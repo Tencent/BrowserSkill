@@ -1,14 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RECORD_FINISH, RECORD_START, RECORD_STEP, RECORD_STOP } from "@/lib/record-bridge";
 import type { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { EXTENSION_VERSION } from "@/transport/handshake";
-import type { RecordedTrace, RecordStopResult, TraceV3 } from "@/transport/types";
+import type { RecordStopResult, TraceV3 } from "@/transport/types";
 import {
   attachRecordFinishListener,
   attachRecordStepListener,
-  handleRecordStart,
-  handleRecordStop,
+  handleRecordStart as rawHandleRecordStart,
+  handleRecordStop as rawHandleRecordStop,
   resetBrowserObservationForTests,
 } from "../record";
 
@@ -18,12 +18,10 @@ const START_URL = "https://example.com/";
 const RECORD_START_V3 = {
   session_id: "abcd",
   url: START_URL,
-  trace_version: 3 as const,
-  supports_tab_switch_steps: true,
 };
 const stepSequenceByProducer = new Map<string, number>();
 
-function asTraceV3(trace: RecordedTrace): TraceV3 {
+function asTraceV3(trace: TraceV3): TraceV3 {
   if (!("version" in trace)) {
     throw new Error("expected v3 trace");
   }
@@ -182,7 +180,7 @@ function makeFakeCdp(
       busyUntil = Date.now() + ms;
     },
     trackSessionTab: () => {},
-    onEvent: (handler: EventListener) => {
+    onEvent: (_tabId: number, handler: EventListener) => {
       events.push(handler);
       return {
         dispose: () => {
@@ -238,9 +236,38 @@ function makeMultiTabsApi(tabs: chrome.tabs.Tab[]) {
   };
 }
 
+async function drainWithTimers<T>(promise: Promise<T>): Promise<T> {
+  let settled = false;
+  promise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  while (!settled && vi.getTimerCount() > 0) {
+    await vi.advanceTimersToNextTimerAsync();
+  }
+  return promise;
+}
+
+function handleRecordStart(
+  ...args: Parameters<typeof rawHandleRecordStart>
+): ReturnType<typeof rawHandleRecordStart> {
+  return drainWithTimers(rawHandleRecordStart(...args));
+}
+
+function handleRecordStop(
+  ...args: Parameters<typeof rawHandleRecordStop>
+): ReturnType<typeof rawHandleRecordStop> {
+  return drainWithTimers(rawHandleRecordStop(...args));
+}
+
 /** Outlast a settle on a quiet page plus the per-tab observation cooldown. */
 function settleWait(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 800));
+  return vi.advanceTimersByTimeAsync(800).then(() => {});
 }
 
 function runtimeOnMessageEmit(
@@ -264,7 +291,12 @@ function runtimeOnMessageEmit(
 }
 
 describe("recorded user steps reach the exported trace", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
   afterEach(() => {
+    vi.useRealTimers();
     stepSequenceByProducer.clear();
     resetBrowserObservationForTests();
     vi.unstubAllGlobals();
@@ -404,7 +436,7 @@ describe("recorded user steps reach the exported trace", () => {
       transitionQualifiers: [],
     } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
     // Let findRecordingForTab's tab lookup and the settle capture resolve.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     const trace = (stopped as RecordStopResult).trace as TraceV3;
@@ -437,7 +469,7 @@ describe("recorded user steps reach the exported trace", () => {
       details as unknown as chrome.webNavigation.WebNavigationFramedCallbackDetails,
     );
     // Let findRecordingForTab's tab lookup and the settle capture resolve.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     const trace = (stopped as RecordStopResult).trace as TraceV3;
@@ -783,7 +815,7 @@ describe("recorded user steps reach the exported trace", () => {
       expects_navigation: true,
     });
     // The SPA swaps the URL while the settle for that click is still waiting.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.advanceTimersByTimeAsync(50);
     tabsApi.goTo("https://example.com/list?group=deepsearch", "分组");
     chromeApi.webNavigationOnCommitted.emit({
       tabId: TAB_ID,
@@ -893,7 +925,7 @@ describe("recorded user steps reach the exported trace", () => {
     });
     cdp.setBusyFor(900);
     setTimeout(() => tabsApi.goTo("https://example.com/detail", "详情"), 800);
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await vi.advanceTimersByTimeAsync(2_000);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     const trace = (stopped as RecordStopResult).trace as TraceV3;
@@ -931,13 +963,13 @@ describe("recorded user steps reach the exported trace", () => {
       value: "标题",
       commit: "blur",
     });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await vi.advanceTimersByTimeAsync(100);
     runtimeOnMessageEmit(chromeApi, requestId, {
       op: "click",
       page_url: START_URL,
       target: { role: "button", name: "确定", tag: "button" },
     });
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await vi.advanceTimersByTimeAsync(1_500);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     const trace = (stopped as RecordStopResult).trace as TraceV3;
@@ -1130,11 +1162,11 @@ describe("recorded user steps reach the exported trace", () => {
       { tab: { id: TAB_ID } } as chrome.runtime.MessageSender,
       () => {},
     );
-    await stopStarted;
+    await drainWithTimers(stopStarted);
 
-    const cliStop = handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
+    const cliStop = rawHandleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     releaseStop();
-    const stopped = await cliStop;
+    const stopped = await drainWithTimers(cliStop);
 
     expect(asTraceV3((stopped as RecordStopResult).trace).stopped_by).toBe("user_finish");
   });
@@ -1177,20 +1209,16 @@ describe("recorded user steps reach the exported trace", () => {
       { tab: { id: TAB_ID } } as chrome.runtime.MessageSender,
       () => {},
     );
-    await stopStarted;
+    await drainWithTimers(stopStarted);
 
-    const cliStop = handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const cliStop = rawHandleRecordStop(manager, { session_id: "abcd" }, deps);
     releaseStop();
-    const result = await Promise.race([
-      cliStop,
-      new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 500)),
-    ]);
+    const result = await drainWithTimers(cliStop);
 
-    expect(result).not.toBe("timed_out");
     expect(result).toMatchObject({ code: "protocol_error" });
   });
 
-  it("defaults to legacy trace v2 without starting observation capture", async () => {
+  it("starts trace v3 observation capture without explicit trace_version fields", async () => {
     const { runtimeOnMessage } = installChrome();
     const manager = fakeManager();
     const tabsApi = makeTabsApi();
@@ -1236,21 +1264,10 @@ describe("recorded user steps reach the exported trace", () => {
     );
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
-    const trace = (stopped as RecordStopResult).trace;
-    expect("version" in trace).toBe(false);
-    expect("pages" in trace && trace.pages.length).toBeGreaterThan(0);
-    // `hover` has no v2 counterpart on peers that negotiate v2.
-    expect("steps" in trace && trace.steps.map((step) => step.op)).toEqual(["click"]);
-  });
-
-  it("rejects unsupported trace_version values", async () => {
-    const manager = fakeManager();
-    const result = await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL, trace_version: 99 },
-      { tabsApi: makeTabsApi(), sendToTab: vi.fn(), cdp: makeFakeCdp() },
-    );
-    expect(result).toMatchObject({ code: "invalid_params" });
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(trace.version).toBe(3);
+    expect(trace.states.length).toBeGreaterThan(0);
+    expect(trace.steps.map((step) => step.op)).toEqual(["hover", "click"]);
   });
 
   it("does not record an unclaimed user tab inside a remote Agent Window", async () => {
@@ -1394,7 +1411,7 @@ describe("recorded user steps reach the exported trace", () => {
     expect(stateUrl(clicks[1]!.state)).toBe(START_URL);
   });
 
-  it("keeps switch_tab internal when the v3 caller did not advertise support", async () => {
+  it("emits switch_tab steps unconditionally in trace v3", async () => {
     const chromeApi = installChrome();
     const manager = fakeManager();
     const tabsApi = makeMultiTabsApi([
@@ -1415,18 +1432,14 @@ describe("recorded user steps reach the exported trace", () => {
     ]);
     const deps = { tabsApi, sendToTab: vi.fn(async () => ({ ok: true })), cdp: makeFakeCdp() };
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL, trace_version: 3 },
-      deps,
-    );
+    await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
     tabsApi.activate(5);
     chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
     await settleWait();
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
     const trace = asTraceV3((stopped as RecordStopResult).trace);
-    expect(trace.steps.some((step) => step.op === "switch_tab")).toBe(false);
+    expect(trace.steps.some((step) => step.op === "switch_tab")).toBe(true);
   });
 
   it("keeps the latest rapid tab activation when an earlier rearm acknowledges late", async () => {
@@ -1464,12 +1477,12 @@ describe("recorded user steps reach the exported trace", () => {
     await handleRecordStart(manager, RECORD_START_V3, deps);
     tabsApi.activate(5);
     chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
-    await secondStarted;
+    await drainWithTimers(secondStarted);
     tabsApi.activate(6);
     chromeApi.tabsOnActivated.emit({ tabId: 6, windowId: AGENT_WINDOW_ID });
     await settleWait();
     releaseSecond();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.advanceTimersByTimeAsync(50);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
     const trace = asTraceV3((stopped as RecordStopResult).trace);
@@ -1618,15 +1631,15 @@ describe("recorded user steps reach the exported trace", () => {
     await handleRecordStart(manager, RECORD_START_V3, deps);
     tabsApi.activate(5);
     chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
-    await rearmStarted;
+    await drainWithTimers(rearmStarted);
 
-    const stoppedPromise = handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const stoppedPromise = rawHandleRecordStop(manager, { session_id: "abcd" }, deps);
     await vi.waitFor(() => {
       expect(sendToTab).toHaveBeenCalledWith(5, expect.objectContaining({ type: RECORD_STOP }));
     });
     failRearm();
-    const stopped = await stoppedPromise;
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    const stopped = await drainWithTimers(stoppedPromise);
+    await vi.advanceTimersByTimeAsync(600);
 
     const startsForSecondTab = sendToTab.mock.calls.filter(
       ([tabId, message]) => tabId === 5 && (message as { type?: string }).type === RECORD_START,
@@ -1796,7 +1809,7 @@ describe("recorded user steps reach the exported trace", () => {
       transitionType: "link",
       transitionQualifiers: [],
     } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.advanceTimersByTimeAsync(50);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
     const trace = asTraceV3((stopped as RecordStopResult).trace);

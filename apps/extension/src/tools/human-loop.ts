@@ -18,6 +18,7 @@ import {
   isHelpResponseMessage,
 } from "@/lib/help-bridge";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
+import { ensureOverlayInjected } from "@/lib/runtime-content-scripts";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   HelpCompletionCondition,
@@ -173,6 +174,7 @@ async function sendHelpRequestWithAck(
   for (let attempt = 0; attempt < HELP_SEND_RETRIES; attempt += 1) {
     if (!isActive()) return null;
     try {
+      await ensureOverlayInjected(tabId);
       const response = await deps.sendToTab(tabId, msg);
       if (!isActive()) {
         await deps
@@ -253,25 +255,12 @@ async function resolveHelpTargets(
             : true;
       resolved.push({ matched, selector: tgt.selector });
     } else if (tgt.ref) {
-      await deps.cdp?.reattachIfSoftDetached?.(tabId);
       const looked = ctx ? lookupSnapshotRef(ctx, tgt.ref, tabId) : null;
       let rect: HelpHighlightRect | null = null;
       if (looked && deps.cdp) {
-        const rawTarget = {
-          tabId,
-          ...(looked.cdpSessionId ? { sessionId: looked.cdpSessionId } : {}),
-        };
-        const target = deps.cdp.resolveTarget ? deps.cdp.resolveTarget(rawTarget) : rawTarget;
-        const geometry = await resolveNodeGeometry(
-          deps.cdp,
-          tabId,
-          {
-            target,
-            backendNodeId: looked.backendNodeId,
-            ...(looked.frameId ? { frameId: looked.frameId } : {}),
-          },
-          { scrollIntoView: options.scrollIntoView },
-        );
+        const geometry = await resolveNodeGeometry(deps.cdp, tabId, looked.handle, {
+          scrollIntoView: options.scrollIntoView,
+        });
         if (!isRpcError(geometry)) {
           rect = {
             top: geometry.topBounds.y,

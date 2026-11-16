@@ -1,5 +1,5 @@
 import type { RenderedRef } from "@browser-skill/vom";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-graph";
 import {
   type CaptureVomMatchNode,
   type CaptureVomObservationResult,
@@ -30,8 +30,9 @@ export interface RegisteredObservation {
 }
 
 export interface RecordingDocumentScope {
+  tabId: number;
   frameId: string;
-  target: CdpTarget;
+  handle: FrameDocumentHandle;
 }
 
 function nodeKey(frameId: string, backendNodeId: number): string {
@@ -68,7 +69,11 @@ export class ObservationNodeIndex {
         documentId,
         this.#scopeByProducer.has(documentId)
           ? null
-          : { frameId: frame.frameId, target: frame.target },
+          : {
+              tabId: frame.handle.tabId,
+              frameId: frame.frameId,
+              handle: frame.handle,
+            },
       );
     }
     for (const geometry of input.matchNodes) {

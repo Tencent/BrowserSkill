@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::JavaScriptDialogInfo;
+use super::{ActionExpectation, JavaScriptDialogInfo};
 
 // ---------------------------------------------------------------------------
 // snapshot
@@ -13,6 +13,7 @@ use super::JavaScriptDialogInfo;
 /// tree for one tab plus a fresh `@e<N>` ref-store on the extension
 /// side (design §4 / §7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotParams {
     pub session_id: String,
     /// Optional target tab. Defaults to the Agent Window's currently
@@ -28,6 +29,9 @@ pub struct SnapshotParams {
     /// best-effort heuristic based on character count).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Optional cooperation context validated by the extension without renewing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -65,6 +69,7 @@ pub struct SnapshotResult {
 /// them. It must not submit input, click, navigate, or otherwise commit
 /// page state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ObserveParams {
     /// Continue a retained observation; does not recapture the page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +99,28 @@ pub struct ObserveParams {
     /// missing hover-revealed structure.
     #[serde(default)]
     pub probe_hover: bool,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -171,6 +198,7 @@ pub struct ObserveResult {
 /// The wire field is `"ref"` (a Rust keyword); the Rust binding lives
 /// in [`Self::ref_`] and uses serde rename / alias so JSON stays clean.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetHtmlParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +219,9 @@ pub struct GetHtmlParams {
     /// omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u32>,
+    /// Optional cooperation context validated by the extension without renewing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -215,6 +246,7 @@ pub struct GetHtmlResult {
 /// tab; pass an `@e<N>` ref from the last `tool.snapshot` to crop to
 /// that element.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,6 +260,9 @@ pub struct ScreenshotParams {
         skip_serializing_if = "Option::is_none"
     )]
     pub ref_: Option<String>,
+    /// Optional cooperation context validated by the extension without renewing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -265,6 +300,7 @@ pub enum ScreenshotScope {
 /// Scroll the session's active web page from top to bottom. PNG bytes are
 /// exported in bounded chunks through `tool.screenshot_read`, then released.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotFullPageParams {
     /// Follow appended content (default), or capture the initial document height.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,6 +311,28 @@ pub struct ScreenshotFullPageParams {
     /// Capture and PNG encoding deadline; defaults to 120000 milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u32>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -293,6 +351,7 @@ pub struct ScreenshotFullPageResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotReadParams {
     pub session_id: String,
     pub capture_id: String,
@@ -309,6 +368,7 @@ pub struct ScreenshotReadResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotReleaseParams {
     pub session_id: String,
     pub capture_id: String,
@@ -331,6 +391,7 @@ mod tests {
             tab_id: Some(7),
             ref_: Some("@e3".into()),
             max_bytes: Some(1024),
+            context_id: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         // Wire field name is `ref`, never `ref_`.
@@ -374,6 +435,7 @@ mod tests {
             session_id: "abcd".into(),
             tab_id: Some(7),
             ref_: Some("@e3".into()),
+            context_id: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v.get("ref").and_then(|v| v.as_str()), Some("@e3"));

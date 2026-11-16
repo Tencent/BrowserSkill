@@ -20,4 +20,4 @@ Use agent-local paths, not browser-internal staging paths.
 - For download directory conflicts with other extensions, see
   [human steps and recovery](help-and-recovery.md).
 
-Remote upload/download are unsupported.
+Remote upload/download are unsupported. In MCP, call `bsk_interact` with `action: "upload"` or `"download"` (`out`, `overwrite`).

@@ -45,10 +45,10 @@ async function setup() {
   } as chrome.tabs.Tab;
   const store = new MemoryStore();
   let owner = "local";
-  let event: Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
+  let event: Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
   const cdp = {
     getAttachmentId: () => "one",
-    onEvent: (handler: typeof event) => {
+    onEvent: (_tabId: number, handler: typeof event) => {
       event = handler;
       return { dispose: vi.fn() };
     },

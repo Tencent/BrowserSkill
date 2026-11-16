@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type CdpFrameGraph,
+  type CdpTarget,
+  type FrameNodeHandle,
+  StaleFrameHandleError,
+} from "@/browser-driver/frame-graph";
 import { projectPolygon, type Quad, unprojectPoint } from "../geometry";
 import type { CdpRunner } from "../shared";
 import { pointBelongsToTarget, pointReachesTarget } from "../target-hit";
@@ -26,7 +31,14 @@ describe("hit-test document identity", () => {
     const check = (frameId?: string) =>
       pointBelongsToTarget(
         cdp,
-        { cdpTarget: { tabId: 4 }, backendNodeId: 10, frameId },
+        {
+          handle: {
+            tabId: 4,
+            frameId: frameId ?? "",
+            loaderId: "loader-1",
+            backendNodeId: 10,
+          },
+        },
         50,
         50,
         "hit",
@@ -124,15 +136,17 @@ function nestedFrames(blocked?: string) {
   const graph: CdpFrameGraph = {
     rootFrameId: "root-frame",
     frames: [
-      { frameId: "root-frame", target: root },
+      { frameId: "root-frame", loaderId: "root-loader", target: root },
       {
         frameId: "parent-frame",
+        loaderId: "parent-loader",
         parentFrameId: "root-frame",
         target: parent,
         ownerBackendNodeId: 100,
       },
       {
         frameId: "child-frame",
+        loaderId: "child-loader",
         parentFrameId: "parent-frame",
         target: child,
         ownerBackendNodeId: 200,
@@ -184,13 +198,27 @@ function nestedFrames(blocked?: string) {
   const cdp: CdpRunner = {
     send: ((_tab, method, params) => request(root, method, params)) as CdpRunner["send"],
     sendToTarget: request as CdpRunner["sendToTarget"],
+    sendToFrame: ((handle, method, params) => {
+      const frame = graph.frames.find((entry) => entry.frameId === handle.frameId);
+      if (!frame || (handle.loaderId && frame.loaderId !== handle.loaderId)) {
+        throw new StaleFrameHandleError(handle);
+      }
+      return request(frame.target, method, params);
+    }) as CdpRunner["sendToFrame"],
+    hasOwnFrameTarget: (_tab, frameId) => frameId !== "root-frame",
     getFrameGraph: async () => graph,
+  };
+  const handle: FrameNodeHandle = {
+    tabId: 4,
+    frameId: "child-frame",
+    loaderId: "child-loader",
+    backendNodeId: 9,
   };
   return {
     cdp,
     hits,
     released,
-    target: { tabId: 4, cdpTarget: child, backendNodeId: 9, frameId: "child-frame" },
+    target: { handle },
   };
 }
 
@@ -217,20 +245,24 @@ describe("pointer hit through frame ancestors", () => {
     expect(h.released).toEqual(h.hits.map((hit) => hit.target));
   });
 
-  it("fails closed when an out-of-process target has no frame identity", async () => {
-    const h = nestedFrames();
-    expect(
-      await pointReachesTarget(h.cdp, { ...h.target, frameId: undefined }, { x: 220, y: 130 }),
-    ).toBe(false);
-    expect(h.hits).toEqual([]);
-  });
-
-  it("fails closed when the frame belongs to a replacement target", async () => {
+  it("fails closed when a handle has an unknown frame identity", async () => {
     const h = nestedFrames();
     expect(
       await pointReachesTarget(
         h.cdp,
-        { ...h.target, cdpTarget: { tabId: 4, sessionId: "retired-child" } },
+        { handle: { ...h.target.handle, frameId: "unknown-frame" } },
+        { x: 220, y: 130 },
+      ),
+    ).toBe(false);
+    expect(h.hits).toEqual([]);
+  });
+
+  it("fails closed when the frame loaderId belongs to a retired document", async () => {
+    const h = nestedFrames();
+    expect(
+      await pointReachesTarget(
+        h.cdp,
+        { handle: { ...h.target.handle, loaderId: "retired-loader" } },
         { x: 220, y: 130 },
       ),
     ).toBe(false);

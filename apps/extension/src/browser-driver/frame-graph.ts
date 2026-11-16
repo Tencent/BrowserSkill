@@ -3,11 +3,76 @@ export interface CdpTarget {
   sessionId?: string;
 }
 
+/**
+ * Stable cross-layer document/frame addressing handle.
+ * Never carries transient CDP `sessionId`; `ChromiumCdp` resolves `frameId` to
+ * its live session internally and validates `loaderId` (+ optional `documentElementBackendNodeId`).
+ */
+export interface FrameDocumentHandle {
+  tabId: number;
+  frameId: string;
+  loaderId: string;
+  documentElementBackendNodeId?: number;
+}
+
+/**
+ * Stable cross-layer DOM node addressing handle.
+ * Never carries transient CDP `sessionId`; `ChromiumCdp` routes and validates
+ * `frameId` + `loaderId` (+ optional `documentElementBackendNodeId`) internally.
+ */
+export interface FrameNodeHandle {
+  tabId: number;
+  frameId: string;
+  loaderId: string;
+  backendNodeId: number;
+  documentElementBackendNodeId?: number;
+}
+
+export class StaleFrameHandleError extends Error {
+  readonly tabId: number;
+  readonly frameId: string;
+
+  constructor(handle: { tabId: number; frameId: string }, detail?: string);
+  constructor(tabId: number, frameId: string, detail?: string);
+  constructor(
+    tabOrHandle: number | { tabId: number; frameId: string },
+    frameOrDetail?: string,
+    maybeDetail?: string,
+  ) {
+    const tabId = typeof tabOrHandle === "number" ? tabOrHandle : tabOrHandle.tabId;
+    const frameId = typeof tabOrHandle === "number" ? (frameOrDetail ?? "") : tabOrHandle.frameId;
+    const detail = typeof tabOrHandle === "number" ? maybeDetail : frameOrDetail;
+    super(detail ?? `Frame ${frameId} in tab ${tabId} changed or is no longer available`);
+    this.name = "StaleFrameHandleError";
+    this.tabId = tabId;
+    this.frameId = frameId;
+  }
+}
+
+export function isStaleFrameHandleError(error: unknown): error is StaleFrameHandleError {
+  return error instanceof StaleFrameHandleError;
+}
+
+export function toFrameDocumentHandle(
+  tabId: number,
+  frame: { frameId: string; loaderId?: string },
+  documentElementBackendNodeId?: number,
+): FrameDocumentHandle {
+  return {
+    tabId,
+    frameId: frame.frameId,
+    loaderId: frame.loaderId ?? "",
+    ...(documentElementBackendNodeId !== undefined ? { documentElementBackendNodeId } : {}),
+  };
+}
+
 export interface CdpFrame {
   frameId: string;
+  loaderId?: string;
   parentFrameId?: string;
   ownerBackendNodeId?: number;
   url?: string;
+  urlFragment?: string;
   target: CdpTarget;
 }
 
@@ -57,7 +122,9 @@ export interface CdpFrameTreeNode {
   frame: {
     id: string;
     parentId?: string;
+    loaderId?: string;
     url?: string;
+    urlFragment?: string;
   };
   childFrames?: CdpFrameTreeNode[];
 }
@@ -76,15 +143,24 @@ function mergeFrame(
   order: string[],
   node: CdpFrameTreeNode,
   target: CdpTarget,
+  authoritative: boolean,
 ): void {
   const existing = frames.get(node.frame.id);
   if (!existing) order.push(node.frame.id);
   const parentFrameId = node.frame.parentId || existing?.parentFrameId;
-  const url = node.frame.url || existing?.url;
+  const loaderId = authoritative
+    ? node.frame.loaderId || existing?.loaderId
+    : existing?.loaderId || node.frame.loaderId;
+  const url = authoritative ? node.frame.url || existing?.url : existing?.url || node.frame.url;
+  const urlFragment = authoritative
+    ? (node.frame.urlFragment ?? existing?.urlFragment)
+    : (existing?.urlFragment ?? node.frame.urlFragment);
   frames.set(node.frame.id, {
     frameId: node.frame.id,
+    ...(loaderId !== undefined ? { loaderId } : {}),
     ...(parentFrameId ? { parentFrameId } : {}),
     ...(url ? { url } : {}),
+    ...(urlFragment !== undefined ? { urlFragment } : {}),
     target,
   });
 }
@@ -106,7 +182,9 @@ function walkFrameTree(
     expanded.add(current.node);
 
     const target = targetByRootFrameId.get(current.node.frame.id) ?? current.inheritedTarget;
-    mergeFrame(frames, order, current.node, target);
+    const authoritative =
+      target.sessionId === source.target.sessionId && target.tabId === source.target.tabId;
+    mergeFrame(frames, order, current.node, target, authoritative);
 
     const children = current.node.childFrames ?? [];
     for (let index = children.length - 1; index >= 0; index -= 1) {
@@ -115,7 +193,7 @@ function walkFrameTree(
   }
 }
 
-export function buildFrameGraph(sources: CdpFrameTreeSource[]): CdpFrameGraph | null {
+export function buildFrameGraph(sources: readonly CdpFrameTreeSource[]): CdpFrameGraph | null {
   const rootSource = sources.find((source) => source.target.sessionId === undefined) ?? sources[0];
   if (!rootSource) return null;
 

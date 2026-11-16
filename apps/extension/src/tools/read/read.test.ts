@@ -156,10 +156,16 @@ describe("DOM read identity and lifecycle", () => {
     });
     const store = h.manager.get("s")!.refStore;
     if (frame === "child") {
-      store.set("e1", 2, { tabId: 7, frameId: "child", cdpSessionId: "child-session" });
+      store.set("e1", 2, { tabId: 7, frameId: "child", loaderId: "child-loader" });
       vi.mocked(h.cdp.getFrameGraph!).mockResolvedValue({
         rootFrameId: "root",
-        frames: [{ frameId: "child", target: { tabId: 7, sessionId: "child-session" } }],
+        frames: [
+          {
+            frameId: "child",
+            target: { tabId: 7, sessionId: "child-session" },
+            loaderId: "child-loader",
+          },
+        ],
       });
     }
     const size = store.size();

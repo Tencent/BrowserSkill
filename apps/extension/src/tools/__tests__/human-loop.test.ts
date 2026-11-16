@@ -1061,7 +1061,12 @@ describe("handleRequestHelp", () => {
                   backendNodeId: 42,
                   tabId: 5,
                   frameId: "child",
-                  cdpSessionId: "child-session",
+                  handle: {
+                    tabId: 5,
+                    frameId: "child",
+                    loaderId: "child-loader",
+                    backendNodeId: 42,
+                  },
                   generation: 1,
                 }),
               },

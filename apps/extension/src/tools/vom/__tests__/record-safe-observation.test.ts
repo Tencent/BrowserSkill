@@ -39,7 +39,7 @@ describe("projectRecordSafeObservation", () => {
     expect(result.frames).toEqual([
       {
         frameId: "child",
-        target: { tabId: 4, sessionId: "oopif-session" },
+        handle: { tabId: 4, frameId: "child", loaderId: "" },
         recordingDocumentId,
       },
     ]);
@@ -76,7 +76,9 @@ describe("projectRecordSafeObservation", () => {
       rendered: { text: '@vom 1\nRootWebArea "Example"', refs: [], truncated: false },
     });
 
-    expect(result.frames).toEqual([{ frameId: "root", target: { tabId: 4 } }]);
+    expect(result.frames).toEqual([
+      { frameId: "root", handle: { tabId: 4, frameId: "root", loaderId: "" } },
+    ]);
     expect(JSON.stringify(result)).not.toContain("user@example.com");
   });
 });

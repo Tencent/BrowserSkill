@@ -1,5 +1,10 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.4.15/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
   "assist": {
     "enabled": true,
     "actions": {
@@ -39,15 +44,11 @@
       "**",
       "!**/node_modules/**",
       "!**/dist/**",
-      "!packages/dsh-plugin-browserskill/lib/**",
-      "!packages/dsh-plugin-browserskill/src/skill-content.generated.ts",
-      "!packages/dsh-plugin-browserskill/src/client/bsk-ui.nomodule.css",
-      "!packages/dsh-plugin-browserskill/.bsk-ui.raw.css",
-      "!packages/dsh-plugin-browserskill/.bsk-ui.input.css",
       "!evals/browser/results/**",
       "!**/target/**",
       "!**/.wxt/**",
       "!**/.output/**",
+      "!**/.worktrees/**",
       "!**/pnpm-lock.yaml",
       "!**/Cargo.lock",
       "!crates/**/schema/**",

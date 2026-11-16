@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_WHEEL_CHROME=/path/to/chrome. Uses an isolated browser/profile.
+// Opt in with BSK_TEST_CHROME=/path/to/chrome. Uses an isolated browser/profile.
 import { describe, expect, it } from "vitest";
 import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
 import { SessionManager } from "@/session-manager/manager";
@@ -25,7 +25,7 @@ async function withBrowser(
     ).href
   );
   await withChrome(
-    { executable: process.env.BSK_WHEEL_CHROME, deviceScale: 1, zoom },
+    { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom },
     async (send: Send) => run(await harness(send)),
   );
 }
@@ -89,7 +89,7 @@ async function harness(send: Send) {
     ctx.refStore.set("e1", backendNodeId, {
       tabId: 4,
       frameId: frame.frameId,
-      cdpSessionId: frame.target.sessionId,
+      loaderId: frame.loaderId,
     });
   const ref = async (frame: CdpFrame, selector = "#probe") => {
     const { executionContextId } = await send<{ executionContextId: number }>(
@@ -176,7 +176,7 @@ const LISTEN = `window.wheels = []; window.blockWheel = false;
     if (window.blockWheel) event.preventDefault();
   }, { capture:true, passive:false });`;
 
-describe.skipIf(!process.env.BSK_WHEEL_CHROME)("real browser wheel", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wheel", () => {
   it("sends trusted viewport input in both directions and horizontally", async () => {
     await withBrowser(async (h) => {
       await h.evaluate(

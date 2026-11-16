@@ -1,4 +1,4 @@
-import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
+import { type CdpRunner, type ChromeTabsApi, delegateCdpRunner } from "@/tools/shared";
 import type { StopReason, TraceV3 } from "@/transport/types";
 import { type DocumentSettleScope, waitForDocumentSettled } from "./document-settle";
 import type { RegisteredObservation } from "./observation-capture";
@@ -46,7 +46,7 @@ export class RecordingObservationRuntime {
     // Wrap only the operations used by observation capture. Cleanup still uses
     // the original CDP connection, so cancellation cannot prevent detaching.
     this.#cdp = input.isTabAllowed
-      ? {
+      ? delegateCdpRunner(input.cdp, {
           send: async (tabId, method, params) => {
             check(tabId);
             return input.cdp.send(tabId, method, params);
@@ -57,25 +57,22 @@ export class RecordingObservationRuntime {
                 return input.cdp.sendToTarget!(target, method, params);
               }
             : undefined,
+          sendToFrame: input.cdp.sendToFrame
+            ? async (handle, method, params, options) => {
+                check(handle.tabId);
+                return input.cdp.sendToFrame!(handle, method, params, options);
+              }
+            : undefined,
           getFrameGraph: input.cdp.getFrameGraph
             ? async (tabId) => {
                 check(tabId);
                 return input.cdp.getFrameGraph!(tabId);
               }
             : undefined,
-          getAttachmentId: input.cdp.getAttachmentId?.bind(input.cdp),
-          resolveTarget: input.cdp.resolveTarget?.bind(input.cdp),
-          retainTabAttachment: input.cdp.retainTabAttachment?.bind(input.cdp),
-          reattachIfSoftDetached: input.cdp.reattachIfSoftDetached
+          getMainFrameHandle: input.cdp.getMainFrameHandle
             ? async (tabId) => {
                 check(tabId);
-                return input.cdp.reattachIfSoftDetached!(tabId);
-              }
-            : undefined,
-          reconcileSoftDetachedFrames: input.cdp.reconcileSoftDetachedFrames
-            ? async (tabId) => {
-                check(tabId);
-                return input.cdp.reconcileSoftDetachedFrames!(tabId);
+                return input.cdp.getMainFrameHandle!(tabId);
               }
             : undefined,
           ensureAttachedToUrl: input.cdp.ensureAttachedToUrl
@@ -84,8 +81,7 @@ export class RecordingObservationRuntime {
                 return input.cdp.ensureAttachedToUrl!(tabId, url);
               }
             : undefined,
-          onEvent: input.cdp.onEvent?.bind(input.cdp),
-        }
+        })
       : input.cdp;
     this.#tabsApi = input.tabsApi;
     this.#maxTokens = input.maxTokens;

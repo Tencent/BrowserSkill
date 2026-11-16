@@ -1,5 +1,5 @@
-import type { CdpTarget } from "@/browser-driver/frame-graph";
-import { type CdpRunner, sendToCdpTarget } from "@/tools/shared";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-graph";
+import { type CdpRunner, sendToFrameHandle } from "@/tools/shared";
 
 const SETTLE_MIN_MS = 150;
 const SETTLE_QUIET_MS = 250;
@@ -27,9 +27,10 @@ const QUIET_PROBE = `(() => {
 })()`;
 
 export interface DocumentSettleScope {
-  target: CdpTarget;
+  tabId: number;
   /** Omit only for the target's root document. */
   frameId?: string;
+  handle?: FrameDocumentHandle;
 }
 
 type SettleOutcome = "quiet" | "timeout" | "cancelled";
@@ -58,17 +59,30 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+function sendInSettleScope<T>(
+  cdp: CdpRunner,
+  scope: DocumentSettleScope,
+  method: string,
+  params: object,
+): Promise<T> {
+  if (scope.handle) {
+    return sendToFrameHandle<T>(cdp, scope.handle, method, params);
+  }
+  return cdp.send<T>(scope.tabId, method, params);
+}
+
 async function executionContextForScope(
   cdp: CdpRunner,
   scope: DocumentSettleScope,
 ): Promise<number | undefined> {
-  if (!scope.frameId) return undefined;
-  const result = await sendToCdpTarget<{ executionContextId?: number }>(
+  const frameId = scope.frameId ?? scope.handle?.frameId;
+  if (!frameId) return undefined;
+  const result = await sendInSettleScope<{ executionContextId?: number }>(
     cdp,
-    scope.target,
+    scope,
     "Page.createIsolatedWorld",
     {
-      frameId: scope.frameId,
+      frameId,
       worldName: SETTLE_WORLD_NAME,
       grantUniveralAccess: false,
     },
@@ -82,13 +96,14 @@ async function readQuietProbe(
   context: ProbeContext,
 ): Promise<QuietProbe | null> {
   try {
-    if (scope.frameId && context.executionContextId === undefined) {
+    const frameId = scope.frameId ?? scope.handle?.frameId;
+    if (frameId && context.executionContextId === undefined) {
       context.executionContextId = await executionContextForScope(cdp, scope);
       if (context.executionContextId === undefined) return null;
     }
-    const reply = await sendToCdpTarget<{ result?: { value?: unknown } }>(
+    const reply = await sendInSettleScope<{ result?: { value?: unknown } }>(
       cdp,
-      scope.target,
+      scope,
       "Runtime.evaluate",
       {
         expression: QUIET_PROBE,

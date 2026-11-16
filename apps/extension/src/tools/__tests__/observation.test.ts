@@ -3584,7 +3584,9 @@ describe("handleSnapshot", () => {
     });
     expect(result.rootFrameId).toBe("root");
     expect(result).not.toHaveProperty("frameDocuments");
-    expect(result.frames).toEqual([{ frameId: "root", target: { tabId: 4 } }]);
+    expect(result.frames).toEqual([
+      { frameId: "root", handle: { tabId: 4, frameId: "root", loaderId: "" } },
+    ]);
     expect(result.matchNodes.find((node) => node.backendNodeId === 13)).toMatchObject({
       frameId: "root",
       backendNodeId: 13,
@@ -3857,9 +3859,9 @@ describe("handleSnapshot", () => {
     expect(result.frames).toHaveLength(2);
     expect(result.frames.find((frame) => frame.frameId === "child")).toEqual({
       frameId: "child",
+      handle: { tabId: 4, frameId: "child", loaderId: "" },
       parentFrameId: "main",
       ownerBackendNodeId: 12,
-      target: { tabId: 4, sessionId: "child-session" },
     });
     expect(result.matchNodes.find((node) => node.backendNodeId === 22)).toMatchObject({
       frameId: "child",
@@ -3872,7 +3874,7 @@ describe("handleSnapshot", () => {
     });
   });
 
-  it("stores iframe refs with their owning CDP session", async () => {
+  it("stores iframe refs with their owning FrameNodeHandle", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     const deps = makeFrameAwareDeps();
@@ -3887,8 +3889,14 @@ describe("handleSnapshot", () => {
     expect(frameRef?.[1]).toMatchObject({
       tabId: 4,
       frameId: "child",
-      cdpSessionId: "child-session",
+      handle: {
+        tabId: 4,
+        frameId: "child",
+        loaderId: "",
+        backendNodeId: 22,
+      },
     });
+    expect("cdpSessionId" in (frameRef?.[1] ?? {})).toBe(false);
   });
 
   it("renders a blocking login overlay as the focused top layer", async () => {
@@ -4406,23 +4414,28 @@ describe("handleGetHtml", () => {
     expect(deps.send).toHaveBeenCalledTimes(1);
   });
 
-  it("reads a frame ref through its child CDP session", async () => {
+  it("reads a frame ref through its child frame handle", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e7", 4242, {
       tabId: 4,
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
     });
     const deps = makeDeps({});
-    const sendToTarget = vi.fn(async (target, method, params) => {
-      expect(target).toEqual({ tabId: 4, sessionId: "child-session" });
+    const sendToFrame = vi.fn(async (handle, method, params) => {
+      expect(handle).toEqual({
+        tabId: 4,
+        frameId: "child-frame",
+        loaderId: "child-loader",
+        backendNodeId: 4242,
+      });
       expect(method).toBe("DOM.getOuterHTML");
       expect(params).toEqual({ backendNodeId: 4242 });
       return { outerHTML: "<button>frame</button>" };
     });
-    (deps.cdp as CdpRunner).sendToTarget = sendToTarget as unknown as NonNullable<
-      CdpRunner["sendToTarget"]
+    (deps.cdp as CdpRunner).sendToFrame = sendToFrame as unknown as NonNullable<
+      CdpRunner["sendToFrame"]
     >;
 
     const res = await handleGetHtml(sm, { session_id: "aa11", ref: "@e7" }, deps);
@@ -4606,4 +4619,49 @@ it.each([
   });
   expect(phases).toEqual(["begin", "end"]);
   expect(capture).not.toHaveBeenCalled();
+});
+
+it.each([
+  { os: "linux", active: false, windowState: "normal", expected: 1 },
+  { os: "win", active: true, windowState: "minimized", expected: 1 },
+  { os: "mac", active: false, windowState: "minimized", expected: 0 },
+] as const)("wakes hidden Aura surfaces during controlled handleScreenshot ($os, active=$active, window=$windowState)", async ({
+  os,
+  active,
+  windowState,
+  expected,
+}) => {
+  vi.stubGlobal("chrome", {
+    runtime: { getPlatformInfo: vi.fn(async () => ({ os })) },
+    windows: { get: vi.fn(async () => ({ id: 100, state: windowState })) },
+  });
+  try {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await manager.start("aa11");
+    ctx.agentCreatedTabs.add(7);
+    const { cdp, sent } = makeFakeCdp({
+      "Page.getFrameTree": () => ({ frameTree: { frame: { id: "main" } } }),
+      "Page.createIsolatedWorld": () => ({ executionContextId: 1 }),
+      "Runtime.evaluate": () => ({
+        result: { deepSerializedValue: { type: "node", value: { backendNodeId: 42 } } },
+      }),
+      "Runtime.releaseObjectGroup": () => ({}),
+      "Page.startScreencast": () => ({}),
+      "Page.stopScreencast": () => ({}),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+    cdp.getAttachmentId = () => "attachment";
+    cdp.onEvent = () => ({ dispose: () => {} });
+    const deps = makeScreenshotDeps({
+      cdp,
+      get: async () => ({ id: 7, windowId: 100, active }) as chrome.tabs.Tab,
+    });
+    deps.sendToTab = async () => {};
+    const res = await handleScreenshot(manager, { session_id: "aa11", tab_id: 7 }, deps);
+    expect(res).toMatchObject({ tab_id: 7, image_base64: TINY_PNG });
+    expect(sent.filter((call) => call.method === "Page.startScreencast")).toHaveLength(expected);
+    expect(sent.filter((call) => call.method === "Page.stopScreencast")).toHaveLength(expected);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

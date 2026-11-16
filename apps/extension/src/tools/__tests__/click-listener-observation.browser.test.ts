@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; the harness owns an isolated browser/profile.
+// Opt in with BSK_TEST_CHROME; the harness owns an isolated browser/profile.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
@@ -13,7 +13,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("click listener observations", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("click listener observations", () => {
   it.each([
     { name: "snapshot", observe: handleSnapshot },
     { name: "observe", observe: handleObserve },
@@ -25,7 +25,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("click listener observations", ()
       ).href
     );
     await withChrome(
-      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (send: Send) => {
         const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
           url: "about:blank",
@@ -203,7 +203,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("click listener observations", ()
       "utf8",
     );
     await withChrome(
-      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (send: Send) => {
         const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
           url: "about:blank",

@@ -1,5 +1,5 @@
 import type { Viewport } from "@browser-skill/vom";
-import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
+import type { CdpFrame, CdpTarget, FrameDocumentHandle } from "@/browser-driver/frame-graph";
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "@/lib/overlay-bridge";
 import type { GeometryProjection } from "../geometry";
 import type { FrameProjectionIssue, SnapshotCoordinates } from "../geometry/coordinate-types";
@@ -1744,10 +1744,8 @@ export async function buildDocumentIndex<T extends DecodedNode>(
   return { nodes, ...(ancestryComplete ? { ancestryComplete } : {}), excludedBackendNodeIds };
 }
 
-export interface DocumentIdentity {
+export interface DocumentIdentity extends FrameDocumentHandle {
   attachmentId: string;
-  target: CdpTarget;
-  frameId: string;
   documentElementBackendNodeId: number;
 }
 

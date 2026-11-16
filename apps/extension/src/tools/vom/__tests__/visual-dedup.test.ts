@@ -7,8 +7,9 @@ function candidate(id: number, width = 100, parent = 1): VisualCandidate {
   return {
     document: {
       attachmentId: "a",
-      target: { tabId: 1 },
+      tabId: 1,
       frameId: "main",
+      loaderId: "loader-1",
       documentElementBackendNodeId: 1,
     },
     backendNodeId: id,
@@ -58,8 +59,8 @@ describe("visual candidate deduplication", () => {
       })),
       ...[
         { frameId: "child" },
-        { target: { tabId: 2 } },
-        { target: { tabId: 1, sessionId: "remote" } },
+        { tabId: 2 },
+        { loaderId: "loader-2" },
         { documentElementBackendNodeId: 9 },
         { attachmentId: "b" },
       ].map((identity) => ({ ...base, document: { ...base.document, ...identity } })),

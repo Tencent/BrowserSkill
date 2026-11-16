@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RecordFramePortMessage } from "@/lib/recording/frame-bridge";
 import { RECORD_FRAME_START } from "@/lib/recording/frame-bridge";
 import { RECORD_DOCUMENT_ATTRIBUTE } from "@/shared/recording-document-identity";
-import { RecordFrameAgent } from "../recording/frame-agent";
+import { attachRecordFrameAgent, RecordFrameAgent } from "../recording/frame-agent";
 
 class PortListeners<T extends (...args: never[]) => unknown> {
   readonly values = new Set<T>();
@@ -120,5 +120,90 @@ describe("RecordFrameAgent", () => {
     );
     expect(sendMessage).toHaveBeenCalledTimes(3);
     expect(document.documentElement.hasAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe(false);
+  });
+
+  it("loads with zero startup wakeup IPC and reports dynamically added subframes (including closed ShadowRoots) while recording", async () => {
+    const closedRoots = new WeakMap<HTMLElement, ShadowRoot>();
+    const preHost = document.createElement("div");
+    const preClosed = preHost.attachShadow({ mode: "closed" });
+    closedRoots.set(preHost, preClosed);
+    document.body.appendChild(preHost);
+
+    const harness = portHarness();
+    const onMessage = new PortListeners<
+      (
+        message: unknown,
+        sender: chrome.runtime.MessageSender,
+        sendResponse: (response: unknown) => void,
+      ) => boolean
+    >();
+    const sendMessage = vi.fn();
+    vi.stubGlobal("chrome", {
+      dom: {
+        openOrClosedShadowRoot: (el: HTMLElement) => closedRoots.get(el) ?? null,
+      },
+      runtime: {
+        onMessage,
+        connect: vi.fn(() => harness.port),
+        sendMessage,
+      },
+    });
+    const dispose = attachRecordFrameAgent();
+    try {
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(onMessage.values.size).toBe(1);
+
+      // Appending an iframe before recording starts emits nothing.
+      document.body.appendChild(document.createElement("iframe"));
+      await Promise.resolve();
+      expect(harness.outbound).toEqual([]);
+
+      // Arm recording via RECORD_FRAME_START, then dynamically append two iframes.
+      let startReply: unknown;
+      for (const listener of onMessage.values) {
+        listener(
+          { type: RECORD_FRAME_START, requestId: "rec-subframe", startedAtMs: 20 },
+          {} as chrome.runtime.MessageSender,
+          (reply) => {
+            startReply = reply;
+          },
+        );
+      }
+      await vi.waitFor(() => expect(startReply).toEqual({ ok: true }));
+      harness.outbound.length = 0;
+
+      document.body.append(document.createElement("iframe"), document.createElement("iframe"));
+      await vi.waitFor(
+        () => {
+          expect(harness.outbound).toEqual([
+            {
+              type: "subframe_added",
+              requestId: "rec-subframe",
+              producerId: expect.any(String),
+            },
+          ]);
+        },
+        { interval: 5 },
+      );
+
+      // Pre-existing closed ShadowRoot and newly inserted closed ShadowRoot hosts also emit `subframe_added`.
+      harness.outbound.length = 0;
+      preClosed.appendChild(document.createElement("iframe"));
+      await vi.waitFor(() => expect(harness.outbound).toHaveLength(1), { interval: 5 });
+
+      harness.outbound.length = 0;
+      const dynamicHost = document.createElement("div");
+      const dynamicClosed = dynamicHost.attachShadow({ mode: "closed" });
+      closedRoots.set(dynamicHost, dynamicClosed);
+      dynamicClosed.appendChild(document.createElement("iframe"));
+      document.body.appendChild(dynamicHost);
+      await vi.waitFor(() => expect(harness.outbound).toHaveLength(1), { interval: 5 });
+
+      harness.outbound.length = 0;
+      dynamicClosed.appendChild(document.createElement("iframe"));
+      await vi.waitFor(() => expect(harness.outbound).toHaveLength(1), { interval: 5 });
+    } finally {
+      dispose();
+    }
   });
 });

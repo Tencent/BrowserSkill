@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_FOCUS_CHROME=/path/to/chrome; each test owns its browser/profile.
+// Opt in with BSK_TEST_CHROME=/path/to/chrome; each test owns its browser/profile.
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { handleBlur, handleFocus } from "../interaction";
@@ -29,7 +29,7 @@ async function withFocusBrowser(
     ).href
   );
   await withChrome(
-    { executable: process.env.BSK_FOCUS_CHROME, deviceScale: 1, zoom: 1 },
+    { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
     async (send: Send) => {
       const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
         url: "about:blank",
@@ -103,7 +103,7 @@ async function withFocusBrowser(
   );
 }
 
-describe.skipIf(!process.env.BSK_FOCUS_CHROME)("real browser focus and blur", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser focus and blur", () => {
   it.each(["light", "open", "closed"])("verifies focus and blur in %s DOM", async (mode) => {
     await withFocusBrowser(async (h) => {
       if (mode !== "light")

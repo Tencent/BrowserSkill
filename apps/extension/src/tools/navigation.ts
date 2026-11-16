@@ -15,7 +15,6 @@
 // The returned shape mirrors bsk-protocol's `NavigateResult` /
 // `NavigateBackResult` / `NavigateForwardResult` / `ReloadResult`.
 
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import {
   isAgentControlledTab,
   type SessionContext,
@@ -44,7 +43,6 @@ import {
   type CdpRunner,
   type ChromeTabsApi,
   cdpBlockedUrlReason,
-  chromeTabsApi,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
@@ -170,18 +168,6 @@ export function shouldTrustReadyStateProbe(
     return false;
   }
   return true;
-}
-
-let defaultDeps: NavigationDeps | null = null;
-function getDefaultDeps(): NavigationDeps {
-  if (!defaultDeps) {
-    defaultDeps = {
-      cdp: new ChromiumCdp(),
-      tabsApi: chromeTabsApi,
-      backgroundExecution: true,
-    };
-  }
-  return defaultDeps;
 }
 
 /**
@@ -399,6 +385,7 @@ function startLifecycleWait(
 
     if (cdp.onEvent) {
       listenerSub = cdp.onEvent(
+        expectedTabId,
         (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
           if (settled) return;
           if (source.tabId !== expectedTabId) return;
@@ -879,7 +866,7 @@ export function waitForLifecyclePassive(
     timer = setTimeout(onTimeout, timeoutMs);
 
     listenerSub =
-      cdp.onEvent?.((source, method, params) => {
+      cdp.onEvent?.(expectedTabId, (source, method, params) => {
         if (settled || source.tabId !== expectedTabId) return;
         if (method === "Page.javascriptDialogOpening") {
           // A blocking dialog (for example beforeunload) pauses the page.
@@ -1186,7 +1173,7 @@ async function recoverBrowserNavigation(
 export async function handleNavigate(
   manager: SessionManager,
   params: NavigateParams,
-  deps: NavigationDeps = getDefaultDeps(),
+  deps: NavigationDeps,
 ): Promise<NavigateResult | RpcError> {
   if (!params || typeof params.url !== "string" || params.url.length === 0) {
     return { code: "invalid_params", message: "navigate requires a url" };
@@ -1455,7 +1442,7 @@ async function handleHistory(
 export function handleNavigateBack(
   manager: SessionManager,
   params: NavigateBackParams,
-  deps: NavigationDeps = getDefaultDeps(),
+  deps: NavigationDeps,
 ): Promise<NavigateHistoryResult | RpcError> {
   return handleHistory(manager, params, "back", deps);
 }
@@ -1463,7 +1450,7 @@ export function handleNavigateBack(
 export function handleNavigateForward(
   manager: SessionManager,
   params: NavigateForwardParams,
-  deps: NavigationDeps = getDefaultDeps(),
+  deps: NavigationDeps,
 ): Promise<NavigateHistoryResult | RpcError> {
   return handleHistory(manager, params, "forward", deps);
 }
@@ -1475,7 +1462,7 @@ export function handleNavigateForward(
 export async function handleReload(
   manager: SessionManager,
   params: ReloadParams,
-  deps: NavigationDeps = getDefaultDeps(),
+  deps: NavigationDeps,
 ): Promise<ReloadResult | RpcError> {
   const ctxOrErr = lookupSession(manager, params, "reload");
   if (isRpcError(ctxOrErr)) return ctxOrErr;

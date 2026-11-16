@@ -15,8 +15,14 @@ const target = { tabId: 4 };
 const graph: CdpFrameGraph = {
   rootFrameId: "main",
   frames: [
-    { frameId: "main", target },
-    { frameId: "child", parentFrameId: "main", ownerBackendNodeId: 10, target },
+    { frameId: "main", target, loaderId: "main-loader" },
+    {
+      frameId: "child",
+      parentFrameId: "main",
+      ownerBackendNodeId: 10,
+      target,
+      loaderId: "child-loader",
+    },
   ],
 };
 
@@ -336,16 +342,16 @@ describe("measurement geometry context", () => {
     expect(await new GeometryContext(cdp, 4, orphan).targetProjection("a")).toBeNull();
   });
 
-  it("rejects a live node whose frame belongs to another target before any DOM input", async () => {
+  it("rejects a live node whose frame loaderId is stale before any DOM input", async () => {
     const cdp = driver();
     expect(
       await resolveNodeGeometry(
         cdp,
         4,
-        { target: { tabId: 4, sessionId: "wrong" }, frameId: "child", backendNodeId: 20 },
+        { tabId: 4, frameId: "child", loaderId: "stale-loader", backendNodeId: 20 },
         { scrollIntoView: true },
       ),
-    ).toMatchObject({ code: "cdp_failed" });
+    ).toMatchObject({ code: "not_found", data: { reason: "ref_not_found" } });
     expect(cdp.calls).not.toHaveBeenCalled();
   });
 
@@ -427,7 +433,7 @@ describe("measurement geometry context", () => {
       await resolveNodeGeometry(
         cdp,
         4,
-        { target, frameId: "child", backendNodeId: 20 },
+        { tabId: 4, frameId: "child", loaderId: "child-loader", backendNodeId: 20 },
         { scrollIntoView: true },
       ),
     ).toMatchObject({ topBounds: { x: 60, y: 620, width: 40, height: 20 } });

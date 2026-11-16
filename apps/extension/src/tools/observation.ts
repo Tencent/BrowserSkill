@@ -29,9 +29,8 @@ import {
   type VomOptions,
   type VomScene,
 } from "@browser-skill/vom";
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { readTimeoutDetails } from "@/browser-driver/command-deadline";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
+import { type FrameNodeHandle, isStaleFrameHandleError } from "@/browser-driver/frame-graph";
 import {
   type CaptureSuppressSendToTab,
   withExtensionOverlayHidden,
@@ -65,12 +64,16 @@ import {
   type ResolvedTargetTab,
   resolveCdpAccessibleTargetTab,
   type CdpRunner as SharedCdpRunner,
-  sendToCdpTarget,
+  sendToFrameHandle,
   normaliseRef as sharedNormaliseRef,
   type ToolEffect,
 } from "./shared";
 import { lookupRefTarget, resolveSnapshotRef } from "./snapshot-ref";
-import { captureControlledViewport } from "./viewport-screenshot";
+import {
+  captureControlledViewport,
+  isHiddenCompositorSurface,
+  withAuraCompositorKeepalive,
+} from "./viewport-screenshot";
 import { type CapturedNode, type CapturedSurfaceProbe, probeHoverSurfaces } from "./vom/capture";
 import {
   type AccessibilityLease,
@@ -140,14 +143,6 @@ export interface ScreenshotDeps {
   sendToTab?: CaptureSuppressSendToTab;
 }
 
-function defaultScreenshotDeps(): ScreenshotDeps {
-  return {
-    cdp: new ChromiumCdp(),
-    tabsApi: chromeTabsCaptureApi,
-    captureApi: chromeTabsCaptureApi,
-  };
-}
-
 function cancelled(tool: string): RpcError {
   return { code: "cancelled", message: `${tool} aborted` };
 }
@@ -173,18 +168,11 @@ function throwIfAborted(signal: AbortSignal | undefined, tool: string): void {
 async function captureElementScreenshot(
   cdp: SharedCdpRunner,
   tabId: number,
-  target: CdpTarget,
-  backendNodeId: number,
-  frameId?: string,
+  handle: FrameNodeHandle,
   signal?: AbortSignal,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   if (signal?.aborted) return cancelled("screenshot");
-  const geometry = await resolveNodeGeometry(
-    cdp,
-    tabId,
-    { target, backendNodeId, ...(frameId ? { frameId } : {}) },
-    { scrollIntoView: true },
-  );
+  const geometry = await resolveNodeGeometry(cdp, tabId, handle, { scrollIntoView: true });
   if (isRpcError(geometry)) return geometry;
   if (signal?.aborted) return cancelled("screenshot");
   const rect = geometry.topBounds;
@@ -256,10 +244,12 @@ async function captureFullTabPng(
       cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       await cdp.ensureAttachedToUrl?.(target.tabId, target.url);
       if (signal?.aborted) return cancelled("screenshot");
-      const shot = await cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
-        format: "png",
-        fromSurface: true,
-      });
+      const shot = await withAuraCompositorKeepalive(cdp, target.tabId, true, signal, () =>
+        cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
+          format: "png",
+          fromSurface: true,
+        }),
+      );
       if (signal?.aborted) return cancelled("screenshot");
       if (shot.data) return shot.data;
       fallbackMsg = "Page.captureScreenshot returned no data";
@@ -278,7 +268,7 @@ async function captureFullTabPng(
 export async function handleScreenshot(
   manager: SessionManager,
   params: ScreenshotParams,
-  deps: ScreenshotDeps = defaultScreenshotDeps(),
+  deps: ScreenshotDeps,
   signal?: AbortSignal,
 ): Promise<ScreenshotResult | RpcError> {
   if (signal?.aborted) return cancelled("screenshot");
@@ -314,10 +304,18 @@ export async function handleScreenshot(
         const missing = resolveSnapshotRef(ctx, ref, target.tabId);
         if (isRpcError(missing)) return missing;
       }
-      const captured = await withExtensionOverlayHidden(
+      const hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
+      const captured = await withAuraCompositorKeepalive(
+        deps.cdp,
         target.tabId,
-        () => captureVisualScreenshot(deps.cdp!, entry.candidate, signal),
-        deps.sendToTab,
+        hiddenSurface,
+        signal,
+        () =>
+          withExtensionOverlayHidden(
+            target.tabId,
+            () => captureVisualScreenshot(deps.cdp!, entry.candidate, signal),
+            deps.sendToTab,
+          ),
       );
       if (isRpcError(captured)) return captured;
       const { mapping, ...image } = captured;
@@ -346,23 +344,18 @@ export async function handleScreenshot(
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;
     const cdp = deps.cdp;
-    const rawTarget = {
-      tabId: target.tabId,
-      ...(node.cdpSessionId ? { sessionId: node.cdpSessionId } : {}),
-    };
-    const nodeTarget = cdp.resolveTarget ? cdp.resolveTarget(rawTarget) : rawTarget;
-    const captured = await withExtensionOverlayHidden(
+    const hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
+    const captured = await withAuraCompositorKeepalive(
+      cdp,
       target.tabId,
+      hiddenSurface,
+      signal,
       () =>
-        captureElementScreenshot(
-          cdp,
+        withExtensionOverlayHidden(
           target.tabId,
-          nodeTarget,
-          node.backendNodeId,
-          node.frameId,
-          signal,
+          () => captureElementScreenshot(cdp, target.tabId, node.handle, signal),
+          deps.sendToTab,
         ),
-      deps.sendToTab,
     );
     if (isRpcError(captured)) return captured;
     if (signal?.aborted) return cancelled("screenshot");
@@ -387,6 +380,7 @@ export async function handleScreenshot(
       );
     }
     cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    let hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
     const captured = await captureControlledViewport(
       cdp,
       target.tabId,
@@ -394,6 +388,7 @@ export async function handleScreenshot(
         if (manager.get(ctx.sessionId) !== ctx || !isAgentControlledTab(ctx, target.tabId))
           return false;
         const tab = await deps.tabsApi.get(target.tabId);
+        if (await isHiddenCompositorSurface(tab.active, tab.windowId)) hiddenSurface = true;
         return (
           manager.get(ctx.sessionId) === ctx &&
           isAgentControlledTab(ctx, target.tabId) &&
@@ -403,6 +398,7 @@ export async function handleScreenshot(
       },
       signal,
       deps.sendToTab,
+      () => hiddenSurface,
     );
     if (isRpcError(captured)) return captured;
     return withShotDialogs({ ...captured, format: "png", tab_id: target.tabId });
@@ -769,17 +765,6 @@ export interface SnapshotDeps {
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
 }
 
-let defaultDeps: SnapshotDeps | null = null;
-function getDefaultDeps(): SnapshotDeps {
-  if (!defaultDeps) {
-    defaultDeps = {
-      cdp: new ChromiumCdp(),
-      tabsApi: { get: (tabId) => chrome.tabs.get(tabId), query: (q) => chrome.tabs.query(q) },
-    };
-  }
-  return defaultDeps;
-}
-
 // ---------------------------------------------------------------------------
 // get_html — `tool.get_html`
 // ---------------------------------------------------------------------------
@@ -817,7 +802,7 @@ function truncateBytes(html: string, maxBytes: number): { out: string; truncated
 export async function handleGetHtml(
   manager: SessionManager,
   params: GetHtmlParams,
-  deps: SnapshotDeps = getDefaultDeps(),
+  deps: SnapshotDeps,
   signal?: AbortSignal,
 ): Promise<GetHtmlResult | RpcError> {
   if (signal?.aborted) return cancelled("get_html");
@@ -847,13 +832,9 @@ export async function handleGetHtml(
     if (params.ref) {
       const resolved = resolveSnapshotRef(ctx, params.ref, target.tabId);
       if (isRpcError(resolved)) return resolved;
-      const rawTarget = {
-        tabId: target.tabId,
-        ...(resolved.cdpSessionId ? { sessionId: resolved.cdpSessionId } : {}),
-      };
-      const resp = await sendToCdpTarget<{ outerHTML?: string }>(
+      const resp = await sendToFrameHandle<{ outerHTML?: string }>(
         deps.cdp,
-        deps.cdp.resolveTarget ? deps.cdp.resolveTarget(rawTarget) : rawTarget,
+        resolved.handle,
         "DOM.getOuterHTML",
         { backendNodeId: resolved.backendNodeId },
       );
@@ -889,6 +870,7 @@ export async function handleGetHtml(
     });
   } catch (err) {
     if (isAbortError(err)) return cancelled("get_html");
+    if (isStaleFrameHandleError(err)) return rpcError("not_found", "ref_not_found", err.message);
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
@@ -998,19 +980,23 @@ async function buildVomObservation(
 ): Promise<CaptureVomObservationResult & { visualOutput?: ObservationOutput }> {
   const { captured, documents: normalizedDocuments } = semanticCapture(facts);
   const store = options.refStore?.stableRefsEnabled ? options.refStore : undefined;
-  const targets = new Map(normalizedDocuments.map((frame) => [frame.frameId, frame.target]));
+  const loaderByFrameId = new Map(
+    facts.documents.map((doc) => [doc.frame.frameId, doc.identity?.loaderId ?? doc.frame.loaderId]),
+  );
+  const rootFrameId = captured.rootFrameId;
   const renderOptions: VomOptions = {
     ...options,
     allocateRef: store
-      ? (node) =>
-          node.visualKey !== undefined
-            ? store.allocateVisualRef()
-            : store.allocateRef({
-                backendNodeId: node.backendNodeId ?? node.id,
-                tabId,
-                frameId: node.frameId,
-                cdpSessionId: node.frameId ? targets.get(node.frameId)?.sessionId : undefined,
-              })
+      ? (node) => {
+          if (node.visualKey !== undefined) return store.allocateVisualRef();
+          const frameId = node.frameId ?? rootFrameId;
+          return store.allocateRef({
+            backendNodeId: node.backendNodeId ?? node.id,
+            tabId,
+            frameId,
+            loaderId: frameId ? loaderByFrameId.get(frameId) : undefined,
+          });
+        }
       : options.allocateRef,
   };
   throwIfAborted(options.signal, "observation");
@@ -1069,15 +1055,15 @@ async function buildVomObservation(
     notices.push(
       "@warning document identity unverified: some retained documents could not be checked for changes during capture.",
     );
+  const identities = new Map(
+    facts.documents.flatMap((doc) =>
+      doc.identity ? [[doc.frame.frameId, doc.identity] as const] : [],
+    ),
+  );
   if (options.includeVisualFacts) {
     const discovery = await deduplicateVisualCandidates(
       await discoverVisualCandidates(facts, options.signal),
       options.signal,
-    );
-    const identities = new Map(
-      facts.documents.flatMap((doc) =>
-        doc.identity ? [[doc.frame.frameId, doc.identity] as const] : [],
-      ),
     );
     const visualOutput = prepareVisualObservation(
       decoratedScene,
@@ -1092,6 +1078,7 @@ async function buildVomObservation(
       ...projectRecordSafeObservation({
         rootFrameId: captured.rootFrameId ?? "root",
         frameDocuments: normalizedDocuments,
+        identities,
         rendered: { text: "", refs: [], truncated: false },
         surfaceProbes: hoverProbes.surfaceProbes,
         hoverProbe: {
@@ -1120,6 +1107,7 @@ async function buildVomObservation(
   return projectRecordSafeObservation({
     rootFrameId: captured.rootFrameId ?? normalizedDocuments[0]?.frameId ?? "root",
     frameDocuments: normalizedDocuments,
+    identities,
     rendered,
     surfaceProbes: hoverProbes.surfaceProbes,
     hoverProbe: {
@@ -1221,7 +1209,7 @@ async function handleVomObservation(
   toolName: "snapshot" | "observe",
   effect: ToolEffect,
   conditionalSurfaceProbe: boolean,
-  deps: SnapshotDeps = getDefaultDeps(),
+  deps: SnapshotDeps,
   signal?: AbortSignal,
 ): Promise<SnapshotResult | ObserveResult | RpcError> {
   if (signal?.aborted) return cancelled(toolName);
@@ -1348,12 +1336,13 @@ async function handleVomObservation(
           : {}),
       });
     }
-    const targetByFrameId = new Map(
-      observation.frames.map((frame) => [frame.frameId, frame.target]),
+    const handleByFrameId = new Map(
+      observation.frames.map((frame) => [frame.frameId, frame.handle]),
     );
     refStore.replace(
       observation.refs.map((ref) => {
-        const refTarget = ref.frameId ? targetByFrameId.get(ref.frameId) : undefined;
+        const frameId = ref.frameId || observation.rootFrameId;
+        const frameHandle = frameId ? handleByFrameId.get(frameId) : undefined;
         return [
           ref.ref,
           {
@@ -1361,8 +1350,11 @@ async function handleVomObservation(
             ...(ref.rowAnchor ? { rowAnchor: ref.rowAnchor } : {}),
             backendNodeId: ref.backendNodeId,
             tabId: target.tabId,
-            ...(ref.frameId ? { frameId: ref.frameId } : {}),
-            ...(refTarget?.sessionId ? { cdpSessionId: refTarget.sessionId } : {}),
+            ...(frameId ? { frameId } : {}),
+            ...(frameHandle?.loaderId ? { loaderId: frameHandle.loaderId } : {}),
+            ...(frameHandle?.documentElementBackendNodeId !== undefined
+              ? { documentElementBackendNodeId: frameHandle.documentElementBackendNodeId }
+              : {}),
           },
         ] as const;
       }),
@@ -1417,7 +1409,7 @@ async function handleVomObservation(
 export async function handleSnapshot(
   manager: SessionManager,
   params: SnapshotParams,
-  deps: SnapshotDeps = getDefaultDeps(),
+  deps: SnapshotDeps,
   signal?: AbortSignal,
 ): Promise<SnapshotResult | RpcError> {
   return handleVomObservation(manager, params, "snapshot", "passive_read", false, deps, signal);
@@ -1426,7 +1418,7 @@ export async function handleSnapshot(
 export async function handleObserve(
   manager: SessionManager,
   params: ObserveParams,
-  deps: SnapshotDeps = getDefaultDeps(),
+  deps: SnapshotDeps,
   signal?: AbortSignal,
 ): Promise<ObserveResult | RpcError> {
   return handleVomObservation(

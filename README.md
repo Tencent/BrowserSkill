@@ -61,9 +61,9 @@ https://github.com/user-attachments/assets/6111d978-baa6-4a76-92c4-4f51d47ae617
   </tr>
 </table>
 
-Qoder and Qoder CN are supported as skill-only targets: `bsk install-skill --harness qoder` and `--harness qoder-cn`.
+Qoder, Qoder CN, and DeepSeek Harness are also supported as skill targets (`bsk install-skill --harness qoder`, `--harness qoder-cn`, and `--harness dsh`).
 
-These and other agents that can run shell commands use the same **`bsk` CLI**. **[DeepSeek Harness](#deepseek-harness-plugin)** has a dedicated plugin with native browser tools and task previews. You choose the agent and model; BrowserSkill connects it to your browser.
+These and other agents that can run shell commands use the same **`bsk` CLI**, and MCP clients can also connect through **`bsk mcp`** ([MCP setup](docs/mcp.md)). You choose the agent and model; BrowserSkill connects it to your browser.
 
 ## What you can do
 
@@ -88,7 +88,7 @@ For local automation, you need **an AI agent + the `bsk` CLI + the browser exten
 | --- | --- |
 | CLI / daemon | macOS: Apple Silicon and Intel · Linux: x64 and ARM64 · Windows: x64 |
 | Extension | Chrome and Microsoft Edge, based on Chromium 125 or later. Other Chromium browsers may work; compatibility is not guaranteed. |
-| Agent integration | A shell-capable agent with the BrowserSkill skill, or DeepSeek Harness with the [DSH plugin](#deepseek-harness-plugin). |
+| Agent integration | A shell-capable or MCP-capable agent with the BrowserSkill skill ([MCP setup](docs/mcp.md)). |
 
 ### Let your agent set it up
 
@@ -98,7 +98,7 @@ Send this to your agent:
 Set up browser-skill on this machine by following https://raw.githubusercontent.com/Tencent/BrowserSkill/main/AGENT_INSTALL.md
 ```
 
-The guide covers CLI installation, the correct skill or DSH plugin, connection checks, and a first browser task. You will still need to install the extension in the browser you want to use:
+The guide covers CLI installation, skill setup, connection checks, and a first browser task. You will still need to install the extension in the browser you want to use:
 
 **[Install for Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)** · **[Install for Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)**
 
@@ -150,8 +150,6 @@ For MCP clients, `bsk install-skill --harness codex --mcp` also configures the
 local stdio server (`claude-code` and `cursor` are supported too). See the
 [MCP setup and workflow](docs/mcp.md).
 
-DSH users should install the [plugin](#deepseek-harness-plugin) instead; it includes the skill.
-
 #### 4. Check the connection
 
 ```sh
@@ -199,23 +197,6 @@ Use `bsk --help` or `bsk <command> --help` for command options. Always stop your
 </details>
 
 In WorkBuddy/CodeBuddy, or hosts that reap command children, the agent should reuse an existing daemon or run `bsk daemon start --foreground` in a managed background task, then verify it from a separate tool call. Follow the [host setup guide](docs/sandboxed-agents.md) for shared `BSK_HOME`, `BSK_AUTO_START=0`, and the independent-terminal fallback when the host cannot keep a task alive.
-
-## DeepSeek Harness plugin
-
-The [DSH plugin](packages/dsh-plugin-browserskill/README.md) adds native `bsk_*` tools, browser task previews, and screenshot results to the DeepSeek Harness Web UI. It uses the same `bsk` CLI and extension and includes its own BrowserSkill skill.
-
-**Upgrading to 0.4.1:** update the CLI and running daemon first, then the extension and plugin. Restart the DSH profile and invoke `/browser-skill` again so existing conversations load the new target-policy control and observation instructions. See the [0.4.1 upgrade guide](packages/dsh-plugin-browserskill/README.md#upgrading-to-041); installations older than 0.3.3 also need the [tool-name migration](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033).
-
-With DeepSeek Harness, pnpm, and `bsk` installed and the extension connected, add the plugin to your profile:
-
-```sh
-dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
-dsh --profile web
-```
-
-Replace `web` with your profile name. Make sure `bsk` is available on the PATH used to start DSH, or set the plugin's `bskPath`. In a conversation, invoke `/browser-skill` and describe the task. A separate `bsk install-skill` step is not needed.
-
-[Plugin usage and configuration](packages/dsh-plugin-browserskill/README.md) · [npm package](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)
 
 ## Website debugging
 
@@ -294,7 +275,7 @@ BrowserSkill does not operate a mandatory cloud service or collect product telem
 | **Website debugging** | The current browser profile, including in remote mode | Retains captured evidence, including available bodies and field values. Stopped records expire after 30 days, with a 50-record / 50 MiB retention budget and earlier eviction when necessary. Stop capture before deleting a record. |
 | **Operation audit** | The daemon's host, under `BSK_HOME/audit` | Off by default. Records task and operation metadata, excluding input values, page bodies, screenshots, and file contents. Ended tasks expire after 30 days. |
 | **Task video** | The current browser profile; exported copies at the chosen destination | Opt-in, silent capture of one authorized tab, limited to 10 minutes / 256 MiB per video. Recordings expire 24 hours after creation; the temporary video budget is 1 GiB. The library supports preview, export and deletion. |
-| **Saved observations and step results** | An explicitly chosen JSON path on the CLI machine, including a remote server | `--save-full` / DSH `saveFull` saves the complete reply before display filtering. Files have no automatic expiry; delete them on that machine. `view` reads historical evidence without refreshing the browser state. |
+| **Saved observations and step results** | An explicitly chosen JSON path on the CLI machine, including a remote server | `--save-full` saves the complete reply before display filtering. Files have no automatic expiry; delete them on that machine. `view` reads historical evidence without refreshing the browser state. |
 
 These features offer export and deletion. Stopping a task or disconnecting does not delete retained history or videos; expiration is applied during access or cleanup. Exported copies and copies already received by an agent or gateway must be managed separately. Known secrets are filtered from debugging evidence, but redaction cannot guarantee that all sensitive data is removed. Video frames are not automatically redacted; review visible content before sharing.
 
@@ -302,7 +283,7 @@ These features offer export and deletion. Stopping a task or disconnecting does 
 
 ## Updating
 
-**For 0.4.1, update the CLI and restart its running daemon before updating the extension; update DSH last.** CLI/daemon and extension 0.4.1 use protocol 1.8, which the new default target policy requires on both peers. Updating only the binary leaves a foreground or externally managed daemon on its old version until its host restarts it. Use matching 0.4.1 components for the new workflow.
+**For 0.4.1, update the CLI and restart its running daemon before updating the extension.** CLI/daemon and extension 0.4.1 use protocol 1.8, which the new default target policy requires on both peers. Updating only the binary leaves a foreground or externally managed daemon on its old version until its host restarts it. Use matching 0.4.1 components for the new workflow.
 
 Existing scripts must follow the [shared-control workflow](crates/bsk-cli/skill/references/cooperation.md): after initial navigation, synchronize with `bsk cooperate sync` and pass its `context_id` as `--context`. Target-policy DOM actions can reuse that context across actions and supplementary reads; use `--expect` to protect decision facts. Scripts, untargeted keys and visual actions also require the sync's `observation_id` as `--observation`. Synchronize again after human intervention or navigation. Select `--policy strict` on the first sync to retain one action per context. Reload the updated skill before continuing.
 
@@ -320,13 +301,7 @@ A daemon that `bsk` started in the background also checks for a new release ever
 
 `bsk doctor` shows the last update attempt; `update-state.json` in the bsk home keeps its stage, result and error. Updates of one executable run one at a time, even from different bsk homes, through `.bsk.update.lock` (`.bsk.exe.update.lock` on Windows), which stays next to it. Until an update is confirmed, the previous executable stays next to the new one as `.bsk.old-*` (`.bsk.exe.old-*` on Windows); one that is still running remains until its process exits, and a later daemon start removes it. On Windows, self-update renames the running executable, which NTFS supports; where the file system refuses, the update fails and leaves the installation unchanged. bsk supports Windows 10 and Windows Server 2016 or later.
 
-Update the extension through its browser store. Update the DSH plugin separately, then restart its profile:
-
-```sh
-dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
-```
-
-Check `bsk --version`, `bsk status`, and `bsk doctor`. Keep the CLI, running daemon, extension, and optional DSH plugin on matching releases for new features. This README describes the current repository; store builds can lag during review. Check the [changelog](CHANGELOG.md) and [releases](https://github.com/Tencent/BrowserSkill/releases) for availability.
+Update the extension through its browser store. Check `bsk --version`, `bsk status`, and `bsk doctor`. Keep the CLI, running daemon, and extension on matching releases for new features. This README describes the current repository; store builds can lag during review. Check the [changelog](CHANGELOG.md) and [releases](https://github.com/Tencent/BrowserSkill/releases) for availability.
 
 Managed CLI skills update on daemon startup, `session start`, or `doctor` while their files remain unchanged. Local edits and custom skills are preserved. Start a new agent session to load updated instructions; doctor reports any paused skill updates.
 
@@ -353,7 +328,7 @@ Stop the daemon in its owning host or supervisor, update with `bsk update --yes 
 | Connect a server-side agent | [Remote browser connections](docs/remote-extension-connection.md) |
 | Run in a sandbox | [Sandboxed agents](docs/sandboxed-agents.md) |
 | Review recorded task metadata | [Operation audit](docs/operation-audit.md) |
-| Integrate with DeepSeek Harness | [DSH plugin](packages/dsh-plugin-browserskill/README.md) |
+| Connect over MCP | [MCP server](docs/mcp.md) |
 | Understand the implementation | [Architecture](docs/architecture.md) · [Protocol](crates/bsk-protocol/README.md) |
 
 ## For Developers
@@ -373,7 +348,6 @@ The CLI is built under `target/release/`; load `apps/extension/dist/chrome-mv3/`
 | `crates/bsk-cli` | CLI, daemon, and bundled agent skill |
 | `crates/bsk-protocol` | Wire types and JSON schemas |
 | `apps/extension` | Browser automation, debugging workspace, and extension UI |
-| `packages/dsh-plugin-browserskill` | DeepSeek Harness integration |
 | `packages/ui`, `packages/i18n`, `packages/vom` | Shared UI, localization, and page observation |
 | `evals/browser` | Local test pages and browser capability evaluations |
 
@@ -448,7 +422,7 @@ Thank you to everyone who contributes code, documentation, translations, and fee
 ### Reading dynamic pages (unreleased, protocol 1.9)
 
 Use `bsk read` for current DOM fields during animation, and `extract` for tables/
-lists. MCP and DSH expose it as `bsk_inspect(action=read)`. A script is checked
+lists. MCP exposes it as `bsk_inspect(action=read)`. A script is checked
 against the `--expect` facts it states, or the whole page when it passes `--observation`;
 `evaluate --unverified` is the last resort. Read results never renew action authority: protect
 business facts with expect. See [dynamic reading](docs/dynamic-reading.md) for

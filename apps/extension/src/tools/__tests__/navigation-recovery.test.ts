@@ -43,7 +43,7 @@ async function fixture() {
     onReferenceFragmentUpdated: event<Listener>(),
     onHistoryStateUpdated: event<Listener>(),
   };
-  const cdpEvents = event<Parameters<NonNullable<CdpRunner["onEvent"]>>[0]>();
+  const cdpEvents = event<Parameters<NonNullable<CdpRunner["onEvent"]>>[1]>();
   const state = { blocked: true, destinationBlocked: false, emitIdle: true };
   const send = vi.fn(async (_tabId: number, method: string) => {
     if (state.blocked) throw new Error(denied);
@@ -63,7 +63,7 @@ async function fixture() {
   });
   const cdp: CdpRunner = {
     send: send as CdpRunner["send"],
-    onEvent: (listener) => {
+    onEvent: (_tabId, listener) => {
       cdpEvents.addListener(listener);
       return { dispose: () => cdpEvents.removeListener(listener) };
     },

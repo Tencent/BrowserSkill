@@ -2,7 +2,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CooperateAction {
     Enable,
@@ -12,8 +12,9 @@ pub enum CooperateAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CooperateParams {
-    /// Omitted by legacy callers. A negotiated policy remains fixed for the session.
+    /// A negotiated policy remains fixed for the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_policy: Option<ControlPolicy>,
     pub session_id: String,
@@ -24,13 +25,6 @@ pub struct CooperateParams {
     pub timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-}
-
-pub const TARGET_CONTROL_PROTOCOL: &str = "1.8";
-
-pub fn supports_target_control(protocol: &str) -> bool {
-    crate::compatibility::Feature::TargetControl
-        .supports(crate::compatibility::Peer::Extension, protocol)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -45,6 +39,7 @@ pub enum ControlPolicy {
 /// Shared metadata merged into guarded tool params on the wire.
 /// Passive reads and session lifecycle operations do not evaluate these conditions.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ActionMetadata {
     /// Context actually returned by sync. Reusable for target-policy DOM actions;
     /// strict policy consumes it after one action. Never fill it from cached state.
@@ -143,6 +138,227 @@ pub fn parse_expectations(value: &str) -> Result<Vec<ActionExpectation>, String>
     Ok(conditions)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CooperateMode {
+    Ready,
+    Human,
+    Held,
+    Yielding,
+    Syncing,
+    Acting,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateTargetPoint {
+    pub x: f64,
+    pub y: f64,
+    pub expires: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<CooperateTargetPoint>,
+    pub revision: u64,
+    pub mode: CooperateMode,
+    pub editing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateEventTimeWindow {
+    pub earliest: f64,
+    pub latest: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateActivityAttribution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_time: Option<f64>,
+    pub event_time: f64,
+    pub expected_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_event_time: Option<CooperateEventTimeWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_timestamp: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateActivity {
+    pub sequence: u64,
+    #[serde(rename = "type")]
+    pub activity_type: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<CooperateActivityAttribution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    pub frame_id: i64,
+    pub document: String,
+    pub cursor: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CooperateFrameGapReason {
+    LoadError,
+    InactiveDocument,
+    HiddenFrame,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateFrameGap {
+    pub frame_id: i64,
+    pub url: String,
+    pub reason: CooperateFrameGapReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CooperateBaselineReason {
+    NoPreviousObservation,
+    FrameReplaced,
+    FieldsIncomplete,
+    RefsReplaced,
+    MediaChanged,
+    TokenBudgetChanged,
+    StructureChanged,
+    FocusChanged,
+    NoHeldText,
+    DocumentReplaced,
+    MultipleFrames,
+    HumanActivity,
+    FieldsChanged,
+    TextLogGap,
+    UnloggedActivity,
+    TextOutsideObservation,
+    TextAmbiguous,
+    TextNamesOtherContent,
+    TextCutByTruncation,
+    TokenBudgetShift,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CooperateChangeKind {
+    Text,
+    MediaProgress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateDeltaChange {
+    pub frame_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub label: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<CooperateChangeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateLinePatch {
+    pub line: u32,
+    pub previous: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateObservationPatch {
+    pub lines: Vec<CooperateLinePatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CooperateSyncResult {
+    Baseline {
+        tab_id: i64,
+        context_id: String,
+        control_policy: ControlPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_gaps: Option<Vec<CooperateFrameGap>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        baseline_reason: Option<CooperateBaselineReason>,
+        observation: super::SnapshotResult,
+        activity: Vec<CooperateActivity>,
+        history_complete: bool,
+        state: CooperateView,
+    },
+    Unchanged {
+        tab_id: i64,
+        context_id: String,
+        control_policy: ControlPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_gaps: Option<Vec<CooperateFrameGap>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        baseline_reason: Option<CooperateBaselineReason>,
+        previous_context_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_observation_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation_patch: Option<CooperateObservationPatch>,
+        changes: Vec<CooperateDeltaChange>,
+        activity: Vec<CooperateActivity>,
+        history_complete: bool,
+        state: CooperateView,
+    },
+    Delta {
+        tab_id: i64,
+        context_id: String,
+        control_policy: ControlPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_gaps: Option<Vec<CooperateFrameGap>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        baseline_reason: Option<CooperateBaselineReason>,
+        previous_context_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_observation_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation_patch: Option<CooperateObservationPatch>,
+        changes: Vec<CooperateDeltaChange>,
+        activity: Vec<CooperateActivity>,
+        history_complete: bool,
+        state: CooperateView,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CooperateStatusResult {
+    pub tab_id: i64,
+    pub stopped: bool,
+    pub activity: Vec<CooperateActivity>,
+    pub state: CooperateView,
+    pub ready: bool,
+    #[serde(default)]
+    pub control_policy: Option<ControlPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_gaps: Option<Vec<CooperateFrameGap>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum CooperateResult {
+    Sync(CooperateSyncResult),
+    Status(CooperateStatusResult),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,16 +374,6 @@ mod tests {
         let new: CooperateParams = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(new.control_policy, Some(ControlPolicy::Target));
         assert_eq!(serde_json::to_value(new).unwrap(), value);
-    }
-
-    #[test]
-    fn target_control_has_an_explicit_protocol_boundary() {
-        for old in ["", "invalid", "1.0", "1.7", "2.0"] {
-            assert!(!supports_target_control(old));
-        }
-        for new in ["1.8", "1.8.0", "1.9"] {
-            assert!(supports_target_control(new));
-        }
     }
 
     #[test]

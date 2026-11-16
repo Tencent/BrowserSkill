@@ -101,13 +101,14 @@ describe("SettleController", () => {
   it("settles an action in its own OOPIF document scope", async () => {
     vi.useFakeTimers();
     const send = vi.fn();
-    const sendToTarget = vi.fn(async (_target, method: string) => {
+    const sendToFrame = vi.fn(async (_handle, method: string) => {
       if (method === "Page.createIsolatedWorld") return { executionContextId: 39 };
       return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
     });
     const cdp: CdpRunner = {
       send: send as unknown as CdpRunner["send"],
-      sendToTarget: sendToTarget as unknown as NonNullable<CdpRunner["sendToTarget"]>,
+      sendToFrame: sendToFrame as unknown as NonNullable<CdpRunner["sendToFrame"]>,
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "oopif-frame",
     };
     const tabsApi: ChromeTabsApi = {
       get: vi.fn(async () => ({ id: 7, url: OBSERVATION.url }) as chrome.tabs.Tab),
@@ -119,17 +120,18 @@ describe("SettleController", () => {
       { op: "click", captureTarget: { tag: "button", name: "Inside frame" } },
     ];
     const controller = new SettleController({ session, cdp, tabsApi, tabId: 7 });
-    const target = { tabId: 7, sessionId: "oopif-session" };
+    const handle = { tabId: 7, frameId: "oopif-frame", loaderId: "oopif-loader" };
 
-    controller.schedule(drafts, 0, { target, frameId: "oopif-frame" });
+    controller.schedule(drafts, 0, { tabId: 7, handle });
     await vi.advanceTimersByTimeAsync(180);
     await controller.flush();
 
     expect(send).not.toHaveBeenCalled();
-    expect(sendToTarget).toHaveBeenCalledWith(
-      target,
+    expect(sendToFrame).toHaveBeenCalledWith(
+      handle,
       "Runtime.evaluate",
       expect.objectContaining({ contextId: 39 }),
+      undefined,
     );
     expect(drafts[0]?.postStateId).toBe("s-next");
   });

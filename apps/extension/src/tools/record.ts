@@ -30,22 +30,21 @@ import {
   type RecordingStepBuffer,
 } from "@/lib/recording/step-buffer";
 import { RecordingTabCoordinator, type TabActivation } from "@/lib/recording/tab-coordinator";
-import { buildTraceV2 } from "@/lib/recording/trace-reducer-v2";
 import type { RecordingDraftStep } from "@/lib/recording/types";
+import { ensureOverlayInjected } from "@/lib/runtime-content-scripts";
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
 import { EXTENSION_VERSION } from "@/transport/handshake";
 import type {
   RecordAwaitParams,
   RecordAwaitResult,
-  RecordedTrace,
   RecordStartParams,
   RecordStartResult,
   RecordStopParams,
   RecordStopResult,
   RpcError,
   StopReason,
+  TraceV3,
 } from "@/transport/types";
-import { TRACE_VERSION_V3 } from "@/transport/types";
 import { handleNavigate } from "./navigation";
 import {
   type CdpRunner,
@@ -67,10 +66,8 @@ interface ActiveRecording {
   steps: RecordingDraftStep[];
   startedAt: string;
   startedAtMs: number;
-  traceVersion: 2 | 3;
-  supportsTabSwitchSteps: boolean;
-  finishPromise: Promise<RecordedTrace>;
-  resolveFinish: (trace: RecordedTrace) => void;
+  finishPromise: Promise<TraceV3>;
+  resolveFinish: (trace: TraceV3) => void;
   rejectFinish: (err: Error) => void;
   settled: boolean;
   finishAttempt: Promise<FinishOutcome> | null;
@@ -89,7 +86,7 @@ interface ActiveRecording {
   lastStepSequenceByProducer: Map<string, number>;
 }
 
-type FinishOutcome = { trace: RecordedTrace } | { error: string };
+type FinishOutcome = { trace: TraceV3 } | { error: string };
 
 function enqueueRecordingAction(
   recording: ActiveRecording,
@@ -105,9 +102,31 @@ function isRecordingFinishing(recording: ActiveRecording): boolean {
 }
 
 const recordings = new Map<string, ActiveRecording>();
+const activeRecordingSubscribers = new Set<() => void | Promise<void>>();
 
 export function hasActiveRecording(sessionId: string): boolean {
   return recordings.has(sessionId);
+}
+
+export function activeRecordingCount(): number {
+  return recordings.size;
+}
+
+export function subscribeActiveRecordings(listener: () => void | Promise<void>): () => void {
+  activeRecordingSubscribers.add(listener);
+  return () => {
+    activeRecordingSubscribers.delete(listener);
+  };
+}
+
+async function notifyActiveRecordingsChanged(): Promise<void> {
+  await Promise.all(
+    [...activeRecordingSubscribers].map((listener) =>
+      Promise.resolve()
+        .then(listener)
+        .catch(() => {}),
+    ),
+  );
 }
 
 const RECORD_START_RETRIES = 3;
@@ -194,6 +213,7 @@ async function sendRecordStartWithAck(
   for (let attempt = 0; attempt < RECORD_START_RETRIES; attempt += 1) {
     if (cancelled?.()) throw new Error("record start cancelled");
     try {
+      await ensureOverlayInjected(tabId);
       const response = await sendToTab(tabId, msg);
       if (isRecordStartAck(response)) return;
       lastError = new Error("content script did not ack RECORD_START");
@@ -208,35 +228,18 @@ async function sendRecordStartWithAck(
   throw lastError ?? new Error("failed to start recording in content script");
 }
 
-function negotiatedTraceVersion(params: RecordStartParams): 2 | 3 | RpcError {
-  if (params.trace_version === undefined) return 2;
-  if (params.trace_version === TRACE_VERSION_V3) return 3;
-  return {
-    code: "invalid_params",
-    message: `unsupported trace_version ${params.trace_version}; supported values are omitted (v2) or ${TRACE_VERSION_V3} (v3)`,
-  };
-}
-
-function buildTrace(recording: ActiveRecording): RecordedTrace {
-  if (recording.traceVersion === 3 && recording.observation) {
-    return recording.observation.buildTrace({
-      drafts: recording.steps,
-      startedAt: recording.startedAt,
-      purpose: recording.purpose,
-      startUrl: recording.startUrl,
-      stoppedBy: recording.stoppedBy,
-      bskVersion: BSK_TRACE_VERSION,
-      includeTabSwitches: recording.supportsTabSwitchSteps,
-    });
-  }
-  if (recording.traceVersion === 3) {
+function buildTrace(recording: ActiveRecording): TraceV3 {
+  if (!recording.observation) {
     throw new Error("trace v3 observation runtime is unavailable");
   }
-  return buildTraceV2({
-    steps: recording.steps,
+  return recording.observation.buildTrace({
+    drafts: recording.steps,
     startedAt: recording.startedAt,
-    ...(recording.startUrl ? { startUrl: recording.startUrl } : {}),
-    ...(recording.purpose ? { purpose: recording.purpose } : {}),
+    purpose: recording.purpose,
+    startUrl: recording.startUrl,
+    stoppedBy: recording.stoppedBy,
+    bskVersion: BSK_TRACE_VERSION,
+    includeTabSwitches: true,
   });
 }
 
@@ -845,6 +848,7 @@ async function finishRecordingAttempt(
   recording.settled = true;
   recordings.delete(sessionId);
   releaseBrowserObservationListenersIfIdle();
+  await notifyActiveRecordingsChanged();
   const trace = buildTrace(recording);
   recording.resolveFinish(trace);
   return { trace };
@@ -855,9 +859,7 @@ export async function handleRecordStart(
   params: RecordStartParams,
   deps: RecordDeps = getDefaultDeps(),
 ): Promise<RecordStartResult | RpcError> {
-  const traceVersionOrErr = negotiatedTraceVersion(params);
-  if (typeof traceVersionOrErr !== "number") return traceVersionOrErr;
-  if (traceVersionOrErr === 3 && !deps.cdp) {
+  if (!deps.cdp) {
     return {
       code: "protocol_error",
       message: "trace v3 recording requires an active CDP connection",
@@ -880,9 +882,9 @@ export async function handleRecordStart(
   // on the destination page can RECORD_QUERY → rearm → show RecordOverlay
   // instead of flashing ControlOverlay ("Agent 正在控制").
   const requestId = makeRequestId(target.tabId);
-  let resolveFinish!: (trace: RecordedTrace) => void;
+  let resolveFinish!: (trace: TraceV3) => void;
   let rejectFinish!: (err: Error) => void;
-  const finishPromise = new Promise<RecordedTrace>((resolve, reject) => {
+  const finishPromise = new Promise<TraceV3>((resolve, reject) => {
     resolveFinish = resolve;
     rejectFinish = reject;
   });
@@ -907,23 +909,20 @@ export async function handleRecordStart(
     steps: [],
     startedAt: new Date(startedAtMs).toISOString(),
     startedAtMs,
-    traceVersion: traceVersionOrErr,
-    supportsTabSwitchSteps: params.supports_tab_switch_steps === true,
     finishPromise,
     resolveFinish,
     rejectFinish,
     settled: false,
     finishAttempt: null,
-    observation:
-      traceVersionOrErr === 3 && sessionCdp
-        ? new RecordingObservationRuntime({
-            cdp: sessionCdp,
-            tabsApi: deps.tabsApi,
-            maxTokens: maxPageTokens,
-            redactValues,
-            isTabAllowed: ctx.remote ? isTabAllowed : undefined,
-          })
-        : null,
+    observation: sessionCdp
+      ? new RecordingObservationRuntime({
+          cdp: sessionCdp,
+          tabsApi: deps.tabsApi,
+          maxTokens: maxPageTokens,
+          redactValues,
+          isTabAllowed: ctx.remote ? isTabAllowed : undefined,
+        })
+      : null,
     stoppedBy: "user_finish",
     navigationCallbacks: new Set(),
     acceptingNavigation: true,
@@ -949,12 +948,14 @@ export async function handleRecordStart(
   // Observe navigations for the whole recording lifetime; attach before
   // optional navigate so the destination load can rearm capture.
   ensureBrowserObservationListeners(deps);
+  await notifyActiveRecordingsChanged();
 
   const abortPending = async (notifyContent: boolean) => {
     recordings.get(params.session_id)?.observation?.cancel();
     deps.frameCoordinator?.cancel(requestId);
     recordings.delete(params.session_id);
     releaseBrowserObservationListenersIfIdle();
+    await notifyActiveRecordingsChanged();
     if (notifyContent) {
       try {
         await deps.sendToTab(target.tabId, {
@@ -1149,9 +1150,9 @@ export async function handleRecordAwait(
     return { code: "cancelled", message: "record_await aborted" };
   }
 
-  const outcome = await new Promise<{ trace: RecordedTrace } | { error: RpcError }>((resolve) => {
+  const outcome = await new Promise<{ trace: TraceV3 } | { error: RpcError }>((resolve) => {
     let settled = false;
-    const finish = (result: { trace: RecordedTrace } | { error: RpcError }) => {
+    const finish = (result: { trace: TraceV3 } | { error: RpcError }) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
@@ -1200,6 +1201,7 @@ export function clearRecordingForSession(sessionId: string): void {
   }
   recordings.delete(sessionId);
   releaseBrowserObservationListenersIfIdle();
+  void notifyActiveRecordingsChanged();
 }
 
 export type { RecordFinishMessage };

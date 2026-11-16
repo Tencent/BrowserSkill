@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; the harness owns an isolated browser/profile.
+// Opt in with BSK_TEST_CHROME; the harness owns an isolated browser/profile.
 import { describe, expect, it } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
@@ -28,7 +28,7 @@ async function browser(
   );
   await withChrome(
     {
-      executable: process.env.BSK_CLICK_CHROME,
+      executable: process.env.BSK_TEST_CHROME,
       deviceScale: 1,
       zoom: 1,
       startupTimeout: 30_000,
@@ -79,7 +79,7 @@ function manager() {
 const tab = { id: 7, windowId: 100, active: true, url: "about:blank" } as chrome.tabs.Tab;
 const tabsApi = { get: async () => tab, query: async () => [tab] };
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("download trigger retirement", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("download trigger retirement", () => {
   it.each([
     "mouseMoved",
     "mousePressed",

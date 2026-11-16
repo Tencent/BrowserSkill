@@ -1,3 +1,4 @@
+import { type ScreencastLease, screencasts } from "@/browser-driver/screencast-coordinator";
 import {
   type CaptureSuppressSendToTab,
   withExtensionOverlayHidden,
@@ -5,11 +6,70 @@ import {
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { parsePngDimensions } from "./png";
-import type { CdpRunner } from "./shared";
+import { type CdpRunner, delegateCdpRunner } from "./shared";
 import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 import { isAbortError, throwIfAborted } from "./vom/capture-abort";
 import { verifyDocumentIdentity } from "./vom/document-identity";
 import type { DocumentIdentity } from "./vom/facts";
+
+async function isAuraCompositorPlatform(): Promise<boolean> {
+  if (typeof chrome !== "undefined" && typeof chrome.runtime?.getPlatformInfo === "function") {
+    const info = await chrome.runtime.getPlatformInfo().catch(() => undefined);
+    return info?.os === "win" || info?.os === "linux";
+  }
+  const proc = (
+    globalThis as {
+      process?: { platform?: string; env?: Record<string, string | undefined> };
+    }
+  ).process;
+  return (
+    Boolean(proc?.env?.BSK_TEST_CHROME) &&
+    (proc?.platform === "win32" || proc?.platform === "linux")
+  );
+}
+
+/** True when Aura may suspend compositor surface frames (unselected tab, occluded/unfocused window, or minimized window). */
+export async function isHiddenCompositorSurface(
+  active: boolean,
+  windowId: number,
+): Promise<boolean> {
+  if (!active) return true;
+  if (typeof chrome === "undefined" || typeof chrome.windows?.get !== "function") return false;
+  const win = await chrome.windows.get(windowId).catch(() => undefined);
+  if (!win) return false;
+  if (win.state === "minimized") return true;
+  if (win.focused !== false) return false;
+  // Headless Chrome reports windows as unfocused without an Aura desktop occlusion path.
+  return !globalThis.navigator?.userAgent.includes("HeadlessChrome/");
+}
+
+/** Hold a minimal screencast consumer on Windows/Linux Aura while reading a hidden surface. */
+export async function withAuraCompositorKeepalive<T>(
+  cdp: CdpRunner,
+  tabId: number,
+  hiddenSurface: boolean,
+  signal: AbortSignal | undefined,
+  work: () => Promise<T>,
+): Promise<T> {
+  if (
+    !hiddenSurface ||
+    !cdp.onEvent ||
+    !cdp.getAttachmentId?.(tabId) ||
+    !(await isAuraCompositorPlatform())
+  ) {
+    return work();
+  }
+  const lease: ScreencastLease = await screencasts(cdp).acquire(
+    tabId,
+    { format: "png", maxWidth: 32, maxHeight: 32 },
+    signal,
+  );
+  try {
+    return await work();
+  } finally {
+    await lease.release().catch(() => {});
+  }
+}
 
 function changed(): RpcError {
   return rpcError(
@@ -21,26 +81,44 @@ function changed(): RpcError {
 
 /** Cleanup and identity probes must not auto-attach to a replacement connection. */
 function boundToAttachment(cdp: CdpRunner, tabId: number, attachmentId: string): CdpRunner {
-  return {
-    getAttachmentId: (id) => cdp.getAttachmentId?.(id),
+  return delegateCdpRunner(cdp, {
     send: <T>(id: number, method: string, params?: object) => {
       if (id !== tabId || cdp.getAttachmentId?.(id) !== attachmentId) {
         return Promise.reject(new Error("Screenshot attachment changed"));
       }
       return cdp.send<T>(id, method, params);
     },
-  };
+    ...(cdp.sendToFrame
+      ? {
+          sendToFrame: <T>(
+            handle: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[0],
+            method: string,
+            params?: object,
+            guard?: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[3],
+          ) => {
+            if (handle.tabId !== tabId || cdp.getAttachmentId?.(handle.tabId) !== attachmentId) {
+              return Promise.reject(new Error("Screenshot attachment changed"));
+            }
+            return cdp.sendToFrame!<T>(handle, method, params, {
+              ...guard,
+              attachmentId,
+            });
+          },
+        }
+      : {}),
+  });
 }
 
 /** Read only the main document identity, not a VOM/AX snapshot or frame graph. */
 async function readDocumentIdentity(cdp: CdpRunner, tabId: number, signal?: AbortSignal) {
   throwIfAborted(signal);
-  const tree = await cdp.send<{ frameTree?: { frame: { id: string } } }>(
+  const tree = await cdp.send<{ frameTree?: { frame: { id: string; loaderId?: string } } }>(
     tabId,
     "Page.getFrameTree",
   );
   const attachmentId = cdp.getAttachmentId?.(tabId);
   const frameId = tree.frameTree?.frame.id;
+  const loaderId = tree.frameTree?.frame.loaderId ?? "";
   if (!attachmentId || !frameId) return null;
   const bound = boundToAttachment(cdp, tabId, attachmentId);
   const objectGroup = `bsk-viewport-identity-${crypto.randomUUID()}`;
@@ -69,10 +147,12 @@ async function readDocumentIdentity(cdp: CdpRunner, tabId: number, signal?: Abor
     const node = root.result?.deepSerializedValue;
     const backendNodeId = node?.type === "node" ? node.value?.backendNodeId : undefined;
     if (backendNodeId === undefined || cdp.getAttachmentId?.(tabId) !== attachmentId) return null;
+    cdp.recordFrameDocumentElement?.(tabId, frameId, loaderId, backendNodeId);
     return {
       attachmentId,
+      tabId,
       frameId,
-      target: { tabId },
+      loaderId,
       documentElementBackendNodeId: backendNodeId,
     } satisfies DocumentIdentity;
   } finally {
@@ -88,6 +168,7 @@ export async function captureControlledViewport(
   stillControlled: () => Promise<boolean>,
   signal?: AbortSignal,
   sendToTab?: CaptureSuppressSendToTab,
+  isHiddenSurface?: () => boolean,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   const deadline = Date.now() + 10_000;
   const wait = <T>(work: Promise<T>, cleanup = false) =>
@@ -103,14 +184,27 @@ export async function captureControlledViewport(
   };
   // Chrome cannot cancel dispatched reads. Retire their waiters and consume late
   // replies; never continue the pipeline after its cancellation or deadline.
-  const captureCdp: CdpRunner = {
-    getAttachmentId: (id) => cdp.getAttachmentId?.(id),
+  const captureCdp: CdpRunner = delegateCdpRunner(cdp, {
     send: (id, method, params) => {
       const cleanup = method === "Runtime.releaseObjectGroup";
       if (!cleanup) check();
       return wait(cdp.send(id, method, params), cleanup);
     },
-  };
+    ...(cdp.sendToFrame
+      ? {
+          sendToFrame: <T>(
+            handle: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[0],
+            method: string,
+            params?: object,
+            guard?: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[3],
+          ) => {
+            const cleanup = method === "Runtime.releaseObjectGroup";
+            if (!cleanup) check();
+            return wait(cdp.sendToFrame!<T>(handle, method, params, guard), cleanup);
+          },
+        }
+      : {}),
+  });
   const controlled = () => {
     check();
     return wait(stillControlled());
@@ -147,11 +241,13 @@ export async function captureControlledViewport(
       tabId,
       async () => {
         if (!(await current())) return null;
-        return bound.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
-          format: "png",
-          fromSurface: true,
-          captureBeyondViewport: false,
-        });
+        return withAuraCompositorKeepalive(cdp, tabId, isHiddenSurface?.() ?? false, signal, () =>
+          bound.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
+            format: "png",
+            fromSurface: true,
+            captureBeyondViewport: false,
+          }),
+        );
       },
       overlay,
     );

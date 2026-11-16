@@ -6,22 +6,9 @@ pub(crate) mod read_limit;
 pub mod store;
 
 use anyhow::Result;
+pub use bsk_protocol::local_auth::LocalAuthMode;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex};
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LocalAuthMode {
-    #[default]
-    Warn,
-    Required,
-    TrustLocal,
-}
-impl LocalAuthMode {
-    pub fn accepts_legacy(self) -> bool {
-        self != Self::Required
-    }
-}
 
 #[derive(Default, Serialize, Deserialize)]
 struct Settings {

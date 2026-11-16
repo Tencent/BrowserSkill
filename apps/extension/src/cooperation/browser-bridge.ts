@@ -1,15 +1,17 @@
+import { injectCooperationAllFrames } from "@/lib/runtime-content-scripts";
 import type { SessionManager } from "@/session-manager/manager";
 import { CooperationController } from "./controller";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import { provenHiddenFrames } from "./hidden-frames";
 import {
   COOPERATION_ARM,
+  COOPERATION_ARM_FRAME,
   COOPERATION_CONTROL,
   COOPERATION_DISABLE,
   COOPERATION_MESSAGE,
   COOPERATION_READ,
-  COOPERATION_READY,
   COOPERATION_RESUME,
+  COOPERATION_SUBFRAME_READY,
   type CooperationFrames,
   type FrameGap,
   type FrameIdentity,
@@ -18,6 +20,8 @@ import {
   type HiddenFrames,
   type InputExpectation,
 } from "./types";
+
+export const COOPERATION_SUBFRAME_DEBOUNCE_MS = 50;
 
 function validFrame(value: unknown): value is FrameState {
   if (!value || typeof value !== "object") return false;
@@ -230,6 +234,9 @@ export function attachCooperation(
   sessions: SessionManager,
   changed: (tabId: number) => void,
   sessionActivity?: (sessionId: string, idleProtected: boolean) => void,
+  onOutermostFrameArmed?: (
+    details: chrome.webNavigation.WebNavigationTransitionCallbackDetails,
+  ) => void,
 ): CooperationController {
   const controller = new CooperationController({
     sessions,
@@ -251,10 +258,95 @@ export function attachCooperation(
       await collectCooperationFrames(tabId, COOPERATION_DISABLE, lease);
     },
   });
+  const subframeNeedsInject = new Set<number>();
+  const observeTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  const clearObserveTimer = (tabId: number) => {
+    const existing = observeTimers.get(tabId);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+      observeTimers.delete(tabId);
+    }
+  };
+  const scheduleObserveTab = (tabId: number, needsInject = false) => {
+    if (needsInject) subframeNeedsInject.add(tabId);
+    clearObserveTimer(tabId);
+    observeTimers.set(
+      tabId,
+      setTimeout(() => {
+        observeTimers.delete(tabId);
+        const shouldInject = subframeNeedsInject.delete(tabId);
+        if (!sessions.findControllingSession?.(tabId)) return;
+        void (async () => {
+          if (shouldInject) {
+            await injectCooperationAllFrames(tabId);
+            if (!sessions.findControllingSession?.(tabId)) return;
+          }
+          await controller.observeTab(tabId);
+        })().catch(() => {});
+      }, COOPERATION_SUBFRAME_DEBOUNCE_MS),
+    );
+  };
+  const armCommittedFrame = (
+    details: chrome.webNavigation.WebNavigationTransitionCallbackDetails,
+  ) => {
+    if (!sessions.findControllingSession?.(details.tabId)) return;
+    const target = details.documentId
+      ? { documentId: details.documentId }
+      : { frameId: details.frameId };
+    void (async () => {
+      try {
+        const ack = await chrome.tabs.sendMessage(
+          details.tabId,
+          { kind: COOPERATION_ARM_FRAME },
+          target,
+        );
+        if (
+          ack === undefined &&
+          details.documentId &&
+          typeof chrome.scripting?.executeScript === "function"
+        ) {
+          await chrome.scripting.executeScript({
+            target: { tabId: details.tabId, documentIds: [details.documentId] },
+            files: ["content-scripts/cooperation.js"],
+            injectImmediately: true,
+          });
+          await chrome.tabs.sendMessage(details.tabId, { kind: COOPERATION_ARM_FRAME }, target);
+        }
+      } catch (error) {
+        if (
+          missingReceiver(error) &&
+          details.documentId &&
+          typeof chrome.scripting?.executeScript === "function"
+        ) {
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: details.tabId, documentIds: [details.documentId] },
+              files: ["content-scripts/cooperation.js"],
+              injectImmediately: true,
+            });
+            await chrome.tabs.sendMessage(details.tabId, { kind: COOPERATION_ARM_FRAME }, target);
+          } catch {
+            // Restricted or replaced documents are handled during frame collection.
+          }
+        }
+      } finally {
+        if (
+          (details.frameId === 0 || details.frameType === "outermost_frame") &&
+          sessions.findControllingSession?.(details.tabId)
+        ) {
+          onOutermostFrameArmed?.(details);
+        }
+      }
+    })();
+    scheduleObserveTab(details.tabId);
+  };
+
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (sender.id !== chrome.runtime.id || typeof sender.tab?.id !== "number") return false;
-    if (message?.kind === COOPERATION_READY) {
-      void controller.observeTab(sender.tab.id).catch(() => {});
+    if (message?.kind === COOPERATION_SUBFRAME_READY) {
+      if (sessions.findControllingSession?.(sender.tab.id)) {
+        scheduleObserveTab(sender.tab.id, true);
+      }
     } else if (message?.kind === COOPERATION_MESSAGE && validFrame(message.state)) {
       controller.receive(sender.tab.id, sender.frameId ?? 0, message.state, message.lease);
     } else if (
@@ -276,7 +368,18 @@ export function attachCooperation(
     // for an unrelated iframe navigation that may never commit.
     if (frameId === 0) controller.invalidate(tabId);
   });
-  chrome.tabs.onRemoved.addListener((tabId) => controller.releaseTab(tabId));
-  chrome.tabs.onDetached.addListener((tabId) => controller.detachTab(tabId));
+  chrome.webNavigation.onCommitted?.addListener((details) => {
+    armCommittedFrame(details);
+  });
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    clearObserveTimer(tabId);
+    subframeNeedsInject.delete(tabId);
+    controller.releaseTab(tabId);
+  });
+  chrome.tabs.onDetached.addListener((tabId) => {
+    clearObserveTimer(tabId);
+    subframeNeedsInject.delete(tabId);
+    controller.detachTab(tabId);
+  });
   return controller;
 }

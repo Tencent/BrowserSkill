@@ -48,7 +48,7 @@ const oracleExpression = `(() => {
   return { probes, viewport: { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight }, owners };
 })()`;
 
-describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate contract", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real DOMSnapshot coordinate contract", () => {
   it.each(
     [
       { deviceScale: 1, zoom: 1 },
@@ -79,7 +79,7 @@ describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate c
     const { baseUrl } = await server.start();
     try {
       await withChrome(
-        { executable: process.env.BSK_GEOMETRY_CHROME, ...configuration },
+        { executable: process.env.BSK_TEST_CHROME, ...configuration },
         async (send: Send) => {
           const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
             url: "about:blank",
@@ -282,8 +282,9 @@ describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate c
                 if (configuration.fixture === "oopif-scrollbars")
                   expect(
                     await resolveNodeGeometry(cdp, 1, {
-                      target: frame.target,
+                      tabId: 1,
                       frameId: frame.frameId,
+                      loaderId: frame.loaderId ?? "",
                       backendNodeId: node!.backendNodeId,
                     }),
                   ).toMatchObject({ code: "permission_denied" });
@@ -297,8 +298,9 @@ describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate c
                 ).toBeLessThan(2);
               if (configuration.fixture !== "oopif-scrollbars") continue;
               const live = await resolveNodeGeometry(cdp, 1, {
-                target: frame.target,
+                tabId: 1,
                 frameId: frame.frameId,
+                loaderId: frame.loaderId ?? "",
                 backendNodeId: node!.backendNodeId,
               });
               if ("code" in live) throw new Error(live.message);

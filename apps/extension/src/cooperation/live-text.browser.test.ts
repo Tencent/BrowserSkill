@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; each test owns its browser, profile and HTTP server.
+// Opt in with BSK_TEST_CHROME; each test owns its browser, profile and HTTP server.
 // Real Chrome observations, target resolution and native input run through the
 // production controller. The page reports DOM revisions like the content
 // script's collector, so this is integration rather than installed-extension
@@ -136,7 +136,7 @@ async function withCooperation(
   try {
     await withChrome(
       {
-        executable: process.env.BSK_CLICK_CHROME,
+        executable: process.env.BSK_TEST_CHROME,
         deviceScale: 1,
         zoom: 1,
         startupTimeout: 30_000,
@@ -370,7 +370,7 @@ const learned = expect.stringContaining("changed by itself");
 const changed = "The action's observed content changed; synchronize and replan";
 const refused = { data: { reason: "cooperation_sync_required", effect_state: "none" } };
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)(
+describe.skipIf(!process.env.BSK_TEST_CHROME)(
   "release-blocking navigation and context regressions",
   () => {
     afterEach(() => vi.unstubAllGlobals());
@@ -432,7 +432,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
   },
 );
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("completed input during frame navigation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("completed input during frame navigation", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   describe.each(["strict", "target"] as const)("%s policy", (policy) => {
@@ -497,7 +497,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("completed input during frame nav
   });
 });
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("shared control with self-updating text", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("shared control with self-updating text", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -661,7 +661,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("shared control with self-updatin
   }, 120_000);
 });
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("target policy in a real browser", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("target policy in a real browser", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });

@@ -838,7 +838,7 @@ else:
 
         real_skill = Path(__file__).resolve().parents[1]
         scenarios = audit.load(real_skill / "references/scenarios.json")
-        self.assertEqual(len(scenarios), 112)
+        self.assertEqual(len(scenarios), 113)
         ids = [s["id"] for s in scenarios]
         self.assertEqual(len(ids), len(set(ids)))
         for required_id in [
@@ -851,6 +851,7 @@ else:
             "EDGE-VIRTUAL-LIST-RECYCLE",
             "EDGE-STACKED-MODALS",
             "EDGE-NESTED-MENU-REFS",
+            "EDGE-SLOTTED-LIST-EXTRACT",
             "LOCAL-VIDEO-PORTAL",
             "LOCAL-FORUM-HUB",
             "PUBLIC-BILIBILI-FEED",
@@ -1172,6 +1173,177 @@ elif cmd in ("sync", "observe", "snapshot"):
             audit.gate(d_ok)
         gate_ok = audit.load(d_ok / "gate.json")
         self.assertIn("EDGE-NESTED-MENU-REFS", gate_ok["passed_ids"])
+
+    def test_slotted_list_extract_gate_contract(self):
+        slotted_cli = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if "--help" in args:
+    if args == ["--help"]:
+        print("Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n  navigate  Go\\n  extract   Extract\\n\\nOptions:\\n  --help  Help")
+    elif args == ["extract", "--help"]:
+        print("Usage: bsk extract <COMMAND>\\n\\nCommands:\\n  discover  Discover\\n  list      List\\n\\nOptions:\\n  --help  Help")
+    else:
+        print("Usage: bsk " + " ".join(args[:-1]) + " [OPTIONS]")
+    sys.exit(0)
+mode = os.environ.get("FAKE_SLOTTED_MODE", "fixed")
+if args[0] == "navigate":
+    print(json.dumps({"ok": True, "url": args[1]}))
+elif args[:2] == ["extract", "discover"]:
+    print(json.dumps({
+        "targets": [
+            {"target_id": "xt_slotted", "kind": "list", "name": "Shadow Slotted Runbook List", "columns": ["text", "url"]},
+            {"target_id": "xt_nested", "kind": "list", "name": "Nested mTLS Sub-checks", "columns": ["text", "url"]}
+        ]
+    }))
+elif args[:2] == ["extract", "list"]:
+    if "--selector" in args:
+        print(json.dumps({
+            "rows": [{"text": "Sub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/mtls"}],
+            "row_sources": [{"source_row": 1}],
+            "warnings": [],
+            "coverage": {"truncated": False, "dataset_complete": "complete"}
+        }))
+    elif mode == "v050":
+        print(json.dumps({
+            "rows": [{"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}],
+            "row_sources": [{"source_row": 1}],
+            "warnings": [],
+            "coverage": {"truncated": False, "dataset_complete": "complete"}
+        }))
+    elif mode == "bad_details_pos":
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/canary"},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 2}, {"source_row": 4}],
+            "warnings": ["hidden_rows_omitted"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+    elif mode == "ambiguous_nested_url":
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": None},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 3}, {"source_row": 5}],
+            "warnings": ["hidden_rows_omitted", "ambiguous_default_url"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+    else:
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/canary"},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 3}, {"source_row": 5}],
+            "warnings": ["hidden_rows_omitted"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+"""
+        self.binary.write_text(slotted_cli)
+        self.binary.chmod(0o755)
+        real_skill = Path(__file__).resolve().parents[1]
+        slotted_scenario = next(
+            s
+            for s in audit.load(real_skill / "references/scenarios.json")
+            if s["id"] == "EDGE-SLOTTED-LIST-EXTRACT"
+        )
+
+        def run_slotted(run_name, mode, target_id="xt_slotted"):
+            out_dir = self.base / run_name
+            audit.write(self.skill / "references/scenarios.json", [slotted_scenario])
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.init(
+                    NS(
+                        out=str(out_dir),
+                        bsk=str(self.binary),
+                        binary=str(self.binary),
+                        browser="chrome",
+                        candidate=run_name,
+                        port=4567,
+                    )
+                )
+
+            def ex(argv):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audit.execute(
+                        NS(
+                            run=str(out_dir),
+                            case="EDGE-SLOTTED-LIST-EXTRACT",
+                            argv=argv,
+                            timeout=5,
+                            lane="browser",
+                            stdin_file=None,
+                            interactive=False,
+                            env=[f"FAKE_SLOTTED_MODE={mode}"],
+                        )
+                    )
+                return max(
+                    (out_dir / "commands").glob("*/meta.json"),
+                    key=lambda p: p.stat().st_mtime_ns,
+                ).parent.name
+
+            r_nav = ex(["navigate", "http://127.0.0.1:4567/arena-shadow-iframe"])
+            r_disc = ex(["extract", "discover", "--json"])
+            r_outer = ex(["extract", "list", "--target-id", target_id, "--json"])
+            r_inner = ex(["extract", "list", "--selector", "#shadow-nested-sublist", "--json"])
+            recs = [r_nav, r_disc, r_outer, r_inner]
+            audit.write(
+                out_dir / "results.json",
+                {
+                    "cases": [
+                        {
+                            "id": "EDGE-SLOTTED-LIST-EXTRACT",
+                            "status": "passed",
+                            "records": recs,
+                            "oracle_summary": "slotted list check",
+                            "checks": [
+                                {
+                                    "record": r_inner,
+                                    "pointer": "/json/rows/0/text",
+                                    "op": "eq",
+                                    "value": "Sub-check: mTLS cert pinned",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.gate(out_dir)
+            return audit.load(out_dir / "gate.json")
+
+        g_v050 = run_slotted("slotted_v050", "v050")
+        self.assertTrue(
+            any("Slotted outer list row count 1 != 3" in e for e in g_v050["errors"]),
+            g_v050["errors"],
+        )
+
+        g_pos = run_slotted("slotted_pos", "bad_details_pos")
+        self.assertTrue(
+            any("source_row [1, 2, 4] != [1, 3, 5]" in e for e in g_pos["errors"]),
+            g_pos["errors"],
+        )
+
+        g_url = run_slotted("slotted_url", "ambiguous_nested_url")
+        self.assertTrue(
+            any("does not end with '/runbook/canary'" in e for e in g_url["errors"]),
+            g_url["errors"],
+        )
+
+        g_tid = run_slotted("slotted_tid", "fixed", target_id="xt_wrong")
+        self.assertTrue(
+            any("Missing extract list --target-id xt_slotted" in e for e in g_tid["errors"]),
+            g_tid["errors"],
+        )
+
+        g_ok = run_slotted("slotted_ok", "fixed")
+        self.assertIn("EDGE-SLOTTED-LIST-EXTRACT", g_ok["passed_ids"])
 
 
 if __name__ == "__main__":

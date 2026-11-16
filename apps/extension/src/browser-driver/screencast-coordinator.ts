@@ -93,7 +93,7 @@ export class ScreencastCoordinator {
           requests: new Set(),
           configuration: "",
           releaseAttachment: this.cdp.retainTabAttachment?.(tabId),
-          subscription: this.cdp.onEvent((source, method, params) => {
+          subscription: this.cdp.onEvent(tabId, (source, method, params) => {
             if (
               source.tabId !== tabId ||
               source.sessionId ||

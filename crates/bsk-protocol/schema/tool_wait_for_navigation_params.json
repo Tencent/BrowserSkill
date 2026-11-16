@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "definitions": {
     "WaitUntil": {
       "description": "Page-lifecycle checkpoint a navigation should wait on.\n\nMapping to CDP `Page.lifecycleEvent` names:\n* `Load` → `load`\n* `DomContentLoaded` → `DOMContentLoaded`\n* `NetworkIdle` → `networkIdle`\n* `Commit` → `commit` (earliest event after the navigation actually\n  commits to a new document)",
@@ -13,6 +14,13 @@
     }
   },
   "properties": {
+    "context_id": {
+      "description": "Optional cooperation context validated by the extension without renewing control.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "session_id": {
       "type": "string"
     },

@@ -12,6 +12,7 @@ import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import { type CdpRunner, sessionCdpRunner } from "@/tools/shared";
 import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
+import { validateToolResult } from "@/transport/protocol";
 import { CooperationController } from "./controller";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import type { CooperationFrames, FrameState } from "./types";
@@ -29,7 +30,7 @@ vi.mock("@/tools/interaction", () => ({
   resolveActionTarget: vi.fn(async () => ({
     backendNodeId: 4,
     frameId: "frame",
-    cdpTarget: { tabId: 7 },
+    handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 4 },
     tab: { tabId: 7 },
   })),
 }));
@@ -684,15 +685,15 @@ describe("shared-tab dispatch fences", () => {
     });
     // Resolves "eN" refs to backend node N.
     const refs = () =>
-      vi.mocked(resolveActionTarget).mockImplementation(
-        async (_c, _s, _t, params) =>
-          ({
-            backendNodeId: Number((params as { ref?: string }).ref?.replace(/^@?e/, "")),
-            frameId: "frame",
-            cdpTarget: { tabId: 7 },
-            tab: { tabId: 7 },
-          }) as Awaited<ReturnType<typeof resolveActionTarget>>,
-      );
+      vi.mocked(resolveActionTarget).mockImplementation(async (_c, _s, _t, params) => {
+        const backendNodeId = Number((params as { ref?: string }).ref?.replace(/^@?e/, ""));
+        return {
+          backendNodeId,
+          frameId: "frame",
+          handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
+          tab: { tabId: 7 },
+        } as Awaited<ReturnType<typeof resolveActionTarget>>;
+      });
     const run = (
       f: Awaited<ReturnType<typeof fixture>>,
       context: string,
@@ -973,15 +974,15 @@ describe("shared-tab dispatch fences", () => {
 
     it("keeps explicit dependencies exact after learning page activity", async () => {
       live((tick) => scene(`10:00:0${tick}`));
-      vi.mocked(resolveActionTarget).mockImplementation(
-        async (_c, _s, _t, params) =>
-          ({
-            backendNodeId: (params as { ref?: string }).ref === "e5" ? 5 : 4,
-            frameId: "frame",
-            cdpTarget: { tabId: 7 },
-            tab: { tabId: 7 },
-          }) as Awaited<ReturnType<typeof resolveActionTarget>>,
-      );
+      vi.mocked(resolveActionTarget).mockImplementation(async (_c, _s, _t, params) => {
+        const backendNodeId = (params as { ref?: string }).ref === "e5" ? 5 : 4;
+        return {
+          backendNodeId,
+          frameId: "frame",
+          handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
+          tab: { tabId: 7 },
+        } as Awaited<ReturnType<typeof resolveActionTarget>>;
+      });
       const f = await fixture();
       expect((await cycle(f, f.first.context_id)).message).toContain("changed by itself");
       const synced = await f.command("sync");
@@ -1102,15 +1103,15 @@ describe("shared-tab dispatch fences", () => {
         })),
       });
       live((tick) => shop(`$${100 + tick}`));
-      vi.mocked(resolveActionTarget).mockImplementation(
-        async (_c, _s, _t, params) =>
-          ({
-            backendNodeId: (params as { ref?: string }).ref === "e8" ? 8 : 4,
-            frameId: "frame",
-            cdpTarget: { tabId: 7 },
-            tab: { tabId: 7 },
-          }) as Awaited<ReturnType<typeof resolveActionTarget>>,
-      );
+      vi.mocked(resolveActionTarget).mockImplementation(async (_c, _s, _t, params) => {
+        const backendNodeId = (params as { ref?: string }).ref === "e8" ? 8 : 4;
+        return {
+          backendNodeId,
+          frameId: "frame",
+          handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
+          tab: { tabId: 7 },
+        } as Awaited<ReturnType<typeof resolveActionTarget>>;
+      });
       const click = (f: Awaited<ReturnType<typeof fixture>>, context: string, ref: string) => {
         f.change({ structure: f.controller.view(7)!.revision + 100 });
         return f.controller.run(
@@ -2802,7 +2803,7 @@ describe.each([false, true])("selection action guards, explicit dependency=%s", 
     vi.mocked(resolveActionTarget).mockResolvedValue({
       backendNodeId: 4,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 4 },
       tab: { tabId: 7, windowId: 100, active: true },
     });
     const f = await fixture();
@@ -3307,7 +3308,7 @@ describe("strict evidence around the action's own preparation", () => {
     vi.mocked(resolveActionTarget).mockResolvedValue({
       backendNodeId,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
       tab: { tabId: 7 },
     } as Awaited<ReturnType<typeof resolveActionTarget>>);
   const run = (
@@ -3443,13 +3444,13 @@ describe("strict evidence around the action's own preparation", () => {
     vi.mocked(resolveActionTarget).mockResolvedValueOnce({
       backendNodeId: 5,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 5 },
       tab: { tabId: 7 },
     } as Awaited<ReturnType<typeof resolveActionTarget>>);
     vi.mocked(resolveActionTarget).mockResolvedValueOnce({
       backendNodeId: 8,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 8 },
       tab: { tabId: 7 },
     } as Awaited<ReturnType<typeof resolveActionTarget>>);
     const f = await fixture();
@@ -3861,18 +3862,18 @@ describe("tool.record_start cooperation guard", () => {
       deps!.refStore?.replace(
         oopifPresent
           ? [
-              ["e1", { backendNodeId: 10, tabId: 7, frameId: "root" }],
+              ["e1", { backendNodeId: 10, tabId: 7, frameId: "root", loaderId: "root-l1" }],
               [
                 "e2",
                 {
                   backendNodeId: 20,
                   tabId: 7,
                   frameId: "child",
-                  cdpSessionId: `oopif-${attachGen}`,
+                  loaderId: "child-l1",
                 },
               ],
             ]
-          : [["e1", { backendNodeId: 10, tabId: 7, frameId: "root" }]],
+          : [["e1", { backendNodeId: 10, tabId: 7, frameId: "root", loaderId: "root-l1" }]],
       );
       return {
         text: oopifPresent ? "Main [ref=@e1]; Child [ref=@e2]" : "Main [ref=@e1]",
@@ -3905,9 +3906,13 @@ describe("tool.record_start cooperation guard", () => {
       expect(await unchanged).toMatchObject({ kind: "unchanged" });
       expect(snapshotCount).toBe(1);
 
-      // Existing `@e2` bound to pre-soft-detach `oopif-1` transparently routes to `oopif-2`!
-      const resolved = await runner.sendToTarget!<{ sessionId: string }>(
-        { tabId: 7, sessionId: "oopif-1" },
+      // Existing `@e2` FrameNodeHandle transparently routes to `oopif-2` without storing `cdpSessionId`!
+      const e2Entry = f.sessions.get("shared")!.refStore.resolveEntry("e2");
+      if (!e2Entry || e2Entry.kind !== "dom" || !e2Entry.handle) {
+        throw new Error("expected e2 DOM FrameNodeHandle");
+      }
+      const resolved = await runner.sendToFrame!<{ sessionId: string }>(
+        e2Entry.handle,
         "DOM.resolveNode",
         { backendNodeId: 20 },
       );
@@ -3935,5 +3940,172 @@ describe("tool.record_start cooperation guard", () => {
       cdp.dispose();
       vi.useRealTimers();
     }
+  });
+
+  it("tags strict-policy post-dispatch tool errors with effect_state unknown and bootstrap aborts with none", async () => {
+    vi.mocked(handleSnapshot).mockImplementation(async () => ({
+      text: "City: Shanghai; Submit [ref=@e1]",
+      ref_count: 1,
+      tab_id: 7,
+      truncated: false,
+    }));
+
+    // 1. Strict policy: `fixture()` syncs under `strict` policy; fail AFTER `beginDomMutation` / `sendGuarded`.
+    const f = await fixture();
+    expect(f.first.control_policy).toBe("strict");
+
+    expect(
+      await f.controller.run(
+        {
+          id: "strict-fill",
+          method: "tool.fill",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            ref: "@e1",
+            value: "secret",
+            context_id: f.first.context_id,
+          },
+        },
+        f.cdp,
+        f.abort.signal,
+        async (runner) => {
+          await runner.sendGuarded?.(
+            { tabId: 7 },
+            "Input.insertText",
+            { text: "secret" },
+            { signal: f.abort.signal },
+          );
+          return {
+            code: "permission_denied",
+            message: "fill verification failed after write",
+            data: { reason: "fill_value_mismatch" },
+          };
+        },
+      ),
+    ).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "fill_value_mismatch",
+        effect_state: "unknown",
+        phase: "execution",
+      },
+    });
+
+    // 2. Bootstrap initial blank-tab navigation cancelled BEFORE dispatch tags `effect_state: "none"`.
+    const blank = await fixture({ url: "about:blank", sync: false });
+    blank.abort.abort();
+    expect(
+      await blank.controller.run(
+        {
+          id: "bootstrap-nav-abort",
+          method: "tool.navigate",
+          params: { session_id: "shared", tab_id: 7, url: "https://example.test" },
+        },
+        blank.cdp,
+        blank.abort.signal,
+        async () => ({ tab_id: 7, url: "https://example.test" }),
+      ),
+    ).toMatchObject({
+      code: "cancelled",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+
+    // 3. Strict-policy `depends_on` validation and pre-dispatch resolution failures carry `effect_state: "none"`.
+    const strictDep = await fixture();
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "strict-bad-dep",
+          method: "tool.evaluate",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            expression: "1",
+            context_id: strictDep.first.context_id,
+            depends_on: [""],
+          },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({
+      code: "invalid_params",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      code: "cdp_failed",
+      message: "DOM.querySelector failed",
+    });
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "strict-missing-dep",
+          method: "tool.evaluate",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            expression: "1",
+            context_id: strictDep.first.context_id,
+            depends_on: ["@e999"],
+          },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({
+      data: {
+        effect_state: "none",
+      },
+    });
+
+    // 4. `manageTabs` (`tool.tab_select`) stamps `effect_state` onto untagged RpcErrors.
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "tab-select-err",
+          method: "tool.tab_select",
+          params: { session_id: "shared", tab_id: 7 },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ code: "cdp_failed", message: "tab activation failed before mutation" }),
+      ),
+    ).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+  });
+
+  it("validates cooperate status/sync against CooperateResult and fails wait immediately when the tab closes", async () => {
+    const f = await fixture();
+    expect(validateToolResult("tool.cooperate", f.first)).toBeUndefined();
+    const status = await f.command("status");
+    expect(validateToolResult("tool.cooperate", status)).toBeUndefined();
+
+    await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    const waiting = f.controller.command(
+      { session_id: "shared", tab_id: 7, action: "wait", timeout_ms: 15000 },
+      f.cdp,
+      f.abort.signal,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.controller.releaseTab(7);
+    await expect(waiting).resolves.toMatchObject({
+      code: "permission_denied",
+      message: "Shared-tab control has ended",
+      data: { effect_state: "none" },
+    });
   });
 });

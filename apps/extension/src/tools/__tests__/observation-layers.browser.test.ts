@@ -57,7 +57,7 @@ function fixture(c: (typeof cases)[number]): string {
   </${tag}>`;
 }
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser observation layers", () => {
   it.each([
     { deviceScale: 1, zoom: 1 },
     { deviceScale: 1.25, zoom: 1 },
@@ -82,7 +82,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers"
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     try {
       await withChrome(
-        { executable: process.env.BSK_CLICK_CHROME, deviceScale, zoom, startupTimeout: 30_000 },
+        { executable: process.env.BSK_TEST_CHROME, deviceScale, zoom, startupTimeout: 30_000 },
         async (send: Send) => {
           const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
             url: "about:blank",

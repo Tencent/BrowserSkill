@@ -2,6 +2,7 @@
 // rendering. Extension handlers attach reasons here; human-facing copy
 // lives in bsk-cli `render_error.rs`.
 
+import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
 import type {
   ErrorCode,
   RpcError,
@@ -35,6 +36,9 @@ export function classifyCdpError(error: RpcError): RpcError {
 }
 
 export function cdpError(error: unknown): RpcError {
+  if (isStaleFrameHandleError(error)) {
+    return rpcError("not_found", "ref_not_found", error.message);
+  }
   return classifyCdpError({
     code: "cdp_failed",
     message: error instanceof Error ? error.message : String(error),

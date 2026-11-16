@@ -29,8 +29,9 @@ import {
 
 const identity: DocumentIdentity = {
   attachmentId: "a",
-  target: { tabId: 4 },
+  tabId: 4,
   frameId: "top",
+  loaderId: "loader-top",
   documentElementBackendNodeId: 1,
 };
 const candidate = (id: number): VisualCandidate => ({
@@ -68,7 +69,7 @@ function fixture(count = 20, maxTokens?: number) {
     candidates,
     identities: new Map([["top", identity]]),
     rootIdentity: identity,
-    frames: new Map([["top", { target: identity.target }]]),
+    frames: new Map([["top", { loaderId: identity.loaderId }]]),
     render: prepareObservationRender(scene),
     notices: [],
     maxTokens,
@@ -121,8 +122,9 @@ describe("visual observation output", () => {
           viewport: { width: 1200, height: 800 },
           documents: [
             {
+              target: { tabId: 4 },
               frameId: "top",
-              target: identity.target,
+              loaderId: identity.loaderId,
               contextScopeId: "top",
               axNodes: [],
               domNodes: [1, 100, 101].map((id) => ({
@@ -994,11 +996,11 @@ it("preserves DOM labels for audit on the first and continuation pages", async (
           {
             id: "audit-click",
             method: "tool.click",
+            audit_id: "operation-test",
             params: {
               session_id: ctx.sessionId,
               tab_id: 4,
               ref,
-              _audit_id: "operation-test",
             },
           },
           manager,
@@ -1023,11 +1025,11 @@ it("preserves DOM labels for audit on the first and continuation pages", async (
         {
           id: "audit-visual",
           method: "tool.click",
+          audit_id: "operation-test",
           params: {
             session_id: ctx.sessionId,
             tab_id: 4,
             ref: "e1",
-            _audit_id: "operation-test",
           },
         },
         manager,

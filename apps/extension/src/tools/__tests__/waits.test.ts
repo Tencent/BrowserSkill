@@ -64,7 +64,7 @@ function makeFakeCdp(
       params?: object,
     ) => Promise<T>,
     trackSessionTab: vi.fn(),
-    onEvent: vi.fn((handler: EventListener) => {
+    onEvent: vi.fn((_tabId: number, handler: EventListener) => {
       events.push(handler);
       return {
         dispose: () => {
@@ -761,21 +761,24 @@ describe("wait-for-element regression coverage", () => {
     "hidden",
   ] as const)("%s preserves a child-frame session failure after a successful probe", async (state) => {
     const manager = await sessionWithRef();
-    manager.get("aa11")?.refStore.set("e1", 555, { tabId: 4, cdpSessionId: "child-frame" });
+    manager
+      .get("aa11")
+      ?.refStore.set("e1", 555, { tabId: 4, frameId: "child-frame", loaderId: "child-loader" });
     const fake = makeFakeCdp();
     const handlers = probeHandlers({ attached: true, visible: true });
     let detached = false;
     const message = "Session with given id not found.";
-    const sendToTarget = vi.fn(async (_target, method: string) => {
+    const sendToFrame = vi.fn(async (_handle, method: string) => {
       if (detached) throw new Error(message);
       return handlers[method as keyof typeof handlers]?.() ?? {};
     });
-    fake.cdp.sendToTarget = sendToTarget as CdpRunner["sendToTarget"];
+    fake.cdp.sendToFrame = sendToFrame as CdpRunner["sendToFrame"];
     const pending = handleWaitForElement(manager, { ...params, state }, fake);
     await vi.advanceTimersByTimeAsync(0);
-    expect(sendToTarget).toHaveBeenCalledWith(
-      { tabId: 4, sessionId: "child-frame" },
+    expect(sendToFrame).toHaveBeenCalledWith(
+      { tabId: 4, frameId: "child-frame", loaderId: "child-loader", backendNodeId: 555 },
       "Runtime.callFunctionOn",
+      expect.any(Object),
       expect.any(Object),
     );
     detached = true;
@@ -967,21 +970,24 @@ describe("wait-for-element regression coverage", () => {
 
   it("releases frame-local handles in their own CDP session", async () => {
     const manager = await sessionWithRef();
-    manager.get("aa11")?.refStore.set("e1", 555, { tabId: 4, cdpSessionId: "child-frame" });
+    manager
+      .get("aa11")
+      ?.refStore.set("e1", 555, { tabId: 4, frameId: "child-frame", loaderId: "child-loader" });
     const fake = makeFakeCdp();
-    const sendToTarget = vi.fn(async (_target, method) =>
+    const sendToFrame = vi.fn(async (_handle, method) =>
       method === "DOM.resolveNode"
         ? { object: { objectId: "frame-object" } }
         : method === "Runtime.callFunctionOn"
           ? { result: { value: { attached: false, visible: false } } }
           : {},
     );
-    fake.cdp.sendToTarget = sendToTarget as CdpRunner["sendToTarget"];
+    fake.cdp.sendToFrame = sendToFrame as CdpRunner["sendToFrame"];
     expect(await handleWaitForElement(manager, params, fake)).toMatchObject({ satisfied: true });
-    expect(sendToTarget).toHaveBeenLastCalledWith(
-      { tabId: 4, sessionId: "child-frame" },
+    expect(sendToFrame).toHaveBeenLastCalledWith(
+      { tabId: 4, frameId: "child-frame", loaderId: "child-loader" },
       "Runtime.releaseObjectGroup",
       { objectGroup: expect.any(String) },
+      undefined,
     );
     expect(fake.sent).toHaveLength(0);
   });

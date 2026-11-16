@@ -29,6 +29,7 @@ import {
   lookupSession,
   resolveTargetTab,
 } from "./shared";
+import { isHiddenCompositorSurface } from "./viewport-screenshot";
 
 export interface FullPageScreenshotDeps {
   cdp: CdpRunner;
@@ -179,11 +180,17 @@ export async function handleFullPageScreenshot(
     attachmentId = deps.cdp.getAttachmentId?.(target.tabId);
     if (!attachmentId) throw new ScreenshotError("changed");
     const platform = await waitForReply(chrome.runtime.getPlatformInfo(), controller.signal);
+    const keepUnselectedAwake = platform.os === "win" || platform.os === "linux";
     await client.prepare();
     const ensureRendering = async (active: boolean) => {
-      if (platform.os !== "win" || active || rendering) return;
-      // Focus emulation keeps script execution alive, but Windows can stop
-      // producing compositor frames on an unselected tab after the first read.
+      if (
+        !keepUnselectedAwake ||
+        rendering ||
+        !(await waitForReply(isHiddenCompositorSurface(active, target.windowId), controller.signal))
+      )
+        return;
+      // Focus emulation keeps script execution alive, but Windows and Linux (Aura)
+      // can stop producing compositor frames on an unselected tab or minimized window.
       // A tiny screencast holds the renderer awake without selecting/resizing it.
       // Its pixels are unused; each tile still comes from captureScreenshot.
       checkOwnership();
@@ -236,8 +243,8 @@ export async function handleFullPageScreenshot(
           write: (...args) => writer.write(...args, controller.signal),
           scope: params.scope,
           loadingTimeoutMs: 30_000,
-          // Preserve the Windows stale-frame guard with the target-only CDP source.
-          checkFreshness: platform.os === "win",
+          // Preserve the Aura stale-frame guard with the target-only CDP source.
+          checkFreshness: keepUnselectedAwake,
           progress: (_phase, value, count) => {
             progress = value;
             frames = count;

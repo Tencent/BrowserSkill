@@ -15,7 +15,14 @@ import {
 } from "@/lib/hover-trigger-policy";
 import type { RecordStepPayload } from "@/lib/record-bridge";
 import { shouldRecordPress } from "@/lib/recording/draft-policy";
-import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+import { RECORD_PASSWORD_ATTRIBUTE } from "@/lib/sensitive-autocomplete";
+import {
+  isExtensionOverlayEvent,
+  isInternalBskMutation,
+  isPasswordTypeMutation,
+  isSensitiveFormField,
+  primaryEventTarget,
+} from "./dom-primitives";
 import {
   closestHoverSurfaceCandidate,
   collectHoverSurfaceStates,
@@ -59,32 +66,6 @@ const HOVER_SURFACE_CONTEXT_MAX_MS = 30_000;
 const HOVER_REPLACE_SCORE_MARGIN = 50;
 const HOVER_CANDIDATE_LIMIT = 24;
 const HOVER_TRIGGER_LABEL_MAX = 48;
-
-function eventTarget(event: Event): EventTarget | null {
-  return event.composedPath()[0] ?? event.target;
-}
-
-function isOverlayTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Node)) return false;
-  const root = document.documentElement;
-  let node: Node | null = target;
-  while (node && node !== root) {
-    if (node instanceof Element && node.hasAttribute("data-bsk-overlay")) {
-      return true;
-    }
-    const rootNode: Node | Document | ShadowRoot = node.getRootNode();
-    if (rootNode instanceof ShadowRoot) {
-      const host: Element = rootNode.host;
-      if (host.hasAttribute("data-bsk-overlay")) {
-        return true;
-      }
-      node = host;
-    } else {
-      node = node.parentNode;
-    }
-  }
-  return false;
-}
 
 function isTextFillable(el: Element): el is FillableElement {
   if (el instanceof HTMLElement && (el.isContentEditable || el.contentEditable === "true")) {
@@ -448,14 +429,12 @@ export function startRecordCapture(
   let hoverSurfaceStates = hoverSurfaceStateMap(collectHoverSurfaceStates());
   const hoverSurfaceNodes = new Map<Element, HoverSurfaceNode>();
   let generatedControlClick: Element | null = null;
-  let navigationActionPending = false;
-  let navigationActionVersion = 0;
   const committedValues = new WeakMap<FillableElement, string>();
   // A "show password" toggle switches type=password to text; keep masking those fields.
   const formerPasswords = new Set<Element>();
   const markFormerPasswords = (records: MutationRecord[]) => {
     for (const record of records) {
-      if (record.oldValue?.toLowerCase() === "password" && record.target instanceof Element) {
+      if (isPasswordTypeMutation(record)) {
         formerPasswords.add(record.target);
         record.target.setAttribute(RECORD_PASSWORD_ATTRIBUTE, "");
       }
@@ -468,23 +447,10 @@ export function startRecordCapture(
     attributeOldValue: true,
   });
 
-  const markNavigationAction = () => {
-    navigationActionPending = true;
-    const version = ++navigationActionVersion;
-    setTimeout(() => {
-      if (navigationActionVersion === version) {
-        navigationActionPending = false;
-      }
-    }, 0);
-  };
-
   const emitFill = (session: FillSession) => {
     if (session.lastValue === session.baselineValue) return;
     markFormerPasswords(typeObserver.takeRecords());
-    const isPassword =
-      (session.element instanceof HTMLInputElement && session.element.type === "password") ||
-      formerPasswords.has(session.element) ||
-      sensitiveAutocomplete(session.element.getAttribute("autocomplete"));
+    const isPassword = isSensitiveFormField(session.element, formerPasswords);
     const value = isPassword ? "***" : session.lastValue;
     emitStep({
       op: "fill",
@@ -523,14 +489,13 @@ export function startRecordCapture(
     };
   };
 
-  const emitNavigateIfChanged = (causedByAction?: boolean) => {
+  const emitNavigateIfChanged = () => {
     if (location.href === lastUrl) return;
     commitFillSession();
     lastUrl = location.href;
     emitStep({
       op: "navigate",
       url: location.href,
-      ...(causedByAction !== undefined ? { navigation_caused_by_action: causedByAction } : {}),
     });
   };
 
@@ -754,13 +719,13 @@ export function startRecordCapture(
 
   const emitClick = (event: MouseEvent) => {
     // Only record clicks an LLM can re-identify (named interactive controls).
-    const target = describeEventTarget(eventTarget(event));
+    const rawTarget = primaryEventTarget(event);
+    const target = describeEventTarget(rawTarget);
     if (!target) return;
-    markNavigationAction();
     emitStep({
       op: "click",
       target,
-      geometry: geometryForEventTarget(eventTarget(event)),
+      geometry: geometryForEventTarget(rawTarget),
       expects_navigation: true,
     });
   };
@@ -785,8 +750,8 @@ export function startRecordCapture(
   };
 
   const onMouseOver = (event: MouseEvent) => {
-    const target = eventTarget(event);
-    if (isOverlayTarget(target)) return;
+    if (isExtensionOverlayEvent(event)) return;
+    const target = primaryEventTarget(event);
     const now = Date.now();
     if (pendingHover && target instanceof Element && pendingHover.element.contains(target)) {
       if (now - pendingHover.recordedAt <= HOVER_BEFORE_CLICK_MAX_MS) return;
@@ -814,9 +779,8 @@ export function startRecordCapture(
   };
 
   const onClick = (event: MouseEvent) => {
-    if (event.button !== 0) return;
-    const target = eventTarget(event);
-    if (isOverlayTarget(target)) return;
+    if (event.button !== 0 || isExtensionOverlayEvent(event)) return;
+    const target = primaryEventTarget(event);
     if (event.detail === 0 && generatedControlClick !== null && target === generatedControlClick) {
       generatedControlClick = null;
       return;
@@ -857,7 +821,6 @@ export function startRecordCapture(
     }
 
     if (isInputCompletionClick(target, fillSession)) {
-      markNavigationAction();
       const sessionElement = fillSession!.element;
       scheduleInputCompletionCommit(
         sessionElement,
@@ -875,12 +838,14 @@ export function startRecordCapture(
   };
 
   const onFocusIn = (event: FocusEvent) => {
-    const target = fillableFromTarget(eventTarget(event));
+    if (isExtensionOverlayEvent(event)) return;
+    const target = fillableFromTarget(primaryEventTarget(event));
     if (target) ensureFillSession(target);
   };
 
   const onFocusOut = (event: FocusEvent) => {
-    const target = fillableFromTarget(eventTarget(event));
+    if (isExtensionOverlayEvent(event)) return;
+    const target = fillableFromTarget(primaryEventTarget(event));
     if (!target) return;
     if (!fillSession || fillSession.element !== target) return;
     syncFillSessionValue(target);
@@ -888,7 +853,8 @@ export function startRecordCapture(
   };
 
   const onInput = (event: Event) => {
-    const rawTarget = eventTarget(event);
+    if (isExtensionOverlayEvent(event)) return;
+    const rawTarget = primaryEventTarget(event);
     // A native <select> in a shadow root fires a non-composed `change` that
     // never reaches the document; its composed `input` does.
     if (rawTarget instanceof HTMLSelectElement && rawTarget.getRootNode() instanceof ShadowRoot) {
@@ -902,13 +868,15 @@ export function startRecordCapture(
     syncFillSessionValue(target);
   };
 
-  const onCompositionStart = () => {
+  const onCompositionStart = (event: CompositionEvent) => {
+    if (isExtensionOverlayEvent(event)) return;
     composing = true;
   };
 
   const onCompositionEnd = (event: CompositionEvent) => {
+    if (isExtensionOverlayEvent(event)) return;
     composing = false;
-    const target = fillableFromTarget(eventTarget(event));
+    const target = fillableFromTarget(primaryEventTarget(event));
     if (target) {
       ensureFillSession(target);
       syncFillSessionValue(target);
@@ -923,7 +891,6 @@ export function startRecordCapture(
       (opt.label || opt.textContent || opt.value).trim(),
     );
     const desc = describeTarget(target);
-    markNavigationAction();
     emitStep({
       op: "select",
       target: desc,
@@ -935,7 +902,8 @@ export function startRecordCapture(
   };
 
   const onChange = (event: Event) => {
-    const target = eventTarget(event);
+    if (isExtensionOverlayEvent(event)) return;
+    const target = primaryEventTarget(event);
     if (target instanceof HTMLSelectElement) {
       recordSelect(target);
     } else {
@@ -944,8 +912,8 @@ export function startRecordCapture(
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
-    if (isOverlayTarget(eventTarget(event))) return;
-    const target = eventTarget(event);
+    if (isExtensionOverlayEvent(event)) return;
+    const target = primaryEventTarget(event);
     const fillable = fillableFromTarget(target);
     if (fillable) {
       ensureFillSession(fillable);
@@ -960,7 +928,6 @@ export function startRecordCapture(
     if (!shouldRecordPress(event.key, modifiers)) {
       return;
     }
-    markNavigationAction();
     if (event.key === "Enter" || event.key === " ") {
       const submitTarget =
         event.key === "Enter" && fillable
@@ -1002,7 +969,10 @@ export function startRecordCapture(
 
   const captureNavigation = options.captureNavigation ?? true;
   const urlObserver = captureNavigation
-    ? new MutationObserver(() => emitNavigateIfChanged())
+    ? new MutationObserver((records) => {
+        if (records.every(isInternalBskMutation)) return;
+        emitNavigateIfChanged();
+      })
     : null;
   urlObserver?.observe(document, { subtree: true, childList: true });
   const onUrlEvent = () => emitNavigateIfChanged();
@@ -1014,19 +984,6 @@ export function startRecordCapture(
     window.addEventListener("popstate", onUrlEvent);
   }
   window.addEventListener("pagehide", onPageHide);
-
-  const originalPushState = history.pushState;
-  const originalReplaceState = history.replaceState;
-  if (captureNavigation) {
-    history.pushState = function (...args: Parameters<History["pushState"]>) {
-      originalPushState.apply(this, args);
-      emitNavigateIfChanged(navigationActionPending ? true : undefined);
-    };
-    history.replaceState = function (...args: Parameters<History["replaceState"]>) {
-      originalReplaceState.apply(this, args);
-      emitNavigateIfChanged(navigationActionPending ? true : undefined);
-    };
-  }
 
   return {
     dispose() {
@@ -1049,10 +1006,6 @@ export function startRecordCapture(
         window.removeEventListener("popstate", onUrlEvent);
       }
       window.removeEventListener("pagehide", onPageHide);
-      if (captureNavigation) {
-        history.pushState = originalPushState;
-        history.replaceState = originalReplaceState;
-      }
     },
   };
 }

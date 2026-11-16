@@ -31,8 +31,9 @@ const styles = {
 const rect = (x = 10, y = 20, width = 100, height = 40) => ({ x, y, width, height });
 const root = {
   attachmentId: "a",
-  target: { tabId: 4 },
+  tabId: 4,
   frameId: "top",
+  loaderId: "top-loader",
   documentElementBackendNodeId: 1,
 };
 function row(id: number, tag: string, box = rect()) {
@@ -70,8 +71,8 @@ function fixture(child = false, oopif = false) {
         document: {
           ...root,
           frameId: "child",
+          loaderId: "child-loader",
           documentElementBackendNodeId: 11,
-          target: oopif ? { tabId: 4, sessionId: "oopif" } : { tabId: 4 },
         },
         parent: { frame: parent, ownerBackendNodeId: 2 },
       }
@@ -164,10 +165,19 @@ function fixture(child = false, oopif = false) {
       throw new Error(`unexpected ${method} ${target.sessionId}`);
     },
   );
-  const cdp = {
+  const cdp: CdpRunner = {
     send: ((tabId, method, params) =>
       send({ tabId }, method, params as Record<string, unknown>)) as CdpRunner["send"],
     sendToTarget: send as unknown as CdpRunner["sendToTarget"],
+    sendToFrame: ((handle, method, params) =>
+      send(
+        oopif && handle.frameId !== "top"
+          ? { tabId: handle.tabId, sessionId: "oopif" }
+          : { tabId: handle.tabId },
+        method,
+        params as Record<string, unknown>,
+      )) as CdpRunner["sendToFrame"],
+    hasOwnFrameTarget: (_tabId, frameId) => oopif && frameId !== "top",
     getAttachmentId: () => control.attachmentId,
     getFrameGraph: vi.fn(async () => {
       throw new Error("whole page discovery forbidden");

@@ -10,6 +10,7 @@ import {
   type SessionManager,
 } from "@/session-manager/manager";
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
+import { methods } from "@/transport/generated/methods";
 import type { RequestFrame } from "@/transport/types";
 import { type DebugArchive, HISTORY_LIMIT } from "./archive";
 import { debugCapabilities } from "./capabilities";
@@ -39,25 +40,11 @@ const MAX_OPERATIONS = 64;
 const MAX_CONSOLE = 100;
 const WINDOW_MS = 1500;
 const OBSERVE_MS = 15000;
-const ACTIONS = new Set([
-  "tool.navigate",
-  "tool.navigate_back",
-  "tool.navigate_forward",
-  "tool.reload",
-  "tool.click",
-  "tool.fill",
-  "tool.upload",
-  "tool.download",
-  "tool.press",
-  "tool.select",
-  "tool.hover",
-  "tool.evaluate",
-  "tool.wheel",
-  "tool.drag",
-  "tool.scroll_to",
-  "tool.focus",
-  "tool.blur",
-]);
+const ACTIONS = new Set<string>(
+  methods
+    .filter((entry) => entry.owner === "extension" && entry.debug_evidence !== "none")
+    .map((entry) => entry.method),
+);
 
 export interface DebugCdp extends CdpRunner {
   ensureNetworkCapture(tabId: number): Promise<void>;
@@ -75,6 +62,7 @@ interface RunState {
   controls?: DebugNetworkControl;
   journal?: DebugJournal;
   controlCleanup?: Promise<void>;
+  subscription?: { dispose(): void };
   operations: DebugOperation[];
   console: DebugConsole[];
   timer?: ReturnType<typeof setTimeout>;
@@ -130,7 +118,6 @@ export class DebugManager {
   // Only lightweight ownership outlives the live cache. Object identity prevents
   // a reused short session ID from inheriting another task's saved evidence.
   private readonly ownedRuns = new WeakMap<SessionContext, Map<string, number>>();
-  private subscription?: { dispose(): void };
   private readonly starting = new Set<SessionContext>();
   // Starts awaiting cleanup still occupy a slot before their RunState is registered.
   private reservedStarts = 0;
@@ -314,7 +301,7 @@ export class DebugManager {
       ownedRuns.set(id, tabId);
       while (ownedRuns.size > HISTORY_LIMIT + MAX_RUNS)
         ownedRuns.delete(ownedRuns.keys().next().value!);
-      this.subscription ??= this.cdp.onEvent?.((source, method, params) =>
+      state.subscription = this.cdp.onEvent?.(tabId, (source, method, params) =>
         this.onEvent(source, method, params),
       );
       try {
@@ -933,24 +920,28 @@ export class DebugManager {
           })
           .finally(() => {
             state.controlCleanup = undefined;
+            state.subscription?.dispose();
+            state.subscription = undefined;
             this.pruneListener();
             state.network.checkpoint();
             void this.persist(state);
           })
       : undefined;
+    if (!state.controlCleanup) {
+      state.subscription?.dispose();
+      state.subscription = undefined;
+    }
     state.network.stop(reason);
     this.change(state);
     void this.persist(state);
     this.pruneListener();
   }
   private pruneListener(): void {
-    if (
-      ![...this.runs.values()].some(
-        ({ run, controlCleanup }) => run.state === "capturing" || controlCleanup,
-      )
-    ) {
-      this.subscription?.dispose();
-      this.subscription = undefined;
+    for (const state of this.runs.values()) {
+      if (state.run.state !== "capturing" && !state.controlCleanup) {
+        state.subscription?.dispose();
+        state.subscription = undefined;
+      }
     }
   }
   stopTab(tabId: number, reason = "tab_released"): void {

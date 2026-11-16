@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_SELECT_CHROME; the fixture owns a headless browser and profile.
+// Opt in with BSK_TEST_CHROME; the fixture owns a headless browser and profile.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSelect } from "../interaction";
@@ -15,7 +15,7 @@ let send: Send;
 let close: (() => void) | undefined;
 let browserRun: Promise<void> | undefined;
 
-if (process.env.BSK_SELECT_CHROME) {
+if (process.env.BSK_TEST_CHROME) {
   beforeAll(async () => {
     const { withChrome } = await import(
       new URL(
@@ -27,7 +27,7 @@ if (process.env.BSK_SELECT_CHROME) {
     const closed = Promise.withResolvers<void>();
     close = () => closed.resolve();
     browserRun = withChrome(
-      { executable: process.env.BSK_SELECT_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (command: Send) => {
         ready.resolve(command);
         await closed.promise;
@@ -42,7 +42,7 @@ if (process.env.BSK_SELECT_CHROME) {
   }, 30_000);
 }
 
-describe.skipIf(!process.env.BSK_SELECT_CHROME)("select disabled state in Chrome", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("select disabled state in Chrome", () => {
   it.each([
     { name: "directly disabled", markup: "<select disabled></select>", disabled: true },
     {

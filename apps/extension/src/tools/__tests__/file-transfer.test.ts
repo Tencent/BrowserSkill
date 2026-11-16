@@ -125,11 +125,11 @@ function silentCdp(): CdpRunner {
   };
 }
 
-function actionTarget(frameId?: string, sessionId?: string): ResolvedActionTarget {
+function actionTarget(frameId = "", loaderId = ""): ResolvedActionTarget {
   return {
     tab: { tabId: 4, windowId: 100, active: true },
     backendNodeId: 123,
-    cdpTarget: { tabId: 4, ...(sessionId ? { sessionId } : {}) },
+    handle: { tabId: 4, frameId, loaderId, backendNodeId: 123 },
     ...(frameId ? { frameId } : {}),
     usedRef: "e3",
   };
@@ -149,7 +149,7 @@ function uploadCdp(
   } = {},
 ) {
   const calls: Array<{ method: string; params?: object }> = [];
-  let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+  let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
   const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
     if (
       method === "Runtime.evaluate" &&
@@ -201,7 +201,7 @@ function uploadCdp(
   });
   const cdp: CdpRunner = {
     send: send as unknown as CdpRunner["send"],
-    onEvent: (handler) => {
+    onEvent: (_tabId, handler) => {
       cdpEvent = handler;
       return { dispose: vi.fn() };
     },
@@ -575,6 +575,7 @@ describe("file transfer tools", () => {
             parentFrameId: "main",
             ownerBackendNodeId: 10,
             target: { tabId: 4, sessionId: "child-session" },
+            loaderId: "child-loader",
           },
         ],
       })),
@@ -582,7 +583,7 @@ describe("file transfer tools", () => {
 
     const result = await uploadThroughFileDrop({
       cdp,
-      actionTarget: actionTarget("child", "child-session"),
+      actionTarget: actionTarget("child", "child-loader"),
       files: ["/stage/one.png"],
       timeoutMs: 100,
       withOverlayHidden: withoutOverlay,
@@ -735,7 +736,7 @@ describe("file transfer tools", () => {
       cancel: vi.fn(async () => {}),
       removeFile: vi.fn(async () => {}),
     };
-    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
     let suggested: chrome.downloads.DownloadFilenameSuggestion | undefined;
     let passthrough = false;
     const sendInputPassthrough = vi.fn(async (_tab: number, message: InputPassthroughMessage) => {
@@ -775,7 +776,7 @@ describe("file transfer tools", () => {
     });
     const cdp: CdpRunner = {
       send: send as unknown as CdpRunner["send"],
-      onEvent: (handler) => {
+      onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
@@ -827,10 +828,12 @@ describe("file transfer tools", () => {
       cancel: vi.fn(async () => {}),
       removeFile: vi.fn(async () => {}),
     };
-    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
     const cdp: CdpRunner = {
       send: vi.fn(async () => ({})) as unknown as CdpRunner["send"],
-      onEvent: (handler) => {
+      isEventFromFrame: (source, handle) =>
+        source.tabId === handle.tabId && source.sessionId === "expected-child",
+      onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
@@ -846,7 +849,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp,
-      target: { tabId: 4, sessionId: "expected-child" },
+      handle: { tabId: 4, frameId: "expected-child", loaderId: "child-loader" },
       downloads,
       browserRelativeDir: "BrowserSkill/tr_1",
       timeoutMs: 5,
@@ -904,10 +907,10 @@ describe("file transfer tools", () => {
       cancel: vi.fn(async () => {}),
       removeFile: vi.fn(async () => {}),
     };
-    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
     const cdp: CdpRunner = {
       send: vi.fn(async () => ({})) as CdpRunner["send"],
-      onEvent: (handler) => {
+      onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
@@ -916,7 +919,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp,
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads,
       browserRelativeDir: "BrowserSkill/tr_21",
       timeoutMs: 1_000,
@@ -980,10 +983,10 @@ describe("file transfer tools", () => {
       cancel: vi.fn(async () => {}),
       removeFile: vi.fn(async () => {}),
     };
-    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
     const cdp: CdpRunner = {
       send: vi.fn(async () => ({})) as CdpRunner["send"],
-      onEvent: (handler) => {
+      onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
@@ -991,7 +994,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp,
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads,
       browserRelativeDir: "BrowserSkill/tr_22",
       maxByteSize: 4,
@@ -1056,10 +1059,10 @@ describe("file transfer tools", () => {
       }),
       removeFile: vi.fn(async () => {}),
     };
-    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
     const cdp: CdpRunner = {
       send: vi.fn(async () => ({})) as CdpRunner["send"],
-      onEvent: (handler) => {
+      onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
@@ -1067,7 +1070,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp,
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads,
       browserRelativeDir: "BrowserSkill/tr_23",
       timeoutMs: 80,
@@ -1111,10 +1114,10 @@ describe("file transfer tools", () => {
       cancel: vi.fn(async () => {}),
       removeFile: vi.fn(async () => {}),
     };
-    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
     const cdp: CdpRunner = {
       send: vi.fn(async () => ({})) as CdpRunner["send"],
-      onEvent: (handler) => {
+      onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
@@ -1131,7 +1134,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp,
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads,
       browserRelativeDir: "BrowserSkill/tr_ambiguous",
       timeoutMs: 100,
@@ -1220,7 +1223,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp: silentCdp(),
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads: fakes.downloads,
       navigationTargets: fakes.navigationTargets,
       browserRelativeDir: "BrowserSkill/tr_60",
@@ -1257,7 +1260,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp: silentCdp(),
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads: fakes.downloads,
       navigationTargets: fakes.navigationTargets,
       browserRelativeDir: "BrowserSkill/tr_51",
@@ -1286,7 +1289,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp: silentCdp(),
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads: fakes.downloads,
       navigationTargets: fakes.navigationTargets,
       browserRelativeDir: "BrowserSkill/tr_52",
@@ -1317,7 +1320,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp: silentCdp(),
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads: fakes.downloads,
       navigationTargets: fakes.navigationTargets,
       browserRelativeDir: "BrowserSkill/tr_54",
@@ -1347,7 +1350,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp: silentCdp(),
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads: fakes.downloads,
       navigationTargets: fakes.navigationTargets,
       browserRelativeDir: "BrowserSkill/tr_55",
@@ -1373,7 +1376,7 @@ describe("file transfer tools", () => {
 
     const result = await captureBrowserDownload({
       cdp: silentCdp(),
-      target: { tabId: 4 },
+      handle: { tabId: 4, frameId: "", loaderId: "" },
       downloads: fakes.downloads,
       navigationTargets: fakes.navigationTargets,
       browserRelativeDir: "BrowserSkill/tr_57",

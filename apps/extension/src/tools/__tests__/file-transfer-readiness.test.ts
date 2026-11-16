@@ -48,7 +48,7 @@ async function fixture(kind: "upload" | "download", hidden = true) {
   let painted = !hidden;
   let delivered = false;
   let uploads = 0;
-  let listener: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+  let listener: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
   const onCreated = event<[chrome.downloads.DownloadItem]>();
   const onChanged = event<[chrome.downloads.DownloadDelta]>();
   const onDeterminingFilename =
@@ -87,7 +87,7 @@ async function fixture(kind: "upload" | "download", hidden = true) {
       guard.onDispatch?.();
       return cdp.send(target.tabId, method, params);
     },
-    onEvent: (callback) => {
+    onEvent: (_tabId, callback) => {
       listener = callback;
       return {
         dispose() {

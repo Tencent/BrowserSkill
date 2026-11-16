@@ -334,7 +334,8 @@ async fn handle(
     let Some(protocol) = one_header(&request, "sec-websocket-protocol").map(str::to_owned) else {
         return Ok(denied());
     };
-    let Some(credential) = protocol.strip_prefix("bsk-auth.") else {
+    let Some(credential) = protocol.strip_prefix(bsk_protocol::REMOTE_AUTH_SUBPROTOCOL_PREFIX)
+    else {
         return Ok(denied());
     };
     let store = gateway.store.clone();

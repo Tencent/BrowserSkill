@@ -31,7 +31,7 @@ async function withPage(
     new URL("cases/regression/snapshot-coordinates/chrome.mjs", evalRoot).href
   );
   await withChrome(
-    { executable: process.env.BSK_GEOMETRY_CHROME, deviceScale: 1, zoom: 1 },
+    { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
     async (send: Send) => {
       const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
         url: "about:blank",
@@ -122,7 +122,7 @@ async function expectCapture(cdp: CdpRunner, candidate: VisualCandidate, crop: R
 const canvas = '<canvas width="200" height="200" style="display:block;background:red"></canvas>';
 const bodyStyle = "margin:0;width:100px;height:100px;";
 
-describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)(
+describe.skipIf(!process.env.BSK_TEST_CHROME)(
   "native Canvas viewport overflow and rendered ancestry",
   { timeout: 30_000 },
   () => {

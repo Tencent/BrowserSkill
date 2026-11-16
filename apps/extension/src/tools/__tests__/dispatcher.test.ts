@@ -51,6 +51,50 @@ function makeRequest(method: string, params: unknown): RequestFrame {
   return { id: "r-1", method, params };
 }
 
+function makeRecordTestCdp(tabId: number): TestDispatcherCdp {
+  type EventListener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => void;
+  const listeners: EventListener[] = [];
+  return {
+    send: vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "frame-1", loaderId: "loader-before" } } };
+      }
+      if (method === "Page.navigate") {
+        for (const listener of [...listeners]) {
+          listener({ tabId }, "Page.lifecycleEvent", {
+            name: "load",
+            frameId: "frame-1",
+            loaderId: "loader-after",
+          });
+        }
+        return { frameId: "frame-1", loaderId: "loader-after" };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      }
+      if (method === "Runtime.evaluate") {
+        return { result: { value: { idleMs: 10_000, readyState: "complete" } } };
+      }
+      if (method === "Accessibility.getFullAXTree") {
+        return { nodes: [] };
+      }
+      return {};
+    }),
+    trackSessionTab: vi.fn(),
+    detachSession: vi.fn(async () => {}),
+    releaseSessionTab: vi.fn(async () => {}),
+    onEvent: (_tabId: number, handler: EventListener) => {
+      listeners.push(handler);
+      return {
+        dispose: () => {
+          const idx = listeners.indexOf(handler);
+          if (idx >= 0) listeners.splice(idx, 1);
+        },
+      };
+    },
+  } as unknown as TestDispatcherCdp;
+}
+
 describe("ToolDispatcher", () => {
   it.each([
     false,
@@ -190,13 +234,15 @@ describe("ToolDispatcher", () => {
     deliver({
       id: "capture",
       method: "tool.screenshot",
-      params: { session_id: "owner", _operation_id: "op-1" },
+      operation_id: "op-1",
+      params: { session_id: "owner" },
     });
     await vi.waitFor(() => expect(debug.before).toHaveBeenCalled());
     deliver({
       id: "sync",
       method: "tool.cooperate",
-      params: { session_id: "owner", action: "sync", _operation_id: "op-2" },
+      operation_id: "op-2",
+      params: { session_id: "owner", action: "sync" },
     });
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({
@@ -252,7 +298,14 @@ describe("ToolDispatcher", () => {
     } as unknown as TestDispatcherCdp;
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();
-    deliver(makeRequest(method, { session_id: "test", expression: "document.title" }));
+    deliver(
+      makeRequest(
+        method,
+        method === "tool.evaluate"
+          ? { session_id: "test", expression: "document.title" }
+          : { session_id: "test" },
+      ),
+    );
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({
       error: {
@@ -316,9 +369,11 @@ describe("ToolDispatcher", () => {
       () => () => {},
       () => () => {},
     );
+    const cdp = makeRecordTestCdp(7);
     const dispatcher = new ToolDispatcher({
       transport,
       sessions,
+      cdp,
       recording: {
         tabsApi: {
           get: vi.fn(async () => tab),
@@ -390,7 +445,10 @@ describe("ToolDispatcher", () => {
     deliver(makeRequest("tool.session_start", { session_id: "aa11", focused: false }));
     await flushMicrotasks();
 
-    expect(create).toHaveBeenCalledWith("about:blank", { focused: false });
+    expect(create).toHaveBeenCalledWith("about:blank", {
+      focused: false,
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("starts an incognito session through the normal dispatcher", async () => {
@@ -403,7 +461,10 @@ describe("ToolDispatcher", () => {
     dispatcher.start();
     deliver(makeRequest("tool.session_start", { session_id: "private", incognito: true }));
     await flushMicrotasks();
-    expect(create).toHaveBeenCalledWith("about:blank", { incognito: true });
+    expect(create).toHaveBeenCalledWith("about:blank", {
+      incognito: true,
+      excludeWindowIds: expect.any(Set),
+    });
     expect(sessions.get("private")?.incognito).toBe(true);
     expect(sent[0]).toMatchObject({ result: { agent_window_id: 4242 } });
     dispatcher.stop();
@@ -1266,6 +1327,12 @@ describe("ToolDispatcher", () => {
           url: props.url,
           active: props.active,
         })),
+        update: vi.fn(async (id: number, props: chrome.tabs.UpdateProperties) => ({
+          id,
+          windowId: 1,
+          url: "https://example.test/",
+          active: props.active ?? true,
+        })),
       },
     });
     const { transport, sent, deliver } = fakeTransport();
@@ -1986,11 +2053,18 @@ it.each([
   ).mockImplementation(async (_req, _signal, inputSent) => {
     inputSent(10);
     for (const fn of listeners) fn({ sourceTabId: 10, sourceFrameId: 0, tabId: 20 });
-    return {};
+    return { tab_id: 10 };
   });
   dispatcher.start();
   try {
-    f.deliver({ id: "open", method, params: { session_id: "popup", tab_id: 10, key: "Enter" } });
+    f.deliver({
+      id: "open",
+      method,
+      params:
+        method === "tool.click"
+          ? { session_id: "popup", tab_id: 10, selector: "#open" }
+          : { session_id: "popup", tab_id: 10, key: "Enter" },
+    });
     await vi.waitFor(() => expect(f.sent.some((r) => "id" in r && r.id === "open")).toBe(true));
     expect(task.observedTabs?.has(20)).toBe(true);
     expect(task.agentCreatedTabs.has(20)).toBe(false);
@@ -2586,15 +2660,11 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       () => () => {},
       () => () => {},
     );
-    const cdp = {
-      send: vi.fn(async <T>() => ({}) as T),
-      detachSession: vi.fn(async () => {}),
-      releaseSessionTab: vi.fn(async () => {}),
-    };
+    const cdp = makeRecordTestCdp(8);
     const dispatcher = new ToolDispatcher({
       transport,
       sessions,
-      cdp: cdp as unknown as TestDispatcherCdp,
+      cdp,
       recording: {
         tabsApi: {
           get: vi.fn(async () => borrowedTab),
@@ -2629,6 +2699,292 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
     } finally {
       dispatcher.stop();
       resetBrowserObservationForTests();
+    }
+  });
+
+  it("accepts optional context_id on passive reads and rejects full action metadata", async () => {
+    const tab = {
+      id: 7,
+      windowId: 4242,
+      active: true,
+      status: "complete",
+      url: "https://example.com/order",
+    } as chrome.tabs.Tab;
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [7] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    await sessions.start("aa11");
+    const cooperation = new CooperationController({
+      sessions,
+      readFrames: async () => ({
+        frames: new Map([
+          [
+            0,
+            {
+              document: "doc-a",
+              focusIsDocument: true,
+              revision: 0,
+              structure: 0,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            },
+          ],
+        ]),
+        gaps: [],
+      }),
+      resumeFrames: async () => {},
+      changed: vi.fn(),
+    });
+    cooperation.startSession("aa11");
+    const cdp = {
+      ensureConsoleCapture: vi.fn(async () => {}),
+      consoleEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
+      send: vi.fn(async () => ({})),
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp, cooperation });
+    dispatcher.start();
+    try {
+      deliver({
+        id: "forged-ctx",
+        method: "tool.console",
+        params: { session_id: "aa11", tab_id: 7, context_id: "ctx-forged" },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toMatchObject({
+        id: "forged-ctx",
+        error: { code: "permission_denied" },
+      });
+
+      deliver({
+        id: "null-ctx",
+        method: "tool.console",
+        params: { session_id: "aa11", tab_id: 7, context_id: null },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(sent[1]).toMatchObject({
+        id: "null-ctx",
+        result: { tab_id: 7, entries: [] },
+      });
+
+      deliver({
+        id: "forbidden-expect",
+        method: "tool.snapshot",
+        params: {
+          session_id: "aa11",
+          tab_id: 7,
+          expect: [{ target: "#ok", field: "exists", equals: true }],
+        },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(3));
+      expect(sent[2]).toMatchObject({
+        id: "forbidden-expect",
+        error: { code: "invalid_params" },
+      });
+    } finally {
+      dispatcher.stop();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("attaches resolved tab_id to unknown-effect action failures and marks pre-invoke cancel as not dispatched", async () => {
+    vi.stubGlobal("chrome", {
+      storage: { onChanged: { addListener: vi.fn() } },
+      tabs: {
+        get: vi.fn(async () => ({ id: 42, windowId: 100, url: "https://shop.test" })),
+        query: vi.fn(async () => [
+          { id: 42, windowId: 100, active: true, url: "https://shop.test" },
+        ]),
+        sendMessage: vi.fn(async () => ({})),
+      },
+      windows: {
+        get: vi.fn(async () => ({ id: 100, incognito: false })),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 100, initialTabIds: [42] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 42),
+      },
+    });
+    await sessions.start("aa99");
+    const cooperation = new CooperationController({
+      sessions,
+      readFrames: async () => ({
+        frames: new Map([
+          [
+            0,
+            {
+              document: "doc-42",
+              focusIsDocument: true,
+              revision: 0,
+              structure: 0,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            },
+          ],
+        ]),
+        gaps: [],
+      }),
+      resumeFrames: async () => {},
+      changed: vi.fn(),
+    });
+    cooperation.startSession("aa99");
+    let abortInFlightEvaluate = false;
+    const cdp = {
+      send: vi.fn(async <T>(_target: unknown, method: string) => {
+        if (method === "Runtime.evaluate") {
+          if (abortInFlightEvaluate) {
+            dispatcher.inflightAbortControllers.get("post-invoke-cancel")?.abort();
+            const abortErr = new Error("Aborted");
+            abortErr.name = "AbortError";
+            throw abortErr;
+          }
+          throw new Error("WebSocket closed mid-evaluate");
+        }
+        return {} as T;
+      }),
+      sendGuarded: vi.fn(
+        async <T>(
+          target: unknown,
+          method: string,
+          _params: Record<string, unknown> | undefined,
+          guard: { onDispatch?: () => void },
+        ) => {
+          guard.onDispatch?.();
+          return (await cdp.send(target, method)) as T;
+        },
+      ),
+      detachSession: vi.fn(async () => {}),
+      acquireBackgroundExecution: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
+    let abortDuringDebugBefore = false;
+    let dispatcher!: ToolDispatcher;
+    dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cooperation,
+      cdp: cdp as unknown as TestDispatcherCdp,
+      interactionPreferences: makePreferenceStore(false),
+      debug: {
+        before: async (req: { id: string }) => {
+          if (abortDuringDebugBefore) {
+            dispatcher.inflightAbortControllers.get(req.id)?.abort();
+          }
+          return undefined;
+        },
+        after: () => {},
+        dispose: () => {},
+      } as never,
+    });
+    dispatcher.start();
+    try {
+      deliver({
+        id: "sync-42",
+        method: "tool.cooperate",
+        params: { session_id: "aa99", tab_id: 42, action: "sync" },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      const ctxId = (sent[0] as { result: { context_id: string } }).result.context_id;
+
+      deliver({
+        id: "post-write-err",
+        method: "tool.evaluate",
+        params: { session_id: "aa99", expression: "mutate()", unverified: true, context_id: ctxId },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(sent[1]).toMatchObject({
+        id: "post-write-err",
+        error: {
+          code: "cdp_failed",
+          data: {
+            effect_state: "unknown",
+            phase: "execution",
+            tab_id: 42,
+          },
+        },
+      });
+
+      abortDuringDebugBefore = true;
+      deliver({
+        id: "pre-invoke-cancel",
+        method: "tool.evaluate",
+        params: { session_id: "aa99", expression: "never()", unverified: true, context_id: ctxId },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(3));
+      expect(sent[2]).toMatchObject({
+        id: "pre-invoke-cancel",
+        error: {
+          code: "cancelled",
+          data: {
+            dispatched: false,
+            effect_state: "none",
+            phase: "precondition",
+          },
+        },
+      });
+
+      // Re-sync and prove an in-flight `AbortError` thrown after `invoked = true`
+      // (with omitted `tab_id`) still carries `tab_id: 42` resolved from `context_id`.
+      abortDuringDebugBefore = false;
+      deliver({
+        id: "resync-42",
+        method: "tool.cooperate",
+        params: { session_id: "aa99", tab_id: 42, action: "sync" },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(4));
+      const nextCtxId = (sent[3] as { result: { context_id: string } }).result.context_id;
+
+      abortInFlightEvaluate = true;
+      deliver({
+        id: "post-invoke-cancel",
+        method: "tool.evaluate",
+        params: {
+          session_id: "aa99",
+          expression: "inFlight()",
+          unverified: true,
+          context_id: nextCtxId,
+        },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(5));
+      expect(sent[4]).toMatchObject({
+        id: "post-invoke-cancel",
+        error: {
+          code: "cancelled",
+          data: {
+            tab_id: 42,
+          },
+        },
+      });
+    } finally {
+      dispatcher.stop();
+      vi.unstubAllGlobals();
     }
   });
 });

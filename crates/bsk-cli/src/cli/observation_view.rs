@@ -45,34 +45,56 @@ pub(crate) fn read(path: &Path) -> anyhow::Result<Value> {
         value = value["post"].take();
     }
     ensure!(value.is_object(), "file contains no synchronization reply");
+    if value.get("observation").is_none()
+        && let Some(vom) = value
+            .get("vom")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    {
+        let mut obs = json!({ "text": vom });
+        if let Some(obs_id) = value.get("observation_id").and_then(Value::as_str) {
+            obs["observation_id"] = Value::String(obs_id.to_owned());
+        }
+        if let Some(tid) = value.get("tab_id").and_then(Value::as_i64) {
+            obs["tab_id"] = Value::from(tid);
+        }
+        if let Some(trunc) = value.get("truncated").and_then(Value::as_bool) {
+            obs["truncated"] = Value::Bool(trunc);
+        }
+        if let Some(cur) = value.get("next_cursor").and_then(Value::as_str) {
+            obs["next_cursor"] = Value::String(cur.to_owned());
+        }
+        if let Some(url) = value
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            obs["url"] = Value::String(url.to_owned());
+        }
+        if let Some(title) = value
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            obs["title"] = Value::String(title.to_owned());
+        }
+        let sid = value
+            .get("session_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        value["observation"] = obs;
+        if value.get("observation_origin").is_none() {
+            attach(&mut value, &sid, None);
+        }
+    }
     Ok(value)
 }
 
 /// The saved text with a text delta's line replacements applied. Every replaced
 /// line must still read as the extension saw it; anything else is not this text.
 fn patched(reply: &Value, text: &str) -> Option<String> {
-    if reply["kind"] != "delta" {
-        return None;
-    }
-    let patch = reply.pointer("/observation_patch/lines")?.as_array()?;
-    // Field values are not part of the saved text, so they cannot be merged into it.
-    if !reply["changes"]
-        .as_array()?
-        .iter()
-        .all(|c| c["kind"] == "text")
-    {
-        return None;
-    }
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    for entry in patch {
-        let index = usize::try_from(entry["line"].as_u64()?.checked_sub(1)?).ok()?;
-        let replacement = entry["text"].as_str()?;
-        if *lines.get(index)? != entry["previous"].as_str()? || replacement.contains('\n') {
-            return None;
-        }
-        lines[index] = replacement;
-    }
-    Some(lines.join("\n"))
+    crate::daemon::scopes::apply_text_delta_patch(reply, text)
 }
 
 /// Reuse only an explicitly supplied, exact predecessor: as it is for an unchanged
@@ -82,11 +104,6 @@ pub(crate) fn attach(reply: &mut Value, session: &str, baseline: Option<&Value>)
         reply
             .pointer("/state/session_id")
             .and_then(Value::as_str)
-            .or_else(|| {
-                reply
-                    .pointer("/_scope_meta/session_id")
-                    .and_then(Value::as_str)
-            })
             .unwrap_or(session)
             .to_owned()
     } else {
@@ -151,12 +168,16 @@ pub(crate) fn omit_saved_merge(reply: &mut Value) {
 }
 
 pub fn dispatch(args: ViewArgs, _format: Format) -> Result<(), CliError> {
-    let value = read(&args.file)?;
     println!(
         "{}",
-        serde_json::to_string_pretty(&project(&value, &args)?).context("render local view")?
+        serde_json::to_string_pretty(&view_value(&args)?).context("render local view")?
     );
     Ok(())
+}
+
+pub(crate) fn view_value(args: &ViewArgs) -> anyhow::Result<Value> {
+    let value = read(&args.file)?;
+    project(&value, args)
 }
 
 fn project(value: &Value, args: &ViewArgs) -> anyhow::Result<Value> {
@@ -316,10 +337,21 @@ mod tests {
         assert_eq!(next["cache_reuse"]["observation"], "saved");
         omit_saved_merge(&mut same);
         assert!(same.get("observation").is_some());
+
+        // Whitespace-collapsed or neutral-focus target deltas emit empty `lines` and `changes`.
+        let mut collapsed = delta();
+        collapsed["observation_patch"]["lines"] = json!([]);
+        collapsed["changes"] = json!([]);
+        attach(&mut collapsed, "s", Some(&old));
+        assert_eq!(
+            collapsed["cache_reuse"],
+            json!({"used":true,"reason":"exact_text_delta_predecessor"})
+        );
+        assert_eq!(collapsed["observation"]["text"], old["observation"]["text"]);
     }
     #[test]
     fn text_delta_never_patches_another_version_or_a_line_that_differs() {
-        for variant in 0..9 {
+        for variant in 0..10 {
             let mut old = targeted();
             let mut v = delta();
             let session = if variant == 0 { "other" } else { "s" };
@@ -333,6 +365,12 @@ mod tests {
                 6 => v["observation_patch"]["lines"][0]["line"] = 9.into(),
                 7 => v["observation_patch"]["lines"][0]["text"] = "a\nb".into(),
                 8 => old["observation"]["text"] = "edited cached contents".into(),
+                9 => {
+                    v["observation_patch"]["lines"] = json!([
+                        {"line":5,"previous":"  alert \"Price pending\"","text":"  alert \"Price mid\""},
+                        {"line":5,"previous":"  alert \"Price mid\"","text":"  alert \"Price settled\""}
+                    ]);
+                }
                 _ => {}
             }
             attach(&mut v, session, Some(&old));

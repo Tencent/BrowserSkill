@@ -460,7 +460,10 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", { size: { width: 1280, height: 800 } });
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {
+      size: { width: 1280, height: 800 },
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("creates the window without size when width/height are omitted", async () => {
@@ -471,7 +474,9 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", {});
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("forwards focused: false to the Agent Window", async () => {
@@ -482,7 +487,10 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", { focused: false });
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {
+      focused: false,
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("rejects a lone width without height", async () => {

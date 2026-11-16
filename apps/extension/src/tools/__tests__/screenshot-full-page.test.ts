@@ -41,12 +41,12 @@ async function setup() {
     active: true,
     url: "https://example.test/",
   } as chrome.tabs.Tab;
-  let onEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+  let onEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
   const disposeEvents = vi.fn(() => {
     onEvent = undefined;
   });
   const cdp = {
-    onEvent: vi.fn((handler: NonNullable<typeof onEvent>) => {
+    onEvent: vi.fn((_tabId: number, handler: NonNullable<typeof onEvent>) => {
       onEvent = handler;
       return { dispose: disposeEvents };
     }),
@@ -419,7 +419,7 @@ describe("Windows full-page rendering lifetime", () => {
     const { manager, deps, disposeEvents } = await setupWindowsCapture();
     vi.mocked(capturePage).mockImplementationOnce(async (options) => {
       await options.screenshot();
-      const frame = deps.cdp.onEvent.mock.calls[0][0];
+      const frame = deps.cdp.onEvent.mock.calls[0][1];
       frame({ tabId: 99 }, "Page.screencastFrame", { sessionId: 2 });
       frame({ tabId: 7, sessionId: "child" }, "Page.screencastFrame", { sessionId: 3 });
       frame({ tabId: 7 }, "Page.screencastVisibilityChanged", {});
@@ -509,6 +509,30 @@ describe("Windows full-page rendering lifetime", () => {
     expect(deps.exports.discard).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("wakes an unfocused headed Linux/Windows Agent Window while skipping HeadlessChrome", async () => {
+    for (const [ua, expectedScreencasts] of [
+      ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136.0.0.0", 1],
+      ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 HeadlessChrome/136.0.0.0", 0],
+    ] as const) {
+      const { manager, tab, deps } = await setupWindowsCapture();
+      tab.active = true;
+      vi.mocked(chrome.runtime.getPlatformInfo).mockResolvedValue({
+        os: "linux",
+      } as chrome.runtime.PlatformInfo);
+      (chrome as unknown as { windows: unknown }).windows = {
+        get: vi.fn(async () => ({ id: 100, focused: false, state: "normal" })),
+      };
+      vi.stubGlobal("navigator", { userAgent: ua });
+      expect(await handleFullPageScreenshot(manager, { session_id: "one" }, deps)).toMatchObject({
+        format: "png",
+      });
+      expect(
+        deps.cdp.send.mock.calls.filter(([, method]) => method === "Page.startScreencast"),
+      ).toHaveLength(expectedScreencasts);
+      await deps.exports.dispose();
+    }
+  });
 });
 
 describe("full-page scope and diagnostics", () => {
@@ -527,7 +551,7 @@ describe("full-page scope and diagnostics", () => {
     expect(vi.mocked(capturePage).mock.calls.at(-1)?.[0]).toMatchObject({
       scope: "current",
       loadingTimeoutMs: 30000,
-      checkFreshness: os === "win",
+      checkFreshness: os === "win" || os === "linux",
     });
     const renderingCalls = deps.cdp.send.mock.calls
       .filter(([, method]) => method.endsWith("Screencast"))

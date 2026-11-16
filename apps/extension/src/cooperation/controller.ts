@@ -1,3 +1,4 @@
+import { injectCooperationAllFrames } from "@/lib/runtime-content-scripts";
 import {
   isAgentControlledTab,
   type SessionContext,
@@ -5,7 +6,7 @@ import {
 } from "@/session-manager/manager";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import { isPassiveDebugAction, toolPolicy } from "@/tools/policy";
+import { isKnownVideoAction, isPassiveDebugAction, toolPolicy } from "@/tools/policy";
 import {
   type CdpRunner,
   cdpBlockedUrlReason,
@@ -16,7 +17,13 @@ import {
 } from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
 import { AccessibilityLease } from "@/tools/vom/capture-coordinator";
-import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
+import type {
+  CooperateBaselineReason,
+  CooperateResult,
+  DragTarget,
+  RequestFrame,
+  RpcError,
+} from "@/transport/types";
 import {
   ActionCheckError,
   actionError,
@@ -66,6 +73,8 @@ interface Context {
   activityCursor: number;
   observationId?: string;
   consumed?: boolean;
+  maxTokens?: number;
+  truncated?: boolean;
   /** Target control: the page text the agent holds, kept current by text deltas. */
   held?: HeldText;
 }
@@ -263,7 +272,7 @@ const SCRIPT_CHANGE_RECOVERY = {
   target:
     "For data, use read/extract (fixed passive DOM queries) without another sync. For a script, read observed_changes and decide whether it touches what the script relies on. If those facts can be stated, pass them as explicit expect checks and omit observation_id: then only they are checked and the rest of the page may keep changing. Only if they cannot be stated, run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
   strict:
-    "Read observed_changes and decide whether it touches what the script relies on. If those regions can be named, synchronize and pass them with --depends-on (plugin: dependsOn): then only they, form values and modal layers are checked, and the rest of the page may keep changing. Only if they cannot be named, synchronize and run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
+    "Read observed_changes and decide whether it touches what the script relies on. If those regions can be named, synchronize and pass them with --depends-on (MCP: depends_on): then only they, form values and modal layers are checked, and the rest of the page may keep changing. Only if they cannot be named, synchronize and run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
 };
 
 function failure(message: string, effect: "none" | "unknown" = "none"): RpcError {
@@ -335,6 +344,19 @@ export class CooperationController implements ControlAuthority {
 
   enabled(tabId: number): boolean {
     return this.tabs.has(tabId);
+  }
+
+  /** Resolve the controlled tab owning `contextId` within `sessionId`, if tracked. */
+  contextTabId(sessionId: string, contextId: string): number | undefined {
+    for (const [tabId, state] of this.tabs) {
+      if (
+        state.sessionId === sessionId &&
+        (state.context?.id === contextId || state.baseline?.id === contextId)
+      ) {
+        return tabId;
+      }
+    }
+    return undefined;
   }
   hasSession(sessionId: string): boolean {
     return this.defaultTabs.has(sessionId);
@@ -440,7 +462,8 @@ export class CooperationController implements ControlAuthority {
       tab.windowId !== session.agentWindowId ||
       this.deps.sessions.get(session.sessionId) !== session ||
       !this.hasSession(session.sessionId) ||
-      !isAgentControlledTab(session, tabId)
+      !isAgentControlledTab(session, tabId) ||
+      (session.temporaryInputTabs?.has(tabId) ?? false)
     )
       return;
     const state = this.track(
@@ -483,11 +506,13 @@ export class CooperationController implements ControlAuthority {
     this.deps.changed(tabId);
     this.sessionActivity(state.sessionId);
   }
-  view(tabId: number): CooperationView | undefined {
-    const state = this.tabs.get(tabId);
-    if (!state) return;
+  private isLiveTab(state: TabState): boolean {
+    return this.tabs.get(state.tabId) === state && this.deps.sessions.has(state.sessionId);
+  }
+  private stateView(state: TabState): CooperationView {
+    const target = !state.held && !this.humanActive(state) ? state.target : undefined;
     return {
-      target: !state.held && !this.humanActive(state) ? state.target : undefined,
+      ...(target ? { target } : {}),
       revision: state.revision,
       // Explicit human ownership survives navigation and unavailable collection.
       mode:
@@ -506,6 +531,10 @@ export class CooperationController implements ControlAuthority {
                     : "syncing",
       editing: [...state.frames.values()].some((frame) => frame.editing),
     };
+  }
+  view(tabId: number): CooperationView | undefined {
+    const state = this.tabs.get(tabId);
+    return state ? this.stateView(state) : undefined;
   }
   private humanBusyOrRecentInput(state: TabState): boolean {
     return [...state.frames.values()].some(
@@ -782,7 +811,11 @@ export class CooperationController implements ControlAuthority {
     state.unresponsive = undefined;
     return frames;
   }
-  async command(params: CooperationParams, cdp: CdpRunner, signal: AbortSignal): Promise<unknown> {
+  async command(
+    params: CooperationParams,
+    cdp: CdpRunner,
+    signal: AbortSignal,
+  ): Promise<CooperateResult | RpcError> {
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return { code: "not_found", message: "Unknown session" };
     cdp = sessionCdpRunner(
@@ -837,7 +870,12 @@ export class CooperationController implements ControlAuthority {
         try {
           await this.refresh(state);
         } catch (error) {
-          if (params.action !== "wait" || signal.aborted || error instanceof FrameCollectionError)
+          if (
+            params.action !== "wait" ||
+            !this.isLiveTab(state) ||
+            signal.aborted ||
+            error instanceof FrameCollectionError
+          )
             throw error;
           state.unavailable = true;
         }
@@ -871,6 +909,7 @@ export class CooperationController implements ControlAuthority {
         }
       }
       if (state.stopped && params.action !== "status") return stopped();
+      if (!this.isLiveTab(state)) return failure("Shared-tab control has ended");
       if (params.action !== "sync" && params.action !== "enable") {
         if (
           params.action === "wait" &&
@@ -884,7 +923,7 @@ export class CooperationController implements ControlAuthority {
           activity: state.activity.filter(
             (event) => event.cursor > (state.baseline?.activityCursor ?? 0),
           ),
-          state: this.view(state.tabId),
+          state: this.stateView(state),
           ready:
             !state.unavailable &&
             !state.held &&
@@ -904,7 +943,8 @@ export class CooperationController implements ControlAuthority {
       }
       if (state.held || state.working || this.humanActive(state))
         return failure("The user is still operating this tab; wait for hand-back");
-      await cdp.reconcileSoftDetachedFrames?.(state.tabId);
+      if (!cdpBlockedUrlReason(target.url))
+        await cdp.ensureAttachedToUrl?.(state.tabId, target.url);
       if (state.stopped) return stopped();
       const previousRefs = session.refStore;
       const previousRefRevision = previousRefs.revision;
@@ -923,8 +963,10 @@ export class CooperationController implements ControlAuthority {
         const fieldsComplete = [...before.values()].every(
           (frame) => frame.fieldsComplete !== false,
         );
+        const sameBudget = baseline !== undefined && baseline.maxTokens === params.max_tokens;
         const comparable =
           baseline &&
+          sameBudget &&
           baseline.frameEpoch === frameEpoch &&
           fieldsComplete &&
           baseline.refs === session.refStore.revision &&
@@ -941,8 +983,8 @@ export class CooperationController implements ControlAuthority {
             ? textDelta(baseline.held, params.max_tokens, baseline.frames, before)
             : undefined;
         const text = typeof patched === "object" ? patched : undefined;
-        const delta = baseline && (exact || !!text);
-        const baselineReason = delta
+        const delta = Boolean(baseline && (exact || !!text));
+        const baselineReason: CooperateBaselineReason | undefined = delta
           ? undefined
           : !baseline
             ? "no_previous_observation"
@@ -954,15 +996,18 @@ export class CooperationController implements ControlAuthority {
                   ? "refs_replaced"
                   : !sameMedia(baseline.frames, before)
                     ? "media_changed"
-                    : (patched ??
-                      (!sameFrames(baseline.frames, before, "structure")
-                        ? "structure_changed"
-                        : "focus_changed"));
+                    : !sameBudget
+                      ? "token_budget_changed"
+                      : typeof patched === "string"
+                        ? patched
+                        : !sameFrames(baseline.frames, before, "structure")
+                          ? "structure_changed"
+                          : "focus_changed";
         // The private evidence describes the text and focus as they were captured.
         if (text && (text.lines.length || text.focusMoved)) evidence = undefined;
         // A delta updates the model's field values. Refresh private semantic
         // evidence too, without replacing refs or repeating page text to the model.
-        if (delta && !sameFields(baseline.frames, before))
+        if (delta && baseline && !sameFields(baseline.frames, before))
           await captureVomObservation(guardedRunner(cdp), state.tabId, target.url, {
             signal,
             accessibilityLease: state.accessibilityLease,
@@ -1028,6 +1073,8 @@ export class CooperationController implements ControlAuthority {
           evidence,
           activityCursor: state.activitySequence,
           observationId: crypto.randomUUID(),
+          maxTokens: observation ? params.max_tokens : baseline?.maxTokens,
+          truncated: observation ? Boolean(observation.truncated) : baseline?.truncated,
           ...(targetPolicy
             ? {
                 held: observation
@@ -1062,49 +1109,15 @@ export class CooperationController implements ControlAuthority {
         );
         const historyGap = state.historyGap;
         state.historyGap = false;
-        return {
+        const base = {
           tab_id: state.tabId,
           context_id: context.id,
           control_policy: session.controlPolicy ?? "strict",
           ...(state.frameGaps.length ? { frame_gaps: state.frameGaps } : {}),
-          ...(targetPolicy ? { observation_id: context.observationId } : {}),
-          kind: delta
-            ? !text && sameFrames(baseline.frames, after, "revision")
-              ? "unchanged"
-              : "delta"
-            : "baseline",
+          ...(targetPolicy && context.observationId
+            ? { observation_id: context.observationId }
+            : {}),
           ...(baselineReason ? { baseline_reason: baselineReason } : {}),
-          ...(delta
-            ? {
-                previous_context_id: baseline.id,
-                // One context id spans many observations under target control.
-                ...(targetPolicy && baseline.observationId
-                  ? { previous_observation_id: baseline.observationId }
-                  : {}),
-                ...(text ? { observation_patch: { lines: text.lines } } : {}),
-                changes: [
-                  ...(text?.changes ?? []),
-                  ...[...after].flatMap(([frameId, frame]) =>
-                    frame.fields.flatMap((field) => {
-                      const previous = baseline.frames
-                        .get(frameId)
-                        ?.fields.find((old) =>
-                          field.id ? old.id === field.id : old.label === field.label,
-                        );
-                      return previous?.value === field.value
-                        ? []
-                        : [
-                            {
-                              frame_id: frameId,
-                              ...field,
-                              ...(previous ? { previous_value: previous.value } : {}),
-                            },
-                          ];
-                    }),
-                  ),
-                ],
-              }
-            : { observation }),
           activity,
           history_complete:
             !historyGap &&
@@ -1116,19 +1129,56 @@ export class CooperationController implements ControlAuthority {
                 (f.events[0]?.sequence ?? f.human + 1) <= old.human + 1
               );
             }),
-          state: { ...this.view(state.tabId), mode: "ready" },
+          state: { ...this.stateView(state), mode: "ready" as const },
+        };
+        if (delta && baseline) {
+          return {
+            ...base,
+            kind: !text && sameFrames(baseline.frames, after, "revision") ? "unchanged" : "delta",
+            previous_context_id: baseline.id,
+            ...(targetPolicy && baseline.observationId
+              ? { previous_observation_id: baseline.observationId }
+              : {}),
+            ...(text ? { observation_patch: { lines: text.lines } } : {}),
+            changes: [
+              ...(text?.changes ?? []),
+              ...[...after].flatMap(([frameId, frame]) =>
+                frame.fields.flatMap((field) => {
+                  const previous = baseline.frames
+                    .get(frameId)
+                    ?.fields.find((old) =>
+                      field.id ? old.id === field.id : old.label === field.label,
+                    );
+                  return previous?.value === field.value
+                    ? []
+                    : [
+                        {
+                          frame_id: frameId,
+                          ...field,
+                          ...(previous ? { previous_value: previous.value } : {}),
+                        },
+                      ];
+                }),
+              ),
+            ],
+          };
+        }
+        return {
+          ...base,
+          kind: "baseline",
+          observation: observation!,
         };
       } finally {
         state.working = false;
         state.lastAgentActivity = this.now();
-        this.changed(state);
+        if (this.tabs.get(state.tabId) === state) this.changed(state);
       }
     } catch (error) {
       if (state.stopped) return stopped();
       if (signal.aborted) return { code: "cancelled", message: "Cooperation wait cancelled" };
       state.unavailable = true;
       state.context = undefined;
-      this.changed(state);
+      if (this.tabs.get(state.tabId) === state) this.changed(state);
       if (error instanceof FrameCollectionError) return error.toRpcError();
       return withUnresponsiveFrames(
         failure(error instanceof Error ? error.message : String(error)),
@@ -1160,6 +1210,7 @@ export class CooperationController implements ControlAuthority {
     };
     state.working = true;
     try {
+      assert();
       const result = await invoke(
         guardedRunner(cdp, {
           prepare: async () => {
@@ -1186,10 +1237,40 @@ export class CooperationController implements ControlAuthority {
           },
         }),
       );
-      return revoked ? failure(revoked, sent ? "unknown" : "none") : result;
+      if (state.stopped) return stopped(sent ? "unknown" : "none");
+      if (signal.aborted)
+        return {
+          code: "cancelled",
+          message: "Initial page operation cancelled",
+          data: {
+            effect_state: sent ? "unknown" : "none",
+            phase: sent ? "execution" : "precondition",
+          },
+        };
+      if (revoked) return failure(revoked, sent ? "unknown" : "none");
+      if (isRpcError(result) && result.data?.effect_state === undefined) {
+        const effect = sent ? "unknown" : "none";
+        return {
+          ...result,
+          data: {
+            ...result.data,
+            effect_state: effect,
+            phase: result.data?.phase ?? (sent ? "execution" : "precondition"),
+          },
+        };
+      }
+      return result;
     } catch (error) {
       if (state.stopped) return stopped(sent ? "unknown" : "none");
-      if (signal.aborted) return { code: "cancelled", message: "Initial page operation cancelled" };
+      if (signal.aborted)
+        return {
+          code: "cancelled",
+          message: "Initial page operation cancelled",
+          data: {
+            effect_state: sent ? "unknown" : "none",
+            phase: sent ? "execution" : "precondition",
+          },
+        };
       return failure(
         error instanceof Error ? error.message : String(error),
         sent ? "unknown" : "none",
@@ -1344,6 +1425,16 @@ export class CooperationController implements ControlAuthority {
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) signal.throwIfAborted();
       if (revoked) return refusal(revoked);
+      if (isRpcError(result) && result.data?.effect_state === undefined) {
+        return {
+          ...result,
+          data: {
+            ...result.data,
+            effect_state: sent ? "unknown" : "none",
+            phase: result.data?.phase ?? (sent ? "execution" : "precondition"),
+          },
+        };
+      }
       return result;
     } catch (error) {
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
@@ -1446,6 +1537,7 @@ export class CooperationController implements ControlAuthority {
         isAgentControlledTab(session, result.tab_id)
       ) {
         this.defaultTabs.set(session.sessionId, result.tab_id);
+        await injectCooperationAllFrames(result.tab_id);
         await this.observeTab(result.tab_id);
       }
       return result;
@@ -1521,7 +1613,10 @@ export class CooperationController implements ControlAuthority {
       this.changed(state);
       try {
         const result = await invoke(cdp);
-        if (!isRpcError(result)) await this.observeTab(state.tabId);
+        if (!isRpcError(result)) {
+          await injectCooperationAllFrames(state.tabId);
+          await this.observeTab(state.tabId);
+        }
         return result;
       } finally {
         state.working = false;
@@ -1533,8 +1628,7 @@ export class CooperationController implements ControlAuthority {
     const action = (req.params as { action?: string }).action;
     if (
       (policy.cooperation === "debug" && isPassiveDebugAction(action)) ||
-      (policy.cooperation === "video" &&
-        ["start", "stop", "status", "read", "list", "capabilities"].includes(action ?? ""))
+      (policy.cooperation === "video" && isKnownVideoAction(action))
     ) {
       req.params = { ...params, tab_id: params.tab_id ?? this.defaultTabs.get(session.sessionId) };
       return invoke(guardedRunner(cdp));
@@ -1688,7 +1782,7 @@ export class CooperationController implements ControlAuthority {
     const rootFrameId = context?.evidence?.rootFrameId;
     const mainDocumentRef = (ref: string) => {
       const node = lookupSnapshotRef(session, ref, target.tabId);
-      return rootFrameId !== undefined && node?.frameId === rootFrameId && !node.cdpSessionId;
+      return rootFrameId !== undefined && node?.frameId === rootFrameId;
     };
     const mainDocumentTarget = (node?: DragTarget) =>
       node?.ref ? mainDocumentRef(node.ref) : !!node?.selector;
@@ -2073,14 +2167,23 @@ export class CooperationController implements ControlAuthority {
       if (error) throw new ActionCheckError((checkFailure = error));
       assert();
     };
+    const verifyExpectations = async () => {
+      if (!expectations.length) return;
+      const error = await checkExpectations(cdp, session, target, expectations);
+      if (error) throw new ActionCheckError((checkFailure = error));
+      assert();
+    };
     // Resolve selectors once per action. Handlers use the same concrete DOM node
     // that passed the checks, even if a list reorders during preparation.
     const pin = (node: ResolvedActionTarget) => {
       const identity = {
         tabId: target.tabId,
         backendNodeId: node.backendNodeId,
-        frameId: node.frameId,
-        cdpSessionId: node.cdpTarget.sessionId,
+        frameId: node.handle?.frameId || node.frameId,
+        loaderId: node.handle?.loaderId,
+        ...(node.handle?.documentElementBackendNodeId !== undefined
+          ? { documentElementBackendNodeId: node.handle.documentElementBackendNodeId }
+          : {}),
       };
       const ref = session.refStore.allocateRef(identity);
       session.refStore.set(ref, node.backendNodeId, identity);
@@ -2105,13 +2208,29 @@ export class CooperationController implements ControlAuthority {
                 "Observe the current page and choose a target again. Nothing was sent.",
             },
           }
-        : error;
+        : error.data?.effect_state !== undefined
+          ? error
+          : {
+              ...error,
+              data: {
+                ...error.data,
+                phase: error.data?.phase ?? "target",
+                effect_state: "none",
+              },
+            };
     let fallbackBootstrap = false;
     try {
       await this.refresh(state);
       assert();
-      if (!mainDocumentAction) {
-        await cdp.reconcileSoftDetachedFrames?.(state.tabId);
+      if (
+        !mainDocumentAction &&
+        context &&
+        state.context &&
+        params.context_id === state.context.id &&
+        context.epoch === state.epoch &&
+        !cdpBlockedUrlReason(target.url)
+      ) {
+        await cdp.ensureAttachedToUrl?.(state.tabId, target.url);
         assert();
       }
       if (
@@ -2134,8 +2253,8 @@ export class CooperationController implements ControlAuthority {
           "This action requires an unused strict observation from cooperate sync",
           "observation",
           script
-            ? "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId). On a page that keeps changing, state what the script relies on with explicit expect checks and omit observation_id: then only they are checked."
-            : "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId).",
+            ? "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (MCP: observation). On a page that keeps changing, state what the script relies on with explicit expect checks and omit observation_id: then only they are checked."
+            : "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (MCP: observation).",
         );
       if (!visual && (primaryTarget?.ref || primaryTarget?.selector)) {
         const resolved = await resolveActionTarget(
@@ -2184,6 +2303,7 @@ export class CooperationController implements ControlAuthority {
           return {
             code: "invalid_params",
             message: "depends_on requires at most 16 observed refs/selectors",
+            data: { phase: "precondition", effect_state: "none" },
           };
         if (params.depends_on.length) {
           // Dependencies constrain the decision even when a key has no target.
@@ -2197,7 +2317,7 @@ export class CooperationController implements ControlAuthority {
               /^@?e\d+$/.test(dependency) ? { ref: dependency } : { selector: dependency },
               "action dependency",
             );
-            if (isRpcError(resolved)) return resolved;
+            if (isRpcError(resolved)) return targetError(resolved);
             evidenceTargets.push(resolved);
           }
         }
@@ -2243,6 +2363,9 @@ export class CooperationController implements ControlAuthority {
           prepare: async (input, method) => {
             assert();
             if (targeted && isInternalActionStep(input, method, req.method === "tool.evaluate")) {
+              if (!nativeInputStarted && primaryEffect(method ?? "") && expectations.length > 0) {
+                await verifyExpectations();
+              }
               return;
             }
             await this.prepareFrames(state, operationSignal, input, method, deadline);
@@ -2260,6 +2383,8 @@ export class CooperationController implements ControlAuthority {
                 await verifyDecision(false);
               } else if (req.method === "tool.press" && input?.type === "keydown") {
                 await verifyDecision(true);
+              } else if (expectations.length > 0) {
+                await verifyExpectations();
               }
             }
           },
@@ -2301,6 +2426,9 @@ export class CooperationController implements ControlAuthority {
           beginDomMutation: async () => {
             if (targeted) {
               assert();
+              if (!nativeInputStarted && expectations.length > 0) {
+                await verifyExpectations();
+              }
               nativeInputStarted = true;
               return;
             }
@@ -2381,6 +2509,7 @@ export class CooperationController implements ControlAuthority {
           data: {
             effect_state: sent ? "unknown" : "none",
             phase: sent ? "execution" : "precondition",
+            ...(sent ? { tab_id: state.tabId } : {}),
           },
         };
       }
@@ -2392,9 +2521,9 @@ export class CooperationController implements ControlAuthority {
           : undefined);
       if (checkFailure || reason)
         return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
-      if (targetPolicy && isRpcError(result)) {
+      if (isRpcError(result)) {
         const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
-        if (effect === "unknown" || detachedByHandler || postRefreshFailed)
+        if (targetPolicy && (effect === "unknown" || detachedByHandler || postRefreshFailed))
           state.context = undefined;
         return {
           ...result,
@@ -2422,6 +2551,7 @@ export class CooperationController implements ControlAuthority {
           data: {
             effect_state: sent ? "unknown" : "none",
             phase: sent ? "execution" : "precondition",
+            ...(sent ? { tab_id: state.tabId } : {}),
           },
         };
       }

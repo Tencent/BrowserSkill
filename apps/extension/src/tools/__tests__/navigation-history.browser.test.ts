@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_NAV_CHROME. The shared harness owns its browser and profile.
+// Opt in with BSK_TEST_CHROME. The shared harness owns its browser and profile.
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
@@ -11,14 +11,14 @@ type Send = <T = Record<string, unknown>>(
   params?: object,
   sessionId?: string,
 ) => Promise<T>;
-type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
+type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
 interface CdpEvent {
   sessionId?: string;
   method: string;
   params?: object;
 }
 
-describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser history navigation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser history navigation", () => {
   it("completes back and forward at load when Chrome restores from the back/forward cache", async () => {
     // No Cache-Control: no-store, so both documents are bfcache eligible.
     const server = createServer((request, response) => {
@@ -39,7 +39,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser history navigation", 
       );
       await withChrome(
         {
-          executable: process.env.BSK_NAV_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30_000,
@@ -79,7 +79,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser history navigation", 
           const cdp: CdpRunner = {
             send: <T>(_tabId: number, method: string, params?: object) =>
               send<T>(method, params, sessionId),
-            onEvent: (listener) => {
+            onEvent: (_tabId, listener) => {
               listeners.add(listener);
               return { dispose: () => void listeners.delete(listener) };
             },

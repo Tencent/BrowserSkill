@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_FILL_CHROME=/path/to/chrome; the suite owns its browser/profile and each test gets a fresh tab.
+// Opt in with BSK_TEST_CHROME=/path/to/chrome; the suite owns its browser/profile and each test gets a fresh tab.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CdpFrame } from "@/browser-driver/frame-graph";
 import { SessionManager } from "@/session-manager/manager";
@@ -17,7 +17,7 @@ let browserSend: Send;
 let closeBrowser: (() => void) | undefined;
 let browserRun: Promise<void> | undefined;
 
-if (process.env.BSK_FILL_CHROME) {
+if (process.env.BSK_TEST_CHROME) {
   beforeAll(async () => {
     const { withChrome } = await import(
       new URL(
@@ -29,7 +29,7 @@ if (process.env.BSK_FILL_CHROME) {
     const closed = Promise.withResolvers<void>();
     closeBrowser = () => closed.resolve();
     browserRun = withChrome(
-      { executable: process.env.BSK_FILL_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (send: Send) => {
         ready.resolve(send);
         await closed.promise;
@@ -214,7 +214,7 @@ const unchangedState = `JSON.stringify({
   scroll: [scrollX, scrollY], events: window.fillEvents
 })`;
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("native controls and editing hosts", () => {
   describe.each([
     ["foreground", false],
     ["background", true],
@@ -376,7 +376,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts
   });
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverability", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("fill lifecycle and discoverability", () => {
   it.each([
     "",
     "true",
@@ -570,7 +570,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
   }, 30_000);
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("fill focus changes", () => {
   it.each([
     ["input", "hidden tab", '<input id="target" value="old">', "value"],
     ["textarea", "hidden tab", '<textarea id="target">old</textarea>', "value"],
@@ -718,7 +718,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
   }, 30_000);
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("date-like fill regressions", () => {
   it("keeps a background date fill after the tab becomes active", async () => {
     await withFillBrowser(
       { background: true, markup: guard + '<input id="target" type="date">' },
@@ -955,7 +955,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
   );
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("fill caret validation", () => {
   it.each([
     [
       "nested text",
@@ -1137,7 +1137,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
   }, 30_000);
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("fill native event deduplication", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("fill native event deduplication", () => {
   it.each([
     ["input append", '<input id="target">', "value", "hello", false, ["hello"]],
     ["input clear", '<input id="target" value="old">', "value", "hello", true, ["", "hello"]],

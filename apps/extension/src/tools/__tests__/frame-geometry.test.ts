@@ -44,18 +44,20 @@ function scrollbarDriver(
     getFrameGraph: async () => ({
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
+        { frameId: "main", target: { tabId: 4 }, loaderId: "main-loader" },
         {
           frameId: "child",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
           target: { tabId: 4, sessionId: "child" },
+          loaderId: "child-loader",
         },
         {
           frameId: "same-child",
           parentFrameId: "child",
           ownerBackendNodeId: 20,
           target: { tabId: 4, sessionId: "child" },
+          loaderId: "same-child-loader",
         },
       ],
     }),
@@ -72,8 +74,9 @@ describe("frame geometry projection", () => {
   ])("preserves scale and clips scrollbar strips for visible viewport $width × $height", async (visible) => {
     const { cdp, send } = scrollbarDriver(visible);
     const geometry = await resolveNodeGeometry(cdp, 4, {
-      target: { tabId: 4, sessionId: "child" },
+      tabId: 4,
       frameId: "child",
+      loaderId: "child-loader",
       backendNodeId: 101,
     });
     expect(geometry).toMatchObject({
@@ -132,12 +135,14 @@ describe("frame geometry projection", () => {
       parentFrameId: "child",
       ownerBackendNodeId: 20,
       target: { tabId: 4, sessionId: "inner" },
+      loaderId: "inner-loader",
     };
     cdp.getFrameGraph = async () => graph;
     expect(
       await resolveNodeGeometry(cdp, 4, {
-        target: { tabId: 4, sessionId: "inner" },
+        tabId: 4,
         frameId: "inner",
+        loaderId: "inner-loader",
         backendNodeId: 101,
       }),
     ).toMatchObject({
@@ -293,8 +298,9 @@ describe("frame geometry projection", () => {
     };
 
     const geometry = await resolveNodeGeometry(cdp, 4, {
-      target: { tabId: 4, sessionId: "child-session" },
+      tabId: 4,
       frameId: "child",
+      loaderId: "",
       backendNodeId: 101,
     });
 
@@ -349,8 +355,9 @@ describe("frame geometry projection", () => {
         cdp,
         4,
         {
-          target: { tabId: 4, sessionId: "child-session" },
+          tabId: 4,
           frameId: "child",
+          loaderId: "",
           backendNodeId: 101,
         },
         { scrollIntoView: true },
@@ -388,8 +395,9 @@ describe("frame geometry projection", () => {
     };
 
     const geometry = await resolveNodeGeometry(cdp, 4, {
-      target: { tabId: 4 },
+      tabId: 4,
       frameId: "child",
+      loaderId: "",
       backendNodeId: 101,
     });
 
@@ -413,8 +421,9 @@ describe("frame geometry projection", () => {
 
     await expect(
       resolveNodeGeometry(cdp, 4, {
-        target: { tabId: 4, sessionId: "child-session" },
+        tabId: 4,
         frameId: "child",
+        loaderId: "child-loader",
         backendNodeId: 101,
       }),
     ).resolves.toMatchObject({ code: "cdp_failed" });

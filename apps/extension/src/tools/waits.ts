@@ -26,8 +26,8 @@ import { isMissingNode } from "./errors";
 // `resolveBackendNode` instead of a page-side promise. That keeps ref /
 // selector / frame handling identical to every other tool.
 
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import type { CdpDispatchGuard } from "@/browser-driver/chromium-cdp";
+import type { CdpTarget, FrameDocumentHandle, FrameNodeHandle } from "@/browser-driver/frame-graph";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
 import type {
@@ -46,12 +46,13 @@ import { cdpLifecycleName, ensureCdpReady, waitForLifecyclePassive } from "./nav
 import {
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
+  delegateCdpRunner,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
   resolveTargetTab,
   sendToCdpTarget,
+  sendToFrameHandle,
 } from "./shared";
 
 export interface WaitForNavigationDeps {
@@ -66,18 +67,10 @@ export interface WaitForNavigationDeps {
 
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 
-let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
-function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
-  if (!defaultDeps) {
-    defaultDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi };
-  }
-  return defaultDeps;
-}
-
 export async function handleWaitForNavigation(
   manager: SessionManager,
   params: WaitForNavigationParams,
-  deps: WaitForNavigationDeps = getDefaultDeps(),
+  deps: WaitForNavigationDeps,
 ): Promise<WaitForNavigationResult | RpcError> {
   const ctxOrErr = lookupSession(manager, params, "wait_for_navigation");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
@@ -270,7 +263,7 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export async function handleWaitForElement(
   manager: SessionManager,
   params: WaitForElementParams,
-  deps: WaitForElementDeps = getDefaultDeps(),
+  deps: WaitForElementDeps,
 ): Promise<WaitForElementResult | RpcError> {
   const ctxOrErr = lookupSession(manager, params, "wait-for-element");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
@@ -317,13 +310,26 @@ export async function handleWaitForElement(
   // allocate a node handle each time, and a 10s wait at 100ms is ~100 of
   // them (same pattern as `wheel.ts`).
   const objectGroup = `bsk-wait-for-element-${crypto.randomUUID()}`;
-  const objectTargets = new Map<string, CdpTarget>();
+  const objectHandles = new Map<string, FrameDocumentHandle>();
   let finished = false;
-  const release = (objectTarget: CdpTarget) => {
+  const releaseTarget = (objectTarget: CdpTarget) => {
+    void sendToCdpTarget(
+      deps.cdp.resourceCleanup ?? deps.cdp,
+      objectTarget,
+      "Runtime.releaseObjectGroup",
+      {
+        objectGroup,
+      },
+    ).catch(() => {});
+  };
+  const releaseHandle = (handle: FrameDocumentHandle) => {
     // Cleanup must not extend the wait's deadline or delay cancellation.
-    void sendToCdpTarget(deps.cdp, objectTarget, "Runtime.releaseObjectGroup", {
-      objectGroup,
-    }).catch(() => {});
+    void sendToFrameHandle(
+      deps.cdp.resourceCleanup ?? deps.cdp,
+      handle,
+      "Runtime.releaseObjectGroup",
+      { objectGroup },
+    ).catch(() => {});
   };
   const send = async <T>(cdpTarget: CdpTarget, method: string, args?: object): Promise<T> => {
     checkBudget(deadline, deps.signal);
@@ -336,29 +342,66 @@ export async function handleWaitForElement(
         : sendToCdpTarget<T>(deps.cdp, cdpTarget, method, args));
     } finally {
       // A resolveNode reply may allocate a handle after timeout/cancellation.
-      if (finished && method === "DOM.resolveNode") release(cdpTarget);
+      if (finished && method === "DOM.resolveNode") releaseTarget(cdpTarget);
     }
   };
-  const probeCdp: CdpRunner = {
+  const sendFrame = async <T>(
+    handle: FrameDocumentHandle | FrameNodeHandle,
+    method: string,
+    args?: object,
+    guard?: CdpDispatchGuard,
+  ): Promise<T> => {
+    checkBudget(deadline, deps.signal);
+    if (!deps.cdp.sendToFrame && deps.cdp.sendGuarded && !handle.frameId) {
+      return send({ tabId: handle.tabId }, method, args);
+    }
+    try {
+      return await sendToFrameHandle<T>(deps.cdp, handle, method, args, {
+        ...guard,
+        signal: guard?.signal ?? deps.signal,
+        onDispatch: () => {
+          checkBudget(deadline, deps.signal);
+          guard?.onDispatch?.();
+        },
+      });
+    } finally {
+      if (finished && method === "DOM.resolveNode") releaseHandle(handle);
+    }
+  };
+  const probeCdp: CdpRunner = delegateCdpRunner(deps.cdp, {
     send: (tabId, method, args) => send({ tabId }, method, args),
     sendToTarget: send,
-    trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
-    resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
-    reattachIfSoftDetached: deps.cdp.reattachIfSoftDetached
-      ? async (tabId) => {
-          checkBudget(deadline, deps.signal);
-          await deps.cdp.reattachIfSoftDetached!(tabId);
-          checkBudget(deadline, deps.signal);
+    sendToFrame: sendFrame,
+    ...(deps.cdp.ensureAttachedToUrl
+      ? {
+          ensureAttachedToUrl: async (tabId, expectedUrl) => {
+            checkBudget(deadline, deps.signal);
+            await deps.cdp.ensureAttachedToUrl!(tabId, expectedUrl);
+            checkBudget(deadline, deps.signal);
+          },
         }
-      : undefined,
-    reconcileSoftDetachedFrames: deps.cdp.reconcileSoftDetachedFrames
-      ? async (tabId) => {
-          checkBudget(deadline, deps.signal);
-          await deps.cdp.reconcileSoftDetachedFrames!(tabId);
-          checkBudget(deadline, deps.signal);
+      : {}),
+    ...(deps.cdp.getMainFrameHandle
+      ? {
+          getMainFrameHandle: async (tabId, sig) => {
+            checkBudget(deadline, deps.signal);
+            const result = await deps.cdp.getMainFrameHandle!(tabId, sig ?? deps.signal);
+            checkBudget(deadline, deps.signal);
+            return result;
+          },
         }
-      : undefined,
-  };
+      : {}),
+    ...(deps.cdp.getFrameGraph
+      ? {
+          getFrameGraph: async (tabId, sig) => {
+            checkBudget(deadline, deps.signal);
+            const result = await deps.cdp.getFrameGraph!(tabId, sig ?? deps.signal);
+            checkBudget(deadline, deps.signal);
+            return result;
+          },
+        }
+      : {}),
+  });
   let probe: Probe | undefined;
 
   const finish = (satisfied: boolean) =>
@@ -376,7 +419,7 @@ export async function handleWaitForElement(
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     for (;;) {
       const next = await beforeDeadline(
-        () => probeState(probeCdp, ctx, target, params, objectGroup, objectTargets),
+        () => probeState(probeCdp, ctx, target, params, objectGroup, objectHandles),
         deadline,
         deps.signal,
       );
@@ -399,7 +442,7 @@ export async function handleWaitForElement(
     return cdpError(error);
   } finally {
     finished = true;
-    for (const objectTarget of objectTargets.values()) release(objectTarget);
+    for (const handle of objectHandles.values()) releaseHandle(handle);
   }
 }
 
@@ -424,7 +467,7 @@ async function probeState(
   target: { tabId: number },
   params: WaitForElementParams,
   objectGroup: string,
-  objectTargets: Map<string, CdpTarget>,
+  objectHandles: Map<string, FrameDocumentHandle>,
 ): Promise<Probe | RpcError | null> {
   const node = await resolveBackendNode(cdp, ctx, target, params, "wait-for-element");
   if (isRpcError(node)) {
@@ -439,11 +482,19 @@ async function probeState(
   }
 
   let objectId: string | undefined;
-  objectTargets.set(cdpTargetKey(node.cdpTarget), node.cdpTarget);
+  const docHandle: FrameDocumentHandle = {
+    tabId: node.handle.tabId,
+    frameId: node.handle.frameId,
+    loaderId: node.handle.loaderId,
+    ...(node.handle.documentElementBackendNodeId !== undefined
+      ? { documentElementBackendNodeId: node.handle.documentElementBackendNodeId }
+      : {}),
+  };
+  objectHandles.set(`${docHandle.tabId}:${docHandle.frameId}:${docHandle.loaderId}`, docHandle);
   try {
-    const resolved = await sendToCdpTarget<{ object?: { objectId?: string } }>(
+    const resolved = await sendToFrameHandle<{ object?: { objectId?: string } }>(
       cdp,
-      node.cdpTarget,
+      node.handle,
       "DOM.resolveNode",
       { backendNodeId: node.backendNodeId, objectGroup },
     );
@@ -456,10 +507,10 @@ async function probeState(
   }
   if (!objectId) return { code: "cdp_failed", message: "DOM.resolveNode returned no objectId" };
 
-  const reply = await sendToCdpTarget<{
+  const reply = await sendToFrameHandle<{
     result?: { value?: { attached?: boolean; visible?: boolean } };
     exceptionDetails?: { text?: string };
-  }>(cdp, node.cdpTarget, "Runtime.callFunctionOn", {
+  }>(cdp, node.handle, "Runtime.callFunctionOn", {
     objectId,
     functionDeclaration: STATE_PROBE,
     returnByValue: true,

@@ -86,7 +86,7 @@ export function consumeVisualCapture(
     capture.id !== params.capture_id ||
     entry !== capture.entry ||
     entry.kind !== "visual-region" ||
-    entry.candidate.document.target.tabId !== tabId
+    entry.candidate.document.tabId !== tabId
   )
     return rpcError(
       "not_found",

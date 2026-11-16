@@ -4,13 +4,87 @@ All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the same PR.
 
-The CLI, extension, and DSH plugin may release separately. Protocol compatibility
+The CLI and extension may release separately. Protocol compatibility
 determines which versions can connect.
 
 ## [Unreleased]
 
+### Added
+
+- **MCP 100% parity**: Added `bsk_ledger`, `bsk_debug`, `bsk_video`, and `bsk_record` first-class tools alongside full CLI parity on existing tools (`session open/stop --all`, `sync` waits/filters, `wait_ms`, `view`, full-page `screenshot` / `extract` `--out`/`--overwrite`/`--format`/`--csv-safe`, `read` `context`, `upload`/`download`, `tab_borrow`, full `emulate`, and `operation_await --out/--overwrite`), unified behind request-scoped `ClientContext`.
+- **Compile-time `MethodSpec` & `RpcErrorReason` SSOT**: Defined exhaustive `bsk_protocol::method::MethodSpec` metadata across all 77 RPC methods (exported to TypeScript `transport/generated/`) and exhaustive `RpcErrorReason` variants with dual CLI/MCP recovery hints (`cli_hint` / `mcp_hint`).
+- DeepSeek Harness (`dsh`) is now a first-class skill installation target via
+  `bsk install-skill --harness dsh` (honoring `$DSH_HOME`, defaulting to
+  `~/.dsh/skills`), `DSH_SESSION_ID` is recognized as an automatic host
+  subagent scope in `ImplicitScopeRegistry`, and MCP `bsk_session(action="start")`
+  now accepts `agent_name`, `project`, and `controller_color` controller identity
+  labels matching `bsk session start` (#731).
+
+### Changed
+
+- **Zero-tax Chrome MV3 `registration: "runtime"` dual-tier content script injection, SW-startup orphan Agent Window reaping, and shared `content/dom-primitives.ts`**: Migrated all four MV3 content-script entrypoints (`content`, `cooperation.content`, `record-frame.content`, and `long-screenshot-page.content`) out of static `manifest.json` `content_scripts` into idempotent runtime injection (`claimIdempotentContentScript`) with `noScriptStartedPostMessage: true` so ordinary browsing incurs zero content-script, `window.postMessage`, or React 19 overhead; injected Tier A (`content.js` and `long-screenshot-page.js`) per `tabId`/`documentId` via idempotent `ensureOverlayInjected` across controlled task tabs, `webNavigation.onCommitted` (including Speculation Rules prerender outermost frames, sequenced strictly after Tier B `cooperation.js` arming/repair), pre-confirmation `tab_borrow` candidate user tabs, `request_help`, `record`, and active `video` overlays while skipping uninjected tabs on `hidden` / `CAPTURE_SUPPRESS` / `INPUT_PASSTHROUGH`; dynamically registered/unregistered pure-TypeScript Tier B (`cooperation.js` and `record-frame.js`) with `persistAcrossSessions: false` when active sessions or recordings transition between `0` and `>= 1`, loading silently at `document_start` with 0 DOM listeners and 0 startup IPC until armed by Background (`COOPERATION_ARM_FRAME` / `RECORD_FRAME_START` plus 50ms per-tab subframe coalescing, `cooperation.js` co-injection in `injectRecordFrameAllFrames`, and non-destructive per-frame `injectCooperationAllFrames` repair across `tab_borrow`, `ack === undefined` frames, and dynamically inserted light-DOM or open/closed `ShadowRoot` `about:blank` / `srcdoc` subframes); tracked dedicated Agent Window `ownedTabIds` in `chrome.storage.session` (`bsk.orphan_agent_windows`) to reap orphaned pure Agent Windows on Service Worker restart without ever closing windows containing user, borrowed, or human-preserved tabs; and extracted `apps/extension/src/content/dom-primitives.ts`.
+- **Single daemon `tool_pipeline`, 4-module `daemon/ipc` decomposition, non-blocking persistence, and shared `cli::orchestration` kernel**: Decomposed 3,489-line `daemon/ipc.rs` into `daemon/tool_pipeline.rs` (single unified `tool.*` pipeline with RAII `AuditTicketGuard`, `SessionActivityGuard`, `ToolInflightRegistry`, `IntentWal`, and post-settlement scope/run-log reconciliation), `daemon/ipc_sessions.rs`, `daemon/ipc_transport.rs`, and a slim `daemon/ipc.rs` router; promoted exhaustive `OutcomeKind` (`bsk-protocol`) / `Outcome` (`daemon/tool_policy.rs`) routing in `daemon/queue.rs`; moved `TransferRegistry` staging/import/session-teardown I/O, `AuditStore` JSONL `sync_data()` writes (including `session.user_interrupt` markers), and monotonic-sequence `IntentWal` flushes/atomic `sync_data()` compactions out of global state `Mutex`es and Tokio worker threads via `spawn_blocking`; and extracted `cli/orchestration.rs` to share Canvas screenshot point-click validation, `open`/`sync`/action/positive timeout bounds, explicit `--session` + `--browser` conflict checks, cached VOM hydration, and 2-second `CANCEL_RESPONSE_GRACE` settlement across `bsk` CLI and `bsk mcp`.
+- **100% strongly typed `bsk-protocol` contracts, typed `EventFrame` payloads, out-of-band WS correlation, and native `ActionMetadata` SSOT**: Replaced all 19 remaining `serde_json::Value` RPC contracts in `Method::contract_meta` (`ToolCooperate`, `LocalAuth*`, `AuditRequest`, `LedgerRequest`, `Session*`, `BrowserList`, `ToolOperationAwait`, and `Transfer*`) with strict Rust/JSON Schema structs, replaced untyped `EventFrame.payload: Value` across Rust and TypeScript with an exhaustive 10-variant `EventFrame` discriminated union, moved `_audit_id` and `_operation_id` out of business `params` into top-level `RequestFrame` envelope fields (deleting in-place `params` mutation and `stripEnvelopeParams`), embedded `ActionMetadata` / passive `context_id` natively with `#[serde(deny_unknown_fields)]` across all 23 `Full` and 9 passive-read `*Params` structs (eliminating post-hoc `catalog.rs` JSON Schema surgery and manual 4-key copy/re-insertion in `daemon/ipc.rs`), and unified `MethodSpec.action_metadata` (`Full` / `ContextOnly` / `TabBindingContext` / `Dynamic` / `None`) as the single source of truth across `bsk-protocol` and `bsk-cli`.
+- **Unified daemon session teardown, strongly typed `IpcEnvelope`, and MCP host-scope lifecycle**: Converged all 6 session teardown paths across `state.rs`, `ws.rs`, `ipc.rs`, `start.rs`, `session_requests.rs`, and `sessions.rs` into `DaemonState::teardown_session(session_id, reason)` covering all 12 session-associated state tables, promoted `HOST_AGENT_ENV_KEYS` ahead of transient `mcp:<pid>:<nonce>` scopes so `bsk mcp` and `bsk` CLI within the same host agent thread share one implicit session (while immediately stopping orphan sessions on `stdio` EOF or disconnect read errors only for exclusive transient `mcp:` scopes), added 256-entry LRU eviction for inactive scope tombstones and idle `start_locks`, and replaced private `_`-prefixed IPC JSON fields with strongly typed `IpcEnvelope` metadata (`IpcRequestMeta` / `IpcResponseMeta`) negotiated via `StatusResult.ipc_envelope` and `DaemonInfo.ipc_envelope` (preserving bidirectional rolling-upgrade compatibility with pre-envelope `"2.0"` `bsk mcp`, CLI, and daemon processes) plus explicit extension-WS `WsCorrelation`.
+- **Single `TabAttachment` state machine & `FrameNodeHandle` addressing**: Collapsed `ChromiumCdp`'s 33 parallel per-tab `Map`/`Set` fields into a single `Map<TabId, TabAttachment>` discriminated union (`detached | attaching | attached | soft_detached`), made `onEvent(tabId, handler)` a tab-scoped `Disposable` subscription holding an automatic idle lease, and sealed all transient `cdpSessionId` routing inside `browser-driver/` behind `FrameNodeHandle` and `FrameDocumentHandle` across `RefStore`, VOM visual observation and capture mappings, `read`, `extract`, `observation`, `interaction`, `waits`, `human-loop`, `recording`, and `CooperationController`.
+- **Protocol `2.0` baseline**: Raised `PROTOCOL_VERSION` and `MIN_COMPATIBLE_PROTOCOL` to `"2.0"`, eliminated extension/daemon legacy version drift, and slimmed `apps/extension/src/transport/generated/validators.js` by over 60% (`~992 KB` -> `<= 390 KB`).
+- **Daemon & extension routing consolidation**: Replaced 9 independent handwritten method tables and `OnceLock` process globals with generated/exhaustive `MethodSpec` tables and explicit `ClientContext` request state.
+- Unified all real-browser test and regression harnesses onto `BSK_TEST_CHROME`
+  and `BSK_TEST_CLI` (resolving Windows `.exe` binaries and stripping host agent
+  scope env vars in isolated daemon fixtures), separated `.browser.test.ts` and
+  `.bench.ts` from the unit Vitest configuration into
+  `apps/extension/vitest.browser.config.ts` and `scripts/run-browser-tests.mjs`
+  (routing `pnpm --filter @browser-skill/extension test:browser` through the
+  runner and enforcing `skipped === 0`, non-empty suite assertions, and
+  per-target suite coverage), and wired every extension `.browser.test.ts` suite
+  plus `eval:browser:check` and `eval:browser:dynamic-read` into CI (#731, #732).
+- Converged scattered default daemon ports, WebSocket URLs, pairing/auth protocol constants, instance ID length, JSON-RPC standard error codes, and `BASE_TOOL_NAMES` into `bsk-protocol` / `bsk` SSOT exports (eliminating hand-maintained duplicates and brittle collection-length assertions), consolidated Rust integration test binaries from 51 to 6 while adding `debug = "line-tables-only"` for `dev`/`test` profiles, split extension Vitest unit runs into `unit-node` and `unit-dom` projects under `threads` pool while removing dead/trivial tests and consolidating single-helper files, replaced fixed wall-clock test sleeps with deterministic clock/mtime/readiness control, added `copyIsolatedExtension` to eliminate redundant per-port `ext:build` CI steps, and added Rust Cargo cache and batched CI steps in `.github/workflows/ci.yml`.
+
 ### Fixed
 
+- Ignored internal `data-bsk-*` attributes and `<browser-skill-overlay>` (`[data-bsk-overlay]`) ShadowHost mutations in `cooperation-capture.ts` so active recording and sensitive-field markers no longer advance `FrameState.structure`, excluded extension ShadowRoot UI controls (`HelpRequestOverlay`, `RecordOverlay`, `BorrowConfirmationOverlay`) across `record-capture.ts`, `record-hover-surface.ts`, and `cooperation-capture.ts` so overlay interactions and hover surfaces are never mis-recorded as webpage steps, and re-evaluated tab control ownership after awaiting `ensureOverlayInjected` so mid-injection tab detachments never flash stale `control` state.
+- VOM token estimation now handles unpaired UTF-16 surrogates without combining them with the following symbol or throwing a `RangeError`; valid emoji pairs retain their existing estimates.
+
+- Fixed non-`start` `tool.video` (`status`/`stop`/`list`/`get`/`delete`), `tool.operation_await`, and scope-bound `tool.wait_ms` bypassing `ToolInflightRegistry` cancellation (and scope-bound `tool.wait_ms` omitting `SessionActivityGuard` idle leases or `ToolDialogAccept`/`ToolDialogDismiss` `decision_lock` waits masking `UserAborted`/`SessionEnded` reasons) on `session.user_interrupt` and `DaemonState::teardown_session` (`session.window_closed` / idle reap / disconnect), fixed `IntentWal` `flush_pending_async` returning before concurrently drained `DISPATCHED` records hit disk and `on_session_ended` leaving un-reconciled `dispatched`/`unknown` records on disk across daemon restarts, fixed `queue.rs` misattributing deadline cancel-cleanup timeouts on non-transfer tools (`navigate`, `screenshot_full_page`, `window_resize`, etc.) as `"file transfer timed out"` (`transfer_outcome_unknown`) and stripping extension `effect_state` / `cancelled_before_dispatch` metadata on cancelled file transfers (including when terminal session teardown reasons are present), fixed Canvas screenshot point-click and zero-timeout validation drift across `bsk` CLI and MCP (`bsk_interact`, `bsk_page`, `bsk_inspect`, `bsk_tabs`, `bsk_assist`, `bsk sync --wait-for/--wait-not --timeout-ms` up to `120000`ms, and structured `scope_browser_conflict` errors on MCP `bsk_session(open)`), and fixed MCP `notifications/cancelled` dropping in-flight IPC futures at `0`ms without awaiting `CANCEL_RESPONSE_GRACE` (recovering real `effect_state` receipts and releasing staged upload files on `cancelled_before_dispatch`).
+- Fixed `dump-schema --method <name> --output` emitting input schemas instead of `output_schema`, fixed `scripts/protocol.mjs` omitting input-only nested `$ref` types (such as `ActionExpectation`, `CookieFilter`, and `UserAgentBrandVersion`) from `transport/generated/input.ts`, fixed MCP `strip_schema` deleting argument and nested property `description` fields from `tools/list` `inputSchema` (stripping only the root struct doc comment at `depth == 0` and preserving inner `oneOf` `null` branches when collapsing `Option<T>`), typed `LoggedStep::Action.modifiers` as `Option<Vec<KeyModifier>>` while closing the `RunLogs` `character_key` input-privacy filter bypass on `modifiers: []` / `null` / `["shift"]`, typed `CooperationController.command` against `CooperateResult` while failing `cooperate wait` immediately on concurrent tab close/release instead of spinning until timeout with `state: undefined`, accepted explicit `"payload": null` on empty-payload `EventFrame` variants, and aligned `bsk sync` activity fixtures with genuine `CooperateActivity` wire contracts.
+- Fixed mid-call idle-timeout session reaping during `Unlocked` tool RPCs, `operation await`, `debug(activity|wait)`, `video`, `ledger`, and `session.run_log` via RAII `SessionActivityGuard` leases, promoted `ToolDialogAccept` to `cancel_at_deadline: true` + `EffectAwareAction` serialized behind a per-session `dialog_operations` decision lock before `IntentWal` reconciliation, gated `ImplicitScopeRegistry` binding on explicit `bind_scope || reuse_or_start_scope` so ephemeral `record` and `recipe` sessions never clobber or tombstone the caller's bound session, eliminated prose-substring `IntentWal` classification in favor of structured `dispatched: false` / `effect_state` error data across `CooperationController` (`bootstrap` / `strict` / `target`), `Dispatcher`, `dialog-control`, and `queue`, added `ErrorCode::UserAborted` to `IntentWal` `Unknown` reconciliation with authoritative multi-tab `tab_id` attribution, and pinned open tabs' active `cN`/`oN` short aliases across >32 ring evictions.
+- Closed the post-#737 VOM cache last-mile gaps across CLI, MCP, and daemon: hydrated `observation` and `observation_origin` in `bsk sync --json` (and normalized `{ "vom": ... }` receipts in `bsk view`) so saved `bsk sync --json` files work directly with `bsk view` and `--baseline`, reused `scope_meta.cached_vom` on slim `unchanged` and text-patched `delta` frames in `authoritative_full_vom` (`--wait-for`/`--wait-not` without redundant `tool.snapshot` fallbacks) and MCP `bsk_session(open|sync)`, hydrated slim `delta` VOM into `RunLogs` while isolating `known`/`masked` ref tables per tab across multi-tab sessions, pinned Step 0's resolved `session_id`/`tab_id`/`context_id` across Steps `1..N` in `bsk plan` and `bsk_plan`, wired `endpoint_pipe_name` across Windows named-pipe server/client IPC, and expanded cross-platform Windows daemon CI unit and integration test coverage alongside updated `2.0` protocol and skill references.
+- Fixed session idle-timeout reaping missing `dialog_operations.remove_session` and losing the `session_idle_timeout` tombstone reason on subsequent browser disconnect, fixed unclaimed `session_requests` cleanup missing `dialog_operations`, `scopes`, and `intent_wal` teardown, and unified `DialogOperation` post-settlement reconciliation (`scopes`, `intent_wal`, and `run_logs`) so operations suspended with `DialogPending` and completed via `dialog accept/dismiss` + `operation await` update `run_logs` to their real completion outcome instead of leaving `Uncertain`.
+- Fixed `--max-tokens` truncated baselines short-circuiting subsequent unbounded or differently budgeted `bsk sync` calls (`baseline_reason: "token_budget_changed"` across both `strict` and `target` policies plus daemon budget/predecessor checks), patched cached `last_vom` in-place on `target`-policy text `delta` updates (including equal-budget `--max-tokens` truncated observations and whitespace-collapsed empty line patches) while clearing `last_vom` on unpatched form `field` deltas so `bsk sync --match-text` never matches stale input values, preserved `truncated`, `capture_truncated`, `next_cursor`, and `presentation` across `bsk sync` cached hydration and receipt formatting, and added symmetric unbounded `tool.snapshot` fallback (with automatic cooperation re-sync) for `--wait-for` when `--max-tokens` truncates the observation.
+- Fixed cross-origin OOPIF `visual-region` `@eN` references and `--capture-id` coordinate clicks failing with `visual_target_changed` after 75s idle Soft-Detach reconnects (when Chrome assigns a new internal child `sessionId` while `frameId + loaderId` remain unchanged), deterministically rejected stale `FrameNodeHandle` / `FrameDocumentHandle` targets across child-frame `loaderId` navigations and same-`loaderId` `document.open()` replacements, and restored 75s idle Soft-Detach after one-shot `console` / `network` reads and `debug start -> stop` lease release.
+- Fixed native-dialog gate bypass when `tool.debug` (`replay`) triggers browser dialogs, missing `intent_wal` tracking on `download`/`dialog_accept`/`debug(replay)`/`navigate`/`reload`, and missing `EffectAwareAction` policies on `window_resize`/`emulate`/`tab_close`.
+- Fixed MCP error hints emitting CLI-only commands (such as `bsk ledger resolve`), missing `discard`/`exported` video cooperation actions, missing `navigate_back`/`forward`/`dialog_*` debug evidence classification, missing audit labels, and `recipe` `session_gone` detection of `session_stopped`/`no_active_session`.
+- Preserved user window focus on macOS and Linux/X11 Chromium when creating or
+  initializing background Agent Windows and tabs (`chromeAgentWindowApi.create`
+  seeding an inactive tab via `tabId` on Linux while excluding active or
+  starting Agent Windows from donor selection, and `tool.tab_create` /
+  `ensureActiveTab` creating inactive tabs before activating via
+  `chrome.tabs.update`, closing orphan tabs or claiming cleanup failures into
+  `agentCreatedTabs`), enabled the Aura screencast compositor keepalive (and
+  full-page stale-frame guard) on headed Linux and Windows across `screenshot`
+  and `screenshot --full-page` on unselected tabs and unfocused/occluded or
+  minimized Agent Windows (skipping `HeadlessChrome/`), and made
+  `parsePngDimensions` charset-independent when bundled (#731, #732).
+- Preserved foreground window focus during native pointer interactions (`click`,
+  `drag`, `download`, and `upload`) in background Linux Agent Windows, ordered
+  CDP focus emulation, temporary `about:blank` tab unselection, and background
+  lease visibility checks so shared tabs do not emit spurious `blur` events,
+  claimed temporary tabs to prevent leaked `about:blank` fallback routing, and
+  rechecked focus after transient X11 events when restoring task popup focus or
+  routing an external link (#731, #732).
+- Accepted hyphen-prefixed base64url local `device_id` values (`Bytes<16>`) in
+  `bsk daemon revoke`, `bsk daemon rotate`, and `bsk daemon pair --replace`
+  without requiring `--`, while still rejecting malformed hyphenated flags at
+  CLI parse time (#732).
+- Failed closed with `invalid_params` when cooperation action metadata
+  (`context_id`, `depends_on`, `observation_id`, `expect`) is supplied to
+  unguarded CLI or MCP commands while stripping auxiliary follow-up RPCs inside
+  multi-phase commands (`open`, `step`, `upload`, `download`, and
+  `screenshot --full-page`), and re-verified `--expect` business conditions in
+  `CooperationController` (`prepare` — including `primaryEffect` hover/focus
+  steps — and `beginDomMutation` before marking `nativeInputStarted`) under
+  `target` policy so last-moment DOM mutations fail closed before the committing
+  press or scripted mutation (#731, #732).
 - VOM tree folding (`shouldSkipRedundantRefChildren` and `renderTreeRows`) preserves
   independent interactive descendants under named interactive controls (such as Vue 3 +
   Element Plus nested `<el-sub-menu>` popups inside a parent `menuitem` or custom ARIA
@@ -19,9 +93,31 @@ determines which versions can connect.
   passive inner wrappers, inherited `cursor: pointer` / click-skin descendants, and native
   `<input>` / `<textarea>` / `<select>` controls folded without duplicate refs; added
   required pre-release audit scenario `EDGE-NESTED-MENU-REFS`.
+- Structured list extraction (`extract list`) collects slot-assigned items and default
+  item links (`url`) across open Shadow DOM `<slot>` projections while preserving rendered
+  slot order, closed-`<details>` hidden row positions, nested-list item and link ownership,
+  visibility checks, and collection limits ([#588](https://github.com/Tencent/BrowserSkill/issues/588),
+  [#612](https://github.com/Tencent/BrowserSkill/pull/612)); added required pre-release
+  audit scenario `EDGE-SLOTTED-LIST-EXTRACT`.
+- Structured extraction (`extract table`, `extract list`, and `extract discover`) applies
+  computed CSS `text-transform` (`uppercase` and `lowercase`) and rendered locale casing
+  rules to visible non-sensitive `<input>` and `<textarea>` values while preserving browser
+  UA `text-transform: none` defaults and byte-budget accounting (follow-up to
+  [#613](https://github.com/Tencent/BrowserSkill/pull/613)).
 - Recording a contenteditable editor keeps the line breaks the person typed, so a
   multi-line edit replays with its lines instead of collapsing into one
   ([#594](https://github.com/Tencent/BrowserSkill/issues/594)).
+
+### Removed
+
+- Removed dead write-only `apps/extension/src/lib/sessions-live-flag.ts` (`bh.sessions_live` / `SESSIONS_LIVE_FLAG_KEY`) and ineffective Isolated World `history.pushState` / `history.replaceState` monkey-patching in `apps/extension/src/content/record-capture.ts`.
+- Removed `reattachIfSoftDetached`, `reconcileSoftDetachedFrames`, and `resolveTarget` compensation hooks from `CdpRunner`, `RefStore.remapChildFrameSessions`, partial hand-written `CdpRunner` wrapper object literals (replaced with full `delegateCdpRunner` delegation), and isolated default `new ChromiumCdp()` fallback instances outside `background.ts`.
+- Removed deprecated `TraceV2` recording types/converters (retaining `TraceV3` only), all 9 legacy `1.x` `Feature::*` compatibility gates, extension/daemon `"1.6"`/`LEGACY_MIN_COMPATIBLE_PEER` shims, duplicate `DragParams.observation_id` / legacy drag modes, and duplicate `wire_*` runtime validators from generated TypeScript artifacts.
+- Retired and removed `packages/dsh-plugin-browserskill`, its standalone release
+  workflow, and DSH-specific test shims; DeepSeek Harness now uses the standard
+  `bsk` CLI and `bsk mcp` server, with in-flight MCP cancellation, cooperation
+  settlement, CLI video export, and dynamic-reading browser regressions migrated
+  to `bsk` CLI and `bsk mcp` (#731, #732).
 
 ## [0.5.0] - 2026-11-12
 

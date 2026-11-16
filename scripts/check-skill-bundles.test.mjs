@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateSkillDirectory } from "../packages/dsh-plugin-browserskill/scripts/validate-skill.mjs";
+import { validateSkillDirectory } from "./lib/validate-skill.mjs";
 
 function fixture(t, files) {
   const root = mkdtempSync(join(tmpdir(), "bsk-skill-validation-"));
@@ -50,23 +50,20 @@ test("LF and CRLF multiline metadata agree without changing resource bytes", (t)
   }
 });
 
-test("both authored skill packages validate in LF and CRLF checkouts", (t) => {
-  for (const [path, maxEntryBytes] of [
-    ["crates/bsk-cli/skill", 2_000],
-    ["packages/dsh-plugin-browserskill/skill", 4_500],
-  ]) {
-    const original = validateSkillDirectory(fileURLToPath(new URL(`../${path}`, import.meta.url)), {
-      maxEntryBytes,
-    });
-    for (const newline of ["\n", "\r\n"]) {
-      const files = Object.fromEntries(
-        [...original.files].map(([name, content]) => [name, content.replace(/\r?\n/g, newline)]),
-      );
-      const skill = validateSkillDirectory(fixture(t, files), { maxEntryBytes });
-      assert.equal(skill.name, original.name);
-      assert.equal(skill.description, original.description);
-      assert.deepEqual(Object.fromEntries(skill.files), files);
-    }
+test("canonical skill package validates in LF and CRLF checkouts", (t) => {
+  const maxEntryBytes = 2_000;
+  const original = validateSkillDirectory(
+    fileURLToPath(new URL("../crates/bsk-cli/skill", import.meta.url)),
+    { maxEntryBytes },
+  );
+  for (const newline of ["\n", "\r\n"]) {
+    const files = Object.fromEntries(
+      [...original.files].map(([name, content]) => [name, content.replace(/\r?\n/g, newline)]),
+    );
+    const skill = validateSkillDirectory(fixture(t, files), { maxEntryBytes });
+    assert.equal(skill.name, original.name);
+    assert.equal(skill.description, original.description);
+    assert.deepEqual(Object.fromEntries(skill.files), files);
   }
 });
 
@@ -89,20 +86,4 @@ test("enforces entry point budget independently of reference size", (t) => {
   });
   assert.doesNotThrow(() => validateSkillDirectory(root, { maxEntryBytes: 500 }));
   assert.throws(() => validateSkillDirectory(root, { maxEntryBytes: 10 }), /budget/);
-});
-
-test("checks the DSH tool contract in deferred files as well as the entry point", (t) => {
-  for (const reference of [
-    "Run bsk click",
-    "```sh\ncommand\n```",
-    "browser_unknown({})",
-    "browser_session({})",
-    "bsk_unknown({})",
-  ]) {
-    const root = fixture(t, {
-      "SKILL.md": `${metadata}bsk_session [details](references/details.md)`,
-      "references/details.md": reference,
-    });
-    assert.throws(() => validateSkillDirectory(root, { browserTools: ["bsk_session"] }));
-  }
 });

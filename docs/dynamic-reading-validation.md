@@ -39,7 +39,7 @@ failure cannot be reconstructed from its historical record alone.
 ## Deterministic browser boundaries
 
 The local fixture continuously updates text, carousel DOM/class/style, Canvas
-paint, video poster attributes and an advertising iframe. CLI, MCP and DSH each
+paint, video poster attributes and an advertising iframe. CLI and MCP each
 complete a delayed read → decision → input → result workflow. Regression checks
 cover these observable boundaries:
 
@@ -71,7 +71,6 @@ The original completed full checks on the 0.4.2-based implementation were:
 
 - Rust workspace: 1036 passed, 1 ignored; formatting and clippy passed.
 - Extension: 3731 passed, 425 conditional skips; TypeScript passed.
-- DSH: 714 passed, 10 conditional skips; TypeScript passed.
 - VOM: 160 passed; opt-in native Chrome live-text/extraction tests: 46 passed.
 - Eval harness: 12 cases / 21 routes validated, 46 tests passed.
 - Full headful cooperation suite: passed, including native human intervention,
@@ -91,7 +90,7 @@ After integrating main at 9d40afa7 (including plan), PR preparation reran:
 - Rust workspace: 1052 passed, 1 ignored; clippy and formatting passed.
 - Extension: 3731 passed, 425 conditional skips; TypeScript passed.
 - Repository Biome, canonical skill/package and bilingual changelog checks passed.
-- The delayed CLI/MCP/DSH browser workflow and the same CLI's plan passed again.
+- The delayed CLI/MCP browser workflow and the same CLI's plan passed again.
   OceanEngine crossed autoplay in all three trials and completed each selected
   pagination action; all three old pagination refs were refused before input.
 
@@ -121,15 +120,15 @@ Before the fixes, eight newly added cases reproduced these failures. Afterward:
   the main route revokes it despite the node and final URL being unchanged.
   This passes on both the first and a fresh attachment. Both native navigation
   tests pass and now run in CI.
-- The delayed dynamic CLI/MCP/DSH and plan workflows pass again (59 commands).
+- The delayed dynamic CLI/MCP and plan workflows pass again.
   These review rechecks use local fixtures; they do not claim another OceanEngine
   run or new video-decoding coverage.
 
 ## Reproduce
 
-Build the CLI and DSH plugin, then build the extension with
-BSK_DAEMON_WS_URL=ws://127.0.0.1:52923. Set BSK_COOP_CHROME to a Chromium executable
-and run `pnpm eval:browser:dynamic-read`. BSK_DYNAMIC_OCEAN=1 includes the real site;
+Build the CLI, then build the extension with
+`BSK_DAEMON_WS_URL=ws://127.0.0.1:52923`. Set `BSK_TEST_CHROME` to a Chromium executable
+and run `pnpm eval:browser:dynamic-read`. `BSK_DYNAMIC_OCEAN=1` includes the real site;
 BSK_DYNAMIC_ARTIFACTS chooses a new evidence directory. The runner owns cleanup
 and tests the same CLI's plan by default; BSK_DYNAMIC_PLAN_CLI can override it.
 The standard cooperation runner separately exercises native human/lifecycle cases.

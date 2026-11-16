@@ -10,7 +10,7 @@ import {
   type CdpRunner,
   isRpcError,
   type ResolvedTargetTab,
-  sendToCdpTarget,
+  sendToFrameHandle,
 } from "@/tools/shared";
 import { buildInPageRowAnchorSnippet } from "@/tools/vom/row-anchor-spec";
 import type { RpcError, RpcErrorReason } from "@/transport/types";
@@ -123,7 +123,8 @@ async function sample(
 ): Promise<Sample | RpcError> {
   const objectGroup = `action-check-${crypto.randomUUID()}`;
   const send = <T>(method: string, params: object) =>
-    sendToCdpTarget<T>(cdp, target.cdpTarget, method, params);
+    sendToFrameHandle<T>(cdp, target.handle, method, params);
+  const cleanup = cdp.resourceCleanup ?? cdp;
   try {
     const resolved = await send<{ object?: { objectId?: string } }>("DOM.resolveNode", {
       backendNodeId: target.backendNodeId,
@@ -163,7 +164,9 @@ async function sample(
     );
   } finally {
     // Navigation may already have released the execution context.
-    await send("Runtime.releaseObjectGroup", { objectGroup }).catch(() => {});
+    await sendToFrameHandle(cleanup, target.handle, "Runtime.releaseObjectGroup", {
+      objectGroup,
+    }).catch(() => {});
   }
 }
 

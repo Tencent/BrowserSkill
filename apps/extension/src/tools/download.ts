@@ -51,7 +51,7 @@ export async function handleDownload(
     let trigger: ReturnType<typeof pointerTransactionDeps> | undefined;
     const capture = await captureBrowserDownload({
       cdp: deps.cdp,
-      target: address.cdpTarget,
+      handle: address.handle,
       downloads: deps.downloads ?? chromeDownloadsApi,
       navigationTargets: deps.navigationTargets ?? chromeNavigationTargetsApi,
       browserRelativeDir: params.browser_relative_dir,
@@ -68,7 +68,13 @@ export async function handleDownload(
           ctx,
           target.tabId,
           // Focus cleanup must remain available after the click trigger is retired.
-          { cdp: deps.cdp, signal, deadline, registerCleanup: clickDeps.registerClickCleanup },
+          {
+            cdp: deps.cdp,
+            signal,
+            deadline,
+            preserveWindowFocus: true,
+            registerCleanup: clickDeps.registerClickCleanup,
+          },
           (input) =>
             clickResolvedTarget(ctx, address, {}, clickDeps, () => {
               input.markSent();

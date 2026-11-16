@@ -1,5 +1,5 @@
 //! One bounded mouse gesture, with element identity at both ends.
-use super::{JavaScriptDialogInfo, KeyModifier, MouseButton};
+use super::{ActionExpectation, JavaScriptDialogInfo, KeyModifier, MouseButton};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -20,13 +20,6 @@ pub struct DragTarget {
     pub offset: Option<DragPoint>,
 }
 
-pub const CLICK_MOVE_CLICK_PROTOCOL: &str = "1.7";
-
-pub fn supports_click_move_click(protocol: &str) -> bool {
-    crate::compatibility::Feature::ClickMoveClick
-        .supports(crate::compatibility::Peer::Extension, protocol)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum DragMode {
@@ -35,6 +28,7 @@ pub enum DragMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DragParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,10 +55,30 @@ pub struct DragParams {
     #[schemars(range(min = 1, max = 5000))]
     pub duration_ms: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u32>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -97,14 +111,5 @@ mod tests {
         assert_eq!(serde_json::to_value(params).unwrap(), new);
         new["mode"] = "auto".into();
         assert!(serde_json::from_value::<DragParams>(new).is_err());
-    }
-    #[test]
-    fn click_mode_requires_the_new_wire_semantics() {
-        for old in ["", "garbage", "1.0", "1.6", "2.0"] {
-            assert!(!supports_click_move_click(old));
-        }
-        for new in ["1.7", "1.8"] {
-            assert!(supports_click_move_click(new));
-        }
     }
 }

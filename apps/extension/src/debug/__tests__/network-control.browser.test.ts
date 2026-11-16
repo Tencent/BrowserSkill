@@ -16,7 +16,7 @@ type Send = <T = Record<string, unknown>>(
 ) => Promise<T>;
 type Event = { sessionId?: string; method: string; params?: Record<string, unknown> };
 type Listener = (source: CdpDebuggee, method: string, params: unknown) => void;
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser network controls", () => {
   it("modifies actual traffic, mocks/blocks without server hits, links replay once and cleans up pending rules", async () => {
     const hits: { url: string; body: string; header?: string }[] = [];
     const server = createServer((req, res) => {
@@ -58,7 +58,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", 
       let onEvent: ((event: Event) => void) | undefined;
       await withChrome(
         {
-          executable: process.env.BSK_CLICK_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30000,

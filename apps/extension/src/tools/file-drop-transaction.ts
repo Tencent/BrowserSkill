@@ -2,11 +2,12 @@
 // events are sent to the target that owns the node: root targets use top-level
 // coordinates, while OOPIF targets require coordinates local to their session.
 
+import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
 import type { RpcError, TransferEffectState } from "@/transport/types";
-import { transferError } from "./errors";
+import { rpcError, transferError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
 import type { ResolvedActionTarget } from "./interaction";
-import { type CdpRunner, isRpcError, sendToCdpTarget } from "./shared";
+import { type CdpRunner, isRpcError, sendToFrameHandle } from "./shared";
 import { pointBelongsToTarget } from "./target-hit";
 import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 
@@ -88,10 +89,7 @@ export async function uploadThroughFileDrop(
   options: FileDropTransactionOptions,
 ): Promise<FileDropTransactionResult | RpcError> {
   const deadline = Date.now() + options.timeoutMs;
-  const rawTarget = options.actionTarget.cdpTarget;
-  let target = options.cdp.resolveTarget?.(rawTarget) ?? rawTarget;
-  let resolvedActionTarget =
-    target === rawTarget ? options.actionTarget : { ...options.actionTarget, cdpTarget: target };
+  const handle = options.actionTarget.handle;
   const objectGroup = `bsk-file-drop-${crypto.randomUUID()}`;
   const dragData: DragData = {
     items: [],
@@ -112,31 +110,11 @@ export async function uploadThroughFileDrop(
   );
 
   try {
-    releaseTabAttachment = options.cdp.retainTabAttachment?.(rawTarget.tabId);
-    if (options.cdp.reattachIfSoftDetached) {
-      await waitBounded(
-        options.cdp.reattachIfSoftDetached(rawTarget.tabId),
-        deadline,
-        options.signal,
-        "reattaching file-drop target timed out",
-      );
-      target = options.cdp.resolveTarget?.(rawTarget) ?? rawTarget;
-      resolvedActionTarget =
-        target === rawTarget
-          ? options.actionTarget
-          : { ...options.actionTarget, cdpTarget: target };
-    }
+    releaseTabAttachment = options.cdp.retainTabAttachment?.(handle.tabId);
     const geometry = await waitBounded(
-      resolveNodeGeometry(
-        options.cdp,
-        options.actionTarget.tab.tabId,
-        {
-          target,
-          backendNodeId: options.actionTarget.backendNodeId,
-          ...(options.actionTarget.frameId ? { frameId: options.actionTarget.frameId } : {}),
-        },
-        { scrollIntoView: true },
-      ),
+      resolveNodeGeometry(options.cdp, options.actionTarget.tab.tabId, handle, {
+        scrollIntoView: true,
+      }),
       deadline,
       options.signal,
       "resolving file-drop target timed out",
@@ -152,7 +130,7 @@ export async function uploadThroughFileDrop(
       try {
         try {
           const belongs = await waitBounded(
-            pointBelongsToTarget(options.cdp, resolvedActionTarget, point.x, point.y, objectGroup),
+            pointBelongsToTarget(options.cdp, { handle }, point.x, point.y, objectGroup),
             deadline,
             options.signal,
             "verifying file-drop target timed out",
@@ -167,6 +145,13 @@ export async function uploadThroughFileDrop(
             );
           }
         } catch (error) {
+          if (isStaleFrameHandleError(error)) {
+            return enrichFailure(
+              rpcError("not_found", "ref_not_found", error.message),
+              "none",
+              "resolve_target",
+            );
+          }
           return failure(
             error instanceof BoundedWaitError ? "timeout" : "cdp_failed",
             "file_drop_target_unavailable",
@@ -183,7 +168,7 @@ export async function uploadThroughFileDrop(
           try {
             if (type === "dragEnter") dragStarted = true;
             await waitBounded(
-              sendToCdpTarget(options.cdp, target, "Input.dispatchDragEvent", {
+              sendToFrameHandle(options.cdp, handle, "Input.dispatchDragEvent", {
                 type,
                 x: point.x,
                 y: point.y,
@@ -196,6 +181,13 @@ export async function uploadThroughFileDrop(
           } catch (error) {
             const unsupported = methodUnavailable(error);
             if (type === "dragEnter" && !(error instanceof BoundedWaitError)) dragStarted = false;
+            if (isStaleFrameHandleError(error) && type === "dragEnter") {
+              return enrichFailure(
+                rpcError("not_found", "ref_not_found", error.message),
+                "none",
+                phase,
+              );
+            }
             return failure(
               unsupported
                 ? "unsupported"
@@ -213,7 +205,7 @@ export async function uploadThroughFileDrop(
         try {
           dropSent = true;
           await waitBounded(
-            sendToCdpTarget(options.cdp, target, "Input.dispatchDragEvent", {
+            sendToFrameHandle(options.cdp, handle, "Input.dispatchDragEvent", {
               type: "drop",
               x: point.x,
               y: point.y,
@@ -238,7 +230,7 @@ export async function uploadThroughFileDrop(
         if (dragStarted && !dropSent) {
           try {
             await waitBounded(
-              sendToCdpTarget(options.cdp, target, "Input.dispatchDragEvent", {
+              sendToFrameHandle(options.cdp, handle, "Input.dispatchDragEvent", {
                 type: "dragCancel",
                 x: dragPoint.x,
                 y: dragPoint.y,
@@ -256,19 +248,30 @@ export async function uploadThroughFileDrop(
     });
     return outcome;
   } catch (error) {
-    outcome = failure(
-      error instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-      "file_drop_target_unavailable",
-      messageOf(error),
-      "none",
-      "resolve_target",
-    );
+    outcome = isStaleFrameHandleError(error)
+      ? enrichFailure(
+          rpcError("not_found", "ref_not_found", error.message),
+          "none",
+          "resolve_target",
+        )
+      : failure(
+          error instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+          "file_drop_target_unavailable",
+          messageOf(error),
+          "none",
+          "resolve_target",
+        );
     return outcome;
   } finally {
     try {
       try {
         await waitBounded(
-          sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
+          sendToFrameHandle(
+            options.cdp.resourceCleanup ?? options.cdp,
+            handle,
+            "Runtime.releaseObjectGroup",
+            { objectGroup },
+          ),
           Date.now() + CLEANUP_TIMEOUT_MS,
           undefined,
           "releasing file-drop object group timed out",
@@ -281,7 +284,7 @@ export async function uploadThroughFileDrop(
         ? (outcome.data?.effect_state as TransferEffectState | undefined)
         : "committed";
       if (effect === "unknown" || cleanupFailed) {
-        await options.cdp.detach?.(target.tabId);
+        await options.cdp.detach?.(handle.tabId);
       }
       if (cleanupFailed && isRpcError(outcome)) {
         outcome.data = { ...outcome.data, cleanup_state: "failed" };

@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_WINDOW_CHROME; the browser, profile and extension are isolated.
+// Opt in with BSK_TEST_CHROME; the browser, profile and extension are isolated.
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -24,7 +24,7 @@ async function poll<T>(read: () => Promise<T | undefined | false>): Promise<T> {
   throw new Error("Window resize browser fixture timed out");
 }
 
-describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("window resize in a real browser", () => {
   it("verifies active-tab resizes, zoom rounding and pinned viewports", async () => {
     const extension = await mkdtemp(path.join(tmpdir(), "bsk-resize-extension-"));
     await writeFile(
@@ -54,7 +54,7 @@ describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser
       );
       await withChrome(
         {
-          executable: process.env.BSK_WINDOW_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           extensionPath: extension,

@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_SCROLL_CHROME=/path/to/chrome. Uses an isolated browser/profile.
+// Opt in with BSK_TEST_CHROME=/path/to/chrome. Uses an isolated browser/profile.
 import { describe, expect, it } from "vitest";
 import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
 import { pointerTargetValidator } from "@/cooperation/pointer-target";
@@ -30,7 +30,7 @@ async function withBrowser(
     ).href
   );
   await withChrome(
-    { executable: process.env.BSK_SCROLL_CHROME, deviceScale, zoom },
+    { executable: process.env.BSK_TEST_CHROME, deviceScale, zoom },
     async (send: Send) => run(await harness(send)),
   );
 }
@@ -94,7 +94,7 @@ async function harness(send: Send) {
     ctx.refStore.set("e1", backendNodeId, {
       tabId: 4,
       frameId: frame.frameId,
-      cdpSessionId: frame.target.sessionId,
+      loaderId: frame.loaderId,
     });
   const ref = async (frame: CdpFrame, selector = "#probe") => {
     const { executionContextId } = await send<{ executionContextId: number }>(
@@ -188,7 +188,7 @@ function expectRect(actual: unknown, expected: ViewportRect) {
     expect(Math.abs((actual as ViewportRect)[key] - expected[key]), key).toBeLessThan(2);
 }
 
-describe.skipIf(!process.env.BSK_SCROLL_CHROME)("real browser scroll-to", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser scroll-to", () => {
   it("measures scroll visibility in a background task without activating it", async () => {
     await withBrowser(async (h) => {
       await h.evaluate(
@@ -326,26 +326,22 @@ describe.skipIf(!process.env.BSK_SCROLL_CHROME)("real browser scroll-to", () => 
         for (const frame of frames) {
           const backendNodeId = await h.ref(frame);
           const result = await h.scroll({ ref: "e1" });
-          const geometry = await resolveNodeGeometry(h.cdp, 4, {
-            target: frame.target,
-            backendNodeId,
+          const handle = {
+            tabId: 4,
             frameId: frame.frameId,
-          });
+            loaderId: frame.loaderId ?? "",
+            backendNodeId,
+          };
+          const geometry = await resolveNodeGeometry(h.cdp, 4, handle);
           expect(isRpcError(geometry)).toBe(false);
           if (isRpcError(geometry)) throw new Error(geometry.message);
-          await pointerTargetValidator(h.cdp)(
-            { tabId: 4, cdpTarget: frame.target, backendNodeId, frameId: frame.frameId },
-            geometry.actionPoint,
-          );
+          await pointerTargetValidator(h.cdp)({ handle }, geometry.actionPoint);
           if (frame.target.sessionId) {
             await h.evaluate(
               "window.frameCover=document.createElement('div');frameCover.style='position:fixed;inset:0;z-index:99999;background:white';document.body.append(frameCover)",
             );
             await expect(
-              pointerTargetValidator(h.cdp)(
-                { tabId: 4, cdpTarget: frame.target, frameId: frame.frameId, backendNodeId },
-                geometry.actionPoint,
-              ),
+              pointerTargetValidator(h.cdp)({ handle }, geometry.actionPoint),
             ).rejects.toThrow(/covered/);
             await h.evaluate("frameCover.remove()");
           }
@@ -397,7 +393,7 @@ describe.skipIf(!process.env.BSK_SCROLL_CHROME)("real browser scroll-to", () => 
   }, 30_000);
 });
 
-describe.skipIf(!process.env.BSK_SCROLL_CHROME)("native target hit testing", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("native target hit testing", () => {
   it.each([
     { zoom: 1, dpr: 1 },
     { zoom: 1.25, dpr: 2 },
@@ -424,10 +420,12 @@ describe.skipIf(!process.env.BSK_SCROLL_CHROME)("native target hit testing", () 
           const [frame] = await h.loadFrames();
           const backendNodeId = await h.ref(frame);
           const target = {
-            tabId: 4,
-            cdpTarget: frame.target,
-            frameId: frame.frameId,
-            backendNodeId,
+            handle: {
+              tabId: 4,
+              frameId: frame.frameId,
+              loaderId: frame.loaderId ?? "",
+              backendNodeId,
+            },
           };
           const verify = pointerTargetValidator(h.cdp);
           const point = await h.evaluate<{ x: number; y: number }>(
@@ -497,7 +495,14 @@ describe.skipIf(!process.env.BSK_SCROLL_CHROME)("native target hit testing", () 
         );
         const [frame] = await h.loadFrames();
         const backendNodeId = await h.ref(frame);
-        const target = { tabId: 4, cdpTarget: frame.target, frameId: frame.frameId, backendNodeId };
+        const target = {
+          handle: {
+            tabId: 4,
+            frameId: frame.frameId,
+            loaderId: frame.loaderId ?? "",
+            backendNodeId,
+          },
+        };
         const verify = pointerTargetValidator(h.cdp);
         await h.evaluate("scrollTo(600,900)");
         const point = await h.evaluate<{ x: number; y: number }>(

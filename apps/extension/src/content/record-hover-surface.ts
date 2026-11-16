@@ -1,3 +1,5 @@
+import { isExtensionOverlayElement } from "./dom-primitives";
+
 export interface HoverSurfaceDecision {
   related: boolean;
   reason?: string;
@@ -49,6 +51,7 @@ function elementTokenText(el: Element): string {
 }
 
 export function isRecognizedHoverSurfaceElement(el: Element): boolean {
+  if (isExtensionOverlayElement(el)) return false;
   if (el.matches(HOVER_SURFACE_SELECTOR)) return true;
   const tokenText = elementTokenText(el);
   if (HOVER_SURFACE_WORD_RE.test(tokenText) && !HOVER_SURFACE_ITEM_RE.test(tokenText)) {
@@ -78,7 +81,7 @@ export function closestRecognizedHoverSurface(element: Element): Element | null 
 }
 
 export function isPositionedFloatingElement(el: Element): boolean {
-  if (!(el instanceof HTMLElement)) return false;
+  if (!(el instanceof HTMLElement) || isExtensionOverlayElement(el)) return false;
   const style = getComputedStyle(el);
   if (style.position !== "absolute") return false;
   if (style.pointerEvents === "none" || style.visibility === "hidden" || style.display === "none") {

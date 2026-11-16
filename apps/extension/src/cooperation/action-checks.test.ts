@@ -14,7 +14,8 @@ const tab = { tabId: 7, windowId: 100, active: true };
 const target = {
   tab,
   backendNodeId: 4,
-  cdpTarget: { tabId: 7, sessionId: "child" },
+  frameId: "child",
+  handle: { tabId: 7, frameId: "child", loaderId: "child-loader", backendNodeId: 4 },
   usedRef: "e1",
 };
 const session = {} as SessionContext;
@@ -23,7 +24,7 @@ function fixture(html = '<button id="buy">Buy</button>') {
   document.body.innerHTML = html;
   const element = document.body.firstElementChild!;
   vi.spyOn(element, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
-  const sendToTarget = vi.fn(async (_target, method, params) => {
+  const sendToFrame = vi.fn(async (_handle, method, params) => {
     if (method === "DOM.resolveNode") return { object: { objectId: "node" } };
     if (method === "Runtime.callFunctionOn") {
       const read = new Function(`return (${params.functionDeclaration})`)();
@@ -38,9 +39,9 @@ function fixture(html = '<button id="buy">Buy</button>') {
     }
     return {};
   });
-  const cdp = { send: vi.fn(), sendToTarget } as unknown as CdpRunner;
+  const cdp = { send: vi.fn(), sendToFrame } as unknown as CdpRunner;
   vi.mocked(resolveActionTarget).mockResolvedValue(target);
-  return { cdp, element, sendToTarget };
+  return { cdp, element, sendToFrame };
 }
 
 beforeEach(() => {
@@ -109,8 +110,8 @@ describe("explicit action conditions", () => {
       "precondition",
       true,
     );
-    expect(f.sendToTarget.mock.calls.every(([node]) => node.sessionId === "child")).toBe(true);
-    expect(f.sendToTarget.mock.calls.at(-1)?.[1]).toBe("Runtime.releaseObjectGroup");
+    expect(f.sendToFrame.mock.calls.every(([node]) => node.frameId === "child")).toBe(true);
+    expect(f.sendToFrame.mock.calls.at(-1)?.[1]).toBe("Runtime.releaseObjectGroup");
   });
 
   it("checks a virtualized row's explicit record identity even when the DOM node persists", async () => {
@@ -160,7 +161,7 @@ describe("explicit action conditions", () => {
   ])("does not interpret a %s precondition target as a missing attribute", async (kind) => {
     const f = fixture();
     if (kind === "detached") f.element.remove();
-    else f.sendToTarget.mockResolvedValueOnce({});
+    else f.sendToFrame.mockResolvedValueOnce({});
     expect(
       await checkExpectations(f.cdp, session, tab, [
         { target: "@e1", field: "attribute", attribute: "data-pending", equals: null },
@@ -174,13 +175,13 @@ describe("explicit action conditions", () => {
         target: "@e1",
       },
     });
-    expect(f.sendToTarget.mock.calls.at(-1)?.[1]).toBe("Runtime.releaseObjectGroup");
+    expect(f.sendToFrame.mock.calls.at(-1)?.[1]).toBe("Runtime.releaseObjectGroup");
   });
 
   it.each(["detached", "unresolved"])("allows exists:false for a %s node", async (kind) => {
     const f = fixture();
     if (kind === "detached") f.element.remove();
-    else f.sendToTarget.mockResolvedValueOnce({});
+    else f.sendToFrame.mockResolvedValueOnce({});
     expect(
       await checkExpectations(f.cdp, session, tab, [
         { target: "@e1", field: "exists", equals: false },
@@ -243,7 +244,7 @@ describe("explicit action conditions", () => {
       },
     });
     expect(resolveActionTarget).toHaveBeenCalledOnce();
-    expect(f.sendToTarget).not.toHaveBeenCalled();
+    expect(f.sendToFrame).not.toHaveBeenCalled();
   });
 });
 
@@ -338,18 +339,18 @@ it.each([
   JSON.stringify({ code: -32000, message: "Could not find node with given id" }),
 ])("classifies a collected node as detached without redirecting or entering input: %s", async (message) => {
   const f = fixture();
-  f.sendToTarget.mockRejectedValueOnce(new Error(message));
+  f.sendToFrame.mockRejectedValueOnce(new Error(message));
   expect(await checkActionTarget(f.cdp, target, "tool.click")).toMatchObject({
     data: { reason: "target_detached", effect_state: "none", backend_node_id: 4 },
   });
-  expect(f.sendToTarget.mock.calls.map((call) => call[1])).toEqual([
+  expect(f.sendToFrame.mock.calls.map((call) => call[1])).toEqual([
     "DOM.resolveNode",
     "Runtime.releaseObjectGroup",
   ]);
 });
 it("keeps other CDP failures unavailable instead of declaring the node absent", async () => {
   const f = fixture();
-  f.sendToTarget.mockRejectedValueOnce(new Error("Session disconnected"));
+  f.sendToFrame.mockRejectedValueOnce(new Error("Session disconnected"));
   expect(await checkActionTarget(f.cdp, target, "tool.click")).toMatchObject({
     data: { reason: "target_unavailable" },
   });
@@ -367,7 +368,7 @@ describe("virtual-scroll row business-key guard", () => {
     `;
     const btn = document.getElementById("slot0")!;
     vi.spyOn(btn, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
-    const sendToTarget = vi.fn(async (_target, method, params) => {
+    const sendToFrame = vi.fn(async (_target, method, params) => {
       if (method === "DOM.resolveNode") return { object: { objectId: "slot0-obj" } };
       if (method === "Runtime.callFunctionOn") {
         const read = new Function(`return (${params.functionDeclaration})`)();
@@ -382,7 +383,7 @@ describe("virtual-scroll row business-key guard", () => {
       }
       return {};
     });
-    const cdp = { send: vi.fn(), sendToTarget } as unknown as CdpRunner;
+    const cdp = { send: vi.fn(), sendToFrame } as unknown as CdpRunner;
     const anchoredTarget = {
       ...target,
       usedRef: "e5",
@@ -391,12 +392,12 @@ describe("virtual-scroll row business-key guard", () => {
 
     // 1) Before virtual scroll recycling: passes with exactly 1 Runtime.callFunctionOn
     expect(await checkActionTarget(cdp, anchoredTarget, "tool.click")).toBeUndefined();
-    expect(sendToTarget.mock.calls.filter(([, m]) => m === "Runtime.callFunctionOn")).toHaveLength(
+    expect(sendToFrame.mock.calls.filter(([, m]) => m === "Runtime.callFunctionOn")).toHaveLength(
       1,
     );
 
     // 2) Virtual list recycles the exact same DOM row + button in place for TK-1017
-    sendToTarget.mockClear();
+    sendToFrame.mockClear();
     const row0 = btn.parentElement!;
     row0.setAttribute("data-ticket-id", "TK-1017");
     row0.querySelector("span")!.textContent = "TK-1017 | P3 | 常规变更任务-1017";
@@ -416,7 +417,7 @@ describe("virtual-scroll row business-key guard", () => {
       },
     });
     // Zero extra CDP roundtrips: still a single Runtime.callFunctionOn!
-    expect(sendToTarget.mock.calls.map(([, m]) => m)).toEqual([
+    expect(sendToFrame.mock.calls.map(([, m]) => m)).toEqual([
       "DOM.resolveNode",
       "Runtime.callFunctionOn",
       "Runtime.releaseObjectGroup",
@@ -449,7 +450,7 @@ describe("virtual-scroll row business-key guard", () => {
     } as DOMRect);
     const btn = document.getElementById("act")!;
     vi.spyOn(btn, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
-    const sendToTarget = vi.fn(async (_target, method, params) => {
+    const sendToFrame = vi.fn(async (_target, method, params) => {
       if (method === "DOM.resolveNode") return { object: { objectId: "act-obj" } };
       if (method === "Runtime.callFunctionOn") {
         const read = new Function(`return (${params.functionDeclaration})`)();
@@ -464,7 +465,7 @@ describe("virtual-scroll row business-key guard", () => {
       }
       return {};
     });
-    const cdp = { send: vi.fn(), sendToTarget } as unknown as CdpRunner;
+    const cdp = { send: vi.fn(), sendToFrame } as unknown as CdpRunner;
     const anchoredTarget = {
       ...target,
       usedRef: "e9",

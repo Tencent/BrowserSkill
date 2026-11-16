@@ -3,10 +3,11 @@
 // chooser events and a frame-scoped DOM probe are independent input-location
 // signals, so event delivery is not required for standard file inputs.
 
+import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
 import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
-import { transferError } from "./errors";
+import { rpcError, transferError } from "./errors";
 import type { ResolvedActionTarget } from "./interaction";
-import { type CdpRunner, isRpcError, sendToCdpTarget } from "./shared";
+import { type CdpRunner, isRpcError, sendToFrameHandle } from "./shared";
 import { BoundedWaitError, remainingMs, waitBounded } from "./transfer-transaction";
 
 const CLEANUP_TIMEOUT_MS = 1_000;
@@ -75,13 +76,6 @@ function enrichFailure(
   };
 }
 
-function sameTarget(
-  source: { tabId?: number; sessionId?: string },
-  target: { tabId: number; sessionId?: string },
-): boolean {
-  return source.tabId === target.tabId && source.sessionId === target.sessionId;
-}
-
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
   await waitBounded(
     new Promise((resolve) => setTimeout(resolve, ms)),
@@ -92,13 +86,14 @@ async function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 async function callOnTrigger<T = RuntimeReply>(
-  options: FileInputTransactionOptions,
+  cdp: CdpRunner,
+  handle: ResolvedActionTarget["handle"],
   objectId: string,
   functionDeclaration: string,
   args: unknown[],
   returnByValue: boolean,
 ): Promise<T> {
-  return sendToCdpTarget<T>(options.cdp, options.actionTarget.cdpTarget, "Runtime.callFunctionOn", {
+  return sendToFrameHandle<T>(cdp, handle, "Runtime.callFunctionOn", {
     objectId,
     functionDeclaration,
     arguments: args.map((value) => ({ value })),
@@ -111,15 +106,12 @@ export async function uploadThroughActivatedFileInput(
   options: FileInputTransactionOptions,
 ): Promise<FileInputTransactionResult | RpcError> {
   const deadline = Date.now() + options.timeoutMs;
-  const rawTarget = options.actionTarget.cdpTarget;
-  let target = options.cdp.resolveTarget?.(rawTarget) ?? rawTarget;
-  let resolvedOptions =
-    target === rawTarget
-      ? options
-      : { ...options, actionTarget: { ...options.actionTarget, cdpTarget: target } };
+  const handle = options.actionTarget.handle;
   const objectGroup = `bsk-upload-${crypto.randomUUID()}`;
   const stateKey = `__bskUpload_${crypto.randomUUID().replaceAll("-", "")}`;
   const chooserEvents: ChooserEvent[] = [];
+  let mockFrameKnown = !handle.frameId;
+  let mockFrameSessionId: string | undefined;
   let interceptionArmed = false;
   let probeArmed = false;
   let triggerObjectId: string | undefined;
@@ -134,30 +126,32 @@ export async function uploadThroughActivatedFileInput(
   );
 
   try {
-    releaseTabAttachment = options.cdp.retainTabAttachment?.(rawTarget.tabId);
-    chooserSubscription = options.cdp.onEvent?.((source, method, raw) => {
-      const expectedTarget = options.cdp.resolveTarget?.(target) ?? target;
-      if (method !== "Page.fileChooserOpened" || !sameTarget(source, expectedTarget)) return;
+    releaseTabAttachment = options.cdp.retainTabAttachment?.(handle.tabId);
+    chooserSubscription = options.cdp.onEvent?.(handle.tabId, (source, method, raw) => {
+      if (method !== "Page.fileChooserOpened") return;
+      const matchesSource = options.cdp.isEventFromFrame
+        ? options.cdp.isEventFromFrame(source, handle)
+        : source.tabId === handle.tabId &&
+          (!mockFrameKnown || (source.sessionId ?? undefined) === mockFrameSessionId);
+      if (!matchesSource) return;
       const event = raw as ChooserEvent;
       chooserEvents.push(event);
     });
 
     try {
-      if (rawTarget.sessionId && options.cdp.reconcileSoftDetachedFrames) {
-        await waitBounded(
-          options.cdp.reconcileSoftDetachedFrames(rawTarget.tabId),
+      if (!options.cdp.isEventFromFrame && handle.frameId && options.cdp.getFrameGraph) {
+        const graph = await waitBounded(
+          options.cdp.getFrameGraph(handle.tabId),
           deadline,
           options.signal,
-          "reconciling upload frame target timed out",
+          "resolving upload frame target timed out",
         );
-        target = options.cdp.resolveTarget?.(rawTarget) ?? rawTarget;
-        resolvedOptions =
-          target === rawTarget
-            ? options
-            : { ...options, actionTarget: { ...options.actionTarget, cdpTarget: target } };
+        mockFrameSessionId = graph.frames.find((entry) => entry.frameId === handle.frameId)?.target
+          .sessionId;
+        mockFrameKnown = true;
       }
       await waitBounded(
-        sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
+        sendToFrameHandle(options.cdp, handle, "Page.setInterceptFileChooserDialog", {
           enabled: true,
         }),
         deadline,
@@ -166,21 +160,27 @@ export async function uploadThroughActivatedFileInput(
       );
       interceptionArmed = true;
     } catch (err) {
-      outcome = transferFailure(
-        err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-        "file_input_probe_failed",
-        err instanceof Error ? err.message : String(err),
-        "none",
-        "arm_interception",
-      );
+      outcome = isStaleFrameHandleError(err)
+        ? enrichFailure(
+            rpcError("not_found", "ref_not_found", err.message),
+            "none",
+            "arm_interception",
+          )
+        : transferFailure(
+            err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+            "file_input_probe_failed",
+            err instanceof Error ? err.message : String(err),
+            "none",
+            "arm_interception",
+          );
       return outcome;
     }
 
     try {
       const resolved = await waitBounded(
-        sendToCdpTarget<{ object?: { objectId?: string } }>(
+        sendToFrameHandle<{ object?: { objectId?: string } }>(
           options.cdp,
-          target,
+          handle,
           "DOM.resolveNode",
           {
             backendNodeId: options.actionTarget.backendNodeId,
@@ -196,7 +196,8 @@ export async function uploadThroughActivatedFileInput(
 
       const armed = await waitBounded(
         callOnTrigger<RuntimeReply>(
-          resolvedOptions,
+          options.cdp,
+          handle,
           triggerObjectId,
           `function(key) {
             const doc = this.ownerDocument;
@@ -229,13 +230,19 @@ export async function uploadThroughActivatedFileInput(
       }
       probeArmed = true;
     } catch (err) {
-      outcome = transferFailure(
-        err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-        "file_input_probe_failed",
-        err instanceof Error ? err.message : String(err),
-        "none",
-        "arm_input_probe",
-      );
+      outcome = isStaleFrameHandleError(err)
+        ? enrichFailure(
+            rpcError("not_found", "ref_not_found", err.message),
+            "none",
+            "arm_input_probe",
+          )
+        : transferFailure(
+            err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+            "file_input_probe_failed",
+            err instanceof Error ? err.message : String(err),
+            "none",
+            "arm_input_probe",
+          );
       return outcome;
     }
 
@@ -268,7 +275,8 @@ export async function uploadThroughActivatedFileInput(
       while (Date.now() < activationDeadline) {
         if (chooserEvents.length > 0) break;
         const reply = await callOnTrigger<RuntimeReply>(
-          resolvedOptions,
+          options.cdp,
+          handle,
           triggerObjectId,
           `function(key) {
             const state = this.ownerDocument.defaultView?.[key];
@@ -341,7 +349,8 @@ export async function uploadThroughActivatedFileInput(
           return outcome;
         }
         const input = await callOnTrigger<RuntimeReply>(
-          resolvedOptions,
+          options.cdp,
+          handle,
           triggerObjectId,
           `function(key) { return this.ownerDocument.defaultView?.[key]?.inputs[0]; }`,
           [stateKey],
@@ -350,9 +359,9 @@ export async function uploadThroughActivatedFileInput(
         const inputError = runtimeError(input, "failed to resolve activated file input object");
         if (inputError) throw inputError;
         if (!input.result?.objectId) throw new Error("activated file input returned no objectId");
-        const described = await sendToCdpTarget<{ node?: { backendNodeId?: number } }>(
+        const described = await sendToFrameHandle<{ node?: { backendNodeId?: number } }>(
           options.cdp,
-          target,
+          handle,
           "DOM.describeNode",
           { objectId: input.result.objectId },
         );
@@ -373,7 +382,7 @@ export async function uploadThroughActivatedFileInput(
 
       try {
         await waitBounded(
-          sendToCdpTarget(options.cdp, target, "DOM.setFileInputFiles", {
+          sendToFrameHandle(options.cdp, handle, "DOM.setFileInputFiles", {
             files: options.files,
             backendNodeId,
           }),
@@ -382,25 +391,33 @@ export async function uploadThroughActivatedFileInput(
           "setting file input files timed out",
         );
       } catch (err) {
-        outcome = transferFailure(
-          err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-          "set_file_input_failed",
-          err instanceof Error ? err.message : String(err),
-          "unknown",
-          "set_files",
-        );
+        outcome = isStaleFrameHandleError(err)
+          ? enrichFailure(rpcError("not_found", "ref_not_found", err.message), "none", "set_files")
+          : transferFailure(
+              err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+              "set_file_input_failed",
+              err instanceof Error ? err.message : String(err),
+              "unknown",
+              "set_files",
+            );
         return outcome;
       }
       outcome = { click, multiple };
       return outcome;
     } catch (err) {
-      outcome = transferFailure(
-        err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-        "file_input_probe_failed",
-        err instanceof Error ? err.message : String(err),
-        "none",
-        "resolve_input",
-      );
+      outcome = isStaleFrameHandleError(err)
+        ? enrichFailure(
+            rpcError("not_found", "ref_not_found", err.message),
+            "none",
+            "resolve_input",
+          )
+        : transferFailure(
+            err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+            "file_input_probe_failed",
+            err instanceof Error ? err.message : String(err),
+            "none",
+            "resolve_input",
+          );
       return outcome;
     }
   } finally {
@@ -424,7 +441,8 @@ export async function uploadThroughActivatedFileInput(
         try {
           await waitBounded(
             callOnTrigger(
-              { ...resolvedOptions, cdp: options.cdp.resourceCleanup ?? options.cdp },
+              options.cdp.resourceCleanup ?? options.cdp,
+              handle,
               triggerObjectId,
               `function(key) {
                 const owner = this.ownerDocument.defaultView;
@@ -446,7 +464,7 @@ export async function uploadThroughActivatedFileInput(
       if (interceptionArmed) {
         try {
           await waitBounded(
-            sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
+            sendToFrameHandle(options.cdp, handle, "Page.setInterceptFileChooserDialog", {
               enabled: false,
               cancel: true,
             }),
@@ -460,7 +478,12 @@ export async function uploadThroughActivatedFileInput(
       }
       try {
         await waitBounded(
-          sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
+          sendToFrameHandle(
+            options.cdp.resourceCleanup ?? options.cdp,
+            handle,
+            "Runtime.releaseObjectGroup",
+            { objectGroup },
+          ),
           Date.now() + CLEANUP_TIMEOUT_MS,
           undefined,
           "releasing upload object group timed out",
@@ -473,7 +496,7 @@ export async function uploadThroughActivatedFileInput(
         ? (outcome.data?.effect_state as TransferEffectState | undefined)
         : "committed";
       if (effect === "unknown" || cleanupFailed) {
-        await options.cdp.detach?.(target.tabId);
+        await options.cdp.detach?.(handle.tabId);
       }
       if (cleanupFailed && isRpcError(outcome)) {
         outcome.data = { ...outcome.data, cleanup_state: "failed" };
