@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { runIntentScenarios } from "./intent-signals.mjs";
 import { createMcpRegressionClient } from "./mcp-client.mjs";
 
 /** Exercise both shipped defaults through the installed extension, including real human input. */
-export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
+export async function runTargetPolicyScenarios({ send, bsk, cli, env, base, directory }) {
   const results = [];
   for (const client of ["cli", "mcp"]) {
     const mcp = client === "mcp" ? await createMcpRegressionClient(cli, env) : undefined;
@@ -122,6 +124,50 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
         sync,
         click,
       });
+      let uploadControlInvalidation;
+      if (!mcp) {
+        const file = join(directory, "target-policy-upload.txt");
+        await writeFile(file, "control context invalidation regression");
+        const uploadSync = await sync();
+        const uploadRef = uploadSync.observation.text.match(/(@e\d+) button "Upload receipt"/)?.[1];
+        assert(uploadRef, JSON.stringify(uploadSync));
+        const pathname = await read("location.pathname");
+        const upload = await bsk(
+          ["upload", uploadRef, "--file", file, ...scope, "--context", uploadSync.context_id],
+          "file_input_probe_failed",
+        );
+        assert.equal(upload.code, "cdp_failed");
+        assert.equal(upload.data.phase, "resolve_input");
+        assert.equal(upload.data.effect_state, "unknown");
+        assert.equal(await read("uploadTriggers"), 1, "upload trigger did not run exactly once");
+        assert.equal(
+          await read("document.querySelector('#upload-file').files.length"),
+          0,
+          "failed upload assigned a file",
+        );
+        assert.equal(await read("location.pathname"), pathname);
+        const blockedReplay = await bsk(
+          ["click", ref, ...scope, "--context", uploadSync.context_id],
+          "uncertain_prior_effect",
+        );
+        assert.equal(blockedReplay.data.dispatched, false);
+        const recovered = await sync();
+        assert.notEqual(recovered.context_id, uploadSync.context_id);
+        const stale = await bsk(
+          ["click", ref, ...scope, "--context", uploadSync.context_id],
+          "control_context_invalid",
+        );
+        assert.equal(stale.data.effect_state, "none");
+        uploadControlInvalidation = {
+          reason: upload.data.reason,
+          phase: upload.data.phase,
+          effectState: upload.data.effect_state,
+          triggerCount: 1,
+          fileCount: 0,
+          uncertainReplayBlocked: true,
+          staleContextRejected: true,
+        };
+      }
       results.push({
         client,
         policy: "target",
@@ -131,6 +177,7 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
         humanRevokedContext: true,
         finalClicks: 4,
         intentSignals,
+        ...(uploadControlInvalidation ? { uploadControlInvalidation } : {}),
       });
     } finally {
       if (session) {

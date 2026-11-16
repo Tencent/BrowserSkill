@@ -448,6 +448,50 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
     expect(next.context_id).not.toBe(f.first.context_id);
   });
 
+  it("preserves a phased upload failure without hiding control-side uncertainty", async () => {
+    const f = await fixture(policy);
+    const refusal = {
+      code: "cdp_failed" as const,
+      message: "Page interaction coverage changed; wait and synchronize",
+      data: {
+        reason: "file_input_probe_failed",
+        phase: "resolve_input",
+        effect_state: "none" as const,
+        recovery: "Inspect the upload target before retrying.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Page.setInterceptFileChooserDialog", { enabled: true });
+      f.controller.invalidate(7);
+      await expect(
+        runner.send(7, "Runtime.callFunctionOn", {
+          objectId: "trigger",
+          functionDeclaration: "function() { return null; }",
+        }),
+      ).rejects.toThrow("Page interaction coverage changed; wait and synchronize");
+      return refusal;
+    });
+
+    expect(result).toEqual({
+      ...refusal,
+      data: {
+        ...refusal.data,
+        effect_state: "unknown",
+        recovery: expect.stringContaining("Never replay"),
+      },
+    });
+    expect(await f.run()).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: policy === "target" ? "control_context_invalid" : "cooperation_sync_required",
+        effect_state: "none",
+      },
+    });
+    const next = await f.sync();
+    expect(next.context_id).not.toBe(f.first.context_id);
+  });
+
   it("preserves file_drop_failed with effect_state none when drag_enter is rejected", async () => {
     const f = await fixture(policy);
     const refusal = {
@@ -500,6 +544,50 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
 });
 
 describe("negotiated target control", () => {
+  it("keeps structured guard failures ahead of an upload handler wrapper", async () => {
+    const f = await fixture();
+    const checks = [{ target: "#price", field: "text" as const, equals: "$100" }];
+    const guardFailure = {
+      code: "permission_denied" as const,
+      message: "Price changed before upload",
+      data: {
+        reason: "precondition_failed" as const,
+        phase: "precondition" as const,
+        effect_state: "none" as const,
+        target: "#price",
+        field: "text",
+        expected: "$100",
+        actual: "$200",
+        recovery: "Synchronize the price before choosing another action.",
+      },
+    };
+    vi.mocked(checkExpectations)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(guardFailure);
+
+    const result = await f.run({ ref: "e1", expect: checks }, "tool.upload", async (runner) => {
+      await runner.send(7, "Page.setInterceptFileChooserDialog", { enabled: true });
+      await expect(
+        runner.send(7, "Runtime.callFunctionOn", {
+          objectId: "trigger",
+          functionDeclaration: "function() { return null; }",
+        }),
+      ).rejects.toThrow("Price changed before upload");
+      return {
+        code: "cdp_failed",
+        message: "Price changed before upload",
+        data: {
+          reason: "file_input_probe_failed",
+          phase: "resolve_input",
+          effect_state: "none",
+        },
+      };
+    });
+
+    expect(result).toEqual(guardFailure);
+    expect(checkExpectations).toHaveBeenCalledTimes(2);
+  });
+
   it("allows repeated actions beside live fields without any private VOM captures", async () => {
     const f = await fixture();
     for (let tick = 1; tick <= 3; tick++) {

@@ -254,7 +254,14 @@ try {
         frameObservability = await runFrameObservabilityScenarios({ send, bsk: runBsk, base });
       if (framesOnly) return;
       if (!compatibilityOnly) {
-        targetPolicy = await runTargetPolicyScenarios({ send, bsk: runBsk, cli, env, base });
+        targetPolicy = await runTargetPolicyScenarios({
+          send,
+          bsk: runBsk,
+          cli,
+          env,
+          base,
+          directory,
+        });
         plan = await runPlanScenarios({ send, bsk: runBsk, cli, env, base });
         recipes = await runRecipeScenarios(scenarios);
       }

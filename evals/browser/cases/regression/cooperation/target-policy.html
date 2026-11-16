@@ -10,6 +10,8 @@
 <form onsubmit="return false">
   <span id="clock">Tick 0</span>
   <button id="apply" type="button">Apply</button>
+  <button id="upload" type="button">Upload receipt</button>
+  <input id="upload-file" type="file" hidden>
   <button id="human" type="button">Human change</button>
   <output id="count">0</output>
   <label>Note <input id="note" aria-label="Note"></label>
@@ -19,11 +21,16 @@
 <div style="height: 1800px" aria-hidden="true"></div>
 <script>
   window.applied = 0;
+  window.uploadTriggers = 0;
   window.ticks = 0;
   window.humanChanged = false;
   setInterval(() => document.querySelector('#clock').textContent = 'Tick ' + ++ticks, 40);
   document.querySelector('#apply').onclick = () => {
     document.querySelector('#count').value = String(++applied);
+  };
+  document.querySelector('#upload').onclick = () => {
+    window.uploadTriggers++;
+    history.pushState({}, '', location.href);
   };
   document.querySelector('#human').onclick = () => { window.humanChanged = true; };
   window.rotatePromo = (slide) => new Promise((resolve) => {

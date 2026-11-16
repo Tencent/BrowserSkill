@@ -2519,8 +2519,24 @@ export class CooperationController implements ControlAuthority {
         (!completed && !isRpcError(result) && detachedByHandler
           ? "The observed page or control state changed; synchronize"
           : undefined);
-      if (checkFailure || reason)
-        return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
+      if (checkFailure || reason) {
+        const controlFailure = reportFailure(
+          checkFailure?.message ?? reason!,
+          sent ? "unknown" : "none",
+        );
+        // The upload handler has the useful failure phase and cause. Control
+        // still owns effect uncertainty and recovery after a revoked context.
+        if (!checkFailure && req.method === "tool.upload" && isRpcError(result))
+          return {
+            ...result,
+            data: {
+              ...result.data,
+              effect_state: controlFailure.data?.effect_state ?? (sent ? "unknown" : "none"),
+              recovery: controlFailure.data?.recovery ?? result.data?.recovery,
+            },
+          };
+        return controlFailure;
+      }
       if (isRpcError(result)) {
         const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
         if (targetPolicy && (effect === "unknown" || detachedByHandler || postRefreshFailed))
