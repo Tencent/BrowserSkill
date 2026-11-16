@@ -2133,6 +2133,8 @@ struct InteractArgs {
     wait_timeout_ms: Option<u32>,
     /// Policy for the post-action sync. Default auto.
     policy: Option<Policy>,
+    /// Approximate token cap for the post-action sync observation (requires sync_after or until_visible).
+    max_tokens: Option<u32>,
 }
 
 enum Prepared {
@@ -2191,9 +2193,11 @@ fn interact_prepare(args: InteractArgs, conn_scope: Option<&str>) -> Result<Prep
         args.depends_on,
     )?;
     let stepped = args.sync_after.unwrap_or(false) || args.until_visible.is_some();
-    if !stepped && (args.policy.is_some() || args.wait_timeout_ms.is_some()) {
+    if !stepped
+        && (args.policy.is_some() || args.wait_timeout_ms.is_some() || args.max_tokens.is_some())
+    {
         return Err(invalid(
-            "policy and wait_timeout_ms apply only with sync_after or until_visible",
+            "policy, wait_timeout_ms and max_tokens apply only with sync_after or until_visible",
         ));
     }
     let validate_transfer_target =
@@ -2349,6 +2353,7 @@ fn interact_prepare(args: InteractArgs, conn_scope: Option<&str>) -> Result<Prep
         params: Value::Object(args.params).to_string(),
         until_visible: args.until_visible,
         wait_timeout_ms,
+        max_tokens: args.max_tokens,
         save_full: None,
         baseline: None,
         match_text: Vec::new(),
@@ -2750,6 +2755,8 @@ struct PlanArgs {
     until_visible: Option<String>,
     /// Readiness budget for until_visible, 1-25000 ms. Default 5000.
     wait_timeout_ms: Option<u32>,
+    /// Approximate token cap for the post-plan sync observation. Keep the same budget across syncs, steps, and plans to preserve cache reuse.
+    max_tokens: Option<u32>,
 }
 
 /// Validate a plan completely before connecting to the daemon.
@@ -2776,6 +2783,7 @@ fn plan_prepare(
     prepared.tab_id = args.tab_id;
     prepared.until_visible = args.until_visible;
     prepared.wait_timeout_ms = wait_timeout_ms;
+    prepared.max_tokens = args.max_tokens;
     Ok((prepared, ctx))
 }
 
@@ -4259,6 +4267,10 @@ mod tests {
         );
         assert!(
             error(json!({"action":"click","session":"s","params":{"ref":"e1"},"policy":"target"}))
+                .contains("sync_after")
+        );
+        assert!(
+            error(json!({"action":"click","session":"s","params":{"ref":"e1"},"max_tokens":150}))
                 .contains("sync_after")
         );
         let too_many = vec![json!({"target":"@e1","field":"exists","equals":true}); 17];

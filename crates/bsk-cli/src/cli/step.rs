@@ -54,6 +54,9 @@ pub struct StepArgs {
     /// Readiness budget in milliseconds, independent of the action timeout.
     #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u32).range(1..=25000))]
     pub wait_timeout_ms: u32,
+    /// Token budget for the post-action VOM observation. Keep the same budget across syncs, steps, and plans to preserve cache reuse.
+    #[arg(long = "max-tokens")]
+    pub max_tokens: Option<u32>,
     /// Save the unfiltered combined result, atomically, without overwriting.
     #[arg(long)]
     pub save_full: Option<PathBuf>,
@@ -256,6 +259,7 @@ pub(crate) fn post_sync(
     session: &str,
     policy: cooperate::Policy,
     tab: Option<i64>,
+    max_tokens: Option<u32>,
     result: &mut Value,
     exit: &mut u8,
     call: &mut impl FnMut(Method, Value, Duration) -> Result<Value, CliError>,
@@ -270,7 +274,9 @@ pub(crate) fn post_sync(
                 action: mode,
                 tab_id: tab,
                 timeout_ms: Some(1000),
-                max_tokens: None,
+                max_tokens: matches!(mode, CooperateAction::Sync | CooperateAction::Enable)
+                    .then_some(max_tokens)
+                    .flatten(),
             })
             .expect("serializable sync"),
             TOOL_IPC_TIMEOUT,
@@ -346,7 +352,15 @@ pub(crate) fn run(
         result["readiness"] = json!({"requested":false});
     }
     let ready_ms = start.elapsed().as_millis() - action_ms;
-    post_sync(session, args.policy, tab, &mut result, &mut exit, &mut call);
+    post_sync(
+        session,
+        args.policy,
+        tab,
+        args.max_tokens,
+        &mut result,
+        &mut exit,
+        &mut call,
+    );
     result["phase"] = if exit == 0 {
         "observed"
     } else {

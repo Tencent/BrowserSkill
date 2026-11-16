@@ -42,6 +42,7 @@ determines which versions can connect.
 
 ### Fixed
 
+- Added `--max-tokens` (`max_tokens` in MCP) to `bsk step`, `bsk plan`, `bsk_interact` (with `sync_after` or `until_visible`), and `bsk_plan`, forwarding it to the post-action `tool.cooperate` sync instead of hardcoding `None` so `--max-tokens` baselines stay reusable across `delta` and `unchanged` syncs without forcing an unbounded page re-capture (#755).
 - Ignored internal `data-bsk-*` attributes and `<browser-skill-overlay>` (`[data-bsk-overlay]`) ShadowHost mutations in `cooperation-capture.ts` so active recording and sensitive-field markers no longer advance `FrameState.structure`, excluded extension ShadowRoot UI controls (`HelpRequestOverlay`, `RecordOverlay`, `BorrowConfirmationOverlay`) across `record-capture.ts`, `record-hover-surface.ts`, and `cooperation-capture.ts` so overlay interactions and hover surfaces are never mis-recorded as webpage steps, and re-evaluated tab control ownership after awaiting `ensureOverlayInjected` so mid-injection tab detachments never flash stale `control` state.
 - VOM token estimation now handles unpaired UTF-16 surrogates without combining them with the following symbol or throwing a `RangeError`; valid emoji pairs retain their existing estimates.
 

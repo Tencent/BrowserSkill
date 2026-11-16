@@ -3170,3 +3170,395 @@ async fn counterexample_f_bidirectional_ipc_envelope_rolling_upgrade_compat() {
     let _ = b4_srv.await;
     b4_daemon.shutdown().await;
 }
+
+/// Issue #755 full-chain regression:
+/// `bsk step` and `bsk plan` forward `--max-tokens` to their post-action `tool.cooperate`
+/// sync (keeping `baseline.maxTokens` intact for `delta` / `unchanged` reuse and updating
+/// daemon `scopes` budget tracking), while omitting `--max-tokens` still requests unbounded syncs.
+#[tokio::test]
+async fn step_and_plan_forward_max_tokens_and_preserve_delta_budget() {
+    let step = Arc::new(Mutex::new(0u32));
+    let step_ext = Arc::clone(&step);
+
+    let ctx_1 = "11111111-1111-4111-8111-111111111755";
+    let obs_1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa751";
+    let obs_2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa752";
+    let obs_3 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa753";
+    let obs_4 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa754";
+    let obs_5 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa755";
+
+    let env = IsolatedEnv::start(move |req| match &req.method {
+        Method::ToolNavigate => ResponseBody::Ok(json!({
+            "tab_id": 7,
+            "url": "https://app.test/board",
+            "final_url": "https://app.test/board",
+            "reached": "load"
+        })),
+        Method::ToolScrollTo | Method::ToolClick => {
+            assert!(
+                req.params
+                    .as_ref()
+                    .and_then(|p| p.get("max_tokens"))
+                    .is_none(),
+                "action RPC {:?} must not carry max_tokens: {:?}",
+                req.method,
+                req.params
+            );
+            ResponseBody::Ok(json!({ "tab_id": 7, "used_ref": "e1" }))
+        }
+        Method::ToolCooperate => {
+            let mut seq = step_ext.lock().unwrap();
+            *seq += 1;
+            let max_tokens = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("max_tokens"))
+                .and_then(Value::as_u64);
+            match *seq {
+                // 1: `bsk open --max-tokens 150`
+                1 => {
+                    assert_eq!(max_tokens, Some(150));
+                    ResponseBody::Ok(json!({
+                        "tab_id": 7,
+                        "control_policy": "target",
+                        "kind": "baseline",
+                        "history_complete": true,
+                        "context_id": ctx_1,
+                        "observation_id": obs_1,
+                        "changes": [],
+                        "observation": {
+                            "observation_id": obs_1,
+                            "tab_id": 7,
+                            "url": "https://app.test/board",
+                            "title": "Board",
+                            "text": "@vom 1\n@e1 heading \"Top\"\n@e2 button \"Count: 1\"",
+                            "ref_count": 2,
+                            "truncated": true,
+                            "next_cursor": "cursor-150"
+                        },
+                        "state": { "mode": "ready", "revision": 1 }
+                    }))
+                }
+                // 2: `bsk step --max-tokens 150 --save-full step1.json` -> fresh 150-token baseline
+                2 => {
+                    assert_eq!(max_tokens, Some(150));
+                    ResponseBody::Ok(json!({
+                        "tab_id": 7,
+                        "control_policy": "target",
+                        "kind": "baseline",
+                        "baseline_reason": "structure_changed",
+                        "history_complete": true,
+                        "context_id": ctx_1,
+                        "observation_id": obs_1,
+                        "changes": [],
+                        "observation": {
+                            "observation_id": obs_1,
+                            "tab_id": 7,
+                            "url": "https://app.test/board",
+                            "title": "Board",
+                            "text": "@vom 1\n@e1 heading \"Top\"\n@e2 button \"Count: 1\"",
+                            "ref_count": 2,
+                            "truncated": true,
+                            "next_cursor": "cursor-150"
+                        },
+                        "state": { "mode": "ready", "revision": 2 }
+                    }))
+                }
+                // 3: `bsk step --max-tokens 150 --baseline step1.json --save-full step2.json` -> text delta
+                3 => {
+                    assert_eq!(max_tokens, Some(150));
+                    ResponseBody::Ok(json!({
+                        "tab_id": 7,
+                        "control_policy": "target",
+                        "kind": "delta",
+                        "history_complete": true,
+                        "previous_context_id": ctx_1,
+                        "previous_observation_id": obs_1,
+                        "context_id": ctx_1,
+                        "observation_id": obs_2,
+                        "observation_patch": {
+                            "lines": [{
+                                "line": 3,
+                                "previous": "@e2 button \"Count: 1\"",
+                                "text": "@e2 button \"Count: 2\""
+                            }]
+                        },
+                        "changes": [{
+                            "frame_id": 0,
+                            "kind": "text",
+                            "id": "t1",
+                            "label": "Count",
+                            "previous_value": "Count: 1",
+                            "value": "Count: 2",
+                            "lines": [3]
+                        }],
+                        "state": { "mode": "ready", "revision": 3 }
+                    }))
+                }
+                // 4: follow-up `bsk sync --max-tokens 150` -> unchanged reuses step-patched cache
+                4 => {
+                    assert_eq!(max_tokens, Some(150));
+                    ResponseBody::Ok(json!({
+                        "tab_id": 7,
+                        "control_policy": "target",
+                        "kind": "unchanged",
+                        "history_complete": true,
+                        "previous_context_id": ctx_1,
+                        "previous_observation_id": obs_2,
+                        "context_id": ctx_1,
+                        "observation_id": obs_2,
+                        "changes": [],
+                        "state": { "mode": "ready", "revision": 3 }
+                    }))
+                }
+                // 5: `bsk plan --max-tokens 150` -> post-sync receives max_tokens: 150
+                5 => {
+                    assert_eq!(max_tokens, Some(150));
+                    ResponseBody::Ok(json!({
+                        "tab_id": 7,
+                        "control_policy": "target",
+                        "kind": "baseline",
+                        "baseline_reason": "structure_changed",
+                        "history_complete": true,
+                        "context_id": ctx_1,
+                        "observation_id": obs_3,
+                        "changes": [],
+                        "observation": {
+                            "observation_id": obs_3,
+                            "tab_id": 7,
+                            "url": "https://app.test/board",
+                            "title": "Board",
+                            "text": "@vom 1\n@e1 heading \"Top\"\n@e2 button \"Count: 3\"",
+                            "ref_count": 2,
+                            "truncated": true,
+                            "next_cursor": "cursor-plan-150"
+                        },
+                        "state": { "mode": "ready", "revision": 4 }
+                    }))
+                }
+                // 6: `bsk step` without `--max-tokens` -> omits max_tokens (unbounded)
+                6 => {
+                    assert_eq!(max_tokens, None);
+                    ResponseBody::Ok(json!({
+                        "tab_id": 7,
+                        "control_policy": "target",
+                        "kind": "baseline",
+                        "baseline_reason": "token_budget_changed",
+                        "history_complete": true,
+                        "context_id": ctx_1,
+                        "observation_id": obs_4,
+                        "changes": [],
+                        "observation": {
+                            "observation_id": obs_4,
+                            "tab_id": 7,
+                            "url": "https://app.test/board",
+                            "title": "Board",
+                            "text": "@vom 1\n@e1 heading \"Top\"\n@e2 button \"Count: 3\"\n@e3 text \"Full\"",
+                            "ref_count": 3,
+                            "truncated": false
+                        },
+                        "state": { "mode": "ready", "revision": 5 }
+                    }))
+                }
+                // 7: `bsk plan` without `--max-tokens` -> omits max_tokens (unbounded)
+                7 => {
+                    assert_eq!(max_tokens, None);
+                    ResponseBody::Ok(json!({
+                        "tab_id": 7,
+                        "control_policy": "target",
+                        "kind": "unchanged",
+                        "history_complete": true,
+                        "previous_context_id": ctx_1,
+                        "previous_observation_id": obs_4,
+                        "context_id": ctx_1,
+                        "observation_id": obs_5,
+                        "changes": [],
+                        "state": { "mode": "ready", "revision": 5 }
+                    }))
+                }
+                other => panic!("unexpected cooperate sequence {other}"),
+            }
+        }
+        other => panic!("unexpected method {other:?}"),
+    })
+    .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let step1_saved = tmp.path().join("step1.json");
+    let step2_saved = tmp.path().join("step2.json");
+
+    let open = env
+        .run_bsk(
+            &[
+                "open",
+                "https://app.test/board",
+                "--max-tokens",
+                "150",
+                "--json",
+            ],
+            &[],
+        )
+        .await;
+    assert!(
+        open.status.success(),
+        "{}",
+        String::from_utf8_lossy(&open.stderr)
+    );
+    let open_json: Value = serde_json::from_slice(&open.stdout).unwrap();
+    assert_eq!(open_json["truncated"], true);
+
+    let step1_out = env
+        .run_bsk(
+            &[
+                "step",
+                "--action",
+                "click",
+                "--params",
+                r#"{"ref":"@e1"}"#,
+                "--max-tokens",
+                "150",
+                "--save-full",
+                step1_saved.to_str().unwrap(),
+                "--json",
+            ],
+            &[],
+        )
+        .await;
+    assert!(
+        step1_out.status.success(),
+        "bsk step1 --max-tokens failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&step1_out.stdout),
+        String::from_utf8_lossy(&step1_out.stderr)
+    );
+
+    let step2_out = env
+        .run_bsk(
+            &[
+                "step",
+                "--action",
+                "scroll-to",
+                "--params",
+                r#"{"ref":"@e1"}"#,
+                "--max-tokens",
+                "150",
+                "--baseline",
+                step1_saved.to_str().unwrap(),
+                "--save-full",
+                step2_saved.to_str().unwrap(),
+                "--json",
+            ],
+            &[],
+        )
+        .await;
+    assert!(
+        step2_out.status.success(),
+        "bsk step2 --max-tokens failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&step2_out.stdout),
+        String::from_utf8_lossy(&step2_out.stderr)
+    );
+    let step2_json: Value = serde_json::from_slice(&step2_out.stdout).unwrap();
+    assert_eq!(step2_json["ok"], true);
+    assert_eq!(step2_json["post"]["kind"], "delta");
+    assert_eq!(
+        step2_json["post"]["cache_reuse"]["reason"],
+        "exact_text_delta_predecessor"
+    );
+    let merged: Value = serde_json::from_slice(&std::fs::read(&step2_saved).unwrap()).unwrap();
+    assert_eq!(merged["post"]["observation_origin"]["kind"], "merged");
+    assert!(
+        merged["post"]["observation"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("@e2 button \"Count: 2\"")
+    );
+
+    // Daemon cache now holds the step-patched 150-token VOM under `last_vom_max_tokens = Some(150)`.
+    let sync_150 = env
+        .run_bsk(&["sync", "--max-tokens", "150", "--json"], &[])
+        .await;
+    assert!(sync_150.status.success());
+    let sync_150_json: Value = serde_json::from_slice(&sync_150.stdout).unwrap();
+    assert_eq!(sync_150_json["unchanged"], true);
+    assert_eq!(sync_150_json["truncated"], true);
+    assert!(
+        sync_150_json["vom"]
+            .as_str()
+            .unwrap()
+            .contains("@e2 button \"Count: 2\""),
+        "expected step delta patch in cached VOM: {sync_150_json}"
+    );
+
+    let plan_out = env
+        .run_bsk(
+            &[
+                "plan",
+                "--steps",
+                r#"[{"action":"scroll-to","ref":"@e1"},{"action":"click","ref":"@e2"}]"#,
+                "--max-tokens",
+                "150",
+                "--json",
+            ],
+            &[],
+        )
+        .await;
+    assert!(
+        plan_out.status.success(),
+        "bsk plan --max-tokens failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&plan_out.stdout),
+        String::from_utf8_lossy(&plan_out.stderr)
+    );
+    let plan_json: Value = serde_json::from_slice(&plan_out.stdout).unwrap();
+    assert_eq!(plan_json["ok"], true);
+    assert_eq!(plan_json["completed"], 2);
+    assert_eq!(plan_json["post"]["observation"]["truncated"], true);
+
+    let step_unbounded = env
+        .run_bsk(
+            &[
+                "step",
+                "--action",
+                "scroll-to",
+                "--params",
+                r#"{"ref":"@e1"}"#,
+                "--json",
+            ],
+            &[],
+        )
+        .await;
+    assert!(step_unbounded.status.success());
+    let step_unbounded_json: Value = serde_json::from_slice(&step_unbounded.stdout).unwrap();
+    assert_eq!(
+        step_unbounded_json["post"]["observation"]["truncated"],
+        false
+    );
+
+    let plan_unbounded = env
+        .run_bsk(
+            &[
+                "plan",
+                "--steps",
+                r#"[{"action":"click","ref":"@e2"}]"#,
+                "--json",
+            ],
+            &[],
+        )
+        .await;
+    assert!(plan_unbounded.status.success());
+
+    let coop_reqs: Vec<Value> = env
+        .take_requests()
+        .into_iter()
+        .filter(|r| r.method == Method::ToolCooperate)
+        .map(|r| r.params.unwrap_or(Value::Null))
+        .collect();
+    assert_eq!(coop_reqs.len(), 7);
+    assert_eq!(coop_reqs[0]["max_tokens"], 150);
+    assert_eq!(coop_reqs[1]["max_tokens"], 150);
+    assert_eq!(coop_reqs[2]["max_tokens"], 150);
+    assert_eq!(coop_reqs[3]["max_tokens"], 150);
+    assert_eq!(coop_reqs[4]["max_tokens"], 150);
+    assert!(coop_reqs[5].get("max_tokens").is_none());
+    assert!(coop_reqs[6].get("max_tokens").is_none());
+
+    env.shutdown().await;
+}

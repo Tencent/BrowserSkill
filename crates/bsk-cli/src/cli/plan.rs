@@ -64,6 +64,9 @@ pub struct PlanArgs {
     /// Readiness budget in milliseconds, independent of the steps' timeouts.
     #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u32).range(1..=25000))]
     pub wait_timeout_ms: u32,
+    /// Token budget for the post-plan VOM observation. Keep the same budget across syncs, steps, and plans to preserve cache reuse.
+    #[arg(long = "max-tokens")]
+    pub max_tokens: Option<u32>,
     /// Save the unfiltered combined result, atomically, without overwriting.
     #[arg(long)]
     pub save_full: Option<PathBuf>,
@@ -99,6 +102,7 @@ pub(crate) struct Plan {
     pub(crate) steps: Vec<Step>,
     pub(crate) until_visible: Option<String>,
     pub(crate) wait_timeout_ms: u32,
+    pub(crate) max_tokens: Option<u32>,
     pub(crate) budget: Duration,
 }
 
@@ -143,6 +147,7 @@ impl Plan {
             steps,
             until_visible: None,
             wait_timeout_ms: DEFAULT_WAIT_MS as u32,
+            max_tokens: None,
             budget: BUDGET,
         })
     }
@@ -413,6 +418,7 @@ pub(crate) fn run_with_meta(
             final_session,
             cooperate::Policy::Auto,
             tab,
+            plan.max_tokens,
             &mut reply,
             &mut exit,
             &mut plain_call,
@@ -444,6 +450,7 @@ fn prepare(args: &PlanArgs, flags: &GlobalFlags) -> anyhow::Result<Plan> {
     plan.tab_id = args.tab_id;
     plan.until_visible = args.until_visible.clone();
     plan.wait_timeout_ms = args.wait_timeout_ms;
+    plan.max_tokens = args.max_tokens;
     Ok(plan)
 }
 
