@@ -33,6 +33,16 @@ export default defineConfig({
   srcDir: "src",
   outDir: "dist",
   modules: ["@wxt-dev/module-react"],
+  hooks: {
+    "build:manifestGenerated": (_wxt, manifest) => {
+      if (manifest.content_scripts?.length === 0) {
+        delete manifest.content_scripts;
+      }
+      if (manifest.host_permissions?.includes("<all_urls>")) {
+        manifest.host_permissions = ["<all_urls>"];
+      }
+    },
+  },
   manifest: {
     name: "BrowserSkill",
     description:

@@ -1,12 +1,13 @@
 import { createRandomUuid } from "../random-uuid";
+import { injectRecordFrameAllFrames } from "../runtime-content-scripts";
 import {
-  isRecordFrameQueryMessage,
   RECORD_FRAME_PORT,
   RECORD_FRAME_START,
   type RecordFramePortMessage,
-  type RecordFrameQueryResponse,
   type RecordFrameStartMessage,
 } from "./frame-bridge";
+
+export const RECORD_SUBFRAME_DEBOUNCE_MS = 50;
 
 export interface RecordingCaptureScope {
   tabId: number;
@@ -49,6 +50,7 @@ export interface RecordFrameCoordinatorDeps {
     message: RecordFrameStartMessage,
     target: { documentId?: string; frameId?: number },
   ): Promise<unknown>;
+  ensureInjected?(tabId: number): Promise<void>;
   subscribeFrameNavigation?(listener: (frame: BrowserFrameNavigation) => void): () => void;
 }
 
@@ -80,6 +82,9 @@ function defaultDeps(): RecordFrameCoordinatorDeps {
     sendToDocument(tabId, message, target) {
       return chrome.tabs.sendMessage(tabId, message, target);
     },
+    ensureInjected(tabId) {
+      return injectRecordFrameAllFrames(tabId);
+    },
     subscribeFrameNavigation(listener) {
       const onCommitted = (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) =>
         listener({ ...details, lifecycle: "committed" });
@@ -98,6 +103,12 @@ function defaultDeps(): RecordFrameCoordinatorDeps {
 export class RecordFrameCoordinator {
   readonly #deps: RecordFrameCoordinatorDeps;
   readonly #recordings = new Map<string, ArmedRecording>();
+  readonly #subframeTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  readonly #pendingSubframeNavigations = new Map<
+    number,
+    Map<string, { frame: BrowserFrame; completed: boolean }>
+  >();
+  readonly #subframeNeedsInject = new Set<number>();
   #attached = false;
   #detachFrameNavigation: (() => void) | null = null;
 
@@ -109,16 +120,15 @@ export class RecordFrameCoordinator {
     if (this.#attached) return () => {};
     this.#attached = true;
     chrome.runtime.onConnect.addListener(this.#onConnect);
-    chrome.runtime.onMessage.addListener(this.#onMessage);
     this.#detachFrameNavigation =
       this.#deps.subscribeFrameNavigation?.(this.#onFrameNavigation) ?? null;
     return () => {
       if (!this.#attached) return;
       this.#attached = false;
       chrome.runtime.onConnect.removeListener(this.#onConnect);
-      chrome.runtime.onMessage.removeListener(this.#onMessage);
       this.#detachFrameNavigation?.();
       this.#detachFrameNavigation = null;
+      this.#clearAllSubframeTimers();
       for (const recording of this.#recordings.values()) this.#cancelAgents(recording);
       this.#recordings.clear();
     };
@@ -135,9 +145,6 @@ export class RecordFrameCoordinator {
     this.#recordings.set(requestId, {
       requestId,
       startedAtMs,
-      // Register the initial tab before navigation begins. A newly-created
-      // child document can query at document_start before armTab's frame
-      // snapshot sees it, especially when Chromium promotes it to an OOPIF.
       tabIds: new Set([initialTabId]),
       agents: new Map(),
       ...(onDocumentReady ? { onDocumentReady } : {}),
@@ -149,6 +156,8 @@ export class RecordFrameCoordinator {
     const recording = this.#recordings.get(requestId);
     if (!recording || recording.finishing) return false;
     recording.tabIds.add(tabId);
+    await this.#deps.ensureInjected?.(tabId);
+    if (recording.finishing || this.#recordings.get(requestId) !== recording) return false;
 
     let frames: BrowserFrame[];
     try {
@@ -202,60 +211,134 @@ export class RecordFrameCoordinator {
   cancel(requestId: string): void {
     const recording = this.#recordings.get(requestId);
     if (!recording) return;
+    for (const tabId of recording.tabIds) this.#clearSubframeTimerForTabIfIdle(tabId, requestId);
     this.#cancelAgents(recording);
     this.#recordings.delete(requestId);
   }
 
-  readonly #onMessage = (
-    message: unknown,
-    sender: chrome.runtime.MessageSender,
-    sendResponse: (response: RecordFrameQueryResponse) => void,
-  ): boolean => {
-    if (!isRecordFrameQueryMessage(message)) return false;
-    const tabId = sender.tab?.id;
-    const recording =
-      typeof tabId === "number"
-        ? [...this.#recordings.values()].find(
-            (candidate) => !candidate.finishing && candidate.tabIds.has(tabId),
-          )
-        : undefined;
-    sendResponse(
-      recording
-        ? {
-            active: true,
-            requestId: recording.requestId,
-            startedAtMs: recording.startedAtMs,
-          }
-        : { active: false },
+  #clearSubframeTimerForTabIfIdle(tabId: number, ignoringRequestId?: string): void {
+    const stillActive = [...this.#recordings.values()].some(
+      (candidate) =>
+        candidate.requestId !== ignoringRequestId &&
+        !candidate.finishing &&
+        candidate.tabIds.has(tabId),
     );
-    return false;
-  };
+    if (stillActive) return;
+    const timer = this.#subframeTimers.get(tabId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#subframeTimers.delete(tabId);
+    }
+    this.#pendingSubframeNavigations.delete(tabId);
+    this.#subframeNeedsInject.delete(tabId);
+  }
+
+  #clearAllSubframeTimers(): void {
+    for (const timer of this.#subframeTimers.values()) clearTimeout(timer);
+    this.#subframeTimers.clear();
+    this.#pendingSubframeNavigations.clear();
+    this.#subframeNeedsInject.clear();
+  }
+
+  #scheduleSubframeArm(tabId: number): void {
+    const existing = this.#subframeTimers.get(tabId);
+    if (existing !== undefined) clearTimeout(existing);
+    this.#subframeTimers.set(
+      tabId,
+      setTimeout(() => {
+        this.#subframeTimers.delete(tabId);
+        void this.#flushSubframeArm(tabId);
+      }, RECORD_SUBFRAME_DEBOUNCE_MS),
+    );
+  }
+
+  async #flushSubframeArm(tabId: number): Promise<void> {
+    const needsInject = this.#subframeNeedsInject.delete(tabId);
+    const pendingNavs = this.#pendingSubframeNavigations.get(tabId);
+    this.#pendingSubframeNavigations.delete(tabId);
+    const activeRecordings = [...this.#recordings.values()].filter(
+      (candidate) => !candidate.finishing && candidate.tabIds.has(tabId),
+    );
+    if (activeRecordings.length === 0) return;
+
+    if (needsInject) {
+      await this.#deps.ensureInjected?.(tabId);
+    }
+
+    let discovered: BrowserFrame[] = [];
+    try {
+      discovered = (await this.#deps.getAllFrames(tabId)).filter((frame) => frame.frameId !== 0);
+    } catch {
+      discovered = [];
+    }
+
+    const targets = new Map<string, { frame: BrowserFrame; completed: boolean }>();
+    for (const frame of discovered) {
+      const key = frame.documentId ?? `frame:${frame.frameId}`;
+      targets.set(key, { frame, completed: false });
+    }
+    if (pendingNavs) {
+      for (const [key, entry] of pendingNavs) {
+        const current = targets.get(key);
+        targets.set(key, {
+          frame: current?.frame ?? entry.frame,
+          completed: Boolean(current?.completed || entry.completed),
+        });
+      }
+    }
+
+    for (const recording of activeRecordings) {
+      if (recording.finishing) continue;
+      await Promise.all(
+        [...targets.values()].map(async ({ frame, completed }) => {
+          const docKey = frame.documentId ? documentKey(tabId, frame.documentId) : null;
+          const alreadyRegistered = docKey ? recording.agents.has(docKey) : false;
+          const started = await this.#startFrame(recording, tabId, frame);
+          if (!started || recording.finishing) return;
+          if (!completed && !(needsInject && !alreadyRegistered)) return;
+          const agent = frame.documentId
+            ? recording.agents.get(documentKey(tabId, frame.documentId))
+            : [...recording.agents.values()].find(
+                (candidate) =>
+                  candidate.tabId === tabId && candidate.browserFrameId === frame.frameId,
+              );
+          if (!agent) return;
+          await recording.onDocumentReady?.({
+            tabId: agent.tabId,
+            documentId: agent.documentId,
+            browserFrameId: agent.browserFrameId,
+            producerId: agent.producerId,
+          });
+        }),
+      );
+    }
+  }
 
   readonly #onFrameNavigation = (frame: BrowserFrameNavigation): void => {
-    if (frame.frameId === 0) return;
-    for (const recording of this.#recordings.values()) {
-      if (recording.finishing || !recording.tabIds.has(frame.tabId)) continue;
-      // onCommitted can race document_start, while onCompleted runs after the
-      // content script is available. Starting twice is safe and closes both
-      // the early-query and late-SPA-frame gaps.
-      void (async () => {
-        const started = await this.#startFrame(recording, frame.tabId, frame);
-        if (!started || frame.lifecycle !== "completed" || recording.finishing) return;
-        const agent = frame.documentId
-          ? recording.agents.get(documentKey(frame.tabId, frame.documentId))
-          : [...recording.agents.values()].find(
-              (candidate) =>
-                candidate.tabId === frame.tabId && candidate.browserFrameId === frame.frameId,
-            );
-        if (!agent) return;
-        await recording.onDocumentReady?.({
-          tabId: agent.tabId,
-          documentId: agent.documentId,
-          browserFrameId: agent.browserFrameId,
-          producerId: agent.producerId,
-        });
-      })();
+    const activeRecordings = [...this.#recordings.values()].filter(
+      (candidate) => !candidate.finishing && candidate.tabIds.has(frame.tabId),
+    );
+    if (activeRecordings.length === 0) return;
+
+    if (frame.frameId === 0) {
+      for (const recording of activeRecordings) {
+        void this.#startFrame(recording, frame.tabId, frame);
+      }
+      return;
     }
+
+    let pendingForTab = this.#pendingSubframeNavigations.get(frame.tabId);
+    if (!pendingForTab) {
+      pendingForTab = new Map();
+      this.#pendingSubframeNavigations.set(frame.tabId, pendingForTab);
+    }
+    const key = frame.documentId ?? `frame:${frame.frameId}`;
+    const previous = pendingForTab.get(key);
+    pendingForTab.set(key, {
+      frame,
+      completed: Boolean(previous?.completed || frame.lifecycle === "completed"),
+    });
+    this.#scheduleSubframeArm(frame.tabId);
   };
 
   readonly #onConnect = (port: chrome.runtime.Port): void => {
@@ -314,6 +397,18 @@ export class RecordFrameCoordinator {
           requestId,
           producerId,
         } satisfies RecordFramePortMessage);
+        return;
+      }
+      if (
+        message.type === "subframe_added" &&
+        registered &&
+        message.requestId === registered.requestId
+      ) {
+        const recording = this.#recordings.get(registered.requestId);
+        if (recording && !recording.finishing && recording.tabIds.has(registered.tabId)) {
+          this.#subframeNeedsInject.add(registered.tabId);
+          this.#scheduleSubframeArm(registered.tabId);
+        }
         return;
       }
       if (

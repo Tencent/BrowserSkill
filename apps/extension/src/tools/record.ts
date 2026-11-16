@@ -31,6 +31,7 @@ import {
 } from "@/lib/recording/step-buffer";
 import { RecordingTabCoordinator, type TabActivation } from "@/lib/recording/tab-coordinator";
 import type { RecordingDraftStep } from "@/lib/recording/types";
+import { ensureOverlayInjected } from "@/lib/runtime-content-scripts";
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
 import { EXTENSION_VERSION } from "@/transport/handshake";
 import type {
@@ -101,9 +102,31 @@ function isRecordingFinishing(recording: ActiveRecording): boolean {
 }
 
 const recordings = new Map<string, ActiveRecording>();
+const activeRecordingSubscribers = new Set<() => void | Promise<void>>();
 
 export function hasActiveRecording(sessionId: string): boolean {
   return recordings.has(sessionId);
+}
+
+export function activeRecordingCount(): number {
+  return recordings.size;
+}
+
+export function subscribeActiveRecordings(listener: () => void | Promise<void>): () => void {
+  activeRecordingSubscribers.add(listener);
+  return () => {
+    activeRecordingSubscribers.delete(listener);
+  };
+}
+
+async function notifyActiveRecordingsChanged(): Promise<void> {
+  await Promise.all(
+    [...activeRecordingSubscribers].map((listener) =>
+      Promise.resolve()
+        .then(listener)
+        .catch(() => {}),
+    ),
+  );
 }
 
 const RECORD_START_RETRIES = 3;
@@ -190,6 +213,7 @@ async function sendRecordStartWithAck(
   for (let attempt = 0; attempt < RECORD_START_RETRIES; attempt += 1) {
     if (cancelled?.()) throw new Error("record start cancelled");
     try {
+      await ensureOverlayInjected(tabId);
       const response = await sendToTab(tabId, msg);
       if (isRecordStartAck(response)) return;
       lastError = new Error("content script did not ack RECORD_START");
@@ -824,6 +848,7 @@ async function finishRecordingAttempt(
   recording.settled = true;
   recordings.delete(sessionId);
   releaseBrowserObservationListenersIfIdle();
+  await notifyActiveRecordingsChanged();
   const trace = buildTrace(recording);
   recording.resolveFinish(trace);
   return { trace };
@@ -923,12 +948,14 @@ export async function handleRecordStart(
   // Observe navigations for the whole recording lifetime; attach before
   // optional navigate so the destination load can rearm capture.
   ensureBrowserObservationListeners(deps);
+  await notifyActiveRecordingsChanged();
 
   const abortPending = async (notifyContent: boolean) => {
     recordings.get(params.session_id)?.observation?.cancel();
     deps.frameCoordinator?.cancel(requestId);
     recordings.delete(params.session_id);
     releaseBrowserObservationListenersIfIdle();
+    await notifyActiveRecordingsChanged();
     if (notifyContent) {
       try {
         await deps.sendToTab(target.tabId, {
@@ -1174,6 +1201,7 @@ export function clearRecordingForSession(sessionId: string): void {
   }
   recordings.delete(sessionId);
   releaseBrowserObservationListenersIfIdle();
+  void notifyActiveRecordingsChanged();
 }
 
 export type { RecordFinishMessage };

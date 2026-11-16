@@ -138,10 +138,10 @@ export interface DispatcherDeps {
   /**
    * Invoked whenever a dispatched RPC may have changed the live
    * session set (currently `tool.session_start` and
-   * `tool.session_stop`). Used to refresh side caches such as the
-   * `chrome.storage.session` "sessions live" flag (review M4/M5 I3).
+   * `tool.session_stop`). Used to reconcile dynamic runtime content scripts
+   * and overlay state before returning to the caller.
    */
-  onSessionsChanged?: () => void;
+  onSessionsChanged?: () => void | Promise<void>;
   /** Invoked before a tool that dispatches page input or mutates browser state is forwarded. */
   onBrowserControlResumed?: (sessionId: string) => void;
   /** Invoked after a tab is explicitly claimed so its overlay can be refreshed immediately. */
@@ -181,7 +181,7 @@ export class ToolDispatcher {
   private screenshotExports: ScreenshotExports;
   private readonly cdp?: DispatcherCdpRunner;
   private readonly recording?: RecordRuntimeDeps;
-  private readonly onSessionsChanged?: () => void;
+  private readonly onSessionsChanged?: () => void | Promise<void>;
   private readonly cooperation?: CooperationController;
   private readonly onBrowserControlResumed?: (sessionId: string) => void;
   private readonly onAgentTabClaimed?: (tabId: number, windowId: number) => void;
@@ -554,6 +554,11 @@ export class ToolDispatcher {
         this.activeDialogOperations.delete(requestSessionId);
       }
     }
+    if (mutatesSessions) {
+      this.debug?.sync();
+      const pendingSync = this.onSessionsChanged?.();
+      if (pendingSync) await pendingSync;
+    }
     const sent = this.sendResponse(body);
     if (!sent && startedSession) {
       // The daemon never observed the session id we just allocated, so
@@ -572,10 +577,9 @@ export class ToolDispatcher {
       } catch (rollbackErr) {
         console.warn("[bsk dispatcher] session rollback after send failure failed", rollbackErr);
       }
-    }
-    if (mutatesSessions) {
       this.debug?.sync();
-      this.onSessionsChanged?.();
+      const rollbackSync = this.onSessionsChanged?.();
+      if (rollbackSync) await rollbackSync;
     }
   }
 

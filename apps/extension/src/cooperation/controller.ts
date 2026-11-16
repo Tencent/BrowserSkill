@@ -1,3 +1,4 @@
+import { injectCooperationAllFrames } from "@/lib/runtime-content-scripts";
 import {
   isAgentControlledTab,
   type SessionContext,
@@ -1536,6 +1537,7 @@ export class CooperationController implements ControlAuthority {
         isAgentControlledTab(session, result.tab_id)
       ) {
         this.defaultTabs.set(session.sessionId, result.tab_id);
+        await injectCooperationAllFrames(result.tab_id);
         await this.observeTab(result.tab_id);
       }
       return result;
@@ -1611,7 +1613,10 @@ export class CooperationController implements ControlAuthority {
       this.changed(state);
       try {
         const result = await invoke(cdp);
-        if (!isRpcError(result)) await this.observeTab(state.tabId);
+        if (!isRpcError(result)) {
+          await injectCooperationAllFrames(state.tabId);
+          await this.observeTab(state.tabId);
+        }
         return result;
       } finally {
         state.working = false;

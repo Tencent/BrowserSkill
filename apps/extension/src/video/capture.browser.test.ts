@@ -688,107 +688,121 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("video CLI browser integration", (
               `chrome.tabs.sendMessage(${tabId},{type:'bsk-help-cancel',requestId:'recovery-help'})`,
             );
           };
-          for (const [route, attempts] of [
-            ["query-retry", 2],
-            ["query-recover", 3],
-          ] as const) {
-            const tab = await evaluate<{ id: number }>(
-              workerSession.sessionId,
-              `chrome.tabs.create({url:'http://127.0.0.1:${address.port}/${route}',active:true})`,
+          const recoveryTask = (await cli("session", "start")) as { session_id: string };
+          try {
+            for (const [route, attempts] of [
+              ["query-retry", 2],
+              ["query-recover", 3],
+            ] as const) {
+              const tab = (await cli(
+                "tab",
+                "create",
+                "--session",
+                recoveryTask.session_id,
+                "--url",
+                `http://127.0.0.1:${address.port}/${route}`,
+              )) as { tab_id: number };
+              await expect
+                .poll(
+                  () =>
+                    pageScript(
+                      tab.tab_id,
+                      "return Number(document.documentElement.dataset.videoQueryAttempts);",
+                    ),
+                  { timeout: 10_000 },
+                )
+                .toBe(attempts);
+              await checkInteractiveOverlays(tab.tab_id);
+              await evaluate(workerSession.sessionId, `chrome.tabs.remove(${tab.tab_id})`);
+            }
+
+            // Exercise actual Speculation Rules activation; pageshow.persisted
+            // is not involved, and the prerendered main frame has a nonzero ID.
+            const prerenderCreated = (await cli(
+              "tab",
+              "create",
+              "--session",
+              recoveryTask.session_id,
+              "--url",
+              "about:blank#video-prerender",
+            )) as { tab_id: number };
+            const prerenderTab = { id: prerenderCreated.tab_id };
+            const targets = await send<{ targetInfos: { targetId: string; url: string }[] }>(
+              "Target.getTargets",
+              { filter: [{ type: "tab", exclude: false }] },
             );
+            const prerenderTarget = targets.targetInfos.find((target) =>
+              target.url.endsWith("#video-prerender"),
+            )!;
+            const prerenderSession = await send<{ sessionId: string }>("Target.attachToTarget", {
+              targetId: prerenderTarget.targetId,
+              flatten: true,
+            });
+            // A legacy page-target session disables prerender. Attach through
+            // the tab target so this fixture permits document replacement.
+            await send(
+              "Target.setAutoAttach",
+              { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+              prerenderSession.sessionId,
+            );
+            const prerenderPage = attachedPages.find(
+              (page) => page.parent === prerenderSession.sessionId,
+            )!;
+            await send("Page.setPrerenderingAllowed", { isAllowed: true }, prerenderPage.session);
+            await evaluate(
+              workerSession.sessionId,
+              `chrome.tabs.update(${prerenderTab.id},{url:'http://127.0.0.1:${address.port}/prerender-start'})`,
+            );
+            type PrerenderFrame = { frameId: number; frameType: string; documentId: string };
+            const prerenderFrame = () =>
+              evaluate<PrerenderFrame | undefined>(
+                workerSession.sessionId,
+                `chrome.webNavigation.getAllFrames({tabId:${prerenderTab.id}}).then(frames=>frames.find(frame=>frame.documentLifecycle==='prerender'&&frame.url.endsWith('/prerendered')))`,
+              );
+            await expect
+              .poll(prerenderFrame, { timeout: 15_000 })
+              .toMatchObject({ frameType: "outermost_frame" });
+            const prerender = (await prerenderFrame())!;
+            expect(prerender.frameType).toBe("outermost_frame");
+            expect(prerender.frameId).toBeGreaterThan(0);
+            const pendingPage = attachedPages.find(
+              (page) => page.parent === prerenderSession.sessionId && page.prerender,
+            )!;
+            await expect
+              .poll(() =>
+                evaluate(
+                  pendingPage.session,
+                  "({prerendering:document.prerendering,injected:document.documentElement.dataset.videoPrerendered,queries:Number(document.documentElement.dataset.videoQueryAttempts||0)})",
+                ),
+              )
+              .toEqual({ prerendering: true, injected: "true", queries: 0 });
+            await pageScript(prerenderTab.id, "document.querySelector('a').click();");
             await expect
               .poll(
                 () =>
-                  pageScript(
-                    tab.id,
+                  pageScript<number>(
+                    prerenderTab.id,
+                    "return performance.getEntriesByType('navigation')[0].activationStart;",
+                  ),
+                { timeout: 10_000 },
+              )
+              .toBeGreaterThan(0);
+            await expect
+              .poll(
+                () =>
+                  pageScript<number>(
+                    prerenderTab.id,
                     "return Number(document.documentElement.dataset.videoQueryAttempts);",
                   ),
                 { timeout: 10_000 },
               )
-              .toBe(attempts);
-            await checkInteractiveOverlays(tab.id);
-            await evaluate(workerSession.sessionId, `chrome.tabs.remove(${tab.id})`);
+              .toBeGreaterThan(0);
+            await checkInteractiveOverlays(prerenderTab.id);
+            await send("Target.detachFromTarget", { sessionId: prerenderSession.sessionId });
+            await evaluate(workerSession.sessionId, `chrome.tabs.remove(${prerenderTab.id})`);
+          } finally {
+            await cli("session", "stop", recoveryTask.session_id);
           }
-
-          // Exercise actual Speculation Rules activation; pageshow.persisted
-          // is not involved, and the prerendered main frame has a nonzero ID.
-          const prerenderTab = await evaluate<{ id: number }>(
-            workerSession.sessionId,
-            "chrome.tabs.create({url:'about:blank#video-prerender',active:true})",
-          );
-          const targets = await send<{ targetInfos: { targetId: string; url: string }[] }>(
-            "Target.getTargets",
-            { filter: [{ type: "tab", exclude: false }] },
-          );
-          const prerenderTarget = targets.targetInfos.find((target) =>
-            target.url.endsWith("#video-prerender"),
-          )!;
-          const prerenderSession = await send<{ sessionId: string }>("Target.attachToTarget", {
-            targetId: prerenderTarget.targetId,
-            flatten: true,
-          });
-          // A legacy page-target session disables prerender. Attach through
-          // the tab target so this fixture permits document replacement.
-          await send(
-            "Target.setAutoAttach",
-            { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
-            prerenderSession.sessionId,
-          );
-          const prerenderPage = attachedPages.find(
-            (page) => page.parent === prerenderSession.sessionId,
-          )!;
-          await send("Page.setPrerenderingAllowed", { isAllowed: true }, prerenderPage.session);
-          await evaluate(
-            workerSession.sessionId,
-            `chrome.tabs.update(${prerenderTab.id},{url:'http://127.0.0.1:${address.port}/prerender-start'})`,
-          );
-          type PrerenderFrame = { frameId: number; frameType: string; documentId: string };
-          const prerenderFrame = () =>
-            evaluate<PrerenderFrame | undefined>(
-              workerSession.sessionId,
-              `chrome.webNavigation.getAllFrames({tabId:${prerenderTab.id}}).then(frames=>frames.find(frame=>frame.documentLifecycle==='prerender'&&frame.url.endsWith('/prerendered')))`,
-            );
-          await expect
-            .poll(prerenderFrame, { timeout: 15_000 })
-            .toMatchObject({ frameType: "outermost_frame" });
-          const prerender = (await prerenderFrame())!;
-          expect(prerender.frameType).toBe("outermost_frame");
-          expect(prerender.frameId).toBeGreaterThan(0);
-          const pendingPage = attachedPages.find(
-            (page) => page.parent === prerenderSession.sessionId && page.prerender,
-          )!;
-          await expect
-            .poll(() =>
-              evaluate(
-                pendingPage.session,
-                "({prerendering:document.prerendering,injected:document.documentElement.dataset.videoPrerendered,queries:Number(document.documentElement.dataset.videoQueryAttempts||0)})",
-              ),
-            )
-            .toEqual({ prerendering: true, injected: "true", queries: 0 });
-          await pageScript(prerenderTab.id, "document.querySelector('a').click();");
-          await expect
-            .poll(
-              () =>
-                pageScript<number>(
-                  prerenderTab.id,
-                  "return performance.getEntriesByType('navigation')[0].activationStart;",
-                ),
-              { timeout: 10_000 },
-            )
-            .toBeGreaterThan(0);
-          await expect
-            .poll(
-              () =>
-                pageScript<number>(
-                  prerenderTab.id,
-                  "return Number(document.documentElement.dataset.videoQueryAttempts);",
-                ),
-              { timeout: 10_000 },
-            )
-            .toBeGreaterThan(0);
-          await checkInteractiveOverlays(prerenderTab.id);
-          await send("Target.detachFromTarget", { sessionId: prerenderSession.sessionId });
-          await evaluate(workerSession.sessionId, `chrome.tabs.remove(${prerenderTab.id})`);
 
           // Recording started before the first task navigation continues across
           // initial navigation and exports cleanly after its owned session stops.

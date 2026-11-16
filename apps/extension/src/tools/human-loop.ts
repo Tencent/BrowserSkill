@@ -18,6 +18,7 @@ import {
   isHelpResponseMessage,
 } from "@/lib/help-bridge";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
+import { ensureOverlayInjected } from "@/lib/runtime-content-scripts";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   HelpCompletionCondition,
@@ -173,6 +174,7 @@ async function sendHelpRequestWithAck(
   for (let attempt = 0; attempt < HELP_SEND_RETRIES; attempt += 1) {
     if (!isActive()) return null;
     try {
+      await ensureOverlayInjected(tabId);
       const response = await deps.sendToTab(tabId, msg);
       if (!isActive()) {
         await deps

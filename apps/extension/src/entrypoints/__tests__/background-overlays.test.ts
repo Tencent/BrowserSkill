@@ -3,13 +3,21 @@ import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { OverlayController, shouldShowAgentControlOverlay } from "@/content/overlay-controller";
 import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { OVERLAY_AGENT_STATE, type OverlayAgentStateMessage } from "@/lib/overlay-bridge";
-import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
+import {
+  COOPERATION_CONTENT_SCRIPT_FILE,
+  OVERLAY_CONTENT_SCRIPT_FILE,
+  resetOverlayInjectionCacheForTests,
+} from "@/lib/runtime-content-scripts";
 import { chromeAgentWindowApi } from "@/session-manager/agent-window";
 import { isAgentControlledTab } from "@/session-manager/manager";
 import { AgentWindowRouting } from "@/session-manager/window-routing";
 import { ToolDispatcher } from "@/tools/dispatcher";
 import { hasActiveHelp } from "@/tools/human-loop";
-import { hasActiveRecording } from "@/tools/record";
+import {
+  activeRecordingCount,
+  hasActiveRecording,
+  subscribeActiveRecordings,
+} from "@/tools/record";
 import { handleTabCreate } from "@/tools/tabs";
 import { VideoManager } from "@/video/manager";
 
@@ -37,7 +45,6 @@ vi.mock("@/lib/interaction-preferences");
 vi.mock("@/lib/keepalive");
 vi.mock("@/lib/local-pairing-bridge");
 vi.mock("@/lib/recording/frame-coordinator");
-vi.mock("@/lib/sessions-live-flag");
 vi.mock("@/long-screenshot/background");
 vi.mock("@/session-manager/event-handler");
 vi.mock("@/session-manager/window-routing");
@@ -59,6 +66,7 @@ vi.mock("@/transport/ws-transport");
 import background from "@/entrypoints/background";
 
 afterEach(() => {
+  resetOverlayInjectionCacheForTests();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   vi.mocked(hasActiveHelp).mockReset();
@@ -82,7 +90,24 @@ async function fixture() {
   const onDetached = event<[number]>();
   const onAttached = event<[number, chrome.tabs.TabAttachInfo]>();
   const onCreated = event<[chrome.tabs.Tab]>();
+  const onCommitted = event<[chrome.webNavigation.WebNavigationTransitionCallbackDetails]>();
   const onCreatedNavigationTarget = event<[{ tabId: number; sourceTabId: number }]>();
+  let registeredScripts: chrome.scripting.RegisteredContentScript[] = [];
+  const executeScript = vi.fn(async (_injection: unknown) => []);
+  const getRegisteredContentScripts = vi.fn(async () => [...registeredScripts]);
+  const registerContentScripts = vi.fn(
+    async (scripts: chrome.scripting.RegisteredContentScript[]) => {
+      registeredScripts.push(...scripts);
+    },
+  );
+  const unregisterContentScripts = vi.fn(async (filter?: chrome.scripting.ContentScriptFilter) => {
+    if (!filter?.ids) {
+      registeredScripts = [];
+      return;
+    }
+    const ids = new Set(filter.ids);
+    registeredScripts = registeredScripts.filter((script) => !ids.has(script.id));
+  });
   const sendMessage = vi.fn(
     async (_tabId: number, message: OverlayAgentStateMessage): Promise<unknown> => {
       overlay.applyAgentControlMode(message.sessionId, message.mode, message.controller);
@@ -90,6 +115,12 @@ async function fixture() {
     },
   );
   vi.stubGlobal("chrome", {
+    scripting: {
+      executeScript,
+      getRegisteredContentScripts,
+      registerContentScripts,
+      unregisterContentScripts,
+    },
     tabs: {
       sendMessage,
       get: vi.fn(async () => ({ url: "https://example.test" })),
@@ -113,6 +144,7 @@ async function fixture() {
     debugger: { onDetach: event() },
     webNavigation: {
       onBeforeNavigate: event(),
+      onCommitted,
       onCompleted: event(),
       onErrorOccurred: event(),
       onCreatedNavigationTarget,
@@ -125,10 +157,6 @@ async function fixture() {
     notifications: { onClicked: event(), onButtonClicked: event() },
   });
   vi.mocked(watchDaemonConnection).mockReturnValue({ ready: Promise.resolve(), dispose() {} });
-  vi.mocked(attachSessionsLiveFlag).mockReturnValue({
-    refresh: vi.fn(async () => {}),
-    syncFromManager: vi.fn(async () => {}),
-  });
   vi.mocked(ChromiumCdp.prototype.releaseSessionTab).mockResolvedValue();
   vi.mocked(VideoManager.prototype.stopTab).mockResolvedValue();
   (background as unknown as () => void)();
@@ -139,7 +167,12 @@ async function fixture() {
     onDetached,
     onAttached,
     onCreated,
+    onCommitted,
     onCreatedNavigationTarget,
+    executeScript,
+    getRegisteredContentScripts,
+    registerContentScripts,
+    unregisterContentScripts,
     sendMessage,
     deps,
     task,
@@ -204,22 +237,26 @@ it("routes identities by tab ownership and restores or clears them on state refr
   const second = await f.deps.sessions.start("two", {
     controller: { name: "Claude", project: "Payments" },
   });
-  const assertClaim = (tabId: number, windowId: number, sessionId: string, name: string) => {
+  const assertClaim = async (tabId: number, windowId: number, sessionId: string, name: string) => {
     f.deps.onAgentTabClaimed?.(tabId, windowId);
-    expect(f.sendMessage).toHaveBeenLastCalledWith(
-      tabId,
-      expect.objectContaining({ sessionId, controller: expect.objectContaining({ name }) }),
-    );
+    await vi.waitFor(() => {
+      expect(f.sendMessage).toHaveBeenLastCalledWith(
+        tabId,
+        expect.objectContaining({ sessionId, controller: expect.objectContaining({ name }) }),
+      );
+    });
     expect(f.overlay.snapshot().controller?.name).toBe(name);
   };
-  assertClaim(10, 10, "one", "Codex");
-  assertClaim(20, 20, second.sessionId, "Claude");
+  await assertClaim(10, 10, "one", "Codex");
+  await assertClaim(20, 20, second.sessionId, "Claude");
   f.overlay.resetAgentOverlays(second.sessionId);
-  assertClaim(10, 10, "one", "Codex");
+  await assertClaim(10, 10, "one", "Codex");
   f.deps.sessions.release("one");
   f.deps.onAgentTabClaimed?.(10, 10);
+  await vi.waitFor(() => {
+    expect(f.overlay.snapshot().activeSessionId).toBeNull();
+  });
   expect(f.overlay.snapshot().controller).toBeUndefined();
-  expect(f.overlay.snapshot().activeSessionId).toBeNull();
   expect(f.deps.sessions.get("two")?.controller?.name).toBe("Claude");
   vi.restoreAllMocks();
 });
@@ -242,7 +279,9 @@ it.each([false, true])("hides an observed tab after detachment, remote=%s", asyn
   f.task.remote = remote;
   f.task.observedTabs = new Set([20]);
   f.deps.onAgentTabClaimed?.(20, 10);
-  expect(shouldShowAgentControlOverlay(f.overlay.snapshot())).toBe(true);
+  await vi.waitFor(() => {
+    expect(shouldShowAgentControlOverlay(f.overlay.snapshot())).toBe(true);
+  });
   const claimed = f.sendMessage.mock.lastCall![1];
   f.onDetached.emit(20);
   expect(isAgentControlledTab(f.task, 20)).toBe(false);
@@ -362,4 +401,187 @@ it.each([
   } finally {
     router.dispose();
   }
+});
+
+it("dynamically registers Tier B scripts with persistAcrossSessions:false and unregisters at zero sessions", async () => {
+  const f = await fixture();
+  const recordingListener = vi.mocked(subscribeActiveRecordings).mock.calls.at(-1)?.[0];
+  await f.deps.onSessionsChanged?.();
+  expect(f.registerContentScripts).toHaveBeenCalledWith([
+    expect.objectContaining({
+      id: "bsk-tier-b-cooperation",
+      js: ["content-scripts/cooperation.js"],
+      allFrames: true,
+      matchOriginAsFallback: true,
+      runAt: "document_start",
+      persistAcrossSessions: false,
+    }),
+  ]);
+
+  // Starting a recording dynamically registers Tier B record-frame with persistAcrossSessions: false.
+  vi.mocked(activeRecordingCount).mockReturnValue(1);
+  await recordingListener?.();
+  expect(f.registerContentScripts).toHaveBeenLastCalledWith([
+    expect.objectContaining({
+      id: "bsk-tier-b-record-frame",
+      js: ["content-scripts/record-frame.js"],
+      allFrames: true,
+      matchOriginAsFallback: true,
+      runAt: "document_start",
+      persistAcrossSessions: false,
+    }),
+  ]);
+
+  // Stopping both session and recording clears all dynamic content scripts.
+  f.unregisterContentScripts.mockClear();
+  vi.mocked(activeRecordingCount).mockReturnValue(0);
+  f.deps.sessions.release(f.task.sessionId);
+  await f.deps.onSessionsChanged?.();
+  expect(f.unregisterContentScripts).toHaveBeenCalledWith();
+});
+
+it("injects Tier A content.js only for controlled tabs and never flashes stale control after mid-injection detach", async () => {
+  const f = await fixture();
+  f.executeScript.mockClear();
+
+  // Free uncontrolled tab in the Agent Window does not receive Tier A React bundle.
+  f.onCreated.emit({ id: 99, windowId: 10 } as chrome.tabs.Tab);
+  await Promise.resolve();
+  expect(f.executeScript).not.toHaveBeenCalledWith(
+    expect.objectContaining({ files: [OVERLAY_CONTENT_SCRIPT_FILE] }),
+  );
+
+  // Mid-injection detach race: if executeScript resolves after onDetached,
+  // background re-evaluates ownership and pushes `hidden` instead of stale `control`.
+  let finishOverlayInject!: () => void;
+  f.executeScript.mockImplementation(async (injection: unknown) => {
+    const files = (injection as { files?: string[] }).files;
+    if (files?.includes(OVERLAY_CONTENT_SCRIPT_FILE)) {
+      await new Promise<void>((resolve) => {
+        finishOverlayInject = resolve;
+      });
+    }
+    return [];
+  });
+  f.task.observedTabs = new Set([55]);
+  f.deps.onAgentTabClaimed?.(55, 10);
+  await vi.waitFor(() => {
+    expect(f.executeScript).toHaveBeenCalledWith({
+      target: { tabId: 55 },
+      files: [OVERLAY_CONTENT_SCRIPT_FILE],
+    });
+  });
+  f.onDetached.emit(55);
+  finishOverlayInject();
+  await vi.waitFor(() => {
+    expect(f.sendMessage).toHaveBeenLastCalledWith(
+      55,
+      expect.objectContaining({ sessionId: null, mode: "hidden" }),
+    );
+  });
+  expect(shouldShowAgentControlOverlay(f.overlay.snapshot())).toBe(false);
+});
+
+it("arms already-loaded cooperation frames in place and injects cooperation.js only into missing-receiver frames", async () => {
+  const f = await fixture();
+  const getAllFrames = vi.fn(async () => [
+    { frameId: 0, documentId: "doc-live", errorOccurred: false, documentLifecycle: "active" },
+    {
+      frameId: 2,
+      documentId: "doc-overlay-only",
+      errorOccurred: false,
+      documentLifecycle: "active",
+    },
+    { frameId: 4, documentId: "doc-missing", errorOccurred: false, documentLifecycle: "active" },
+  ]);
+  Object.assign(chrome.webNavigation, { getAllFrames });
+
+  const missingOnce = new Set(["doc-missing"]);
+  const overlayOnlyOnce = new Set(["doc-overlay-only"]);
+  f.sendMessage.mockImplementation(
+    async (_tabId: number, message: unknown, options?: { documentId?: string }) => {
+      if (
+        message &&
+        typeof message === "object" &&
+        (message as { kind?: string }).kind === "cooperation.arm_frame"
+      ) {
+        if (options?.documentId && missingOnce.delete(options.documentId)) {
+          throw new Error("Could not establish connection. Receiving end does not exist.");
+        }
+        if (options?.documentId && overlayOnlyOnce.delete(options.documentId)) {
+          return undefined;
+        }
+        return { ok: true };
+      }
+      return undefined;
+    },
+  );
+  f.executeScript.mockClear();
+
+  f.task.agentCreatedTabs.add(77);
+  f.deps.onAgentTabClaimed?.(77, 10);
+
+  await vi.waitFor(() => {
+    expect(f.executeScript).toHaveBeenCalledWith({
+      target: { tabId: 77, documentIds: ["doc-missing"] },
+      files: [COOPERATION_CONTENT_SCRIPT_FILE],
+      injectImmediately: true,
+    });
+    expect(f.executeScript).toHaveBeenCalledWith({
+      target: { tabId: 77, documentIds: ["doc-overlay-only"] },
+      files: [COOPERATION_CONTENT_SCRIPT_FILE],
+      injectImmediately: true,
+    });
+    expect(f.executeScript).toHaveBeenCalledWith({
+      target: { tabId: 77 },
+      files: [OVERLAY_CONTENT_SCRIPT_FILE],
+    });
+  });
+  // `cooperation.js` must finish injecting before `content.js` on tab claim so `content.js`'s
+  // `onMessage` listener never causes `COOPERATION_READ` to resolve `undefined`.
+  const claimFiles = f.executeScript.mock.calls.map(
+    ([arg]) => (arg as { files?: string[] }).files?.[0],
+  );
+  expect(claimFiles.lastIndexOf(COOPERATION_CONTENT_SCRIPT_FILE)).toBeLessThan(
+    claimFiles.indexOf(OVERLAY_CONTENT_SCRIPT_FILE),
+  );
+  expect(f.executeScript).not.toHaveBeenCalledWith(
+    expect.objectContaining({
+      target: { tabId: 77, documentIds: ["doc-live"] },
+      files: [COOPERATION_CONTENT_SCRIPT_FILE],
+    }),
+  );
+  expect(f.executeScript).not.toHaveBeenCalledWith(
+    expect.objectContaining({
+      target: { tabId: 77, allFrames: true },
+      files: [COOPERATION_CONTENT_SCRIPT_FILE],
+    }),
+  );
+
+  // Outermost-frame `onCommitted` also repairs `cooperation.js` strictly before `content.js`.
+  f.executeScript.mockClear();
+  missingOnce.add("doc-committed-nav");
+  f.onCommitted.emit({
+    tabId: 77,
+    frameId: 0,
+    frameType: "outermost_frame",
+    documentId: "doc-committed-nav",
+  } as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+  await vi.waitFor(() => {
+    expect(f.executeScript).toHaveBeenCalledWith({
+      target: { tabId: 77, documentIds: ["doc-committed-nav"] },
+      files: [OVERLAY_CONTENT_SCRIPT_FILE],
+    });
+  });
+  expect(f.executeScript.mock.calls.map(([arg]) => arg)).toEqual([
+    {
+      target: { tabId: 77, documentIds: ["doc-committed-nav"] },
+      files: [COOPERATION_CONTENT_SCRIPT_FILE],
+      injectImmediately: true,
+    },
+    {
+      target: { tabId: 77, documentIds: ["doc-committed-nav"] },
+      files: [OVERLAY_CONTENT_SCRIPT_FILE],
+    },
+  ]);
 });
