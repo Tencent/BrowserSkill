@@ -92,6 +92,24 @@ const fixtures: Record<string, string> = {
     <script>customElements.define("x-case", class extends HTMLElement {
       constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = '<span style="text-transform:uppercase"><slot></slot></span>'; }
     });</script>`,
+  transformedControls: `<style>
+      #t { text-transform: uppercase; }
+      #t input.upper { text-transform: uppercase; }
+      #t input.literal { text-transform: none; }
+      #t textarea.lower { text-transform: lowercase; }
+    </style><table id="t" lang="tr"><tbody><tr>
+      <td><input value="iı"></td>
+      <td><input class="upper" value="iı"></td>
+      <td><input class="upper literal" value="PaId"></td>
+      <td><input class="upper" lang="de" value="straße"></td>
+      <td lang="en"><div id="slot-host"><input class="upper" value="iı"></div></td>
+      <td><textarea class="lower">Iİ\nSECOND</textarea></td>
+    </tr></tbody></table>
+    <ul id="l"><li><input style="text-transform:uppercase" value="abc-12"></li></ul>
+    <script>
+      document.getElementById("slot-host").attachShadow({ mode: "open" }).innerHTML =
+        '<span lang="tr"><slot></slot></span>';
+    </script>`,
   contentVisibility: `<table id="t"><tr><td>Visible<div style="content-visibility: hidden"><span style="content-visibility: visible; visibility: visible">Hidden text</span></div></td><td><div style="content-visibility: auto; position: absolute; top: 100000px">Offscreen text</div></td></tr></table>
     <div style="content-visibility: hidden"><table id="hiddenTable"><tr><td>Hidden table</td></tr></table><ul id="hiddenList"><li>Hidden item</li></ul></div>
     <ul id="l"><li>Visible item<div style="content-visibility: hidden"><a href="/hidden">Hidden link</a></div></li></ul>`,
@@ -520,6 +538,14 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser structured extractio
     expect(values(await extract("transformedSlot", { action: "table", selector: "#t" }))).toEqual([
       ["PAID"],
     ]);
+  });
+
+  it("applies explicit CSS case transforms to input and textarea values while keeping UA none defaults", async () => {
+    expect(
+      values(await extract("transformedControls", { action: "table", selector: "#t" })),
+    ).toEqual([["iı", "İI", "PaId", "STRASSE", "İI", "ıi\nsecond"]]);
+    const list = await extract("transformedControls", { action: "list", selector: "#l" });
+    expect(list.result!.rows[0].text).toBe("ABC-12");
   });
 
   it.each([

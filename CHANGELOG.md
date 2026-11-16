@@ -99,6 +99,11 @@ determines which versions can connect.
   visibility checks, and collection limits ([#588](https://github.com/Tencent/BrowserSkill/issues/588),
   [#612](https://github.com/Tencent/BrowserSkill/pull/612)); added required pre-release
   audit scenario `EDGE-SLOTTED-LIST-EXTRACT`.
+- Structured extraction (`extract table`, `extract list`, and `extract discover`) applies
+  computed CSS `text-transform` (`uppercase` and `lowercase`) and rendered locale casing
+  rules to visible non-sensitive `<input>` and `<textarea>` values while preserving browser
+  UA `text-transform: none` defaults and byte-budget accounting (follow-up to
+  [#613](https://github.com/Tencent/BrowserSkill/pull/613)).
 
 ### Removed
 
