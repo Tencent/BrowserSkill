@@ -399,6 +399,8 @@ export interface ChromiumCdpOptions {
   canControlDialog?: (tabId: number) => boolean | Promise<boolean>;
   /** Invalidate tab refs when the root document or debugger attachment changes. */
   onDocumentChanged?: (tabId: number) => void;
+  /** Notify observers when the root document's URL changes in-place without replacing the Document. */
+  onRouteChanged?: (tabId: number, url?: string) => void;
   /** Invalidate child-frame refs when child frames disappear or navigate across idle soft-detach. */
   onChildFramesInvalidated?: (tabId: number, staleFrameIds: ReadonlySet<string>) => void;
   /** Notify tab observers when `chrome.debugger` soft-detaches on idle without replacing the document. */
@@ -434,6 +436,23 @@ function sameRootDocumentSignature(
     before.backendNodeId === after.backendNodeId &&
     before.documentElementBackendNodeId === after.documentElementBackendNodeId &&
     before.documentUrl === after.documentUrl
+  );
+}
+
+function sameRootDocumentIdentity(
+  before: RootDocumentSignature | undefined,
+  after: RootDocumentSignature,
+): boolean {
+  if (!before || !before.probed || !after.probed || after.dialogOpen) return false;
+  return (
+    before.frameId !== undefined &&
+    before.frameId === after.frameId &&
+    before.loaderId !== undefined &&
+    before.loaderId === after.loaderId &&
+    before.backendNodeId !== undefined &&
+    before.backendNodeId === after.backendNodeId &&
+    before.documentElementBackendNodeId !== undefined &&
+    before.documentElementBackendNodeId === after.documentElementBackendNodeId
   );
 }
 
@@ -759,10 +778,15 @@ export class ChromiumCdp {
         check();
 
         let rootDocumentUnchanged = false;
+        let sameRootIdentity = false;
         if (previousSoftDetach !== undefined) {
           const currentDocSignature = await this.probeRootDocumentSignature(tabId);
           check();
           rootDocumentUnchanged = sameRootDocumentSignature(
+            previousSoftDetach.rootSignature,
+            currentDocSignature,
+          );
+          sameRootIdentity = sameRootDocumentIdentity(
             previousSoftDetach.rootSignature,
             currentDocSignature,
           );
@@ -775,11 +799,19 @@ export class ChromiumCdp {
             ) {
               attachingEntry.pendingDialog.attachmentId = attachingEntry.attachingId;
             }
-            this.options.onDocumentChanged?.(tabId);
+            if (sameRootIdentity && this.options.onRouteChanged) {
+              this.options.onRouteChanged(
+                tabId,
+                currentDocSignature.documentUrl ?? currentDocSignature.url,
+              );
+            } else {
+              this.options.onDocumentChanged?.(tabId);
+            }
           } else if (currentDocSignature.dialogOpen) {
             attachingEntry.deferredRootCheck = { expected: previousSoftDetach.rootSignature };
           }
           if (currentDocSignature.frameId) {
+            attachingEntry.frameDiscovery.rootFrameId = currentDocSignature.frameId;
             const existingRoot = attachingEntry.frames.get(currentDocSignature.frameId);
             attachingEntry.frames.set(currentDocSignature.frameId, {
               loaderId: currentDocSignature.loaderId ?? existingRoot?.loaderId ?? "",
@@ -796,7 +828,7 @@ export class ChromiumCdp {
         });
         check();
 
-        if (previousSoftDetach !== undefined && rootDocumentUnchanged) {
+        if (previousSoftDetach !== undefined && (rootDocumentUnchanged || sameRootIdentity)) {
           const hadChildFrames = [...previousSoftDetach.frames.entries()].some(
             ([frameId, route]) =>
               frameId !== previousSoftDetach.rootSignature.frameId ||
@@ -2768,19 +2800,35 @@ export class ChromiumCdp {
           route.documentElementBackendNodeId = undefined;
         }
       }
+    } else if (
+      method === "Page.navigatedWithinDocument" &&
+      typeof raw.frameId === "string" &&
+      typeof raw.url === "string"
+    ) {
+      const existing = entry.frames.get(raw.frameId);
+      if (existing) {
+        const hashIndex = raw.url.indexOf("#");
+        existing.url = hashIndex >= 0 ? raw.url.slice(0, hashIndex) : raw.url;
+        existing.urlFragment = hashIndex >= 0 ? raw.url.slice(hashIndex) : undefined;
+      }
     } else if (method === "Page.frameDetached" && typeof raw.frameId === "string") {
       entry.frames.delete(raw.frameId);
     }
 
     const rootRouteChanged =
       method === "Page.navigatedWithinDocument" && raw.frameId === entry.frameDiscovery.rootFrameId;
-    if (
+    if (!source.sessionId && rootRouteChanged) {
+      const routeUrl = typeof raw.url === "string" ? raw.url : undefined;
+      if (this.options.onRouteChanged) {
+        this.options.onRouteChanged(tabId, routeUrl);
+      } else {
+        this.options.onDocumentChanged?.(tabId);
+      }
+    } else if (
       !source.sessionId &&
-      (rootRouteChanged ||
-        method === "DOM.documentUpdated" ||
-        ((method === "Page.frameNavigated" || method === "Page.documentOpened") &&
-          frame &&
-          !frame.parentId))
+      (method === "Page.frameNavigated" || method === "Page.documentOpened") &&
+      frame &&
+      !frame.parentId
     ) {
       this.options.onDocumentChanged?.(tabId);
     }
@@ -3010,7 +3058,15 @@ export class ChromiumCdp {
         live.deferredRootCheck = undefined;
         if (current.dialogOpen || !sameRootDocumentSignature(pending.expected, current)) {
           live.attachmentId = crypto.randomUUID();
-          this.options.onDocumentChanged?.(tabId);
+          if (
+            !current.dialogOpen &&
+            sameRootDocumentIdentity(pending.expected, current) &&
+            this.options.onRouteChanged
+          ) {
+            this.options.onRouteChanged(tabId, current.documentUrl ?? current.url);
+          } else {
+            this.options.onDocumentChanged?.(tabId);
+          }
         }
       } finally {
         pending.verification = undefined;

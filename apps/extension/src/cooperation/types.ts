@@ -61,6 +61,7 @@ export interface TextChange {
 
 export interface FrameState {
   document: string;
+  url?: string;
   /** Collector-local identity of the deep active element in this document. */
   focus?: string;
   /** True only for the ordinary document focus, without a specific recipient. */

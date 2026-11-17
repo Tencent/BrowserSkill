@@ -180,6 +180,9 @@ export default defineBackground(() => {
       sessions.invalidateTabRefs(tabId);
       cooperation.invalidate(tabId);
     },
+    onRouteChanged: (tabId, url) => {
+      cooperation.invalidateRoute(tabId, url);
+    },
     onChildFramesInvalidated: (tabId, staleFrameIds) => {
       sessions.invalidateTabChildFrames(tabId, staleFrameIds);
       cooperation.invalidateChildFrames(tabId);

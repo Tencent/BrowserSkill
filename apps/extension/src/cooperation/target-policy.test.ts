@@ -2126,3 +2126,111 @@ describe("text deltas under target control", () => {
     );
   });
 });
+
+describe("same-document routes, concurrent background observation, and handler failure receipts", () => {
+  it("completes multi-step targeted actions across same-pathname query/hash updates and defers pathname route invalidation until settlement", async () => {
+    const f = await fixture("target");
+    const stepReceipt = { tab_id: 7, actual_value: "shoes", value_length: 5 };
+    const fillResult = await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+      await runner.beginDomMutation?.();
+      await runner.send(7, "Input.insertText", { text: "shoes" });
+      f.controller.invalidateRoute(7, "https://fixture.test/?q=shoes#results");
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "input-obj-1",
+        functionDeclaration: "function() { return true; }",
+      });
+      return stepReceipt;
+    });
+    expect(fillResult).toEqual(stepReceipt);
+    expect(f.controller.view(7)?.mode).toBe("ready");
+    // Same-pathname query/hash update preserves target context for the next step.
+    expect(await f.run({ ref: "e1" }, "tool.click", async () => ({ tab_id: 7 }))).toEqual({
+      tab_id: 7,
+    });
+
+    // Clicking an SPA link that changes pathname finishes cleanly, keeps mode out of
+    // `unavailable`, and revokes the old context with `effect_state: "none"` afterward.
+    const routeClick = await f.run({ ref: "e1" }, "tool.click", async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      f.controller.invalidateRoute(7, "https://fixture.test/orders");
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      return { tab_id: 7, x: 4, y: 5 };
+    });
+    expect(routeClick).toEqual({ tab_id: 7, x: 4, y: 5 });
+    expect(f.controller.view(7)?.mode).toBe("syncing");
+    expect(await f.run({ ref: "e1" }, "tool.click")).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "control_context_invalid", effect_state: "none" },
+    });
+  });
+
+  it("isolates in-flight actions and target contexts from transient background observeTab failures while preserving structured handler errors", async () => {
+    const f = await fixture("target");
+    // Transient subframe error during idle background `observeTab` recovers once collection succeeds.
+    f.readFrames.mockRejectedValueOnce(new Error("subframe temporarily unavailable"));
+    await f.controller.observeTab(7);
+    expect(f.controller.view(7)?.mode).toBe("unavailable");
+
+    // In-flight main-document action survives a concurrent background `observeTab` failure.
+    const fillReceipt = { tab_id: 7, actual_value: "ok", value_length: 2 };
+    const completed = await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+      await runner.beginDomMutation?.();
+      await runner.send(7, "Input.insertText", { text: "ok" });
+      f.readFrames.mockRejectedValueOnce(new Error("background subframe replacing"));
+      await f.controller.observeTab(7);
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "input-obj-2",
+        functionDeclaration: "function() { return true; }",
+      });
+      return fillReceipt;
+    });
+    expect(completed).toEqual(fillReceipt);
+
+    // Structured handler error (e.g. failed download after `onBeforeNavigate`) is preserved,
+    // not overwritten with `Page interaction coverage changed`, while revoking old context.
+    const downloadError = {
+      code: "cdp_failed" as const,
+      message: "HTTP 500 instead of file attachment",
+      data: {
+        reason: "download_capture_failed",
+        phase: "execution",
+        effect_state: "unknown" as const,
+      },
+    };
+    const failedDownload = await f.run({ ref: "e1" }, "tool.download", async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      f.controller.invalidate(7);
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      return downloadError;
+    });
+    expect(failedDownload).toMatchObject({
+      code: "cdp_failed",
+      message: "HTTP 500 instead of file attachment",
+      data: { reason: "download_capture_failed", effect_state: "unknown" },
+    });
+    expect(await f.run({ ref: "e1" }, "tool.click")).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "control_context_invalid", effect_state: "none" },
+    });
+  });
+});
