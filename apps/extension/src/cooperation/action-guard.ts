@@ -231,8 +231,7 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
       if (key === "runBrowserMutation")
         return async <R>(operation: () => Promise<R>): Promise<R> => {
           if (!prepare) throw new Error("Shared-tab observation cannot mutate the browser");
-          await beginDomMutation?.();
-          await prepare();
+          await prepare(undefined, "Browser.mutate");
           dispatch?.(true, "Browser.mutate");
           return operation();
         };

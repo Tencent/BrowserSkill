@@ -22,6 +22,7 @@ import {
 } from "./types";
 
 export const COOPERATION_SUBFRAME_DEBOUNCE_MS = 50;
+export const FRAME_REPLY_TIMEOUT_MS = 3_000;
 
 function validFrame(value: unknown): value is FrameState {
   if (!value || typeof value !== "object") return false;
@@ -114,7 +115,10 @@ async function readFrame(
         return active ? request() : undefined;
       })(),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new FrameUnresponsiveError([frameIdentity(frame)])), 1200);
+        timer = setTimeout(
+          () => reject(new FrameUnresponsiveError([frameIdentity(frame)])),
+          FRAME_REPLY_TIMEOUT_MS,
+        );
       }),
     ]);
     if (!validFrame(value))

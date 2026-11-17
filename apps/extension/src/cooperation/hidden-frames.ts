@@ -11,7 +11,7 @@ export interface FrameOwner {
 }
 
 const OWNER_ELEMENTS = new Set(["iframe", "frame", "object", "embed", "fencedframe"]);
-const OWNER_REPLY_MS = 1200;
+const OWNER_REPLY_MS = 3_000;
 const MAX_OWNERS = 4096;
 
 /**
