@@ -168,6 +168,8 @@ def discover(bsk, directory):
             [bsk, *parts, "--help"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=20,
             env=env,
         )
@@ -175,7 +177,7 @@ def discover(bsk, directory):
             raise ValueError("Help discovery failed: " + key + " " + r.stderr)
         text = r.stdout
         file = directory / ((key.replace(" ", "__") or "root") + ".txt")
-        file.write_text(text)
+        file.write_text(text, encoding="utf-8")
         documents.append({"command": key, "path": file.name, "sha256": digest(file)})
         match = re.search(r"^Commands:\s*\n(.*?)(?=^\S|\Z)", text, re.M | re.S)
         children = (
@@ -190,6 +192,8 @@ def discover(bsk, directory):
                 [bsk, "recipe", "--help"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=20,
                 env=env,
             )
@@ -634,8 +638,8 @@ def execute(args):
         if started_ms is not None and finished_ms is not None
         else 0.0
     )
-    out_text = (folder / "stdout.txt").read_text(errors="replace")
-    err_text = (folder / "stderr.txt").read_text(errors="replace")
+    out_text = (folder / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+    err_text = (folder / "stderr.txt").read_text(encoding="utf-8", errors="replace")
     parsed_json = parse(out_text.strip() or err_text.strip())
     metrics = extract_metrics(cmd_name, code, parsed_json, elapsed_ms)
     meta.update(
@@ -697,8 +701,8 @@ def read_record(root, record_id):
             raise ValueError("Changed raw " + kind)
     if (d / "stdin.txt").exists() and digest(d / "stdin.txt") != m.get("stdin_sha256"):
         raise ValueError("Changed protocol input")
-    out = (d / "stdout.txt").read_text(errors="replace")
-    err = (d / "stderr.txt").read_text(errors="replace")
+    out = (d / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+    err = (d / "stderr.txt").read_text(encoding="utf-8", errors="replace")
     parsed_json = parse(out.strip() or err.strip())
     if "elapsed_ms" not in m:
         s_ms = parse_iso_ms(m.get("started"))

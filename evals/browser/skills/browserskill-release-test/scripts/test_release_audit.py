@@ -833,6 +833,29 @@ else:
             if resolved.is_symlink():
                 resolved.unlink()
 
+    def test_events_endpoint_serves_utf8_payloads(self):
+        root = self.skill / "assets/fixtures"
+        server = serve.make_server(root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}"
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/event",
+                    data=json.dumps(
+                        {"type": "note", "value": "中文事件"}, ensure_ascii=False
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+            ).read()
+            body = urllib.request.urlopen(url + "/events").read().decode("utf-8")
+            self.assertIn("中文事件", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_shipped_scenarios_and_fixture_manifest_integrity(self):
         import re as _re
 
