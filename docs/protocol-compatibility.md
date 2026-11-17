@@ -3,7 +3,7 @@
 CLI, MCP server (`bsk mcp`), daemon, Agent Skill, and browser extensions can update at
 different times. Their application semvers (`CARGO_PKG_VERSION`, extension manifest
 version) do not have to match; runtime compatibility is governed by the wire protocol
-version (`PROTOCOL_VERSION = "2.0"`, `MIN_COMPATIBLE_PROTOCOL = "2.0"` in
+version (`PROTOCOL_VERSION = "2.1"`, `MIN_COMPATIBLE_PROTOCOL = "2.0"` in
 `crates/bsk-protocol/src/catalog.rs`).
 
 ## Handshake and version checks
@@ -33,8 +33,11 @@ actionable diagnostics.
 
 If the daemon is on an incompatible protocol version, update `bsk` and restart the daemon
 after active tasks finish (host-managed foreground daemons must be restarted by their host).
-If an extension profile is on an older major protocol, update or reload that browser profile's
-extension and wait for reconnection. Each connected browser profile is checked independently.
+If an unpacked extension has been replaced on disk, use `bsk ext reload --browser <id>` after
+all sessions on that browser have closed. The one-shot command requires protocol 2.1; older
+extensions return an unsupported-method error. Chrome's manual Reload remains available.
+For an extension profile on an older major protocol, update or manually reload that browser
+profile's extension and wait for reconnection. Each connected browser profile is checked independently.
 
 The Agent Skill (`crates/bsk-cli/skill/`) supplies workflow instructions rather than runtime
 capability; reload the skill or start a new conversation after updating `bsk`.

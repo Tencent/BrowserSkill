@@ -732,14 +732,14 @@ async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
     }
     drop(old_ws);
 
-    // Connect valid protocol "2.0" browser.
+    // Connect a browser on the current protocol minor version.
     let mut ws = connect_ws(info.ws_port).await;
     let hs = handshake_ws(&mut ws, PROTOCOL_VERSION, Some(PROTOCOL_VERSION)).await;
     let hs_result: HandshakeResult = match hs.body {
         ResponseBody::Ok(v) => serde_json::from_value(v).unwrap(),
-        ResponseBody::Err(e) => panic!("2.0 handshake failed: {e:?}"),
+        ResponseBody::Err(e) => panic!("current protocol handshake failed: {e:?}"),
     };
-    assert_eq!(hs_result.protocol_version, "2.0");
+    assert_eq!(hs_result.protocol_version, PROTOCOL_VERSION);
     assert_eq!(hs_result.min_compatible_protocol.as_deref(), Some("2.0"));
 
     // Enable operation audit over WS (`AuditRequestParams` -> `AuditRequestResult::Configure`)

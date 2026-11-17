@@ -92,6 +92,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::Mcp(args) => cli::mcp::dispatch(args),
         Command::Session(cmd) => cli::session::dispatch(cmd, &base_ctx, format),
         Command::Browsers => cli::browsers::dispatch(format),
+        Command::Extension(cmd) => cli::extension::dispatch(cmd, format),
         Command::Tab(cmd) => cli::tab::dispatch(cmd, &base_ctx, format),
         Command::Window(cmd) => cli::window::dispatch(cmd, &base_ctx, format),
         Command::Emulate(args) => cli::emulate::dispatch(args, &base_ctx, format),

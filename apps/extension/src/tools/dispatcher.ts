@@ -151,6 +151,8 @@ export interface DispatcherDeps {
   interactionPreferences?: InteractionPreferenceStore;
   /** i18n notification copy for `tool.request_help` (resolved per-call). */
   helpNotificationCopy?: () => { title: string; body: string };
+  /** Reload the unpacked extension after an explicit daemon request and idle check. */
+  reloadExtension?: () => void;
 }
 
 /** Suggested wait before retrying a request refused while another settles.
@@ -188,6 +190,7 @@ export class ToolDispatcher {
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly interactionPreferences?: InteractionPreferenceStore;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
+  private readonly reloadExtension?: () => void;
   private subscription: { dispose(): void } | null = null;
   private readonly hoverBypassTabs = new Map<number, string>();
   private readonly hoverLatches = new Map<number, HoverLatch>();
@@ -222,6 +225,7 @@ export class ToolDispatcher {
     this.approveBorrow = deps.approveBorrow;
     this.interactionPreferences = deps.interactionPreferences;
     this.helpNotificationCopy = deps.helpNotificationCopy;
+    this.reloadExtension = deps.reloadExtension;
   }
 
   start(): void {
@@ -349,6 +353,11 @@ export class ToolDispatcher {
         result: { cancelled: ac !== undefined },
       };
       this.sendResponse(reply);
+      return;
+    }
+
+    if (raw.method === "extension.reload") {
+      await this.dispatchExtensionReload(raw);
       return;
     }
 
@@ -594,6 +603,60 @@ export class ToolDispatcher {
         console.debug("[bsk dispatcher] disconnect after send failure errored", disconnectError);
       });
       return false;
+    }
+  }
+
+  private async dispatchExtensionReload(raw: RequestFrame): Promise<void> {
+    const params = raw.params;
+    const browserInstanceId =
+      typeof params === "object" && params !== null && "browser_instance_id" in params
+        ? params.browser_instance_id
+        : undefined;
+    if (typeof browserInstanceId !== "string" || !browserInstanceId) {
+      this.sendResponse({
+        id: raw.id,
+        error: { code: "invalid_params", message: "extension.reload requires browser_instance_id" },
+      });
+      return;
+    }
+    const reloadExtension = this.reloadExtension;
+    if (!reloadExtension) {
+      this.sendResponse({
+        id: raw.id,
+        error: { code: "unsupported", message: "Extension reload is unavailable in this build" },
+      });
+      return;
+    }
+
+    const idle = await this.runWhenIdle(async () => {
+      if (
+        !this.sendResponse({
+          id: raw.id,
+          result: { scheduled: true, browser_instance_id: browserInstanceId },
+        })
+      ) {
+        return;
+      }
+      // Give the WebSocket response time to leave the worker before Chrome restarts it.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      try {
+        reloadExtension();
+      } catch (error) {
+        console.warn("[bsk dispatcher] extension reload failed", error);
+        return;
+      }
+      // Keep the session-start reservation briefly while Chrome tears down this worker.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    });
+    if (!idle) {
+      this.sendResponse({
+        id: raw.id,
+        error: {
+          code: "unsupported",
+          message: "Stop active sessions and retry extension reload.",
+          data: { reason: "session_busy" },
+        },
+      });
     }
   }
 

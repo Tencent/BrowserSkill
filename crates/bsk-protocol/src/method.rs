@@ -244,6 +244,7 @@ methods! {
     SessionList => ("session.list", SessionListParams, SessionListResult),
     SessionRunLog => ("session.run_log", SessionRunLogParams, RunLog),
     BrowserList => ("browser.list", BrowserListParams, BrowserListResult),
+    ExtensionReload => ("extension.reload", ExtensionReloadParams, ExtensionReloadResult),
     ToolSessionStart => ("tool.session_start", SessionStartParams, SessionStartResult),
     ToolSessionStop => ("tool.session_stop", SessionStopParams, SessionStopOutcome),
     ToolWindowResize => ("tool.window_resize", WindowResizeParams, WindowResizeResult),
@@ -530,6 +531,13 @@ impl Method {
             ),
             Self::BrowserList => method_spec!(
                 owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
+                deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
+                wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
+                background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
+                debug_evidence: None, audit_key: None, recipe: Ignore
+            ),
+            Self::ExtensionReload => method_spec!(
+                owner: Shared, effect: ControlPlane, action_metadata: None, remote_allowed: false,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
@@ -1200,6 +1208,15 @@ mod tests {
         let method: Method = serde_json::from_value(json!("cancel")).unwrap();
         assert_eq!(method, Method::Cancel);
         assert_eq!(serde_json::to_value(method).unwrap(), json!("cancel"));
+    }
+
+    #[test]
+    fn extension_reload_is_an_explicit_local_shared_control_plane_method() {
+        let method = Method::ExtensionReload;
+        assert_eq!(method.wire_name(), "extension.reload");
+        assert_eq!(method.owner(), MethodOwner::Shared);
+        assert_eq!(method.effect(), MethodEffect::ControlPlane);
+        assert!(!method.spec().remote_allowed);
     }
 
     #[test]

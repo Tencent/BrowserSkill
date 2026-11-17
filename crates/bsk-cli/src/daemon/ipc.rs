@@ -20,9 +20,10 @@ use crate::ipc_client::{IpcRequestMeta, IpcResponseMeta};
 
 pub(super) use super::ipc_sessions::{RecordSessionStop, handle_session_start_scoped};
 use super::ipc_sessions::{
-    handle_browser_list, handle_ledger_request, handle_session_list, handle_session_run_log,
-    handle_session_stop, handle_session_stop_all_rpc, handle_status, handle_transfer_begin,
-    handle_transfer_chunk, handle_transfer_finish, handle_transfer_read, handle_transfer_release,
+    handle_browser_list, handle_extension_reload, handle_ledger_request, handle_session_list,
+    handle_session_run_log, handle_session_stop, handle_session_stop_all_rpc, handle_status,
+    handle_transfer_begin, handle_transfer_chunk, handle_transfer_finish, handle_transfer_read,
+    handle_transfer_release,
 };
 pub use super::ipc_transport::{IpcHandle, IpcServer, bind, serve};
 use super::sessions::SessionId;
@@ -379,6 +380,10 @@ async fn dispatch_envelope_rpc(
         Method::SessionList => handle_session_list(&state, params),
         Method::LedgerRequest => handle_ledger_request(&state, params, &req_meta).await,
         Method::BrowserList => match handle_browser_list(&state, params).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::ExtensionReload => match handle_extension_reload(&state, rpc_id, params).await {
             Ok(v) => ResponseBody::Ok(v),
             Err(e) => ResponseBody::Err(e),
         },

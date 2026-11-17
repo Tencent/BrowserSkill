@@ -11,8 +11,9 @@ determines which versions can connect.
 
 ### Added
 
+- Added protocol 2.1 method `extension.reload` and `bsk ext reload --browser <id>` for an explicit, session-safe reload of an unpacked extension after replacing its build. The command is manual by default and refuses to reload while sessions are active.
 - **MCP 100% parity**: Added `bsk_ledger`, `bsk_debug`, `bsk_video`, and `bsk_record` first-class tools alongside full CLI parity on existing tools (`session open/stop --all`, `sync` waits/filters, `wait_ms`, `view`, full-page `screenshot` / `extract` `--out`/`--overwrite`/`--format`/`--csv-safe`, `read` `context`, `upload`/`download`, `tab_borrow`, full `emulate`, and `operation_await --out/--overwrite`), unified behind request-scoped `ClientContext`.
-- **Compile-time `MethodSpec` & `RpcErrorReason` SSOT**: Defined exhaustive `bsk_protocol::method::MethodSpec` metadata across all 77 RPC methods (exported to TypeScript `transport/generated/`) and exhaustive `RpcErrorReason` variants with dual CLI/MCP recovery hints (`cli_hint` / `mcp_hint`).
+- **Compile-time `MethodSpec` & `RpcErrorReason` SSOT**: Defined exhaustive `bsk_protocol::method::MethodSpec` metadata across all 78 RPC methods (exported to TypeScript `transport/generated/`) and exhaustive `RpcErrorReason` variants with dual CLI/MCP recovery hints (`cli_hint` / `mcp_hint`).
 - DeepSeek Harness (`dsh`) is now a first-class skill installation target via
   `bsk install-skill --harness dsh` (honoring `$DSH_HOME`, defaulting to
   `~/.dsh/skills`), `DSH_SESSION_ID` is recognized as an automatic host

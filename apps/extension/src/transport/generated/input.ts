@@ -555,6 +555,7 @@ export type Method =
   | "session.list"
   | "session.run_log"
   | "browser.list"
+  | "extension.reload"
   | "tool.session_start"
   | "tool.session_stop"
   | "tool.window_resize"
@@ -1160,6 +1161,8 @@ export interface ProtocolTypes {
   EventKind: EventKind;
   ExpectationField: ExpectationField;
   ExpectedValue: ExpectedValue;
+  ExtensionReloadParams: ExtensionReloadParams;
+  ExtensionReloadResult: ExtensionReloadResult;
   ExtractAction: ExtractAction;
   ExtractColumn: ExtractColumn;
   ExtractCompleteness: ExtractCompleteness;
@@ -3138,6 +3141,28 @@ export interface SessionUserInterruptEvent {
 export interface SessionInteractionChangedEvent {
   interaction: InteractionPolicy;
   session_id: string;
+}
+/**
+ * One-shot request to reload an idle extension after replacing an unpacked build.
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ExtensionReloadParams".
+ */
+export interface ExtensionReloadParams {
+  /**
+   * Browser instance id or label. Omit only when exactly one browser is connected.
+   */
+  browser_instance_id?: string;
+}
+/**
+ * The extension accepted a user-requested reload and is about to restart.
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ExtensionReloadResult".
+ */
+export interface ExtensionReloadResult {
+  browser_instance_id: string;
+  scheduled: boolean;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
