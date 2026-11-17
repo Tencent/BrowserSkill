@@ -7,8 +7,10 @@ import {
 
 export { RECORD_PASSWORD_ATTRIBUTE, SENSITIVE_AUTOCOMPLETE_SELECTOR, sensitiveAutocomplete };
 
+export const OVERLAY_HOST_LEGACY_ATTR = "data-bsk-overlay-host";
+
 /** Selector matching BrowserSkill's injected overlay hosts and Shadow DOM roots. */
-export const BSK_OVERLAY_SELECTOR = `[data-bsk-overlay],[${OVERLAY_HOST_MARKER_ATTR}],${OVERLAY_HOST_NAME}`;
+export const BSK_OVERLAY_SELECTOR = `[${OVERLAY_HOST_MARKER_ATTR}],[${OVERLAY_HOST_LEGACY_ATTR}],${OVERLAY_HOST_NAME}`;
 
 /** Non-rendered or BrowserSkill-internal ancestor subtrees excluded from passive DOM reads. */
 export const READ_REDACTED_ANCESTOR_SELECTOR = `script,style,template,noscript,${BSK_OVERLAY_SELECTOR}`;

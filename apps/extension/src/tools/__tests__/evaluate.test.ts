@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { handleEvaluate } from "../evaluate";
@@ -360,22 +360,24 @@ describe("handleEvaluate", () => {
     const api: CdpDebuggerApi = {
       attach: vi.fn(async () => {}),
       detach: vi.fn(async () => {}),
-      sendCommand: vi.fn(async (target: CdpDebuggee, method: string) => {
-        if (method === "Runtime.evaluate") {
-          for (const listener of detachListeners) {
-            listener({ tabId: target.tabId }, "target_closed");
+      sendCommand: vi.fn(
+        async (target: Parameters<CdpDebuggerApi["sendCommand"]>[0], method: string) => {
+          if (method === "Runtime.evaluate") {
+            for (const listener of detachListeners) {
+              listener({ tabId: target.tabId }, "target_closed");
+            }
+            return {
+              result: {
+                type: "object",
+                className: "HTMLDivElement",
+                objectId: "detached-node-1",
+                description: "div#gone",
+              },
+            };
           }
-          return {
-            result: {
-              type: "object",
-              className: "HTMLDivElement",
-              objectId: "detached-node-1",
-              description: "div#gone",
-            },
-          };
-        }
-        return {};
-      }),
+          return {};
+        },
+      ),
       // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
       onEvent: { addListener: vi.fn(), removeListener: vi.fn() } as any,
       onDetach: {

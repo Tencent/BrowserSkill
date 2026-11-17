@@ -1,9 +1,10 @@
 import {
-  isOverlayHostElementName,
-  OVERLAY_HOST_MARKER_ATTR,
-  OVERLAY_HOST_SELECTOR,
-} from "@/lib/overlay-bridge";
-import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+  BSK_OVERLAY_SELECTOR,
+  OVERLAY_HOST_LEGACY_ATTR,
+  RECORD_PASSWORD_ATTRIBUTE,
+  sensitiveAutocomplete,
+} from "@/lib/dom-predicates";
+import { isOverlayHostElementName, OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 
 export const INTERNAL_BSK_ATTR_PREFIX = "data-bsk-";
 
@@ -13,7 +14,9 @@ export function primaryEventTarget(event: Event): EventTarget | null {
 
 export function isExtensionOverlayElement(element: Element): boolean {
   return (
-    isOverlayHostElementName(element.localName) || element.hasAttribute(OVERLAY_HOST_MARKER_ATTR)
+    isOverlayHostElementName(element.localName) ||
+    element.hasAttribute(OVERLAY_HOST_MARKER_ATTR) ||
+    element.hasAttribute(OVERLAY_HOST_LEGACY_ATTR)
   );
 }
 
@@ -30,7 +33,7 @@ export function isExtensionOverlayNode(target: EventTarget | null): boolean {
       continue;
     }
     if (current instanceof Element) {
-      if (isExtensionOverlayElement(current) || current.closest(OVERLAY_HOST_SELECTOR)) {
+      if (isExtensionOverlayElement(current) || current.closest(BSK_OVERLAY_SELECTOR)) {
         return true;
       }
     }

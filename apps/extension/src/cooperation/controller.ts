@@ -2492,11 +2492,20 @@ export class CooperationController implements ControlAuthority {
         operationSignal,
         completionSignal,
       );
+      const withUsedSelector = (value: unknown) =>
+        req.method !== "tool.press" &&
+        params.selector &&
+        value &&
+        typeof value === "object" &&
+        !isRpcError(value) &&
+        (value as Record<string, unknown>).used_selector === undefined
+          ? { ...(value as Record<string, unknown>), used_selector: params.selector }
+          : value;
       // A completed download transfers cleanup ownership to the daemon. Keep its
       // receipt even if control changed during final cleanup; dropping it would
       // orphan the file. The consumed context still requires a fresh next step.
       if (["tool.tab_close", "tool.download"].includes(req.method) && !isRpcError(result))
-        return result;
+        return withUsedSelector(result);
       // A handler receipt describes completed input, independently of whether its
       // document can authorize the next action. evaluate reports script exceptions
       // in-band; a successfully evaluated false value is still a completed script.
@@ -2564,18 +2573,7 @@ export class CooperationController implements ControlAuthority {
           },
         };
       }
-      if (
-        primaryTarget?.selector &&
-        result &&
-        typeof result === "object" &&
-        (result as Record<string, unknown>).used_selector === undefined
-      ) {
-        return {
-          ...(result as Record<string, unknown>),
-          used_selector: primaryTarget.selector,
-        };
-      }
-      return result;
+      return withUsedSelector(result);
     } catch (error) {
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) {

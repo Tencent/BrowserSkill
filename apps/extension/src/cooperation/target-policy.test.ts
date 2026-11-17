@@ -1900,6 +1900,168 @@ describe("text deltas under target control", () => {
     expect(okRes).toMatchObject({ tab_id: 7, used_selector: "#save-btn" });
     expect(okRes).not.toHaveProperty("used_ref");
     expect([...f.session.refStore.entries()]).toEqual(initialRefs);
+
+    // Drag with source.selector pins both endpoints without injecting top-level used_selector onto DragResult.
+    vi.mocked(resolveActionTarget)
+      .mockResolvedValueOnce({
+        tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+        backendNodeId: 79,
+        handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 79 },
+        usedSelector: "#drag-card",
+      })
+      .mockResolvedValueOnce({
+        tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+        backendNodeId: 80,
+        handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 80 },
+        usedSelector: "#drop-zone",
+      });
+    const dragReq = {
+      id: "drag-sel",
+      method: "tool.drag",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        source: { selector: "#drag-card" },
+        target: { selector: "#drop-zone" },
+      },
+    };
+    const dragRes = (await f.controller.run(dragReq, f.cdp, f.signal, async (runner) => {
+      expect(lookupPinnedSelectorTarget(runner, 7, "#drag-card")?.backendNodeId).toBe(79);
+      expect(lookupPinnedSelectorTarget(runner, 7, "#drop-zone")?.backendNodeId).toBe(80);
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 30,
+        y: 40,
+      });
+      return { tab_id: 7, source: { x: 10, y: 20 }, target: { x: 30, y: 40 } };
+    })) as Record<string, unknown>;
+    expect(dragRes).toEqual({ tab_id: 7, source: { x: 10, y: 20 }, target: { x: 30, y: 40 } });
+    expect(dragRes).not.toHaveProperty("used_selector");
+
+    // Directed press with selector pins focus target without injecting undocumented used_selector onto PressResult.
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 81,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 81 },
+      usedSelector: "#search-input",
+    });
+    const pressReq = {
+      id: "press-sel",
+      method: "tool.press",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        selector: "#search-input",
+        key: "Enter",
+      },
+    };
+    const pressRes = (await f.controller.run(pressReq, f.cdp, f.signal, async (runner) => {
+      expect(lookupPinnedSelectorTarget(runner, 7, "#search-input")?.backendNodeId).toBe(81);
+      await runner.send(7, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+      });
+      await runner.send(7, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Enter",
+        code: "Enter",
+      });
+      return { tab_id: 7, key: "Enter", code: "Enter", modifiers: [] };
+    })) as Record<string, unknown>;
+    expect(pressRes).toEqual({ tab_id: 7, key: "Enter", code: "Enter", modifiers: [] });
+    expect(pressRes).not.toHaveProperty("used_selector");
+    expect(pressRes).not.toHaveProperty("used_ref");
+
+    // Download with selector preserves baseline on pre-dispatch error and attaches used_selector on completion.
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 82,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 82 },
+      usedSelector: "#export-csv",
+    });
+    const dlFailRes = await f.controller.run(
+      {
+        id: "dl-fail",
+        method: "tool.download",
+        params: {
+          session_id: "s",
+          tab_id: 7,
+          context_id: f.first.context_id,
+          selector: "#export-csv",
+        },
+      },
+      f.cdp,
+      f.signal,
+      async () => ({
+        code: "timeout",
+        message: "another bsk download is active",
+        data: { reason: "session_busy", effect_state: "none", dispatched: false },
+      }),
+    );
+    expect(dlFailRes).toMatchObject({
+      code: "timeout",
+      data: { reason: "session_busy", effect_state: "none" },
+    });
+    expect(dlFailRes).not.toHaveProperty("used_selector");
+
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 82,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 82 },
+      usedSelector: "#export-csv",
+    });
+    const dlOkRes = await f.controller.run(
+      {
+        id: "dl-ok",
+        method: "tool.download",
+        params: {
+          session_id: "s",
+          tab_id: 7,
+          context_id: f.first.context_id,
+          selector: "#export-csv",
+        },
+      },
+      f.cdp,
+      f.signal,
+      async (runner) => {
+        expect(lookupPinnedSelectorTarget(runner, 7, "#export-csv")?.backendNodeId).toBe(82);
+        await runner.send(7, "Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          button: "left",
+          x: 15,
+          y: 25,
+        });
+        await runner.send(7, "Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          button: "left",
+          x: 15,
+          y: 25,
+        });
+        return {
+          tab_id: 7,
+          filename: "report.csv",
+          mime_type: "text/csv",
+          byte_size: 42,
+          browser_path: "/tmp/report.csv",
+        };
+      },
+    );
+    expect(dlOkRes).toMatchObject({
+      tab_id: 7,
+      filename: "report.csv",
+      used_selector: "#export-csv",
+    });
+    expect(dlOkRes).not.toHaveProperty("used_ref");
   });
 
   it("refreshes live frame activity inside beginDomMutation under target policy and blocks DOM write on human intervention", async () => {

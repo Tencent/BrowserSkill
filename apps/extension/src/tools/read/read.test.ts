@@ -67,6 +67,8 @@ describe("declarative DOM reads", () => {
         ],
       }).items[0],
     ).toMatchObject({ values: { x: null, attr: null }, redacted: ["x", "attr"] });
+    document.body.innerHTML = '<div data-bsk-overlay-host><div id="row">overlay-ui</div></div>';
+    expect(collect().items[0]).toMatchObject({ values: { text: null }, redacted: ["text"] });
   });
   it("does not quietly redirect a detached node to a replacement", () => {
     const node = document.querySelector("#row")!;

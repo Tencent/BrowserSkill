@@ -1018,6 +1018,22 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("target policy in a real browser",
         });
         expect(await page.read("document.activeElement.id")).toBe("other");
         expect((await page.inputs()).keys).toEqual([]);
+
+        const resynced = await page.sync();
+        const directed = await page.act("tool.press", {
+          context_id: resynced.context_id,
+          selector: "#other",
+          key: "Enter",
+        });
+        expect(directed, JSON.stringify(directed)).toMatchObject({
+          key: "Enter",
+          code: "Enter",
+          modifiers: [],
+        });
+        expect(directed).not.toHaveProperty("used_selector");
+        expect(directed).not.toHaveProperty("used_ref");
+        expect(await page.read("document.activeElement.id")).toBe("other");
+        expect((await page.inputs()).keys).toEqual(["Enter:true"]);
       },
       { policy: "target" },
     );
