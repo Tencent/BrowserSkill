@@ -61,7 +61,7 @@ https://github.com/user-attachments/assets/6111d978-baa6-4a76-92c4-4f51d47ae617
   </tr>
 </table>
 
-Qoder, Qoder CN, and DeepSeek Harness are also supported as skill targets (`bsk install-skill --harness qoder`, `--harness qoder-cn`, and `--harness dsh`).
+Qoder, Qoder CN, and DeepSeek Harness are also supported as skill targets (`bsk install-skill --harness qoder`, `--harness qoder-cn`, and `--harness dsh`), and **[DeepSeek Harness](#deepseek-harness-plugin)** also provides a lightweight plugin (`@wxg-prc-cpg/browser-skill-dsh-plugin`) with bundled skill registration and on-demand `bsk` CLI setup.
 
 These and other agents that can run shell commands use the same **`bsk` CLI**, and MCP clients can also connect through **`bsk mcp`** ([MCP setup](docs/mcp.md)). You choose the agent and model; BrowserSkill connects it to your browser.
 
@@ -198,6 +198,19 @@ Use `bsk --help` or `bsk <command> --help` for command options. Always stop your
 
 In WorkBuddy/CodeBuddy, or hosts that reap command children, the agent should reuse an existing daemon or run `bsk daemon start --foreground` in a managed background task, then verify it from a separate tool call. Follow the [host setup guide](docs/sandboxed-agents.md) for shared `BSK_HOME`, `BSK_AUTO_START=0`, and the independent-terminal fallback when the host cannot keep a task alive.
 
+## DeepSeek Harness plugin
+
+The lightweight [DSH plugin](packages/dsh-plugin-browserskill/README.md) (`@wxg-prc-cpg/browser-skill-dsh-plugin`) packages the canonical `browser-skill` CLI skill for DeepSeek Harness profiles, automatically adds `~/.local/bin` (or a configured `bskPath`) to the host `PATH`, and bundles an on-demand `bsk` CLI + extension setup flow when `bsk` is not yet installed. Under the hood, it shares the exact same `bsk` CLI, daemon (`DSH_SESSION_ID` implicit scoping), and Agent Window runtime as every other agent.
+
+```sh
+dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
+dsh --profile web
+```
+
+Replace `web` with your profile name. Invoke `/browser-skill` in a conversation — if `bsk` is missing, the agent runs the bundled installer and guides browser extension connection automatically. No separate `bsk install-skill` step is needed.
+
+[Plugin usage and configuration](packages/dsh-plugin-browserskill/README.md) · [npm package](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)
+
 ## Website debugging
 
 **Give your agent the browser evidence behind a bug.** Start capture before reproducing an issue on a website you are authorized to debug, then inspect the result in the extension or through the agent.
@@ -301,7 +314,7 @@ A daemon that `bsk` started in the background also checks for a new release ever
 
 `bsk doctor` shows the last update attempt; `update-state.json` in the bsk home keeps its stage, result and error. Updates of one executable run one at a time, even from different bsk homes, through `.bsk.update.lock` (`.bsk.exe.update.lock` on Windows), which stays next to it. Until an update is confirmed, the previous executable stays next to the new one as `.bsk.old-*` (`.bsk.exe.old-*` on Windows); one that is still running remains until its process exits, and a later daemon start removes it. On Windows, self-update renames the running executable, which NTFS supports; where the file system refuses, the update fails and leaves the installation unchanged. bsk supports Windows 10 and Windows Server 2016 or later.
 
-Update the extension through its browser store. Check `bsk --version`, `bsk status`, and `bsk doctor`. Keep the CLI, running daemon, and extension on matching releases for new features. This README describes the current repository; store builds can lag during review. Check the [changelog](CHANGELOG.md) and [releases](https://github.com/Tencent/BrowserSkill/releases) for availability.
+Update the extension through its browser store. If you use the DeepSeek Harness plugin, update it in your profile (`dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest`) and restart that profile. Check `bsk --version`, `bsk status`, and `bsk doctor`. Keep the CLI, running daemon, extension, and optional DSH plugin on matching releases for new features. This README describes the current repository; store builds can lag during review. Check the [changelog](CHANGELOG.md) and [releases](https://github.com/Tencent/BrowserSkill/releases) for availability.
 
 Managed CLI skills update on daemon startup, `session start`, or `doctor` while their files remain unchanged. Local edits and custom skills are preserved. Start a new agent session to load updated instructions; doctor reports any paused skill updates.
 
@@ -328,6 +341,7 @@ Stop the daemon in its owning host or supervisor, update with `bsk update --yes 
 | Connect a server-side agent | [Remote browser connections](docs/remote-extension-connection.md) |
 | Run in a sandbox | [Sandboxed agents](docs/sandboxed-agents.md) |
 | Review recorded task metadata | [Operation audit](docs/operation-audit.md) |
+| Integrate with DeepSeek Harness | [DSH plugin](packages/dsh-plugin-browserskill/README.md) |
 | Connect over MCP | [MCP server](docs/mcp.md) |
 | Understand the implementation | [Architecture](docs/architecture.md) · [Protocol](crates/bsk-protocol/README.md) |
 
@@ -348,6 +362,7 @@ The CLI is built under `target/release/`; load `apps/extension/dist/chrome-mv3/`
 | `crates/bsk-cli` | CLI, daemon, and bundled agent skill |
 | `crates/bsk-protocol` | Wire types and JSON schemas |
 | `apps/extension` | Browser automation, debugging workspace, and extension UI |
+| `packages/dsh-plugin-browserskill` | Lightweight DeepSeek Harness skill and on-demand setup plugin |
 | `packages/ui`, `packages/i18n`, `packages/vom` | Shared UI, localization, and page observation |
 | `evals/browser` | Local test pages and browser capability evaluations |
 

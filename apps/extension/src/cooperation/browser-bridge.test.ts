@@ -4,6 +4,7 @@ import {
   attachCooperation,
   COOPERATION_SUBFRAME_DEBOUNCE_MS,
   collectCooperationFrames,
+  FRAME_REPLY_TIMEOUT_MS,
 } from "./browser-bridge";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import type { FrameOwner } from "./hidden-frames";
@@ -99,7 +100,7 @@ it("keeps the collection deadline when a retry never responds", async () => {
   const result = expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toThrow(
     "A page frame is not responding",
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   await result;
   expect(send).toHaveBeenCalledTimes(2);
 });
@@ -125,7 +126,7 @@ it("cannot arm a late retry after the collection deadline", async () => {
   const result = expect(collectCooperationFrames(7, COOPERATION_ARM, "lease")).rejects.toThrow(
     "A page frame is not responding",
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   await result;
   reply(undefined);
   await vi.advanceTimersByTimeAsync(25);
@@ -335,7 +336,7 @@ it("cannot arm a repaired collector after the deadline", async () => {
   const result = expect(collectCooperationFrames(7, COOPERATION_ARM, "lease")).rejects.toThrow(
     "not responding",
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   await result;
   finish();
   await vi.advanceTimersByTimeAsync(25);
@@ -453,7 +454,7 @@ const settle = async <T>(work: Promise<T>) => {
     (value) => ({ value }),
     (error: unknown) => ({ error }),
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   return outcome as Promise<{ value?: T; error?: unknown }>;
 };
 

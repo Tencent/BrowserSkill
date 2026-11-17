@@ -250,6 +250,12 @@ jobs:
       - name: Run VOM tests
         run: pnpm --filter @browser-skill/vom test
 
+      - name: Typecheck, test, and verify DSH plugin package
+        run: >-
+          pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin typecheck &&
+          pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin test &&
+          node scripts/check-dsh-package.mjs
+
       - name: Run extension unit tests
         run: pnpm ext:test
 
