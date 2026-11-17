@@ -1,11 +1,9 @@
 import {
-  type CdpFrame,
-  type FrameDocumentHandle,
   type FrameNodeHandle,
   isStaleFrameHandleError,
+  rootProcessBoundary,
   StaleFrameHandleError,
-  toFrameDocumentHandle,
-} from "@/browser-driver/frame-graph";
+} from "@/browser-driver/frame-handles";
 import type { RpcError } from "@/transport/types";
 import { nodeContentRegion, scrollNodeIntoView } from "./element-geometry";
 import { rpcError } from "./errors";
@@ -23,7 +21,7 @@ import {
 } from "./geometry";
 import type { CssViewport } from "./geometry/coordinate-types";
 import { cssViewport, GeometryContext } from "./geometry/frame-context";
-import { type CdpRunner, cdpRunnerForFrame, cdpRunnerForTarget, isRpcError } from "./shared";
+import { type CdpRunner, cdpRunnerForFrame, isRpcError } from "./shared";
 
 export type NodeAddress = FrameNodeHandle;
 
@@ -42,15 +40,6 @@ function geometryError(message: string): RpcError {
   return { code: "cdp_failed", message };
 }
 
-function frameRunner(
-  cdp: CdpRunner,
-  handle: FrameDocumentHandle | FrameNodeHandle,
-  resolvedFrame?: CdpFrame,
-): CdpRunner {
-  if (cdp.sendToFrame || !resolvedFrame) return cdpRunnerForFrame(cdp, handle);
-  return cdpRunnerForTarget(cdp, resolvedFrame.target);
-}
-
 async function scrollFrameOwners(
   cdp: CdpRunner,
   tabId: number,
@@ -65,7 +54,7 @@ async function scrollFrameOwners(
       return geometryError(`could not resolve frame owner for ${child.frameId}`);
     }
     const error = await scrollNodeIntoView(
-      frameRunner(cdp, toFrameDocumentHandle(tabId, parent), parent),
+      cdpRunnerForFrame(cdp, parent.handle),
       tabId,
       child.ownerBackendNodeId,
     );
@@ -94,7 +83,7 @@ async function scrollElementWithContext(
     const error = await scrollFrameOwners(cdp, tabId, context, handle.frameId);
     if (error) return error;
   }
-  return scrollNodeIntoView(frameRunner(cdp, handle, frame), tabId, handle.backendNodeId);
+  return scrollNodeIntoView(cdpRunnerForFrame(cdp, handle), tabId, handle.backendNodeId);
 }
 
 export async function scrollElementAndFramesIntoView(
@@ -165,13 +154,13 @@ export async function resolveNodeGeometry(
 
     // Only topology was read above. Begin live measurements after scrolling.
     const localRegion = await nodeContentRegion(
-      frameRunner(cdp, address, frame),
+      cdpRunnerForFrame(cdp, address),
       tabId,
       address.backendNodeId,
     );
     if (isRpcError(localRegion)) return localRegion;
 
-    const isOopifTarget = Boolean(frame?.target.sessionId);
+    const isOopifTarget = Boolean(frame?.isOutOfProcess);
     let topVisibleRegions: Region;
     let targetActionPoint: Point | null = null;
     if (address.frameId && graph && frame) {
@@ -180,7 +169,7 @@ export async function resolveNodeGeometry(
         return geometryError(`could not resolve frame geometry for ${address.frameId}`);
       topVisibleRegions = projectRegionToViewport(localRegion, projection);
       if (isOopifTarget) {
-        const localViewport = await context.viewport(frame.target);
+        const localViewport = await context.targetViewport(address.frameId);
         if (!localViewport) return geometryError("could not resolve target viewport geometry");
         const localVisibleRegions = localRegion
           .map((polygon) =>
@@ -199,7 +188,7 @@ export async function resolveNodeGeometry(
         targetActionPoint = localActionRegion ? polygonCentroid(localActionRegion) : null;
       }
     } else {
-      const viewport = await context.viewport({ tabId });
+      const viewport = await context.viewport(rootProcessBoundary(tabId));
       if (!viewport) return geometryError("could not resolve top viewport geometry");
       topVisibleRegions = localRegion
         .map((polygon) =>
@@ -223,7 +212,7 @@ export async function resolveNodeGeometry(
       topBounds,
       actionPoint,
       targetActionPoint,
-      topViewport: cssViewport(await context.layoutMetrics({ tabId })),
+      topViewport: cssViewport(await context.topLayoutMetrics(rootProcessBoundary(tabId))),
     };
   } catch (error) {
     if (isStaleFrameHandleError(error)) {

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDownload } from "../download";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { handleUpload } from "../upload";
 
 function deferred<T>() {
@@ -71,10 +72,10 @@ async function fixture(kind: "upload" | "download", hidden = true) {
   const detach = vi.fn(async (_tabId: number, expected?: string) => {
     if (attachment === expected) attachment = undefined;
   });
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     detach,
     getAttachmentId: () => attachment,
-    sendGuarded: async (target, method, params, guard) => {
+    sendToFrame: async (handle, method, params, guard) => {
       if (
         holdEnable &&
         method === "Emulation.setFocusEmulationEnabled" &&
@@ -83,9 +84,9 @@ async function fixture(kind: "upload" | "download", hidden = true) {
         focusQueued = true;
         await enableFocus.promise;
       }
-      if (guard.signal?.aborted) throw new DOMException("aborted", "AbortError");
-      guard.onDispatch?.();
-      return cdp.send(target.tabId, method, params);
+      if (guard?.signal?.aborted) throw new DOMException("aborted", "AbortError");
+      guard?.onDispatch?.();
+      return cdp.send(handle.tabId, method, params);
     },
     onEvent: (_tabId, callback) => {
       listener = callback;
@@ -145,7 +146,7 @@ async function fixture(kind: "upload" | "download", hidden = true) {
       }
       return {};
     }) as CdpRunner["send"],
-  };
+  });
   const tab = { id: 7, windowId: 100, active: true } as chrome.tabs.Tab;
   const deps = {
     cdp,
@@ -153,7 +154,7 @@ async function fixture(kind: "upload" | "download", hidden = true) {
     tabsApi: { get: async () => tab, query: async () => [tab] },
   };
   const finishDownload = () => {
-    listener?.({ tabId: 7 }, "Page.downloadWillBegin", {
+    listener?.(rootEventSource(7), "Page.downloadWillBegin", {
       url: item.url,
       suggestedFilename: "sample.bin",
     });

@@ -2,7 +2,7 @@
 // events are sent to the target that owns the node: root targets use top-level
 // coordinates, while OOPIF targets require coordinates local to their session.
 
-import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type { RpcError, TransferEffectState } from "@/transport/types";
 import { rpcError, transferError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
@@ -99,6 +99,7 @@ export async function uploadThroughFileDrop(
   let dragStarted = false;
   let dropSent = false;
   let dragPoint = { x: 0, y: 0 };
+  let objectGroupRequested = false;
   let cleanupFailed = false;
   let releaseTabAttachment: (() => void) | undefined;
   let outcome: FileDropTransactionResult | RpcError = failure(
@@ -129,6 +130,7 @@ export async function uploadThroughFileDrop(
     outcome = await options.withOverlayHidden(async () => {
       try {
         try {
+          objectGroupRequested = true;
           const belongs = await waitBounded(
             pointBelongsToTarget(options.cdp, { handle }, point.x, point.y, objectGroup),
             deadline,
@@ -264,27 +266,40 @@ export async function uploadThroughFileDrop(
     return outcome;
   } finally {
     try {
-      try {
-        await waitBounded(
-          sendToFrameHandle(
-            options.cdp.resourceCleanup ?? options.cdp,
-            handle,
-            "Runtime.releaseObjectGroup",
-            { objectGroup },
-          ),
-          Date.now() + CLEANUP_TIMEOUT_MS,
-          undefined,
-          "releasing file-drop object group timed out",
-        );
-      } catch {
-        cleanupFailed = true;
+      if (objectGroupRequested) {
+        try {
+          await waitBounded(
+            sendToFrameHandle(
+              options.cdp.resourceCleanup ?? options.cdp,
+              handle,
+              "Runtime.releaseObjectGroup",
+              { objectGroup },
+              { allowReattach: false },
+            ),
+            Date.now() + CLEANUP_TIMEOUT_MS,
+            undefined,
+            "releasing file-drop object group timed out",
+          );
+        } catch (err) {
+          if (
+            !(
+              err instanceof Error &&
+              (err.message === "No resources owned on this tab" ||
+                err.message === "debugger detached" ||
+                err.message === "Debugger attachment changed before dispatch")
+            ) &&
+            !isStaleFrameHandleError(err)
+          ) {
+            cleanupFailed = true;
+          }
+        }
       }
 
       const effect = isRpcError(outcome)
         ? (outcome.data?.effect_state as TransferEffectState | undefined)
         : "committed";
       if (effect === "unknown" || cleanupFailed) {
-        await options.cdp.detach?.(handle.tabId);
+        await options.cdp.detach?.(handle.tabId).catch(() => {});
       }
       if (cleanupFailed && isRpcError(outcome)) {
         outcome.data = { ...outcome.data, cleanup_state: "failed" };

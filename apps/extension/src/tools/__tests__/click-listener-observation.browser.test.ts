@@ -2,10 +2,11 @@
 // Opt in with BSK_TEST_CHROME; the harness owns an isolated browser/profile.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleClick, handleHover } from "../interaction";
 import { handleObserve, handleSnapshot } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -43,20 +44,29 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("click listener observations", () 
           expect(reply.exceptionDetails).toBeUndefined();
           return reply.result.value;
         };
-        const cdp: CdpRunner = {
+        const cdp: CdpRunner = createStubCdpRunner({
           send: (_tabId, method, params) => local(method, params),
-          sendToTarget: (_target, method, params) => local(method, params),
+          sendToFrame: (_handle, method, params) => local(method, params),
           getAttachmentId: () => sessionId,
-          getFrameGraph: async () => {
-            const { frameTree } = await local<{ frameTree: { frame: { id: string } } }>(
-              "Page.getFrameTree",
-            );
+          getFrameDocuments: async () => {
+            const { frameTree } = await local<{
+              frameTree: { frame: { id: string; loaderId?: string } };
+            }>("Page.getFrameTree");
+            const loaderId = frameTree.frame.loaderId ?? "";
             return {
               rootFrameId: frameTree.frame.id,
-              frames: [{ frameId: frameTree.frame.id, target: { tabId: 4 } }],
+              frames: [
+                {
+                  handle: toFrameDocumentHandle(4, { frameId: frameTree.frame.id, loaderId }),
+                  frameId: frameTree.frame.id,
+                  loaderId,
+                  processKey: "root",
+                  isOutOfProcess: false,
+                },
+              ],
             };
           },
-        };
+        });
         const manager = new SessionManager({
           agentWindow: {
             create: async () => ({ windowId: 100, initialTabIds: [4] }),
@@ -223,20 +233,29 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("click listener observations", () 
         };
         await local("Page.enable");
         await local("Page.bringToFront");
-        const cdp: CdpRunner = {
+        const cdp: CdpRunner = createStubCdpRunner({
           send: (_tabId, method, params) => local(method, params),
-          sendToTarget: (_target, method, params) => local(method, params),
+          sendToFrame: (_handle, method, params) => local(method, params),
           getAttachmentId: () => sessionId,
-          getFrameGraph: async () => {
-            const { frameTree } = await local<{ frameTree: { frame: { id: string } } }>(
-              "Page.getFrameTree",
-            );
+          getFrameDocuments: async () => {
+            const { frameTree } = await local<{
+              frameTree: { frame: { id: string; loaderId?: string } };
+            }>("Page.getFrameTree");
+            const loaderId = frameTree.frame.loaderId ?? "";
             return {
               rootFrameId: frameTree.frame.id,
-              frames: [{ frameId: frameTree.frame.id, target: { tabId: 4 } }],
+              frames: [
+                {
+                  handle: toFrameDocumentHandle(4, { frameId: frameTree.frame.id, loaderId }),
+                  frameId: frameTree.frame.id,
+                  loaderId,
+                  processKey: "root",
+                  isOutOfProcess: false,
+                },
+              ],
             };
           },
-        };
+        });
         const manager = new SessionManager({
           agentWindow: {
             create: async () => ({ windowId: 100, initialTabIds: [4] }),
@@ -253,7 +272,9 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("click listener observations", () 
             .split("\n")
             .map((line) => line.trim())
             .find((line) => {
-              const match = line.match(/^(@e\d+)\s+menuitem\s+"([^"]+)"$/);
+              const match = line.match(
+                /^(@e\d+)\s+menuitem\s+"([^"]+)"(?:\s+\[(?:has-submenu|expanded)\])*$/,
+              );
               if (!match) return false;
               const cleaned = match[2].replace(/ \[(?:has-submenu|expanded)\]$/, "");
               return cleaned === exactName;

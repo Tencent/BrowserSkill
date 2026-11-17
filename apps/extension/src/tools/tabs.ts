@@ -327,20 +327,24 @@ export interface TabManagementDeps {
   /** Clears Agent-scoped overlays after a borrowed tab is returned. */
   agentOverlayReset?: AgentOverlayResetApi;
   /** Releases this session's CDP claim after a borrowed tab is returned. */
-  cdp?: Pick<CdpRunner, "acquireBackgroundExecution" | "releaseSessionTab" | "runBrowserMutation">;
+  cdp?: Partial<
+    Pick<CdpRunner, "acquireBackgroundExecution" | "releaseSessionTab" | "runBrowserMutation">
+  >;
   /** Runs after tab_return validation, before moving the borrowed tab. */
   beforeReturn?: (sessionId: string, tabId: number) => Promise<void>;
   /**
    * Reports whether `windowId` is any live session's Agent Window.
-   * `tab_return`'s fallback window picker uses this to avoid moving a
-   * returned borrowed tab into *another* session's Agent Window (Agent
-   * Windows are created with `type: "normal"`, so they otherwise match
-   * the `getLastFocused({ windowTypes: ["normal"] })` query). Production
-   * callers derive this from the `SessionManager`; the `() => false`
-   * default only preserves legacy behaviour for direct/test callers.
+   * `tab_return`'s fallback window picker requires this predicate so returning
+   * a borrowed tab can never move it into another session's Agent Window
+   * (Agent Windows are created with `type: "normal"`, so they otherwise match
+   * the `getLastFocused({ windowTypes: ["normal"] })` query).
    */
   isAgentWindowId?: (windowId: number) => boolean;
 }
+
+export type ReturnBorrowedTabDeps = TabManagementDeps & {
+  isAgentWindowId: (windowId: number) => boolean;
+};
 
 function mutateBrowser<T>(deps: TabManagementDeps, operation: () => Promise<T>): Promise<T> {
   return deps.cdp?.runBrowserMutation ? deps.cdp.runBrowserMutation(operation) : operation();
@@ -367,10 +371,6 @@ function getTabGroupsApi(deps: TabManagementDeps): ChromeTabGroupsApi | undefine
     };
   }
   return undefined;
-}
-
-function getIsAgentWindowId(deps: TabManagementDeps): (windowId: number) => boolean {
-  return deps.isAgentWindowId ?? (() => false);
 }
 
 function getAgentOverlayResetApi(deps: TabManagementDeps): AgentOverlayResetApi {
@@ -1302,7 +1302,9 @@ export async function handleTabBorrow(
       const rollback = await returnBorrowedTab(ctx, params.tab_id, {
         ...deps,
         // Returning an already moved tab is this transaction's rollback, not new input.
-        cdp: { releaseSessionTab: deps.cdp?.releaseSessionTab?.bind(deps.cdp) },
+        cdp: deps.cdp?.releaseSessionTab
+          ? { releaseSessionTab: deps.cdp.releaseSessionTab.bind(deps.cdp) }
+          : undefined,
         signal: undefined,
         isSessionLive: () => manager.get(ctx.sessionId) === ctx,
         isAgentWindowId: (id) => manager.findByWindowId(id) !== null,
@@ -1781,7 +1783,7 @@ async function restoreReturnedTabAttributes(
 export async function returnBorrowedTab(
   ctx: SessionContext,
   tabId: number,
-  deps: TabManagementDeps,
+  deps: ReturnBorrowedTabDeps,
 ): Promise<ReturnOutcome | RpcError> {
   return withUiTeardown(ctx, tabId, () => returnBorrowedTabCore(ctx, tabId, deps));
 }
@@ -1789,7 +1791,7 @@ export async function returnBorrowedTab(
 async function returnBorrowedTabCore(
   ctx: SessionContext,
   tabId: number,
-  deps: TabManagementDeps,
+  deps: ReturnBorrowedTabDeps,
 ): Promise<ReturnOutcome | RpcError> {
   const entry = ctx.borrowedTabs.get(tabId);
   if (!entry) {
@@ -1801,7 +1803,7 @@ async function returnBorrowedTabCore(
   const tabsApi = getTabsApi(deps);
   const windowsApi = getWindowsApi(deps);
   const tabGroupsApi = getTabGroupsApi(deps);
-  const isAgentWindowId = getIsAgentWindowId(deps);
+  const { isAgentWindowId } = deps;
   const alreadyCancelled = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (alreadyCancelled) return alreadyCancelled;
 

@@ -1,5 +1,5 @@
 import type { RenderedRef } from "@browser-skill/vom";
-import type { FrameDocumentHandle } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
 import {
   type CaptureVomMatchNode,
   type CaptureVomObservationResult,

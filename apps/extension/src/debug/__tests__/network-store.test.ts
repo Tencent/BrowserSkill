@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { rootEventSource, targetEventSource } from "@/browser-driver/frame-handles";
 import { replayRequest } from "../control-model";
 import { bodySlice, DebugNetworkStore, MAX_REQUESTS, requestProjection } from "../network-store";
 import { BODY_CHARS, redactBody, redactHeaders, redactText, redactUrl } from "../redact";
+
+const ROOT = rootEventSource(7);
 
 function fixture(
   send = vi.fn(async () => ({ body: '{"ok":false,"token":"secret","data":{"name":"Alice"}}' })),
@@ -11,17 +14,21 @@ function fixture(
   let now = 1000;
   const store = new DebugNetworkStore(
     "d1",
-    { send: send as never },
+    { sendToEventSource: send as never },
     () => ++sequence,
     () => now++,
     retain,
   );
-  const event = (method: string, data: object, sessionId?: string) =>
-    store.onEvent({ tabId: 7, ...(sessionId ? { sessionId } : {}) }, `Network.${method}`, {
-      requestId: "raw",
-      timestamp: now / 1000,
-      ...data,
-    });
+  const event = (method: string, data: object, childKey?: string) =>
+    store.onEvent(
+      childKey ? targetEventSource(7, `oopif:${childKey}`) : ROOT,
+      `Network.${method}`,
+      {
+        requestId: "raw",
+        timestamp: now / 1000,
+        ...data,
+      },
+    );
   const request = (data = {}, sessionId?: string) =>
     event(
       "requestWillBeSent",
@@ -79,7 +86,7 @@ describe("debug network evidence", () => {
       headers: { "content-type": "text/html" },
     };
     if (path === "annotation")
-      f.store.annotate({ tabId: 7 }, "raw", {
+      f.store.annotate(ROOT, "raw", {
         effective: { ...request, postData: html },
         mock: { status: 200, headers: request.headers, body: html },
       });
@@ -112,7 +119,7 @@ describe("debug network evidence", () => {
     const headers = { "content-security-policy": "x".repeat(3000) };
     if (path === "extra-first") f.event("responseReceivedExtraInfo", { headers });
     if (path === "mock")
-      f.store.annotate({ tabId: 7 }, "raw", { mock: { status: 200, headers, body: "{}" } });
+      f.store.annotate(ROOT, "raw", { mock: { status: 200, headers, body: "{}" } });
     f.request({
       request: { url: "https://site.test/save", method: "GET", headers: { mode: "dry-run" } },
     });
@@ -151,7 +158,7 @@ describe("debug network evidence", () => {
     ).toBe(4095);
     if (path === "extra-first") f.event("requestWillBeSentExtraInfo", { headers });
     if (path === "annotation")
-      f.store.annotate({ tabId: 7 }, "raw", {
+      f.store.annotate(ROOT, "raw", {
         effective: { url: "https://site.test/save", method: "GET", headers },
       });
     f.request({
@@ -180,7 +187,7 @@ describe("debug network evidence", () => {
       request_body: { state: "empty", replay_safe: true },
     });
     const second = fixture();
-    second.store.annotate({ tabId: 7 }, "raw", { effective: { url, method: "GET", headers: {} } });
+    second.store.annotate(ROOT, "raw", { effective: { url, method: "GET", headers: {} } });
     second.request();
     expect(second.store.list()[0]).toMatchObject({
       truncated: true,
@@ -220,7 +227,7 @@ describe("debug network evidence", () => {
       values: "a".repeat(BODY_CHARS - base.length - 1),
     });
     expect(body.length).toBeLessThan(BODY_CHARS);
-    f.store.annotate({ tabId: 7 }, "raw", {
+    f.store.annotate(ROOT, "raw", {
       intervention: { rule_id: "r1", type: "mock", state: "applied" },
       effective: {
         url: "https://site.test/api",
@@ -272,7 +279,7 @@ describe("debug network evidence", () => {
       '"Alice"',
     );
     expect(requestProjection(entry, "response", 0, 5).response_body.next_offset).toBe(5);
-    expect(f.send).toHaveBeenCalledWith(7, "Network.getResponseBody", { requestId: "raw" });
+    expect(f.send).toHaveBeenCalledWith(ROOT, "Network.getResponseBody", { requestId: "raw" });
   });
 
   it("correlates out-of-order ExtraInfo with redirect hops without mixing headers", () => {
@@ -438,7 +445,7 @@ describe("redaction and projections", () => {
     const f = fixture();
     f.request();
     f.request({}, "child");
-    f.store.detachTarget("child");
+    f.store.detachTarget("oopif:child");
     expect(f.store.list().map((entry) => entry.state)).toEqual(["pending", "interrupted"]);
   });
 

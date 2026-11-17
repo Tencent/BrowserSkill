@@ -5,7 +5,7 @@
 // no CDP intent on the clicked target, so a navigation target that the clicked
 // tab opens after mouse press supplies the intent URL instead.
 
-import type { FrameDocumentHandle } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
 import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
 import { transferError } from "./errors";
 import { type CdpRunner, isRpcError } from "./shared";
@@ -329,15 +329,9 @@ export async function captureBrowserDownload(
     popupUrls.add(details.url);
     reconcile();
   };
-  let mockFrameKnown = !options.handle.frameId;
-  let mockFrameSessionId: string | undefined;
-  const cdpSubscription = options.cdp.onEvent?.(options.handle.tabId, (source, method, raw) => {
+  const cdpSubscription = options.cdp.onEvent(options.handle.tabId, (source, method, raw) => {
     if (settled || method !== "Page.downloadWillBegin") return;
-    const matchesSource = options.cdp.isEventFromFrame
-      ? options.cdp.isEventFromFrame(source, options.handle)
-      : source.tabId === options.handle.tabId &&
-        (!mockFrameKnown || (source.sessionId ?? undefined) === mockFrameSessionId);
-    if (!matchesSource) return;
+    if (!options.cdp.isEventFromFrame(source, options.handle)) return;
     if (capturedId !== undefined && options.inputSignal?.aborted) return;
     const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
     if (typeof event.url !== "string" || typeof event.suggestedFilename !== "string") return;
@@ -356,24 +350,10 @@ export async function captureBrowserDownload(
     };
     reconcile();
   });
-  if (!cdpSubscription) {
-    return captureError("CDP download intent subscription unavailable", "none", "arm");
-  }
   let releaseTabAttachment: (() => void) | undefined;
 
   try {
-    releaseTabAttachment = options.cdp.retainTabAttachment?.(options.handle.tabId);
-    if (!options.cdp.isEventFromFrame && options.handle.frameId && options.cdp.getFrameGraph) {
-      const graph = await waitBounded(
-        options.cdp.getFrameGraph(options.handle.tabId),
-        deadline,
-        options.signal,
-        "resolving download frame target timed out",
-      );
-      mockFrameSessionId = graph.frames.find((entry) => entry.frameId === options.handle.frameId)
-        ?.target.sessionId;
-      mockFrameKnown = true;
-    }
+    releaseTabAttachment = options.cdp.retainTabAttachment(options.handle.tabId);
     options.downloads.onDeterminingFilename.addListener(determiningListener);
     options.downloads.onCreated.addListener(createdListener);
     options.downloads.onChanged.addListener(changedListener);

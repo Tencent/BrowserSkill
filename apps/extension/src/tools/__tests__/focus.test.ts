@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleBlur, handleFocus } from "../interaction";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 interface ScriptParams {
   functionDeclaration: string;
 }
 interface Call {
-  target: CdpTarget;
+  target: { tabId: number; sessionId?: string };
   method: string;
 }
 
@@ -42,7 +42,11 @@ async function setup(element?: HTMLElement, childSession = false) {
   });
   const focus = vi.fn(() => targetElement.focus());
   const release = vi.fn(async () => ({}));
-  const send = async (target: CdpTarget, method: string, params?: object) => {
+  const send = async (
+    target: { tabId: number; sessionId?: string },
+    method: string,
+    params?: object,
+  ) => {
     const call = { target, method };
     calls.push(call);
     try {
@@ -71,9 +75,8 @@ async function setup(element?: HTMLElement, childSession = false) {
       afterCommand(call);
     }
   };
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: (tabId, method, params) => send({ tabId }, method, params) as never,
-    sendToTarget: send as CdpRunner["sendToTarget"],
     sendToFrame: (handle, method, params) =>
       send(
         {
@@ -83,23 +86,32 @@ async function setup(element?: HTMLElement, childSession = false) {
         method,
         params,
       ) as never,
-    getFrameGraph: vi.fn(async () => ({
+    getFrameDocuments: vi.fn(async () => ({
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
+        {
+          handle: toFrameDocumentHandle(4, { frameId: "main", loaderId: "" }),
+          frameId: "main",
+          loaderId: "",
+          processKey: "root",
+          isOutOfProcess: false,
+        },
         ...(childSession
           ? [
               {
+                handle: toFrameDocumentHandle(4, { frameId: "child", loaderId: "child-loader" }),
                 frameId: "child",
+                loaderId: "child-loader",
                 parentFrameId: "main",
                 ownerBackendNodeId: 99,
-                target: { tabId: 4, sessionId: "child-session" },
+                processKey: "oopif:child",
+                isOutOfProcess: true,
               },
             ]
           : []),
       ],
     })),
-  };
+  });
   const tabsApi = {
     get: vi.fn(async (id: number) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab),
     query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),

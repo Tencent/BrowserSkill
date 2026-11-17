@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { WaitForElementResult } from "@/transport/types";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { handleWaitForElement } from "../waits";
 
 type Send = <T = Record<string, unknown>>(
@@ -41,9 +41,9 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser element waits", () =
               targetId,
               flatten: true,
             });
-            const cdp: CdpRunner = {
+            const cdp: CdpRunner = createStubCdpRunner({
               send: (_tabId, method, params) => send(method, params, sessionId),
-            };
+            });
             const tab = { id: 4, windowId: 100, active: !background } as chrome.tabs.Tab;
             const deps = { cdp, tabsApi: { get: async () => tab, query: async () => [tab] } };
             const evaluate = async <T>(expression: string) => {
@@ -145,14 +145,14 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser element waits", () =
             await evaluate(
               `document.body.insertAdjacentHTML('beforeend', '<div id="race-mask">Loading</div>')`,
             );
-            const removalCdp: CdpRunner = {
+            const removalCdp: CdpRunner = createStubCdpRunner({
               async send<T>(tabId: number, method: string, params?: object): Promise<T> {
                 if (method === "DOM.describeNode") {
                   await evaluate(`document.querySelector('#race-mask')?.remove()`);
                 }
                 return cdp.send<T>(tabId, method, params);
               },
-            };
+            });
             expect(
               await handleWaitForElement(
                 manager,

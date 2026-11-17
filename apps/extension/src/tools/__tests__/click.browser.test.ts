@@ -8,7 +8,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { ControlOverlay } from "@/content/ControlOverlay";
 import {
   INPUT_PASSTHROUGH,
@@ -19,7 +19,7 @@ import { SessionManager } from "@/session-manager/manager";
 import { prepareBackgroundExecution } from "../background-execution";
 import { handleClick, handlePress } from "../interaction";
 import { handleObserve } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { handleWheel } from "../wheel";
 
 type Send = <T = Record<string, unknown>>(
@@ -34,7 +34,7 @@ interface CdpEvent {
   params?: object;
 }
 
-type CdpEventListener = (source: CdpDebuggee, method: string, params: unknown) => void;
+type CdpEventListener = Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0];
 
 describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser click readiness", () => {
   it("delivers hidden native input, preserves disabled semantics and restores visibility", async () => {
@@ -122,13 +122,13 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser click readiness", ()
               hidden ? "hidden" : "visible",
             );
             const commands: { method: string; params?: object }[] = [];
-            const cdp: CdpRunner = {
+            const cdp: CdpRunner = createStubCdpRunner({
               send: async (_tabId, method, params) => {
                 commands.push({ method, params });
                 return (await send(method, params, target.sessionId)) as never;
               },
               getAttachmentId: () => target.sessionId,
-            };
+            });
             const tab = { id: 4, windowId: 100, active: !hidden } as chrome.tabs.Tab;
             const tabsApi = { get: async () => tab, query: async () => [tab] };
             let action: { ref?: string; selector?: string } = {
@@ -578,7 +578,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser click readiness", ()
         const tab = { id: 4, windowId: 100, active: true } as chrome.tabs.Tab;
         const tabsApi = { get: async () => tab, query: async () => [tab] };
         const mouse: string[] = [];
-        const cdp: CdpRunner = {
+        const cdp: CdpRunner = createStubCdpRunner({
           send: async (_tabId, method, params) => {
             if (method === "Input.dispatchMouseEvent") {
               mouse.push((params as { type: string }).type);
@@ -592,7 +592,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser click readiness", ()
             }
             return (await local(method, params)) as never;
           },
-        };
+        });
         const phases: string[] = [];
         const sendInputPassthrough: InputPassthroughSendToTab = async (_tabId, message) => {
           phases.push(message.phase);

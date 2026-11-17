@@ -2,17 +2,21 @@
 // End-to-end real-browser regression for computed-style stealth prompt-injection stripping.
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
-import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentGraph,
+  type FrameDocumentInfo,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleObserve, handleSnapshot } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
   params?: object,
   sessionId?: string,
 ) => Promise<T>;
-type FrameTree = { frame: { id: string }; childFrames?: FrameTree[] };
+type FrameTree = { frame: { id: string; loaderId?: string }; childFrames?: FrameTree[] };
 
 const IFRAME_HTML = `<!doctype html>
 <body style="margin:0;background:#ffffff">
@@ -265,32 +269,36 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)(
             })()`);
             expect(await evaluate<number>("devicePixelRatio")).toBeCloseTo(2, 4);
 
-            const graph = async (): Promise<CdpFrameGraph> => {
+            const graph = async (): Promise<FrameDocumentGraph> => {
               const { frameTree } = await local<{ frameTree: FrameTree }>("Page.getFrameTree");
-              const frames: CdpFrame[] = [];
+              const frames: FrameDocumentInfo[] = [];
               const visit = async (tree: FrameTree, parentFrameId?: string) => {
                 const owner = parentFrameId
                   ? await local<{ backendNodeId: number }>("DOM.getFrameOwner", {
                       frameId: tree.frame.id,
                     })
                   : undefined;
+                const loaderId = tree.frame.loaderId ?? "";
                 frames.push({
+                  handle: toFrameDocumentHandle(7, { frameId: tree.frame.id, loaderId }),
                   frameId: tree.frame.id,
+                  loaderId,
                   parentFrameId,
-                  target: { tabId: 7 },
                   ownerBackendNodeId: owner?.backendNodeId,
+                  processKey: "root",
+                  isOutOfProcess: false,
                 });
                 for (const child of tree.childFrames ?? []) await visit(child, tree.frame.id);
               };
               await visit(frameTree);
               return { rootFrameId: frameTree.frame.id, frames };
             };
-            const cdp: CdpRunner = {
+            const cdp: CdpRunner = createStubCdpRunner({
               send: (_tabId, method, params) => local(method, params),
-              sendToTarget: (_target, method, params) => local(method, params),
+              sendToFrame: (_handle, method, params) => local(method, params),
               getAttachmentId: () => sessionId,
-              getFrameGraph: graph,
-            };
+              getFrameDocuments: graph,
+            });
             const manager = new SessionManager({
               agentWindow: {
                 create: async () => ({ windowId: 100, initialTabIds: [] }),

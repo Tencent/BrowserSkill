@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { CooperationController } from "@/cooperation/controller";
 import { INTERACTION_STORAGE_KEY, InteractionPreferenceStore } from "@/lib/interaction-preferences";
+import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import type { ConnectionStateHandler, FrameHandler, Transport } from "@/transport/transport";
 import type {
@@ -17,8 +18,15 @@ import {
   resetBrowserObservationForTests,
   setBrowserObservationAttachForTests,
 } from "../record";
+import { type CdpRunnerStubOverrides, createStubCdpRunner } from "../shared";
 
 type TestDispatcherCdp = NonNullable<ConstructorParameters<typeof ToolDispatcher>[0]["cdp"]>;
+
+function stubDispatcherCdp<T extends Record<string, unknown>>(overrides: T): TestDispatcherCdp & T {
+  return createStubCdpRunner(
+    overrides as unknown as CdpRunnerStubOverrides,
+  ) as unknown as TestDispatcherCdp & T;
+}
 
 function fakeTransport() {
   const handlers = new Set<FrameHandler>();
@@ -52,16 +60,20 @@ function makeRequest(method: string, params: unknown): RequestFrame {
 }
 
 function makeRecordTestCdp(tabId: number): TestDispatcherCdp {
-  type EventListener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => void;
+  type EventListener = (
+    source: { tabId: number; targetKey: string; isRootTarget: boolean },
+    method: string,
+    params: unknown,
+  ) => void;
   const listeners: EventListener[] = [];
-  return {
+  return stubDispatcherCdp({
     send: vi.fn(async (_tabId: number, method: string) => {
       if (method === "Page.getFrameTree") {
         return { frameTree: { frame: { id: "frame-1", loaderId: "loader-before" } } };
       }
       if (method === "Page.navigate") {
         for (const listener of [...listeners]) {
-          listener({ tabId }, "Page.lifecycleEvent", {
+          listener({ tabId, targetKey: "root", isRootTarget: true }, "Page.lifecycleEvent", {
             name: "load",
             frameId: "frame-1",
             loaderId: "loader-after",
@@ -92,7 +104,7 @@ function makeRecordTestCdp(tabId: number): TestDispatcherCdp {
         },
       };
     },
-  } as unknown as TestDispatcherCdp;
+  });
 }
 
 describe("ToolDispatcher", () => {
@@ -118,13 +130,13 @@ describe("ToolDispatcher", () => {
       sequence: 1,
       decision_deadline: 60000,
     };
-    const cdp = {
+    const cdp = stubDispatcherCdp({
       send: vi.fn(() => {
         throw new Error("Renderer blocked");
       }),
       pendingDialogs: () => [dialog],
-      resolveDialog: vi.fn(async () => ({ ...dialog, handled: "accepted" })),
-    } as unknown as TestDispatcherCdp;
+      resolveDialog: vi.fn(async () => ({ ...dialog, handled: "accepted" as const })),
+    });
     const debug = {
       before: vi.fn(() => {
         throw new Error("Screenshot blocked");
@@ -198,10 +210,10 @@ describe("ToolDispatcher", () => {
       },
     });
     await sessions.start("owner");
-    const cdp = {
+    const cdp = stubDispatcherCdp({
       send: vi.fn(),
-      pendingDialogs: () => [{ id: "async-dialog", tab_id: 7 }],
-    } as unknown as TestDispatcherCdp;
+      pendingDialogs: () => [{ id: "async-dialog", tab_id: 7 } as PendingJavaScriptDialog],
+    }) as TestDispatcherCdp;
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();
     deliver(makeRequest("tool.evaluate", { session_id: "owner", expression: "dangerousAction()" }));
@@ -226,7 +238,10 @@ describe("ToolDispatcher", () => {
       },
     });
     await sessions.start("owner");
-    const cdp = { send: vi.fn(), pendingDialogs: () => [] } as unknown as TestDispatcherCdp;
+    const cdp = stubDispatcherCdp({
+      send: vi.fn(),
+      pendingDialogs: () => [],
+    }) as TestDispatcherCdp;
     // The first operation (for example a cancelled screenshot) has not settled.
     const debug = { before: vi.fn(() => new Promise(() => {})), after: vi.fn(), dispose: vi.fn() };
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp, debug: debug as never });
@@ -291,11 +306,11 @@ describe("ToolDispatcher", () => {
     });
     await sessions.start("test");
     const error = new Error("Cannot access a chrome-extension:// URL of different extension");
-    const cdp = {
+    const cdp = stubDispatcherCdp({
       send: vi.fn().mockRejectedValue(error),
       ensureConsoleCapture: vi.fn().mockRejectedValue(error),
       consoleEntriesSince: vi.fn(),
-    } as unknown as TestDispatcherCdp;
+    }) as TestDispatcherCdp;
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();
     deliver(
@@ -330,7 +345,7 @@ describe("ToolDispatcher", () => {
       },
     });
     await sessions.start("remote");
-    const cdp = { send: vi.fn() } as unknown as TestDispatcherCdp;
+    const cdp = stubDispatcherCdp({ send: vi.fn() });
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();
     deliver(makeRequest(method, { session_id: "remote" }));
@@ -634,7 +649,7 @@ describe("ToolDispatcher", () => {
     let leased = false;
     let visibility = "visible";
     let visibilityReads = 0;
-    const cdp = {
+    const cdp = stubDispatcherCdp({
       acquireBackgroundExecution: vi.fn(async (sessionId: string, tabId: number) => {
         expect([sessionId, tabId]).toEqual(["aa11", 7]);
         commands.push("acquire");
@@ -670,7 +685,7 @@ describe("ToolDispatcher", () => {
         if (method === "Input.dispatchMouseEvent") return {};
         throw new Error(`unexpected CDP call ${method}`);
       }),
-    } as unknown as TestDispatcherCdp;
+    }) as TestDispatcherCdp;
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();
 
@@ -897,7 +912,11 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: stubDispatcherCdp(cdp),
+    });
     dispatcher.start();
 
     deliver(makeRequest("tool.console", { session_id: "aa11" }));
@@ -986,7 +1005,11 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: stubDispatcherCdp(cdp),
+    });
     dispatcher.start();
 
     deliver(
@@ -1028,7 +1051,11 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: stubDispatcherCdp(cdp),
+    });
     dispatcher.start();
 
     deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
@@ -1098,7 +1125,7 @@ describe("ToolDispatcher", () => {
     const dispatcher = new ToolDispatcher({
       transport,
       sessions,
-      cdp: cdp as TestDispatcherCdp,
+      cdp: stubDispatcherCdp(cdp),
       cooperation,
     });
     dispatcher.start();
@@ -1248,7 +1275,7 @@ describe("ToolDispatcher", () => {
     const { transport, sent, deliver } = fakeTransport();
     const onBrowserControlResumed = vi.fn();
     let resolveNode: ((value: object) => void) | undefined;
-    const cdp = {
+    const cdp = stubDispatcherCdp({
       send: vi.fn(async (_tabId: number, method: string) => {
         if (method === "Runtime.evaluate") return { result: { value: "visible" } };
         if (method === "DOM.resolveNode")
@@ -1261,7 +1288,7 @@ describe("ToolDispatcher", () => {
         if (method === "Runtime.callFunctionOn") return { result: { value: true } };
         return {};
       }),
-    } as unknown as TestDispatcherCdp;
+    }) as TestDispatcherCdp;
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp, onBrowserControlResumed });
     const hover = dispatcher as unknown as {
       rememberHover: (sessionId: string, result: object) => void;
@@ -1403,7 +1430,11 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: stubDispatcherCdp(cdp),
+    });
 
     (
       dispatcher as unknown as { rememberHover: (sessionId: string, result: unknown) => unknown }
@@ -1481,7 +1512,11 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: stubDispatcherCdp(cdp),
+    });
     const helpers = dispatcher as unknown as {
       rememberHover: (sessionId: string, result: unknown) => unknown;
       setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
@@ -1542,7 +1577,7 @@ describe("ToolDispatcher", () => {
     const dispatcher = new ToolDispatcher({
       transport,
       sessions,
-      cdp: cdp as unknown as TestDispatcherCdp,
+      cdp: stubDispatcherCdp(cdp),
     });
     const helpers = dispatcher as unknown as {
       rememberHover: (sessionId: string, result: unknown) => unknown;
@@ -1598,7 +1633,7 @@ describe("ToolDispatcher", () => {
     const dispatcher = new ToolDispatcher({
       transport,
       sessions,
-      cdp: cdp as unknown as TestDispatcherCdp,
+      cdp: stubDispatcherCdp(cdp),
     });
     const helpers = dispatcher as unknown as {
       rememberHover: (sessionId: string, result: unknown) => unknown;
@@ -1709,7 +1744,11 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: stubDispatcherCdp(cdp),
+    });
     const helpers = dispatcher as unknown as {
       rememberHover: (sessionId: string, result: unknown) => unknown;
       withHoverReassert: <T>(
@@ -1892,7 +1931,7 @@ describe("ToolDispatcher", () => {
     const dispatcher = new ToolDispatcher({
       transport,
       sessions,
-      cdp: { detachSession } as unknown as TestDispatcherCdp,
+      cdp: stubDispatcherCdp({ send: vi.fn(), detachSession }),
     });
     dispatcher.start();
     deliver({ id: "one-stop", method: "tool.session_stop", params: { session_id: "one" } });
@@ -1988,12 +2027,12 @@ describe("background execution dispatch integration", () => {
         get: async () => ({ id: 7, windowId: 100, active: false, url: "https://fixture.test" }),
       },
     });
-    const cdp = {
+    const cdp = stubDispatcherCdp({
       send: vi.fn(),
       acquireBackgroundExecution: vi.fn(async () => {
         throw new Error("simulation unavailable");
       }),
-    } as unknown as TestDispatcherCdp;
+    }) as TestDispatcherCdp;
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();
     try {
@@ -2246,7 +2285,7 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       transport,
       sessions,
       cooperation,
-      cdp: cdp as unknown as TestDispatcherCdp,
+      cdp: stubDispatcherCdp(cdp),
       interactionPreferences: makePreferenceStore(false),
       onAgentTabClaimed,
     });
@@ -2340,7 +2379,7 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       transport,
       sessions,
       cooperation,
-      cdp: cdp as unknown as TestDispatcherCdp,
+      cdp: stubDispatcherCdp(cdp),
       interactionPreferences: makePreferenceStore(true),
     });
     dispatcher.start();
@@ -2362,7 +2401,7 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       transport: t2,
       sessions,
       cooperation,
-      cdp: cdp as unknown as TestDispatcherCdp,
+      cdp: stubDispatcherCdp(cdp),
       interactionPreferences: makePreferenceStore(false),
     });
     dispatcherNoConfirm.start();
@@ -2476,7 +2515,7 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       transport,
       sessions,
       cooperation,
-      cdp: cdp as unknown as TestDispatcherCdp,
+      cdp: stubDispatcherCdp(cdp),
       interactionPreferences: makePreferenceStore(false),
     });
     dispatcher.start();
@@ -2751,7 +2790,7 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       changed: vi.fn(),
     });
     cooperation.startSession("aa11");
-    const cdp = {
+    const cdp = stubDispatcherCdp({
       ensureConsoleCapture: vi.fn(async () => {}),
       consoleEntriesSince: vi.fn(() => ({
         tab_id: 7,
@@ -2760,7 +2799,7 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
         truncated: false,
       })),
       send: vi.fn(async () => ({})),
-    } as unknown as TestDispatcherCdp;
+    }) as TestDispatcherCdp;
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp, cooperation });
     dispatcher.start();
     try {
@@ -2869,15 +2908,15 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
         }
         return {} as T;
       }),
-      sendGuarded: vi.fn(
+      sendToFrame: vi.fn(
         async <T>(
-          target: unknown,
+          handle: { tabId: number },
           method: string,
-          _params: Record<string, unknown> | undefined,
-          guard: { onDispatch?: () => void },
+          params: Record<string, unknown> | undefined,
+          guard?: { onDispatch?: () => void },
         ) => {
-          guard.onDispatch?.();
-          return (await cdp.send(target, method)) as T;
+          guard?.onDispatch?.();
+          return (await cdp.send(handle.tabId, method)) as T;
         },
       ),
       detachSession: vi.fn(async () => {}),
@@ -2890,7 +2929,7 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       transport,
       sessions,
       cooperation,
-      cdp: cdp as unknown as TestDispatcherCdp,
+      cdp: stubDispatcherCdp(cdp),
       interactionPreferences: makePreferenceStore(false),
       debug: {
         before: async (req: { id: string }) => {
@@ -2984,6 +3023,399 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       });
     } finally {
       dispatcher.stop();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("awaits compositor paint on tool.wheel when ownsBackgroundExecution is true on an unfocused/minimized window", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 100, initialTabIds: [42] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 42,
+      },
+    });
+    const ctx = await sessions.start("wheel-bg");
+    ctx.refStore.set("e1", 701, { tabId: 42 });
+
+    const tab = {
+      id: 42,
+      windowId: 100,
+      active: true,
+      url: "https://wheel.example/",
+    } as chrome.tabs.Tab;
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+      },
+    });
+
+    let windowState: { id: number; focused: boolean; state: chrome.windows.Window["state"] } = {
+      id: 100,
+      focused: false,
+      state: "minimized",
+    };
+    const evaluatedExpressions: string[] = [];
+    const dispatchedMethods: string[] = [];
+    const cdp = stubDispatcherCdp({
+      ownsBackgroundExecution: vi.fn(() => true),
+      send: vi.fn(async (_tabId: number, method: string, params?: object) => {
+        dispatchedMethods.push(method);
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+        }
+        if (method === "DOM.getBoxModel") {
+          return { model: { content: [100, 100, 300, 100, 300, 300, 100, 300] } };
+        }
+        if (method === "DOM.getContentQuads") {
+          return { quads: [[100, 100, 300, 100, 300, 300, 100, 300]] };
+        }
+        if (method === "Runtime.evaluate") {
+          const expr = (params as { expression?: string } | undefined)?.expression ?? "";
+          evaluatedExpressions.push(expr);
+          if (expr === "document.visibilityState") {
+            return { result: { value: "visible" } };
+          }
+          if (expr.includes("requestAnimationFrame")) {
+            return { result: { value: true } };
+          }
+          return { result: { value: { x: 0, y: 120 } } };
+        }
+        if (method === "Runtime.callFunctionOn") {
+          return { result: { value: { scrollTop: 120, scrollLeft: 0 } } };
+        }
+        if (method === "DOM.resolveNode") {
+          return { object: { objectId: "scroller-1" } };
+        }
+        return {};
+      }),
+    });
+
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp,
+      windowsApi: { get: vi.fn(async () => windowState) },
+    });
+    dispatcher.start();
+    try {
+      deliver({
+        id: "wheel-minimized",
+        method: "tool.wheel",
+        params: { session_id: "wheel-bg", tab_id: 42, delta_y: 120 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toMatchObject({
+        id: "wheel-minimized",
+        result: { tab_id: 42, delta_y: 120 },
+      });
+      const wheelIdx = dispatchedMethods.indexOf("Input.dispatchMouseEvent");
+      expect(wheelIdx).toBeGreaterThanOrEqual(0);
+      expect(evaluatedExpressions.some((expr) => expr.includes("requestAnimationFrame"))).toBe(
+        true,
+      );
+
+      // Foreground focused window does not wait on extra hidden-surface paint frames.
+      evaluatedExpressions.length = 0;
+      windowState = { id: 100, focused: true, state: "normal" };
+      deliver({
+        id: "wheel-focused",
+        method: "tool.wheel",
+        params: { session_id: "wheel-bg", tab_id: 42, delta_y: 120 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(sent[1]).toMatchObject({
+        id: "wheel-focused",
+        result: { tab_id: 42, delta_y: 120 },
+      });
+      expect(evaluatedExpressions.some((expr) => expr.includes("requestAnimationFrame"))).toBe(
+        false,
+      );
+    } finally {
+      dispatcher.stop();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("cleans up hover latches and overlay bypass refcounts when tabsOnRemoved fires", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 100, initialTabIds: [42, 43] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 42,
+      },
+    });
+    const ctx = await sessions.start("hover-cleanup");
+    ctx.refStore.set("e1", 501, { tabId: 42 });
+
+    const tabs = new Map<number, chrome.tabs.Tab>([
+      [42, { id: 42, windowId: 100, active: true, url: "https://a.example/" } as chrome.tabs.Tab],
+      [43, { id: 43, windowId: 100, active: false, url: "https://b.example/" } as chrome.tabs.Tab],
+    ]);
+    const sendMessage = vi.fn(async () => ({ ok: true }));
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async (id: number) => tabs.get(id)!),
+        query: vi.fn(async () => [...tabs.values()]),
+        sendMessage,
+      },
+    });
+
+    const removedListeners = new Set<(tabId: number) => void>();
+    const tabsOnRemoved = {
+      addListener: (cb: (tabId: number) => void) => removedListeners.add(cb),
+      removeListener: (cb: (tabId: number) => void) => removedListeners.delete(cb),
+    };
+
+    const mouseMovedTabs: number[] = [];
+    const cdp = stubDispatcherCdp({
+      send: vi.fn(async (tabId: number, method: string, params?: object) => {
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+        }
+        if (method === "DOM.getContentQuads") {
+          return { quads: [[10, 10, 50, 10, 50, 50, 10, 50]] };
+        }
+        if (method === "Runtime.evaluate") {
+          const expr = (params as { expression?: string } | undefined)?.expression ?? "";
+          if (expr.includes("overlayHostPresent")) {
+            return {
+              result: {
+                value: { overlayHostPresent: true, overlayHostConnected: true, hitIndex: 0 },
+              },
+            };
+          }
+          return { result: { value: "visible" } };
+        }
+        if (method === "Input.dispatchMouseEvent") {
+          mouseMovedTabs.push(tabId);
+          return {};
+        }
+        return {};
+      }),
+    });
+
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp,
+      tabsOnRemoved,
+    });
+    dispatcher.start();
+    try {
+      deliver({
+        id: "hover-42",
+        method: "tool.hover",
+        params: { session_id: "hover-cleanup", tab_id: 42, ref: "e1", settle_ms: 0 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toMatchObject({ id: "hover-42", result: { tab_id: 42 } });
+      expect(sendMessage).toHaveBeenCalledWith(42, {
+        type: OVERLAY_AUTOMATION_BYPASS,
+        enabled: true,
+      });
+
+      // Closing tab 42 forgets both the hover latch and the per-tab bypass ownership entry.
+      sendMessage.mockClear();
+      mouseMovedTabs.length = 0;
+      tabs.delete(42);
+      for (const listener of removedListeners) listener(42);
+
+      // Subsequent tool.click on tab 43 (or session-wide) does not reassert hover on closed tab 42,
+      // and session_stop does not send redundant bypass messages to closed tab 42.
+      ctx.refStore.set("e2", 502, { tabId: 43 });
+      deliver({
+        id: "click-43",
+        method: "tool.click",
+        params: { session_id: "hover-cleanup", ref: "e2", tab_id: 43 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(mouseMovedTabs.every((id) => id === 43)).toBe(true);
+      expect(sendMessage).not.toHaveBeenCalledWith(42, expect.anything());
+
+      // If Chrome later reuses tab ID 42, hover re-acquires overlay bypass instead of hitting stale owner cache.
+      tabs.set(42, {
+        id: 42,
+        windowId: 100,
+        active: true,
+        url: "https://reused.example/",
+      } as chrome.tabs.Tab);
+      ctx.refStore.set("e3", 503, { tabId: 42 });
+      sendMessage.mockClear();
+      deliver({
+        id: "hover-42-reused",
+        method: "tool.hover",
+        params: { session_id: "hover-cleanup", tab_id: 42, ref: "e3", settle_ms: 0 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(3));
+      expect(sendMessage).toHaveBeenCalledWith(42, {
+        type: OVERLAY_AUTOMATION_BYPASS,
+        enabled: true,
+      });
+    } finally {
+      dispatcher.stop();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns structured session_busy on concurrent tool.download without sharing module-global lock across dispatchers", async () => {
+    const t1 = fakeTransport();
+    const t2 = fakeTransport();
+    const makeSessions = async (sessionId: string, windowId: number, tabId: number) => {
+      const sm = new SessionManager({
+        agentWindow: {
+          create: async () => ({ windowId, initialTabIds: [tabId] }),
+          remove: async () => {},
+          ensureActiveTab: async () => tabId,
+        },
+      });
+      const ctx = await sm.start(sessionId);
+      ctx.refStore.set("e1", 901, { tabId });
+      return sm;
+    };
+    const sessions1 = await makeSessions("dl-1", 101, 51);
+    const sessions2 = await makeSessions("dl-2", 102, 52);
+
+    let releasePress1!: (val: object) => void;
+    const press1Started = new Promise<void>((resolve) => {
+      vi.stubGlobal("chrome", {
+        tabs: {
+          get: vi.fn(async (id: number) => ({
+            id,
+            windowId: id === 51 ? 101 : 102,
+            active: true,
+            url: "https://files.example/",
+          })),
+          query: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => ({})),
+        },
+        downloads: {
+          onDeterminingFilename: { addListener: vi.fn(), removeListener: vi.fn() },
+          onCreated: { addListener: vi.fn(), removeListener: vi.fn() },
+          onChanged: { addListener: vi.fn(), removeListener: vi.fn() },
+          search: vi.fn(async () => []),
+          cancel: vi.fn(async () => {}),
+          removeFile: vi.fn(async () => {}),
+        },
+        webNavigation: {
+          onCreatedNavigationTarget: { addListener: vi.fn(), removeListener: vi.fn() },
+        },
+      });
+      void resolve;
+    });
+    void press1Started;
+
+    let enteredFirstDownload!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      enteredFirstDownload = resolve;
+    });
+    let secondDispatcherEntered = false;
+
+    const makeDownloadCdp = (isFirst: boolean) =>
+      stubDispatcherCdp({
+        send: vi.fn(async (_tabId: number, method: string, params?: object) => {
+          if (method === "Page.getLayoutMetrics") {
+            return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+          }
+          if (method === "DOM.getContentQuads") {
+            return { quads: [[10, 10, 40, 10, 40, 40, 10, 40]] };
+          }
+          if (method === "Runtime.evaluate") {
+            const expr = (params as { expression?: string } | undefined)?.expression ?? "";
+            return {
+              result: { value: expr === "document.visibilityState" ? "visible" : "absent" },
+            };
+          }
+          if (
+            method === "Input.dispatchMouseEvent" &&
+            (params as { type?: string } | undefined)?.type === "mousePressed"
+          ) {
+            if (isFirst) {
+              enteredFirstDownload();
+              return new Promise<object>((resolve) => {
+                releasePress1 = resolve;
+              });
+            }
+            secondDispatcherEntered = true;
+          }
+          return {};
+        }),
+      });
+
+    const d1 = new ToolDispatcher({
+      transport: t1.transport,
+      sessions: sessions1,
+      cdp: makeDownloadCdp(true),
+    });
+    const d2 = new ToolDispatcher({
+      transport: t2.transport,
+      sessions: sessions2,
+      cdp: makeDownloadCdp(false),
+    });
+    d1.start();
+    d2.start();
+    try {
+      t1.deliver({
+        id: "dl-first",
+        method: "tool.download",
+        params: {
+          session_id: "dl-1",
+          tab_id: 51,
+          ref: "e1",
+          browser_relative_dir: "BrowserSkill/d1",
+          timeout_ms: 5_000,
+        },
+      });
+      await firstEntered;
+
+      // Second concurrent download on the same dispatcher receives structured session_busy with effect_state: "none".
+      t1.deliver({
+        id: "dl-second-same-dispatcher",
+        method: "tool.download",
+        params: {
+          session_id: "dl-1",
+          tab_id: 51,
+          ref: "e1",
+          browser_relative_dir: "BrowserSkill/d1",
+          timeout_ms: 5_000,
+        },
+      });
+      await vi.waitFor(() => expect(t1.sent).toHaveLength(1));
+      expect(t1.sent[0]).toMatchObject({
+        id: "dl-second-same-dispatcher",
+        error: {
+          code: "timeout",
+          data: {
+            reason: "session_busy",
+            effect_state: "none",
+            dispatched: false,
+          },
+        },
+      });
+
+      // Separate ToolDispatcher instance has its own DownloadConcurrencyGate (no module-global lock leak).
+      t2.deliver({
+        id: "dl-other-dispatcher",
+        method: "tool.download",
+        params: {
+          session_id: "dl-2",
+          tab_id: 52,
+          ref: "e1",
+          browser_relative_dir: "BrowserSkill/d2",
+          timeout_ms: 50,
+        },
+      });
+      await vi.waitFor(() => expect(secondDispatcherEntered).toBe(true));
+
+      t1.deliver({ id: "cancel-dl-first", method: "cancel", params: { rpc_id: "dl-first" } });
+      releasePress1?.({});
+      await vi.waitFor(() => expect(t1.sent.length).toBeGreaterThanOrEqual(3));
+    } finally {
+      d1.stop();
+      d2.stop();
       vi.unstubAllGlobals();
     }
   });

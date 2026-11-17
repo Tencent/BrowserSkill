@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import type { VideoHost, VideoHostCommand } from "./host-protocol";
 import { VIDEO_NAVIGATION_TIMEOUT_MS, VideoManager } from "./manager";
 import { VideoArtifactStore } from "./store";
@@ -46,16 +47,17 @@ async function setup() {
   const store = new MemoryStore();
   let owner = "local";
   let event: Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
+  const send = vi.fn(
+    async (_tab: number, method: string): Promise<any> =>
+      method === "Page.captureScreenshot" ? { data: "image" } : {},
+  );
   const cdp = {
     getAttachmentId: () => "one",
     onEvent: (_tabId: number, handler: typeof event) => {
       event = handler;
       return { dispose: vi.fn() };
     },
-    send: vi.fn(
-      async <T>(_tab: number, method: string): Promise<T> =>
-        (method === "Page.captureScreenshot" ? { data: "image" } : {}) as T,
-    ),
+    send,
   };
   const request = vi.fn(async <T>(command: VideoHostCommand): Promise<T> => {
     if (command.action === "start") {
@@ -85,7 +87,7 @@ async function setup() {
   const changed = vi.fn();
   const video = new VideoManager({
     sessions,
-    cdp: cdp as CdpRunner,
+    cdp: createStubCdpRunner({ ...cdp, send: send as CdpRunner["send"] }),
     store,
     owner: () => owner,
     tabs: { query: async () => [tab], get: async () => tab },
@@ -108,7 +110,11 @@ async function setup() {
       owner = value;
     },
     frame: (data: string, timestamp?: number) =>
-      event({ tabId: 7 }, "Page.screencastFrame", { data, metadata: { timestamp }, sessionId: 1 }),
+      event(rootEventSource(7), "Page.screencastFrame", {
+        data,
+        metadata: { timestamp },
+        sessionId: 1,
+      }),
   };
 }
 

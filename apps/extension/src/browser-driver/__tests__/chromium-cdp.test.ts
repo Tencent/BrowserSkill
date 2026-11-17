@@ -13,7 +13,7 @@ import {
   DEFAULT_IDLE_DETACH_MS,
 } from "../chromium-cdp";
 import { CdpReadTimeoutError, READ_TIMEOUT_MS } from "../command-deadline";
-import { StaleFrameHandleError } from "../frame-graph";
+import { StaleFrameHandleError, toRootFrameHandle } from "../frame-handles";
 
 function fakeChromeEvent<TArgs extends unknown[]>() {
   const listeners = new Set<(...args: TArgs) => void>();
@@ -84,7 +84,7 @@ describe("ChromiumCdp", () => {
         sessionId: "child-session",
         targetInfo: { type: "iframe", targetId: "child" },
       });
-      const graph = cdp.getFrameGraph(4, signal.signal);
+      const graph = cdp.getFrameDocuments(4, signal.signal);
       await started;
       if (ending === "abort") signal.abort();
       else {
@@ -142,7 +142,7 @@ describe("ChromiumCdp", () => {
         targetInfo: { type: "iframe", targetId: "child" },
       });
       for (let attempt = 0; attempt < 2; attempt++) {
-        const capture = cdp.getFrameGraph(4);
+        const capture = cdp.getFrameDocuments(4);
         await vi.advanceTimersByTimeAsync(11_000);
         const graph = await capture;
         expect(graph.frames.map((frame) => frame.frameId)).toEqual(["main", "healthy"]);
@@ -150,18 +150,21 @@ describe("ChromiumCdp", () => {
           {
             frameId: "child",
             parentFrameId: "main",
-            target: { tabId: 4, sessionId: "child-session" },
+            processKey: "oopif:child",
+            isOutOfProcess: true,
           },
         ]);
         expect(childReads).toBe(1);
       }
       finish({ frameTree: { frame: { id: "child" } } });
       await vi.advanceTimersByTimeAsync(0);
-      const recovered = cdp.getFrameGraph(4);
+      const recovered = cdp.getFrameDocuments(4);
       await vi.advanceTimersByTimeAsync(100);
-      expect(
-        (await recovered).frames.find((frame) => frame.frameId === "child")?.target.sessionId,
-      ).toBe("child-session");
+      expect((await recovered).frames.find((frame) => frame.frameId === "child")).toMatchObject({
+        frameId: "child",
+        processKey: "oopif:child",
+        isOutOfProcess: true,
+      });
       expect(childReads).toBe(2);
     } finally {
       cdp.dispose();
@@ -174,14 +177,14 @@ describe("ChromiumCdp", () => {
     const calls = () =>
       vi.mocked(api.sendCommand).mock.calls.filter((c) => c[1] === "Target.setAutoAttach");
     await cdp.ensureAttached(4);
-    await Promise.all([cdp.getFrameGraph(4), cdp.getFrameGraph(4)]);
-    await cdp.getFrameGraph(4);
+    await Promise.all([cdp.getFrameDocuments(4), cdp.getFrameDocuments(4)]);
+    await cdp.getFrameDocuments(4);
     expect(calls()).toHaveLength(1);
     onDetach.fire({ tabId: 4 }, "canceled_by_user");
-    await cdp.getFrameGraph(4);
+    await cdp.getFrameDocuments(4);
     expect(calls()).toHaveLength(2);
     await cdp.detachAll();
-    await cdp.getFrameGraph(4);
+    await cdp.getFrameDocuments(4);
     expect(calls()).toHaveLength(3);
     cdp.dispose();
   });
@@ -195,8 +198,8 @@ describe("ChromiumCdp", () => {
     });
     const cdp = new ChromiumCdp(api);
     await cdp.ensureAttached(4);
-    await cdp.getFrameGraph(4);
-    await cdp.getFrameGraph(4);
+    await cdp.getFrameDocuments(4);
+    await cdp.getFrameDocuments(4);
     expect(attempts).toBe(2);
     cdp.dispose();
   });
@@ -239,17 +242,18 @@ describe("ChromiumCdp", () => {
       });
       await vi.advanceTimersByTimeAsync(10_000);
       expect(childConfigurations).toBe(1);
-      const graph = cdp.getFrameGraph(4);
+      const graph = cdp.getFrameDocuments(4);
       await vi.advanceTimersByTimeAsync(2_000);
       expect((await graph).unavailableFrames?.map((frame) => frame.frameId)).toEqual(["child"]);
       expect(childConfigurations).toBe(1);
       finish({});
       await vi.advanceTimersByTimeAsync(0);
-      const recovered = cdp.getFrameGraph(4);
+      const recovered = cdp.getFrameDocuments(4);
       await vi.advanceTimersByTimeAsync(2_000);
-      expect((await recovered).frames.find((frame) => frame.frameId === "child")?.target).toEqual({
-        tabId: 4,
-        sessionId: "child",
+      expect((await recovered).frames.find((frame) => frame.frameId === "child")).toMatchObject({
+        frameId: "child",
+        processKey: "oopif:child",
+        isOutOfProcess: true,
       });
       expect(childConfigurations).toBe(1);
     } finally {
@@ -289,7 +293,7 @@ describe("ChromiumCdp", () => {
         await cdp.ensureAttached(4);
         onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", { sessionId: "child" });
       }
-      const graph = cdp.getFrameGraph(4);
+      const graph = cdp.getFrameDocuments(4);
       const rejected = expect(graph).rejects.toThrow(`${stuckMethod} timed out`);
       // Root initialization must not resend the configuration after its deadline.
       await vi.advanceTimersByTimeAsync(22_000);
@@ -434,16 +438,21 @@ describe("ChromiumCdp", () => {
       sessionId: "nested-session",
     });
 
-    const graph = await cdp.getFrameGraph(4);
+    const graph = await cdp.getFrameDocuments(4);
 
     expect(graph.frames).toHaveLength(4);
-    expect(graph.frames.find((frame) => frame.frameId === "left")?.target).toEqual({ tabId: 4 });
-    expect(graph.frames.find((frame) => frame.frameId === "right")?.target.sessionId).toBe(
-      "right-session",
-    );
-    expect(graph.frames.find((frame) => frame.frameId === "nested")?.target.sessionId).toBe(
-      "nested-session",
-    );
+    expect(graph.frames.find((frame) => frame.frameId === "left")).toMatchObject({
+      processKey: "root",
+      isOutOfProcess: false,
+    });
+    expect(graph.frames.find((frame) => frame.frameId === "right")).toMatchObject({
+      processKey: "oopif:right",
+      isOutOfProcess: true,
+    });
+    expect(graph.frames.find((frame) => frame.frameId === "nested")).toMatchObject({
+      processKey: "oopif:nested",
+      isOutOfProcess: true,
+    });
     expect(graph.frames.find((frame) => frame.frameId === "right")?.ownerBackendNodeId).toBe(200);
     expect(graph.frames.find((frame) => frame.frameId === "nested")?.ownerBackendNodeId).toBe(300);
     expect(api.sendCommand).toHaveBeenCalledWith(
@@ -505,13 +514,14 @@ describe("ChromiumCdp", () => {
     );
     const cdp = new ChromiumCdp(api);
 
-    const graph = await cdp.getFrameGraph(4);
+    const graph = await cdp.getFrameDocuments(4);
 
     expect(graph.frames).toHaveLength(depth + 1);
     for (let index = 1; index <= depth; index += 1) {
-      expect(
-        graph.frames.find((frame) => frame.frameId === `frame-${index}`)?.target.sessionId,
-      ).toBe(`session-${index}`);
+      expect(graph.frames.find((frame) => frame.frameId === `frame-${index}`)).toMatchObject({
+        processKey: `oopif:frame-${index}`,
+        isOutOfProcess: true,
+      });
     }
   });
 
@@ -1583,8 +1593,8 @@ describe("ChromiumCdp", () => {
 describe("document-bound references", () => {
   it.each([
     "send",
-    "sendToTarget",
-    "sendGuarded",
+    "sendToFrame",
+    "sendToFrameGuarded",
   ] as const)("learns the loaded root from %s without frame discovery, including after reattach", async (method) => {
     const { api, onEvent } = fakeApi();
     let root = "loaded-root";
@@ -1598,9 +1608,10 @@ describe("document-bound references", () => {
     const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
     const read = () => {
       if (method === "send") return cdp.send(4, "Page.getFrameTree");
-      if (method === "sendToTarget") return cdp.sendToTarget({ tabId: 4 }, "Page.getFrameTree");
-      return cdp.sendGuarded(
-        { tabId: 4 },
+      if (method === "sendToFrame")
+        return cdp.sendToFrame(toRootFrameHandle(4), "Page.getFrameTree");
+      return cdp.sendToFrame(
+        toRootFrameHandle(4),
         "Page.getFrameTree",
         {},
         {
@@ -1614,7 +1625,6 @@ describe("document-bound references", () => {
         await cdp.ensureAttached(4);
         changed.mockClear();
         refs.set("e1", 42, { tabId: 4, frameId: root });
-        await cdp.sendToTarget({ tabId: 4, sessionId: "child-session" }, "Page.getFrameTree");
         onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: "child" });
         expect(changed).not.toHaveBeenCalled();
         await read();
@@ -1647,8 +1657,8 @@ describe("document-bound references", () => {
     const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
     try {
       await cdp.ensureAttached(4);
-      const tree = cdp.sendGuarded(
-        { tabId: 4 },
+      const tree = cdp.sendToFrame(
+        toRootFrameHandle(4),
         "Page.getFrameTree",
         {},
         {
@@ -1682,8 +1692,8 @@ describe("document-bound references", () => {
     const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
     try {
       await cdp.ensureAttached(4);
-      const tree = cdp.sendGuarded(
-        { tabId: 4 },
+      const tree = cdp.sendToFrame(
+        toRootFrameHandle(4),
         "Page.getFrameTree",
         {},
         {
@@ -2590,8 +2600,8 @@ describe("idle soft-detach and immediate close/return detach", () => {
         signal,
       );
       expect(prepErr).toBeUndefined();
-      await cooperativeRunner.sendGuarded!(
-        { tabId: 49 },
+      await cooperativeRunner.sendToFrame(
+        toRootFrameHandle(49),
         "Input.dispatchMouseEvent",
         { type: "mouseMoved", x: 10, y: 10 },
         { signal },
@@ -2662,8 +2672,8 @@ describe("idle soft-detach and immediate close/return detach", () => {
       await cdp.detach(50);
       expect(cdp.isAttached(50)).toBe(false);
       await expect(
-        cdp.sendGuarded(
-          { tabId: 50 },
+        cdp.sendToFrame(
+          toRootFrameHandle(50),
           "Runtime.evaluate",
           { expression: "1" },
           {
@@ -3418,6 +3428,80 @@ describe("idle soft-detach and immediate close/return detach", () => {
       expect(cdp.consoleEntriesSince(57, undefined, 10, 200, false).entries).toHaveLength(0);
     } finally {
       blockDetach56?.();
+      cdp.dispose();
+    }
+  });
+
+  it("releases object groups on navigated frame handles without refreshing frame routes or reattaching", async () => {
+    const { api, onEvent } = fakeApi();
+    let frameTreeCalls = 0;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Page.getFrameTree") {
+        frameTreeCalls++;
+        return {
+          frameTree: {
+            frame: { id: "root", loaderId: "loader-1", url: "https://example.test/" },
+            childFrames: [
+              {
+                frame: {
+                  id: "child",
+                  parentId: "root",
+                  loaderId: "child-loader-1",
+                  url: "https://example.test/child",
+                },
+              },
+            ],
+          },
+        };
+      }
+      return {};
+    });
+    const cdp = new ChromiumCdp(api);
+    try {
+      await cdp.ensureAttached(58);
+      await cdp.getFrameDocuments(58);
+      const initialTreeCalls = frameTreeCalls;
+
+      // Simulate same-process child frame navigation updating `loaderId`.
+      onEvent.fire({ tabId: 58 }, "Page.frameNavigated", {
+        frame: {
+          id: "child",
+          parentId: "root",
+          loaderId: "child-loader-2",
+          url: "https://example.test/child-next",
+        },
+      });
+
+      const staleChildHandle = {
+        tabId: 58,
+        frameId: "child",
+        loaderId: "child-loader-1",
+        backendNodeId: 77,
+      };
+      // Normal reads/writes on stale loaderId deterministically reject.
+      await expect(
+        cdp.sendToFrame(staleChildHandle, "DOM.resolveNode", { backendNodeId: 77 }),
+      ).rejects.toMatchObject({ name: "StaleFrameHandleError" });
+
+      // Cleanup (`Runtime.releaseObjectGroup` / `Runtime.releaseObject`) still dispatches
+      // to the session without calling `Page.getFrameTree` or throwing `StaleFrameHandleError`.
+      await expect(
+        cdp.sendToFrame(
+          staleChildHandle,
+          "Runtime.releaseObjectGroup",
+          { objectGroup: "bsk-test-group" },
+          { allowReattach: false },
+        ),
+      ).resolves.toEqual({});
+      expect(frameTreeCalls).toBe(initialTreeCalls);
+      expect(api.sendCommand).toHaveBeenLastCalledWith(
+        { tabId: 58 },
+        "Runtime.releaseObjectGroup",
+        {
+          objectGroup: "bsk-test-group",
+        },
+      );
+    } finally {
       cdp.dispose();
     }
   });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
+import { type CdpRunner, type ChromeTabsApi, createStubCdpRunner } from "@/tools/shared";
 
 const captureRecordingObservation = vi.hoisted(() => vi.fn());
 const waitForDocumentSettled = vi.hoisted(() => vi.fn(async () => "quiet" as const));
@@ -31,7 +31,7 @@ function observation(url = "https://example.com/") {
 
 function runtime(): RecordingObservationRuntime {
   return new RecordingObservationRuntime({
-    cdp: { send: vi.fn() as unknown as CdpRunner["send"] },
+    cdp: createStubCdpRunner({ send: vi.fn() as unknown as CdpRunner["send"] }),
     tabsApi: { get: vi.fn(), query: vi.fn() } as unknown as ChromeTabsApi,
   });
 }

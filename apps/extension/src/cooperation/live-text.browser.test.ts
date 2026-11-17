@@ -7,13 +7,13 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
+import { createFrameDocumentInfo, type FrameDocumentInfo } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { type EmulateCdpRunner, handleEmulate } from "@/tools/emulate";
 import { handleEvaluate } from "@/tools/evaluate";
 import { handleBlur, handleClick, handleFill, handlePress } from "@/tools/interaction";
 import { handleObserve, handleScreenshot, handleSnapshot } from "@/tools/observation";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
 import { CooperationController } from "./controller";
 import type { FrameState } from "./types";
@@ -163,15 +163,25 @@ async function withCooperation(
         };
         await local("Page.enable");
         await local("Page.bringToFront");
-        const graph = async (): Promise<CdpFrameGraph> => {
+        const getFrameDocuments = async (): Promise<{
+          rootFrameId: string;
+          frames: FrameDocumentInfo[];
+        }> => {
           interface Tree {
-            frame: { id: string };
+            frame: { id: string; loaderId?: string };
             childFrames?: Tree[];
           }
           const { frameTree } = await local<{ frameTree: Tree }>("Page.getFrameTree");
-          const frames: CdpFrame[] = [];
+          const frames: FrameDocumentInfo[] = [];
           const visit = (tree: Tree, parentFrameId?: string) => {
-            frames.push({ frameId: tree.frame.id, parentFrameId, target: { tabId: 4 } });
+            frames.push(
+              createFrameDocumentInfo({
+                tabId: 4,
+                frameId: tree.frame.id,
+                loaderId: tree.frame.loaderId ?? "",
+                parentFrameId,
+              }),
+            );
             for (const child of tree.childFrames ?? []) visit(child, tree.frame.id);
           };
           visit(frameTree);
@@ -183,16 +193,21 @@ async function withCooperation(
           if (method === "Accessibility.getFullAXTree") captures.accessibility++;
           return local(method, params);
         };
-        const cdp: CdpRunner & EmulateCdpRunner = {
-          send: (_tabId, method, params) => instrumented(method, params),
-          sendToTarget: (_target, method, params) => instrumented(method, params),
-          getAttachmentId: () => sessionId,
-          getFrameGraph: graph,
-          setDeviceMetricsOverride: ChromiumCdp.prototype.setDeviceMetricsOverride,
-          clearDeviceMetricsOverride: ChromiumCdp.prototype.clearDeviceMetricsOverride,
-          setUserAgentOverride: ChromiumCdp.prototype.setUserAgentOverride,
-          setTouchEmulationEnabled: ChromiumCdp.prototype.setTouchEmulationEnabled,
-        };
+        const cdp: CdpRunner & EmulateCdpRunner = Object.assign(
+          createStubCdpRunner({
+            send: (_tabId, method, params) => instrumented(method, params),
+            sendToFrame: (_handle, method, params) => instrumented(method, params),
+            getAttachmentId: () => sessionId,
+            getFrameDocuments,
+            getMainFrameHandle: async () => (await getFrameDocuments()).frames[0].handle,
+          }),
+          {
+            setDeviceMetricsOverride: ChromiumCdp.prototype.setDeviceMetricsOverride,
+            clearDeviceMetricsOverride: ChromiumCdp.prototype.clearDeviceMetricsOverride,
+            setUserAgentOverride: ChromiumCdp.prototype.setUserAgentOverride,
+            setTouchEmulationEnabled: ChromiumCdp.prototype.setTouchEmulationEnabled,
+          },
+        );
         const sessions = new SessionManager({
           agentWindow: {
             create: async () => ({ windowId: 100, initialTabIds: [4] }),
@@ -1003,6 +1018,22 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("target policy in a real browser",
         });
         expect(await page.read("document.activeElement.id")).toBe("other");
         expect((await page.inputs()).keys).toEqual([]);
+
+        const resynced = await page.sync();
+        const directed = await page.act("tool.press", {
+          context_id: resynced.context_id,
+          selector: "#other",
+          key: "Enter",
+        });
+        expect(directed, JSON.stringify(directed)).toMatchObject({
+          key: "Enter",
+          code: "Enter",
+          modifiers: [],
+        });
+        expect(directed).not.toHaveProperty("used_selector");
+        expect(directed).not.toHaveProperty("used_ref");
+        expect(await page.read("document.activeElement.id")).toBe("other");
+        expect((await page.inputs()).keys).toEqual(["Enter:true"]);
       },
       { policy: "target" },
     );

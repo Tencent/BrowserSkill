@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import type { CapturedNode } from "../capture";
 import { buildSemanticGraph, resolveSemanticGraph, type SemanticAxNode } from "../semantic-graph";
 
@@ -21,7 +22,16 @@ function graph(domNodes: CapturedNode[], axNodes: SemanticAxNode[] = []) {
     viewport: { width: 800, height: 600 },
     rootFrameId: "main",
     documents: [
-      { frameId: "main", contextScopeId: "main", target: { tabId: 1 }, domNodes, axNodes },
+      {
+        frameId: "main",
+        loaderId: "",
+        processKey: "root",
+        isOutOfProcess: false,
+        contextScopeId: "main",
+        handle: toFrameDocumentHandle(1, { frameId: "main" }),
+        domNodes,
+        axNodes,
+      },
     ],
   });
 }
@@ -208,5 +218,33 @@ describe("semantic sibling context", () => {
     );
     expect(byBackend(resolved, 18)?.rowAnchor).toBe("settlement-2026Q4.csv");
     expect(byBackend(resolved, 25)?.rowAnchor).toBeUndefined();
+  });
+
+  it("keeps popup state in structured hasPopup/expanded fields without mutating vom.name", () => {
+    const resolved = resolveSemanticGraph(
+      graph([
+        dom(1, "main"),
+        {
+          ...dom(10, "div", "Filter"),
+          attrs: { role: "combobox", "aria-haspopup": "listbox", "aria-expanded": "true" },
+        },
+        {
+          ...dom(11, "button", "More actions"),
+          attrs: { "aria-haspopup": "menu", "aria-expanded": "false" },
+        },
+      ]),
+    );
+    expect(byBackend(resolved, 10)).toMatchObject({
+      role: "combobox",
+      name: "Filter",
+      hasPopup: true,
+      expanded: true,
+    });
+    expect(byBackend(resolved, 11)).toMatchObject({
+      role: "button",
+      name: "More actions",
+      hasPopup: true,
+      expanded: false,
+    });
   });
 });

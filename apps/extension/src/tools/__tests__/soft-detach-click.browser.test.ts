@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { CooperationController } from "@/cooperation/controller";
 import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import type { CooperationFrames, FrameState } from "@/cooperation/types";
@@ -34,7 +34,7 @@ interface CdpEvent {
   params?: object;
 }
 
-type CdpEventListener = (source: CdpDebuggee, method: string, params: unknown) => void;
+type CdpEventListener = Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0];
 
 const stubInputClock = (cdp: ChromiumCdp) => {
   vi.spyOn(cdp, "prepareInputTimestamp").mockImplementation(async () => ({

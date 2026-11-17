@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import type { WaitUntil } from "@/transport/types";
 import {
@@ -7,7 +8,7 @@ import {
   handleNavigateForward,
   handleReload,
 } from "../navigation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 const destination = "https://example.test/page#two";
 type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
@@ -31,7 +32,7 @@ async function fixture() {
     action: () => {},
   };
   const fire = (method: string, params: object, tabId = 4) => {
-    for (const listener of [...listeners]) listener({ tabId }, method, params);
+    for (const listener of [...listeners]) listener(rootEventSource(tabId), method, params);
   };
   const sameDocument = (url = destination, frameId = "main") =>
     fire("Page.navigatedWithinDocument", { frameId, url, navigationType: "fragment" });
@@ -58,13 +59,13 @@ async function fixture() {
       for (const name of state.replay) lifecycle(name);
     return {};
   });
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as CdpRunner["send"],
     onEvent: (_tabId, listener) => {
       listeners.add(listener);
       return { dispose: () => listeners.delete(listener) };
     },
-  };
+  });
   const tab = { id: 4, windowId: 100, active: true, url: destination } as chrome.tabs.Tab;
   const run = (operation: Operation, wait_until: WaitUntil, signal?: AbortSignal) => {
     const deps = {

@@ -1461,7 +1461,11 @@ describe("handleTabReturn", () => {
       throw new Error("simulated move failure");
     });
     const { api: windowsApi } = makeWindowsApi(state);
-    const res = await returnBorrowedTab(ctx, 7, { tabs: api, windows: windowsApi });
+    const res = await returnBorrowedTab(ctx, 7, {
+      tabs: api,
+      windows: windowsApi,
+      isAgentWindowId: (id) => sm.findByWindowId(id) !== null,
+    });
     expect(res).toMatchObject({ code: "cdp_failed" });
   });
 
@@ -1483,7 +1487,11 @@ describe("handleTabReturn", () => {
       createWindowId: 777,
     });
 
-    const res = await returnBorrowedTab(ctx, 7, { tabs: api, windows: windowsApi });
+    const res = await returnBorrowedTab(ctx, 7, {
+      tabs: api,
+      windows: windowsApi,
+      isAgentWindowId: (id) => sm.findByWindowId(id) !== null,
+    });
 
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res.toWindowId).toBe(777);
@@ -2106,4 +2114,40 @@ it("claims an unremovable tab into agentCreatedTabs when chromeTabMutationApi.cr
   } finally {
     vi.stubGlobal("chrome", prevChrome);
   }
+});
+
+it("never returns a borrowed user tab into another live session's Agent Window when original window closed", async () => {
+  const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
+  const ctxA = await sm.start("sess-a");
+  await sm.start("sess-b"); // owns Agent Window 101
+
+  const state: FakeTabState = {
+    tabs: new Map([[7, { id: 7, windowId: 100, index: 0 } as chrome.tabs.Tab]]),
+    nextTabId: 50,
+    windowsClosed: new Set([200]), // original user window 200 is closed
+  };
+  ctxA.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 0 });
+
+  const { api, spies } = makeTabMutationApi(state);
+  // Last focused window is session B's Agent Window (101), so returnBorrowedTab must skip 101 and create a fresh user window.
+  const windowsApi = {
+    get: vi.fn(async (windowId: number) => {
+      if (state.windowsClosed.has(windowId)) throw new Error("window closed");
+      return { id: windowId, type: "normal" } as chrome.windows.Window;
+    }),
+    getLastFocused: vi.fn(async () => ({ id: 101, type: "normal" }) as chrome.windows.Window),
+    create: vi.fn(async () => ({ id: 999, type: "normal" }) as chrome.windows.Window),
+    remove: vi.fn(async () => {}),
+  };
+
+  const res = await returnBorrowedTab(ctxA, 7, {
+    tabs: api,
+    windows: windowsApi,
+    isAgentWindowId: (id) => sm.findByWindowId(id) !== null,
+  });
+
+  if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+  expect(res.toWindowId).toBe(999);
+  expect(res.toWindowId).not.toBe(101);
+  expect(spies.move).toHaveBeenCalledWith(7, { windowId: 999, index: 0 });
 });

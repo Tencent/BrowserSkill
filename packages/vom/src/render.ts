@@ -6,6 +6,7 @@ import type {
   CondSurface,
   Rect,
   RenderedRef,
+  VomLineMetadata,
   VomNode,
   VomOptions,
   VomResult,
@@ -77,8 +78,124 @@ const STRUCTURAL_ROLES = new Set([
   "webarea",
 ]);
 
+/** Maximum length for names derived by joining descendant text without an ellipsis mark. */
+export const VOM_DERIVED_NAME_CAP = 240;
+
 export function isVomStructuralRole(role: string | undefined): boolean {
   return STRUCTURAL_ROLES.has(role?.toLowerCase() ?? "");
+}
+
+/** Normalize and JSON-escape a text string exactly as VOM renders node names. */
+export function encodeVomNameContent(value: string): string {
+  return JSON.stringify(value.replace(/\s+/g, " ").trim()).slice(1, -1);
+}
+
+const PRE_NAME_DRAG_HINTS = [" [draggable]", " [drop-target]", " [drag-handle]"] as const;
+
+function readLeadingJsonEscapedContent(
+  text: string,
+): { escaped: string; rest: string } | undefined {
+  if (!text.startsWith('"')) return undefined;
+  let escaped = false;
+  for (let i = 1; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "\\" && !escaped) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"' && !escaped) {
+      return { escaped: text.slice(1, i), rest: text.slice(i + 1) };
+    }
+    escaped = false;
+  }
+  return undefined;
+}
+
+/** Structured inspection of one rendered VOM line shared with incremental text-delta patching. */
+export function inspectVomLine(line: string): VomLineMetadata {
+  const trimmed = line.replace(/^ +/, "");
+  const indent = line.length - trimmed.length;
+  if (trimmed.startsWith("@context ")) {
+    const body = trimmed.slice("@context ".length);
+    const spaceAt = body.indexOf(" ");
+    const role = spaceAt >= 0 ? body.slice(0, spaceAt) : body;
+    const quoted =
+      spaceAt >= 0 ? readLeadingJsonEscapedContent(body.slice(spaceAt + 1)) : undefined;
+    return {
+      indent,
+      kind: "context",
+      ...(role ? { role } : {}),
+      ...(quoted && quoted.rest.length === 0 ? { escapedName: quoted.escaped } : {}),
+      plainNamedNode: false,
+      silentlyTruncatesLabel: true,
+    };
+  }
+  if (
+    trimmed.startsWith("@warning ") ||
+    trimmed.startsWith("@more ") ||
+    trimmed.startsWith("@continued ")
+  ) {
+    return { indent, kind: "notice", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+  if (
+    trimmed.startsWith("@vom ") ||
+    trimmed.startsWith("@view ") ||
+    trimmed.startsWith("@layers ")
+  ) {
+    return { indent, kind: "header", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+  if (/^L\d+\s/.test(trimmed)) {
+    return { indent, kind: "layer", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+  if (trimmed.startsWith("[§ active:")) {
+    return { indent, kind: "active-scope", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+
+  let rest = trimmed;
+  let ref: string | undefined;
+  if (rest.startsWith("@e")) {
+    const spaceAt = rest.indexOf(" ");
+    if (spaceAt > 2) {
+      const digits = rest.slice(2, spaceAt);
+      if (/^\d+$/.test(digits)) {
+        ref = `e${digits}`;
+        rest = rest.slice(spaceAt + 1);
+      }
+    }
+  }
+  const roleMatch = /^[A-Za-z][\w-]*/.exec(rest);
+  if (!roleMatch) {
+    return { indent, kind: "node", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+  const role = roleMatch[0];
+  rest = rest.slice(role.length);
+  let hadPreNameAnnotation = false;
+  for (const hint of PRE_NAME_DRAG_HINTS) {
+    if (rest.startsWith(hint)) {
+      hadPreNameAnnotation = true;
+      rest = rest.slice(hint.length);
+      break;
+    }
+  }
+  let escapedName: string | undefined;
+  if (rest.startsWith(' "')) {
+    const parsed = readLeadingJsonEscapedContent(rest.slice(1));
+    if (parsed) {
+      escapedName = parsed.escaped;
+      rest = parsed.rest;
+    }
+  }
+  const plainNamedNode =
+    ref === undefined && !hadPreNameAnnotation && escapedName !== undefined && rest.length === 0;
+  return {
+    indent,
+    kind: "node",
+    ...(ref ? { ref } : {}),
+    role,
+    ...(escapedName !== undefined ? { escapedName } : {}),
+    plainNamedNode,
+    silentlyTruncatesLabel: role === "canvas",
+  };
 }
 
 const SENSITIVE_MASK = "•••";
@@ -169,14 +286,14 @@ function cleanSemanticText(value: string | undefined): string | undefined {
 }
 
 function isLowValueContext(value: string): boolean {
-  const clean = value.trim();
-  const key = clean.toLowerCase();
-  if (clean === "欢迎") return true;
-  if (key.includes("icp") || key.includes("备案")) return true;
-  if (clean.includes("联系方式") || clean.includes("政府网站标识")) return true;
-  if (/^\d{5,}$/.test(clean)) return true;
-  if (/北京市小客车指标调控管理信息系统|beijing municipal commission/i.test(clean)) return true;
-  return false;
+  return /^\d{5,}$/.test(value.trim());
+}
+
+function isDocumentRootContextStop(node: VomNode): boolean {
+  return (
+    ["rootwebarea", "webarea", "document"].includes(normalizedRole(node)) ||
+    ["body", "html"].includes(normalizedTag(node))
+  );
 }
 
 function normalizedRole(node: VomNode): string {
@@ -688,7 +805,7 @@ function contextLabel(node: VomNode, targetName: string): string | undefined {
 }
 
 function weakLabelContext(node: VomNode, targetName: string): string | undefined {
-  if (isVomReferenceNode(node)) return undefined;
+  if (isVomReferenceNode(node) || isDocumentRootContextStop(node)) return undefined;
   return weakContextText(
     cleaned(node.name) ?? cleaned(node.text) ?? cleaned(node.nearbyText),
     targetName,
@@ -798,7 +915,7 @@ function collectOwnedContext(
   let guard = 0;
   while (current !== null && guard <= state.parentMap.size) {
     const parent = state.nodesById.get(current);
-    if (!parent) break;
+    if (!parent || isDocumentRootContextStop(parent)) break;
     if (!sharesContextScope(node, parent)) break;
     const label = contextLabel(parent, nodeName);
     if (label) contexts.push({ text: label, source: "owned", order: contexts.length });
@@ -847,7 +964,13 @@ function collectSameContainerContext(
     cache.set(key, prefix);
 
     const parent = state.nodesById.get(parentId);
-    if (!parent || !sharesContextScope(node, parent) || isContextBoundary(parent)) break;
+    if (
+      !parent ||
+      !sharesContextScope(node, parent) ||
+      isContextBoundary(parent) ||
+      isDocumentRootContextStop(parent)
+    )
+      break;
     childId = parentId;
     parentId = state.parentMap.get(parentId) ?? null;
     guard += 1;
@@ -1018,8 +1141,13 @@ function renderNodeLine(
     const inlineOpts = formatInlineSelectOptions(node, state);
     if (inlineOpts) line += ` [options: ${inlineOpts}]`;
   } else if (role === "combobox" && !isNativeSelect && !isEditableCombobox(node)) {
-    const expanded = node.attrs?.["aria-expanded"]?.toLowerCase() === "true";
+    const expanded =
+      node.expanded === true || node.attrs?.["aria-expanded"]?.toLowerCase() === "true";
     line += expanded ? " [custom-dropdown: expanded]" : " [custom-dropdown: click to open]";
+  } else if (node.hasPopup && name) {
+    const expanded =
+      node.expanded === true || node.attrs?.["aria-expanded"]?.toLowerCase() === "true";
+    line += expanded ? " [expanded]" : " [has-submenu]";
   }
 
   if (surface && surface.subItems.length > 0) {
@@ -1814,8 +1942,25 @@ function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOp
     "@layers 2 focus=L1",
     `L1 ${layer.kind} cover=${Math.round(layer.coverage * 100)}%`,
   ];
-  const state = renderNodes(visibleNodes, options, header, scene.surfaces, scene.activeScopeBlocks);
-  state.lines.push(renderPageOcclusionLine(hiddenCount));
+  const occlusionLine = renderPageOcclusionLine(hiddenCount);
+  const occlusionCost = estimateLineTokens(occlusionLine);
+  const budgetFinite = options.maxTokens !== undefined && Number.isFinite(options.maxTokens);
+  const nodeOptions = budgetFinite
+    ? { ...options, maxTokens: Math.max(0, options.maxTokens! - occlusionCost) }
+    : options;
+  const state = renderNodes(
+    visibleNodes,
+    nodeOptions,
+    header,
+    scene.surfaces,
+    scene.activeScopeBlocks,
+  );
+  if (!budgetFinite || state.tokens + occlusionCost <= options.maxTokens!) {
+    state.lines.push(occlusionLine);
+    state.tokens += occlusionCost;
+  } else {
+    state.truncated = true;
+  }
 
   return {
     text: state.lines.join("\n"),

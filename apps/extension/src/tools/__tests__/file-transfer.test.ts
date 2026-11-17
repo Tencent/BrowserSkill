@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  createFrameDocumentInfo,
+  rootEventSource,
+  targetEventSource,
+} from "@/browser-driver/frame-handles";
 import type { InputPassthroughMessage } from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import { type DownloadsApi, handleDownload } from "../download";
@@ -6,7 +11,7 @@ import { captureBrowserDownload } from "../download-capture";
 import { uploadThroughFileDrop } from "../file-drop-transaction";
 import { uploadThroughActivatedFileInput } from "../file-input-transaction";
 import type { ResolvedActionTarget } from "../interaction";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { handleUpload } from "../upload";
 
 function sessions() {
@@ -118,11 +123,13 @@ function popupDownloadFakes() {
   };
 }
 
-function silentCdp(): CdpRunner {
-  return {
-    send: vi.fn(async () => ({})) as CdpRunner["send"],
+function silentCdp(
+  send: CdpRunner["send"] = vi.fn(async () => ({})) as CdpRunner["send"],
+): CdpRunner {
+  return createStubCdpRunner({
+    send,
     onEvent: () => ({ dispose: vi.fn() }),
-  };
+  });
 }
 
 function actionTarget(frameId = "", loaderId = ""): ResolvedActionTarget {
@@ -195,21 +202,21 @@ function uploadCdp(
       (params as { type?: string }).type === "mousePressed" &&
       options.chooser
     ) {
-      cdpEvent?.({ tabId: 4 }, "Page.fileChooserOpened", options.chooser);
+      cdpEvent?.(rootEventSource(4), "Page.fileChooserOpened", options.chooser);
     }
     return {};
   });
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as unknown as CdpRunner["send"],
     onEvent: (_tabId, handler) => {
       cdpEvent = handler;
       return { dispose: vi.fn() };
     },
-  };
+  });
   return {
     calls,
     emitChooser: (event: { frameId?: string; backendNodeId?: number; mode?: string }) =>
-      cdpEvent?.({ tabId: 4 }, "Page.fileChooserOpened", event),
+      cdpEvent?.(rootEventSource(4), "Page.fileChooserOpened", event),
     cdp,
   };
 }
@@ -252,10 +259,10 @@ function dropCdp(
     if (method === "Runtime.releaseObjectGroup") return {};
     throw new Error(`unexpected drop CDP command ${method}`);
   });
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as unknown as CdpRunner["send"],
     detach,
-  };
+  });
   return { calls, cdp, detach };
 }
 
@@ -325,14 +332,14 @@ describe("file transfer tools", () => {
 
   it("fails before clicking when chooser interception is unavailable", async () => {
     const trigger = vi.fn(async () => ({ tab_id: 4, x: 10, y: 10 }));
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async (_tabId: number, method: string) => {
         if (method === "Page.setInterceptFileChooserDialog") {
           throw new Error("method unavailable");
         }
         return {};
       }) as CdpRunner["send"],
-    };
+    });
 
     const result = await uploadThroughActivatedFileInput({
       cdp,
@@ -530,19 +537,23 @@ describe("file transfer tools", () => {
   it("dispatches an OOPIF file drop in the child target's local coordinates", async () => {
     const rootCalls: Array<{ method: string; params?: object }> = [];
     const childCalls: Array<{ method: string; params?: object }> = [];
-    const cdp: CdpRunner = {
-      send: vi.fn(async (_tabId, method, params) => {
-        rootCalls.push({ method, params });
-        if (method === "DOM.scrollIntoViewIfNeeded") return {};
-        if (method === "DOM.getBoxModel") {
-          return { model: { content: [100, 100, 300, 100, 300, 200, 100, 200] } };
+    const rootSend = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      rootCalls.push({ method, params });
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "DOM.getBoxModel") {
+        return { model: { content: [100, 100, 300, 100, 300, 200, 100, 200] } };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+      }
+      throw new Error(`unexpected root command ${method}`);
+    });
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: rootSend as CdpRunner["send"],
+      sendToFrame: vi.fn(async (handle, method, params) => {
+        if (handle.frameId !== "child") {
+          return rootSend(handle.tabId, method, params);
         }
-        if (method === "Page.getLayoutMetrics") {
-          return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
-        }
-        throw new Error(`unexpected root command ${method}`);
-      }) as CdpRunner["send"],
-      sendToTarget: vi.fn(async (_target, method, params) => {
         childCalls.push({ method, params });
         if (method === "DOM.scrollIntoViewIfNeeded") return {};
         if (method === "DOM.getContentQuads") {
@@ -565,21 +576,23 @@ describe("file transfer tools", () => {
           return {};
         }
         throw new Error(`unexpected child command ${method}`);
-      }) as CdpRunner["sendToTarget"],
-      getFrameGraph: vi.fn(async () => ({
+      }) as CdpRunner["sendToFrame"],
+      getFrameDocuments: vi.fn(async () => ({
         rootFrameId: "main",
         frames: [
-          { frameId: "main", target: { tabId: 4 } },
-          {
+          createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+          createFrameDocumentInfo({
+            tabId: 4,
             frameId: "child",
             parentFrameId: "main",
             ownerBackendNodeId: 10,
-            target: { tabId: 4, sessionId: "child-session" },
+            processKey: "oopif:child",
+            isOutOfProcess: true,
             loaderId: "child-loader",
-          },
+          }),
         ],
       })),
-    };
+    });
 
     const result = await uploadThroughFileDrop({
       cdp,
@@ -760,7 +773,7 @@ describe("file transfer tools", () => {
         method === "Input.dispatchMouseEvent" &&
         (params as { type?: string }).type === "mousePressed"
       ) {
-        cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
+        cdpEvent?.(rootEventSource(4), "Page.downloadWillBegin", {
           url: initial.url,
           suggestedFilename: "result.zip",
         });
@@ -774,13 +787,13 @@ describe("file transfer tools", () => {
       }
       return {};
     });
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: send as unknown as CdpRunner["send"],
       onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
-    };
+    });
 
     const result = await handleDownload(
       manager,
@@ -829,15 +842,15 @@ describe("file transfer tools", () => {
       removeFile: vi.fn(async () => {}),
     };
     let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async () => ({})) as unknown as CdpRunner["send"],
       isEventFromFrame: (source, handle) =>
-        source.tabId === handle.tabId && source.sessionId === "expected-child",
+        source.tabId === handle.tabId && source.targetKey === "expected-child",
       onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
-    };
+    });
     const unrelated = {
       id: 17,
       url: "https://example.test/unrelated.zip",
@@ -854,7 +867,7 @@ describe("file transfer tools", () => {
       browserRelativeDir: "BrowserSkill/tr_1",
       timeoutMs: 5,
       trigger: async () => {
-        cdpEvent?.({ tabId: 4, sessionId: "other-child" }, "Page.downloadWillBegin", {
+        cdpEvent?.(targetEventSource(4, "other-child"), "Page.downloadWillBegin", {
           url: unrelated.url,
           suggestedFilename: unrelated.filename,
         });
@@ -908,13 +921,13 @@ describe("file transfer tools", () => {
       removeFile: vi.fn(async () => {}),
     };
     let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async () => ({})) as CdpRunner["send"],
       onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
-    };
+    });
     let suggestion: chrome.downloads.DownloadFilenameSuggestion | undefined;
 
     const result = await captureBrowserDownload({
@@ -930,7 +943,7 @@ describe("file transfer tools", () => {
             resolve();
           });
         });
-        cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
+        cdpEvent?.(rootEventSource(4), "Page.downloadWillBegin", {
           url: initial.url,
           suggestedFilename: initial.filename,
         });
@@ -984,13 +997,13 @@ describe("file transfer tools", () => {
       removeFile: vi.fn(async () => {}),
     };
     let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async () => ({})) as CdpRunner["send"],
       onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
-    };
+    });
 
     const result = await captureBrowserDownload({
       cdp,
@@ -1000,7 +1013,7 @@ describe("file transfer tools", () => {
       maxByteSize: 4,
       timeoutMs: 1_000,
       trigger: async () => {
-        cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
+        cdpEvent?.(rootEventSource(4), "Page.downloadWillBegin", {
           url: initial.url,
           suggestedFilename: initial.filename,
         });
@@ -1060,13 +1073,13 @@ describe("file transfer tools", () => {
       removeFile: vi.fn(async () => {}),
     };
     let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async () => ({})) as CdpRunner["send"],
       onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
-    };
+    });
 
     const result = await captureBrowserDownload({
       cdp,
@@ -1075,7 +1088,7 @@ describe("file transfer tools", () => {
       browserRelativeDir: "BrowserSkill/tr_23",
       timeoutMs: 80,
       trigger: async () => {
-        cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
+        cdpEvent?.(rootEventSource(4), "Page.downloadWillBegin", {
           url: initial.url,
           suggestedFilename: initial.filename,
         });
@@ -1115,13 +1128,13 @@ describe("file transfer tools", () => {
       removeFile: vi.fn(async () => {}),
     };
     let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async () => ({})) as CdpRunner["send"],
       onEvent: (_tabId, handler) => {
         cdpEvent = handler;
         return { dispose: vi.fn() };
       },
-    };
+    });
     const defaults: number[] = [];
     const candidate = (id: number) =>
       ({
@@ -1139,7 +1152,7 @@ describe("file transfer tools", () => {
       browserRelativeDir: "BrowserSkill/tr_ambiguous",
       timeoutMs: 100,
       trigger: async () => {
-        cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
+        cdpEvent?.(rootEventSource(4), "Page.downloadWillBegin", {
           url: "https://example.test/same.bin",
           suggestedFilename: "same.bin",
         });
@@ -1196,7 +1209,7 @@ describe("file transfer tools", () => {
         timeout_ms: 1_000,
       },
       {
-        cdp: { ...silentCdp(), send: send as unknown as CdpRunner["send"] },
+        cdp: silentCdp(send as unknown as CdpRunner["send"]),
         tabsApi: tabsApi(),
         downloads: fakes.downloads,
         navigationTargets: fakes.navigationTargets,

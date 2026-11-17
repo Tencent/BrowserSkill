@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import type { CdpFrame } from "@/browser-driver/frame-graph";
-import type { CdpRunner } from "../shared";
+import { type FrameDocumentInfo, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { captureVisualScreenshot } from "../visual-screenshot";
 import { resolveVisualRegionNow, verifyVisualHit } from "../visual-target";
 import { captureObservationFacts } from "../vom/capture-coordinator";
@@ -43,12 +43,12 @@ async function withPage(
       await send("Target.activateTarget", { targetId });
       const local: Send = (method, params) => send(method, params, sessionId);
       const { frameTree } = await local<{ frameTree: Tree }>("Page.getFrameTree");
-      const cdp: CdpRunner = {
+      const cdp: CdpRunner = createStubCdpRunner({
         send: (_tab, method, params) => local(method, params),
         getAttachmentId: () => "visual-geometry-browser-test",
-        getFrameGraph: async () => {
+        getFrameDocuments: async () => {
           const { frameTree } = await local<{ frameTree: Tree }>("Page.getFrameTree");
-          const frames: CdpFrame[] = [];
+          const frames: FrameDocumentInfo[] = [];
           const visit = async (tree: Tree, parentFrameId?: string) => {
             const owner = parentFrameId
               ? await local<{ backendNodeId: number }>("DOM.getFrameOwner", {
@@ -56,17 +56,20 @@ async function withPage(
                 })
               : undefined;
             frames.push({
+              handle: toFrameDocumentHandle(1, { frameId: tree.frame.id, loaderId: "" }),
               frameId: tree.frame.id,
-              target: { tabId: 1 },
+              loaderId: "",
               parentFrameId,
               ownerBackendNodeId: owner?.backendNodeId,
+              processKey: "root",
+              isOutOfProcess: false,
             });
             for (const child of tree.childFrames ?? []) await visit(child, tree.frame.id);
           };
           await visit(frameTree);
           return { rootFrameId: frameTree.frame.id, frames };
         },
-      };
+      });
       await run({
         cdp,
         send: local,

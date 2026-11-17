@@ -2,7 +2,7 @@
 // rendering. Extension handlers attach reasons here; human-facing copy
 // lives in bsk-cli `render_error.rs`.
 
-import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type {
   ErrorCode,
   RpcError,

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSnapshot } from "@/tools/observation";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { CooperationController } from "./controller";
 import type { CooperationParams, FrameState } from "./types";
 
@@ -51,9 +51,9 @@ async function fixture() {
     changed: () => {},
     now: () => 10_000,
   });
-  const cdp = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: vi.fn(async (_tabId, method) => {
-      if (method === "Accessibility.enable" || method === "DOMSnapshot.enable") return {};
+      if (method === "Accessibility.enable" || method === "DOMSnapshot.enable") return {} as never;
       if (method === "Accessibility.getFullAXTree")
         return {
           nodes: [
@@ -71,16 +71,16 @@ async function fixture() {
               backendDOMNodeId: 200,
             },
           ],
-        };
+        } as never;
       if (method === "Page.getLayoutMetrics")
         return {
           cssVisualViewport: { clientWidth: 1000 },
           cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
-        };
+        } as never;
       // Exercise the existing AX fallback with a minimal, stable document.
       throw new Error(`Unsupported fixture method: ${method}`);
     }),
-  } as CdpRunner;
+  });
   const abort = new AbortController();
   return {
     session,

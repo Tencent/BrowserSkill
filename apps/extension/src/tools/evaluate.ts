@@ -30,6 +30,7 @@ import {
   isRpcError,
   lookupSession,
   resolveTargetTab,
+  withRemoteObject,
 } from "./shared";
 
 export interface EvaluateDeps {
@@ -147,7 +148,7 @@ export async function handleEvaluate(
     return { code: "cancelled", message: "evaluate aborted" };
   }
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
-  deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+  deps.cdp.trackSessionTab(ctx.sessionId, target.tabId);
   try {
     await deps.cdp.beginDomMutation?.();
     const reply = await deps.cdp.send<RuntimeEvaluateReply>(target.tabId, "Runtime.evaluate", {
@@ -156,28 +157,43 @@ export async function handleEvaluate(
       returnByValue: params.return_by_value ?? true,
       throwOnSideEffect: false,
     });
-    if (deps.signal?.aborted)
-      return {
-        code: "cancelled",
-        message: "evaluate cancelled after dispatch; page effects may have occurred",
-        data: { effect_state: "unknown" },
-      };
-    // The receipt says so when nothing about the page was verified.
-    const unverified = params.unverified === true ? { verified: false as const } : {};
-    if (reply.exceptionDetails) {
+    const releaseAndFormat = async (): Promise<EvaluateResult | RpcError> => {
+      if (deps.signal?.aborted)
+        return {
+          code: "cancelled",
+          message: "evaluate cancelled after dispatch; page effects may have occurred",
+          data: { effect_state: "unknown" },
+        };
+      // The receipt says so when nothing about the page was verified.
+      const unverified = params.unverified === true ? { verified: false as const } : {};
+      if (reply.exceptionDetails) {
+        return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+          ok: false,
+          tab_id: target.tabId,
+          error: buildEvaluateError(reply.exceptionDetails),
+          ...unverified,
+        });
+      }
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-        ok: false,
+        ok: true,
         tab_id: target.tabId,
-        error: buildEvaluateError(reply.exceptionDetails),
+        value: extractValue(reply.result),
         ...unverified,
       });
+    };
+    const objectIds = [
+      ...new Set(
+        [reply.result?.objectId, reply.exceptionDetails?.exception?.objectId].filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ),
+      ),
+    ];
+    let run = releaseAndFormat;
+    for (const objectId of objectIds) {
+      const next = run;
+      run = () => withRemoteObject(deps.cdp, target.tabId, objectId, next);
     }
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      ok: true,
-      tab_id: target.tabId,
-      value: extractValue(reply.result),
-      ...unverified,
-    });
+    return await run();
   } catch (err) {
     return {
       code: "cdp_failed",

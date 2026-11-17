@@ -4,8 +4,9 @@
 // isolated world, followed by the same normalizer and byte budget.
 import { createServer } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { handleExtract } from "../extract";
 import { collectExtractDom } from "./collector";
 import { fitExtractBudget, normalizeExtract } from "./normalize";
@@ -281,15 +282,24 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser structured extractio
             active: true,
             url: `${origin}/${fixture}`,
           } as chrome.tabs.Tab;
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: (_tab, method, args) => local(method, args),
             getAttachmentId: () => "a1",
             ensureAttachedToUrl: async () => {},
-            getFrameGraph: async () => ({
+            getFrameDocuments: async () => ({
               rootFrameId: frameTree.frame.id,
-              frames: [{ frameId: frameTree.frame.id, target: { tabId: 1 }, url: tab.url }],
+              frames: [
+                {
+                  handle: toFrameDocumentHandle(1, { frameId: frameTree.frame.id, loaderId: "" }),
+                  frameId: frameTree.frame.id,
+                  loaderId: "",
+                  url: tab.url,
+                  processKey: "root",
+                  isOutOfProcess: false,
+                },
+              ],
             }),
-          };
+          });
           const tabsApi = { get: async () => tab, query: async () => [tab] };
           const discovered = await handleExtract(
             manager,

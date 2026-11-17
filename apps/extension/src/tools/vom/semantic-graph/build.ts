@@ -46,7 +46,8 @@ export function buildSemanticGraph(input: BuildSemanticGraphInput): SemanticGrap
         ? { ownerBackendNodeId: document.ownerBackendNodeId }
         : {}),
       contextScopeId: document.contextScopeId,
-      target: document.target,
+      handle: document.handle,
+      processKey: document.processKey,
       ...(document.url ? { url: document.url } : {}),
       order: frameOrder,
     });

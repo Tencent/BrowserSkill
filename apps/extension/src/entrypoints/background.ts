@@ -59,6 +59,10 @@ import {
 import { ToolDispatcher } from "@/tools/dispatcher";
 import { clearHelpForSession, hasActiveHelp } from "@/tools/human-loop";
 import {
+  clearObserveIdentityStreaksForSession,
+  clearObserveIdentityStreaksForTab,
+} from "@/tools/observation";
+import {
   activeRecordingCount,
   attachRecordFinishListener,
   attachRecordQueryListener,
@@ -132,8 +136,9 @@ export default defineBackground(() => {
       cooperation.release(ctx.sessionId);
       debug.releaseSession(ctx.sessionId);
       void video.stopSession(ctx.sessionId).catch(() => {});
-      clearRecordingForSession(ctx.sessionId);
+      clearRecordingForSession(ctx.sessionId, recordDeps);
       clearHelpForSession(ctx.sessionId);
+      clearObserveIdentityStreaksForSession(ctx.sessionId);
     },
     onSessionsChanged: onOverlaySessionStateChanged,
   });
@@ -451,22 +456,13 @@ export default defineBackground(() => {
     debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
     cdp.forgetClosedTab?.(tabId);
+    dispatcher.forgetClosedTab(tabId);
+    clearObserveIdentityStreaksForTab(tabId);
     debug.sync();
   });
   // Reconcile dynamic Tier B content-script registrations on SW startup so
   // idle browser startups always begin with zero registered content scripts.
   void runtimeScripts.sync();
-  const cleanupAfterDisconnect = createDisconnectCleanup({
-    manager: sessions,
-    // Same contract as the dispatcher's `tool.session_stop`: without these
-    // deps the agent-tab cleanup and the window-release path are dead code.
-    sessionStopDeps: {
-      cdp,
-      tabManagement: { tabs: chromeTabMutationApi },
-      tabsQuery: chromeTabsApi,
-    },
-    onSessionsChanged: onOverlaySessionStateChanged,
-  });
   const recordDeps = {
     tabsApi: chrome.tabs,
     cdp,
@@ -487,6 +483,18 @@ export default defineBackground(() => {
       }
     },
   } satisfies RecordRuntimeDeps;
+  const cleanupAfterDisconnect = createDisconnectCleanup({
+    manager: sessions,
+    // Same contract as the dispatcher's `tool.session_stop`: without these
+    // deps the agent-tab cleanup and the window-release path are dead code.
+    sessionStopDeps: {
+      cdp,
+      recording: recordDeps,
+      tabManagement: { tabs: chromeTabMutationApi },
+      tabsQuery: chromeTabsApi,
+    },
+    onSessionsChanged: onOverlaySessionStateChanged,
+  });
   recordFrameCoordinator.attach();
   attachRecordStepListener(recordDeps);
   attachRecordFinishListener(recordDeps);

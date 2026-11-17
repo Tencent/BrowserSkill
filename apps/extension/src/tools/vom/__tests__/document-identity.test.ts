@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { StaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { StaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type { CdpRunner } from "../../shared";
 import { verifyDocumentIdentity, verifyVisualTargetIdentity } from "../document-identity";
 import type { VisualCandidate } from "../visual-discovery";

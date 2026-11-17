@@ -2,9 +2,9 @@ import type { VomScene } from "@browser-skill/vom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { scrollNodeIntoView } from "@/tools/element-geometry";
-import { resolveActionTarget } from "@/tools/interaction";
+import { handleSelect, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner, lookupPinnedSelectorTarget } from "@/tools/shared";
 import {
   ActionCheckError,
   actionError,
@@ -18,7 +18,10 @@ vi.mock("@/tools/observation", () => ({
   captureVomObservation: vi.fn(),
   handleSnapshot: vi.fn(async () => ({ text: "@e1 button Continue", tab_id: 7 })),
 }));
-vi.mock("@/tools/interaction", () => ({ resolveActionTarget: vi.fn() }));
+vi.mock("@/tools/interaction", async (original) => ({
+  ...(await original<typeof import("@/tools/interaction")>()),
+  resolveActionTarget: vi.fn(),
+}));
 vi.mock("./action-checks", async (original) => ({
   ...(await original<typeof import("./action-checks")>()),
   checkActionTarget: vi.fn(async () => undefined),
@@ -55,8 +58,15 @@ async function fixture(policy: "strict" | "target" = "target") {
     handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 4 },
     usedRef: "e1",
   });
-  const send = vi.fn(async () => ({}));
-  const cdp = { send } as CdpRunner;
+  const send = vi.fn(
+    async (
+      _tabId: number,
+      _method: string,
+      _params?: object,
+      _signal?: AbortSignal,
+    ): Promise<any> => ({}),
+  );
+  const cdp: CdpRunner = createStubCdpRunner({ send: send as CdpRunner["send"] });
   const readFrames = vi.fn<CooperationDeps["readFrames"]>(async () => ({
     frames: new Map([[0, structuredClone(frame)]]),
     gaps: [],
@@ -1083,7 +1093,7 @@ describe("negotiated target control", () => {
     "tool.download",
     "tool.upload",
     "tool.wheel",
-  ])("preserves the selector in a pinned %s receipt", async (method) => {
+  ])("preserves the selector in a pinned %s receipt without polluting refStore", async (method) => {
     const f = await fixture();
     const request = {
       id: "selector-action",
@@ -1096,9 +1106,9 @@ describe("negotiated target control", () => {
       } as Record<string, unknown>,
     };
     const result = await f.controller.run(request, f.cdp, f.signal, async (runner) => {
-      expect(request.params.selector).toBeUndefined();
-      expect(request.params.ref).toMatch(/^e\d+$/);
-      expect(f.session.refStore.resolveEntry(request.params.ref as string)).toMatchObject({
+      expect(request.params.selector).toBe("#confirm");
+      expect(request.params.ref).toBeUndefined();
+      expect(lookupPinnedSelectorTarget(runner, 7, "#confirm")).toMatchObject({
         backendNodeId: 4,
       });
       await runner.send(7, "Input.dispatchMouseEvent", {
@@ -1107,11 +1117,10 @@ describe("negotiated target control", () => {
         x: 10,
         y: 20,
       });
-      return { tab_id: 7, used_ref: request.params.ref };
+      return { tab_id: 7, used_selector: "#confirm" };
     });
     expect(result).toEqual({
       tab_id: 7,
-      used_ref: request.params.ref,
       used_selector: "#confirm",
     });
     expect(resolveActionTarget).toHaveBeenCalledTimes(1);
@@ -1284,13 +1293,14 @@ describe("targeted optimistic fast-path", () => {
     // Entry preflight runs checkActionTarget & checkExpectations once.
     expect(checkActionTarget).toHaveBeenCalledTimes(1);
     expect(checkExpectations).toHaveBeenCalledTimes(1);
-    // readFrames is called at entry refresh (undefined), once to arm beforeinput (not twice),
-    // plus non-blocking clear cleanup for beforeinput.
+    // readFrames is called at entry refresh (undefined), once at beginDomMutation() to
+    // re-fence human input after scroll/focus preparation, once to arm beforeinput,
+    // plus non-blocking clear cleanup for beforeinput. Internal runner.send steps emit 0 polls.
     const armCalls = f.readFrames.mock.calls.filter(
       ([, input]) => input !== undefined && input.type !== "clear",
     );
     const pollCalls = f.readFrames.mock.calls.filter(([, input]) => input === undefined);
-    expect(pollCalls).toHaveLength(1);
+    expect(pollCalls).toHaveLength(2);
     expect(armCalls).toHaveLength(1);
     expect(armCalls[0]?.[1]).toMatchObject({ type: "beforeinput", text: "hello" });
   });
@@ -1795,5 +1805,324 @@ describe("text deltas under target control", () => {
       baseline_reason: "token_budget_changed",
       observation: { text: VOM, truncated: false },
     });
+  });
+
+  it("pins --selector without polluting session.refStore, emitting used_ref, or leaking @eN in handleSelect errors", async () => {
+    const f = await fixture("target");
+    const initialRefs = [...f.session.refStore.entries()];
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 77,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 77 },
+      usedSelector: "#custom-combo",
+    });
+
+    f.send.mockImplementation(async (_tabId: number, method: string) => {
+      if (method === "DOM.describeNode") {
+        return { node: { nodeName: "DIV", localName: "div", attributes: [] } };
+      }
+      return {};
+    });
+
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 100, initialTabIds: [7] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 7,
+      },
+    });
+    // Reuse the controller's real session manager via a wrapper calling real handleSelect.
+    const selectReq = {
+      id: "sel-custom",
+      method: "tool.select",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        observation_id: f.first.observation_id,
+        selector: "#custom-combo",
+        values: ["opt-1"],
+      },
+    };
+    const fakeSm = {
+      get: (id: string) => (id === "s" ? f.session : sessions.get(id)),
+      findByWindowId: (wid: number) => (wid === 100 ? f.session : null),
+    } as unknown as SessionManager;
+    const tab = {
+      id: 7,
+      windowId: 100,
+      active: true,
+      url: "https://fixture.test",
+    } as chrome.tabs.Tab;
+    const errRes = await f.controller.run(selectReq, f.cdp, f.signal, (runner, sig) =>
+      handleSelect(fakeSm, selectReq.params, {
+        cdp: runner,
+        tabsApi: { get: async () => tab, query: async () => [tab] },
+        signal: sig,
+      }),
+    );
+    expect(errRes).toMatchObject({
+      code: "invalid_params",
+      message: expect.stringContaining("Click #custom-combo first"),
+    });
+    expect((errRes as { message: string }).message).not.toMatch(/@e\d+/);
+    expect([...f.session.refStore.entries()]).toEqual(initialRefs);
+
+    // Valid selector action returns used_selector without used_ref and leaves refStore untouched.
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 78,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 78 },
+      usedSelector: "#save-btn",
+    });
+    const clickReq = {
+      id: "clk-sel",
+      method: "tool.click",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        observation_id: f.first.observation_id,
+        selector: "#save-btn",
+      },
+    };
+    const okRes = (await f.controller.run(clickReq, f.cdp, f.signal, async (runner) => {
+      const pinned = lookupPinnedSelectorTarget(runner, 7, "#save-btn");
+      expect(pinned?.backendNodeId).toBe(78);
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      return { tab_id: 7, used_selector: "#save-btn", x: 10, y: 20 };
+    })) as Record<string, unknown>;
+    expect(okRes).toMatchObject({ tab_id: 7, used_selector: "#save-btn" });
+    expect(okRes).not.toHaveProperty("used_ref");
+    expect([...f.session.refStore.entries()]).toEqual(initialRefs);
+
+    // Drag with source.selector pins both endpoints without injecting top-level used_selector onto DragResult.
+    vi.mocked(resolveActionTarget)
+      .mockResolvedValueOnce({
+        tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+        backendNodeId: 79,
+        handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 79 },
+        usedSelector: "#drag-card",
+      })
+      .mockResolvedValueOnce({
+        tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+        backendNodeId: 80,
+        handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 80 },
+        usedSelector: "#drop-zone",
+      });
+    const dragReq = {
+      id: "drag-sel",
+      method: "tool.drag",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        source: { selector: "#drag-card" },
+        target: { selector: "#drop-zone" },
+      },
+    };
+    const dragRes = (await f.controller.run(dragReq, f.cdp, f.signal, async (runner) => {
+      expect(lookupPinnedSelectorTarget(runner, 7, "#drag-card")?.backendNodeId).toBe(79);
+      expect(lookupPinnedSelectorTarget(runner, 7, "#drop-zone")?.backendNodeId).toBe(80);
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 30,
+        y: 40,
+      });
+      return { tab_id: 7, source: { x: 10, y: 20 }, target: { x: 30, y: 40 } };
+    })) as Record<string, unknown>;
+    expect(dragRes).toEqual({ tab_id: 7, source: { x: 10, y: 20 }, target: { x: 30, y: 40 } });
+    expect(dragRes).not.toHaveProperty("used_selector");
+
+    // Directed press with selector pins focus target without injecting undocumented used_selector onto PressResult.
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 81,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 81 },
+      usedSelector: "#search-input",
+    });
+    const pressReq = {
+      id: "press-sel",
+      method: "tool.press",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        selector: "#search-input",
+        key: "Enter",
+      },
+    };
+    const pressRes = (await f.controller.run(pressReq, f.cdp, f.signal, async (runner) => {
+      expect(lookupPinnedSelectorTarget(runner, 7, "#search-input")?.backendNodeId).toBe(81);
+      await runner.send(7, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+      });
+      await runner.send(7, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Enter",
+        code: "Enter",
+      });
+      return { tab_id: 7, key: "Enter", code: "Enter", modifiers: [] };
+    })) as Record<string, unknown>;
+    expect(pressRes).toEqual({ tab_id: 7, key: "Enter", code: "Enter", modifiers: [] });
+    expect(pressRes).not.toHaveProperty("used_selector");
+    expect(pressRes).not.toHaveProperty("used_ref");
+
+    // Download with selector preserves baseline on pre-dispatch error and attaches used_selector on completion.
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 82,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 82 },
+      usedSelector: "#export-csv",
+    });
+    const dlFailRes = await f.controller.run(
+      {
+        id: "dl-fail",
+        method: "tool.download",
+        params: {
+          session_id: "s",
+          tab_id: 7,
+          context_id: f.first.context_id,
+          selector: "#export-csv",
+        },
+      },
+      f.cdp,
+      f.signal,
+      async () => ({
+        code: "timeout",
+        message: "another bsk download is active",
+        data: { reason: "session_busy", effect_state: "none", dispatched: false },
+      }),
+    );
+    expect(dlFailRes).toMatchObject({
+      code: "timeout",
+      data: { reason: "session_busy", effect_state: "none" },
+    });
+    expect(dlFailRes).not.toHaveProperty("used_selector");
+
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 82,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 82 },
+      usedSelector: "#export-csv",
+    });
+    const dlOkRes = await f.controller.run(
+      {
+        id: "dl-ok",
+        method: "tool.download",
+        params: {
+          session_id: "s",
+          tab_id: 7,
+          context_id: f.first.context_id,
+          selector: "#export-csv",
+        },
+      },
+      f.cdp,
+      f.signal,
+      async (runner) => {
+        expect(lookupPinnedSelectorTarget(runner, 7, "#export-csv")?.backendNodeId).toBe(82);
+        await runner.send(7, "Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          button: "left",
+          x: 15,
+          y: 25,
+        });
+        await runner.send(7, "Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          button: "left",
+          x: 15,
+          y: 25,
+        });
+        return {
+          tab_id: 7,
+          filename: "report.csv",
+          mime_type: "text/csv",
+          byte_size: 42,
+          browser_path: "/tmp/report.csv",
+        };
+      },
+    );
+    expect(dlOkRes).toMatchObject({
+      tab_id: 7,
+      filename: "report.csv",
+      used_selector: "#export-csv",
+    });
+    expect(dlOkRes).not.toHaveProperty("used_ref");
+  });
+
+  it("refreshes live frame activity inside beginDomMutation under target policy and blocks DOM write on human intervention", async () => {
+    const f = await fixture("target");
+    let domMutated = false;
+    const res = await f.run(
+      { ref: "e1", observation_id: f.first.observation_id, value: "opt-a" },
+      "tool.select",
+      async (runner) => {
+        // Simulate human input occurring during scroll/focus preparation without push notification yet.
+        f.change({ human: 1, editing: true }, false);
+        await runner.beginDomMutation?.();
+        domMutated = true;
+        return { tab_id: 7, used_ref: "e1", selected_values: ["opt-a"], selected_labels: ["A"] };
+      },
+    );
+    expect(domMutated).toBe(false);
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "human_intervention", effect_state: "none" },
+    });
+  });
+
+  it("does not consume target-policy baseline when an untargeted action fails pre-write validation with effect_state: none", async () => {
+    const f = await fixture("target");
+    const preWriteErr = await f.run(
+      { key: "InvalidKey", observation_id: f.first.observation_id },
+      "tool.press",
+      async () => ({
+        code: "invalid_params",
+        message: "unsupported key",
+        data: { effect_state: "none", phase: "precondition" },
+      }),
+    );
+    expect(preWriteErr).toMatchObject({
+      code: "invalid_params",
+      data: { effect_state: "none" },
+    });
+
+    // Retrying with the same observation_id succeeds without requiring a redundant sync.
+    const retryOk = await f.run(
+      { key: "Enter", observation_id: f.first.observation_id },
+      "tool.press",
+      async (runner) => {
+        await runner.send(7, "Input.dispatchKeyEvent", { type: "keyDown", key: "Enter" });
+        return { tab_id: 7, key: "Enter" };
+      },
+    );
+    expect(retryOk).toMatchObject({ tab_id: 7, key: "Enter" });
+  });
+
+  it("passes includeVisualFacts: true during cooperate sync so Canvas @eN visual refs stay in parity with observe", async () => {
+    const f = await fixture("target");
+    snapshots.mockClear();
+    f.change({ structure: 5, revision: 5 });
+    await f.sync("target");
+    expect(snapshots).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ session_id: "s", tab_id: 7 }),
+      expect.objectContaining({ includeVisualFacts: true }),
+      expect.anything(),
+    );
   });
 });

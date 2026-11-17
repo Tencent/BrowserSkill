@@ -968,12 +968,19 @@ elif cmd == "read":
 elif cmd in ("sync", "observe", "snapshot"):
     phase = "post" if "--post" in args else "pre"
     if phase == "pre":
-        vom = (
-            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
-            "  @e1 menuitem \\"Overview\\"\\n"
-            "  @e2 menuitem \\"Workspace [has-submenu]\\""
-            + ("\\n  @e9 menuitem \\"Audit export\\"" if mode == "leaked_pre" else "")
-        )
+        if mode == "v050":
+            vom = (
+                "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+                "  @e1 menuitem \\"Overview\\"\\n"
+                "  @e2 menuitem \\"Workspace [has-submenu]\\""
+            )
+        else:
+            vom = (
+                "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+                "  @e1 menuitem \\"Overview\\"\\n"
+                "  @e2 menuitem \\"Workspace\\" [has-submenu]"
+                + ("\\n  @e9 menuitem \\"Audit export\\"" if mode == "leaked_pre" else "")
+            )
     elif mode == "v050":
         vom = (
             "@vom 1\\nmenubar \\"Console navigation\\"\\n"
@@ -986,7 +993,7 @@ elif cmd in ("sync", "observe", "snapshot"):
     elif mode == "dup_ref":
         vom = (
             "@vom 1\\nmenu\\n"
-            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history\\" [expanded]\\n"
             "    @e5 menuitem \\"Audit export\\"\\n"
             "    @e5 menuitem \\"Report history\\""
         )
@@ -995,10 +1002,10 @@ elif cmd in ("sync", "observe", "snapshot"):
         vom = (
             "@vom 1\\nmenubar \\"Console navigation\\"\\n"
             "  @e1 menuitem \\"Overview\\"\\n"
-            "  @e2 menuitem \\"Workspace [expanded]\\"\\n"
+            "  @e2 menuitem \\"Workspace\\" [expanded]\\n"
             "menu\\n"
             "  @e3 menuitem \\"Members\\"\\n"
-            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history\\" [expanded]\\n"
             f"    {audit_ref} menuitem \\"Audit export\\"\\n"
             "    @e8 menuitem \\"Report history\\""
         )

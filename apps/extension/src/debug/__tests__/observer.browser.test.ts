@@ -2,7 +2,9 @@
 // Owns an isolated browser and fixture; never freezes a user's tab.
 import { createServer } from "node:http";
 import { expect, it } from "vitest";
+import { rootEventSource, type TabEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
+import { createStubCdpRunner } from "@/tools/shared";
 import { type DebugCdp, DebugManager } from "../manager";
 
 it.skipIf(!process.env.BSK_TEST_CHROME)(
@@ -30,16 +32,19 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
           zoom: 1,
           startupTimeout: 30000,
           onEvent: (event: { method: string; params?: object }) =>
-            listener?.({ tabId: 7 }, event.method, event.params),
+            listener?.(rootEventSource(7), event.method, event.params),
         },
-        async (send: (method: string, params?: object, sessionId?: string) => Promise<any>) => {
+        async (send: (method: string, params?: object, targetSession?: string) => Promise<any>) => {
           const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-          const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
+          const { sessionId: targetSession } = await send("Target.attachToTarget", {
+            targetId,
+            flatten: true,
+          });
           const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-          await send("Page.enable", {}, sessionId);
-          await send("Runtime.enable", {}, sessionId);
-          await send("Page.navigate", { url }, sessionId);
-          await send("Runtime.evaluate", { expression: "document.readyState" }, sessionId);
+          await send("Page.enable", {}, targetSession);
+          await send("Runtime.enable", {}, targetSession);
+          await send("Page.navigate", { url }, targetSession);
+          await send("Runtime.evaluate", { expression: "document.readyState" }, targetSession);
           const sessions = new SessionManager({
             agentWindow: {
               create: async () => ({ windowId: 100, initialTabIds: [7] }),
@@ -49,14 +54,20 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
           });
           (await sessions.start("s1")).agentCreatedTabs.add(7);
           const hooks: object[] = [];
-          const cdp = {
-            sendAttached: (_target: unknown, method: string, params?: { expression?: string }) => {
+          const cdp: DebugCdp = createStubCdpRunner({
+            send: ((_tabId: number, method: string, params?: object) =>
+              send(method, params, targetSession)) as DebugCdp["send"],
+            sendToEventSource: ((
+              _target: TabEventSource,
+              method: string,
+              params?: { expression?: string },
+            ) => {
               if (method === "Runtime.evaluate" && params?.expression?.includes(".agent(true,"))
                 hooks.push(params);
-              return send(method, params, sessionId);
-            },
+              return send(method, params, targetSession);
+            }) as DebugCdp["sendToEventSource"],
             ensureNetworkCapture: async () => {
-              await send("Network.enable", {}, sessionId);
+              await send("Network.enable", {}, targetSession);
             },
             onEvent: (_tabId: number, fn: NonNullable<typeof listener>) => {
               listener = fn;
@@ -66,7 +77,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
                 },
               };
             },
-          } as unknown as DebugCdp;
+          });
           const tabs = {
             get: async () => ({ id: 7, windowId: 100, url }) as chrome.tabs.Tab,
             query: async () => [{ id: 7 } as chrome.tabs.Tab],
@@ -77,7 +88,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             await send(
               "Runtime.evaluate",
               { expression: "setTimeout(()=>{while(true){}},50);true" },
-              sessionId,
+              targetSession,
             );
             await new Promise((resolve) => setTimeout(resolve, 150));
             const before = Date.now();
@@ -91,25 +102,25 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             manager.after(ticket);
             expect((await send("Browser.getVersion")).product).toContain("Chrome");
           } finally {
-            await send("Runtime.terminateExecution", {}, sessionId);
+            await send("Runtime.terminateExecution", {}, targetSession);
           }
           try {
             // Re-deliver the obsolete enable after the disable and its admission deadline.
             // It must not suppress subsequent genuine user input.
-            await send("Runtime.evaluate", { expression: "true" }, sessionId);
+            await send("Runtime.evaluate", { expression: "true" }, targetSession);
             expect(hooks).toHaveLength(1);
-            await send("Runtime.evaluate", hooks[0], sessionId);
+            await send("Runtime.evaluate", hooks[0], targetSession);
             await send(
               "Input.dispatchMouseEvent",
               { type: "mousePressed", x: 40, y: 30, button: "left", clickCount: 1 },
-              sessionId,
+              targetSession,
             );
             await send(
               "Input.dispatchMouseEvent",
               { type: "mouseReleased", x: 40, y: 30, button: "left", clickCount: 1 },
-              sessionId,
+              targetSession,
             );
-            await send("Runtime.evaluate", { expression: "true" }, sessionId);
+            await send("Runtime.evaluate", { expression: "true" }, targetSession);
             await new Promise((resolve) => setTimeout(resolve, 50));
             const result = await manager.read({ session_id: "s1", action: "operations" });
             expect(

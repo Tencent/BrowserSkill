@@ -1,3 +1,4 @@
+import { inspectVomLine } from "@browser-skill/vom";
 import { injectCooperationAllFrames } from "@/lib/runtime-content-scripts";
 import {
   isAgentControlledTab,
@@ -12,8 +13,10 @@ import {
   cdpBlockedUrlReason,
   chromeTabsApi,
   isRpcError,
+  type PinnedSelectorTarget,
   resolveTargetTab,
   sessionCdpRunner,
+  withPinnedSelectorTargets,
 } from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
 import { AccessibilityLease } from "@/tools/vom/capture-coordinator";
@@ -1027,6 +1030,7 @@ export class CooperationController implements ControlAuthority {
                 tabsApi: chromeTabsApi,
                 refStore,
                 accessibilityLease: state.accessibilityLease,
+                includeVisualFacts: true,
                 onScene: (scene) => {
                   evidence = observationEvidence(scene);
                 },
@@ -1082,9 +1086,15 @@ export class CooperationController implements ControlAuthority {
                       text: observation.text,
                       truncated: observation.truncated,
                       maxTokens: params.max_tokens,
+                      lineMeta: observation.text.split("\n").map((line) => inspectVomLine(line)),
                     }
                   : text && baseline?.held
-                    ? { ...baseline.held, text: text.text, patched: true }
+                    ? {
+                        ...baseline.held,
+                        text: text.text,
+                        lineMeta: text.lineMeta,
+                        patched: true,
+                      }
                     : baseline?.held,
               }
             : {}),
@@ -2174,20 +2184,21 @@ export class CooperationController implements ControlAuthority {
       assert();
     };
     // Resolve selectors once per action. Handlers use the same concrete DOM node
-    // that passed the checks, even if a list reorders during preparation.
-    const pin = (node: ResolvedActionTarget) => {
-      const identity = {
-        tabId: target.tabId,
+    // that passed the checks, even if a list reorders during preparation, without
+    // polluting session.refStore or rewriting selector params into fake @eN refs.
+    const pinnedSelectors = new Map<string, PinnedSelectorTarget>();
+    const pinSelector = (selector: string, node: ResolvedActionTarget) => {
+      pinnedSelectors.set(selector, {
+        handle: node.handle ?? {
+          tabId: target.tabId,
+          frameId: node.frameId ?? "",
+          loaderId: "",
+          backendNodeId: node.backendNodeId,
+        },
         backendNodeId: node.backendNodeId,
-        frameId: node.handle?.frameId || node.frameId,
-        loaderId: node.handle?.loaderId,
-        ...(node.handle?.documentElementBackendNodeId !== undefined
-          ? { documentElementBackendNodeId: node.handle.documentElementBackendNodeId }
-          : {}),
-      };
-      const ref = session.refStore.allocateRef(identity);
-      session.refStore.set(ref, node.backendNodeId, identity);
-      return ref;
+        ...(node.frameId ? { frameId: node.frameId } : {}),
+        usedSelector: selector,
+      });
     };
     const primaryEffect = (method: string) =>
       (req.method === "tool.focus" && method === "DOM.focus") ||
@@ -2219,6 +2230,28 @@ export class CooperationController implements ControlAuthority {
               },
             };
     let fallbackBootstrap = false;
+    let restoreStrictObservation = false;
+    const maybeRestoreObservation = (effect: string) => {
+      if (
+        restoreStrictObservation &&
+        context &&
+        effect === "none" &&
+        !nativeInputStarted &&
+        !preparationSent &&
+        !detachedByHandler &&
+        !postRefreshFailed &&
+        !revoked &&
+        checkFailure?.data?.reason !== "observation_changed" &&
+        !state.stopped &&
+        state.baseline === context &&
+        state.context !== undefined &&
+        context.epoch === state.epoch &&
+        !interruption(false)
+      ) {
+        context.consumed = false;
+        this.changed(state);
+      }
+    };
     try {
       await this.refresh(state);
       assert();
@@ -2263,17 +2296,11 @@ export class CooperationController implements ControlAuthority {
           target,
           primaryTarget,
           "shared action",
-          targetPolicy || req.method === "tool.drag",
+          true,
         );
         if (isRpcError(resolved)) return targetError(resolved);
         actionTarget = resolved;
-        if (targeted && primaryTarget.selector) {
-          const pinned = { ...primaryTarget, ref: pin(resolved), selector: undefined };
-          req.params =
-            req.method === "tool.drag"
-              ? { ...(req.params as object), source: pinned }
-              : { ...(req.params as object), ...pinned };
-        }
+        if (primaryTarget.selector) pinSelector(primaryTarget.selector, resolved);
       }
       if (req.method === "tool.drag" && (params.target?.ref || params.target?.selector)) {
         const resolved = await resolveActionTarget(
@@ -2286,11 +2313,7 @@ export class CooperationController implements ControlAuthority {
         );
         if (isRpcError(resolved)) return targetError(resolved);
         destinationTarget = resolved;
-        if (targeted && params.target?.selector)
-          req.params = {
-            ...(req.params as object),
-            target: { ...params.target, ref: pin(resolved), selector: undefined },
-          };
+        if (params.target.selector) pinSelector(params.target.selector, resolved);
       }
       if (params.depends_on !== undefined) {
         if (
@@ -2316,6 +2339,7 @@ export class CooperationController implements ControlAuthority {
               target,
               /^@?e\d+$/.test(dependency) ? { ref: dependency } : { selector: dependency },
               "action dependency",
+              true,
             );
             if (isRpcError(resolved)) return targetError(resolved);
             evidenceTargets.push(resolved);
@@ -2352,10 +2376,15 @@ export class CooperationController implements ControlAuthority {
       if (targeted && params.timeout_ms !== undefined)
         req.params = { ...(req.params as object), timeout_ms: Math.max(1, deadline - Date.now()) };
       if (!targetPolicy) state.context = undefined;
-      else if (!targeted) context.consumed = true;
+      else if (!targeted && !context.consumed) {
+        context.consumed = true;
+        restoreStrictObservation = true;
+      }
       this.changed(state);
-      let result = await invoke(
-        guardedRunner(cdp, {
+      const actionCdp =
+        pinnedSelectors.size > 0 ? withPinnedSelectorTargets(cdp, pinnedSelectors) : cdp;
+      const result = await invoke(
+        guardedRunner(actionCdp, {
           onInputClockError: (error) => {
             checkFailure = error.toRpcError();
           },
@@ -2424,16 +2453,15 @@ export class CooperationController implements ControlAuthority {
             }
           },
           beginDomMutation: async () => {
+            await this.refresh(state);
+            assert();
             if (targeted) {
-              assert();
               if (!nativeInputStarted && expectations.length > 0) {
                 await verifyExpectations();
               }
               nativeInputStarted = true;
               return;
             }
-            await this.refresh(state);
-            assert();
             if (!nativeInputStarted) await verifyDecision();
             nativeInputStarted = true;
           },
@@ -2464,21 +2492,20 @@ export class CooperationController implements ControlAuthority {
         operationSignal,
         completionSignal,
       );
-      // Pinning preserves the chosen node; the receipt also preserves how the
-      // caller selected it. This applies to download's early return as well.
-      if (
-        targeted &&
+      const withUsedSelector = (value: unknown) =>
+        req.method !== "tool.press" &&
         params.selector &&
-        result &&
-        typeof result === "object" &&
-        !isRpcError(result)
-      )
-        result = { ...result, used_selector: params.selector };
+        value &&
+        typeof value === "object" &&
+        !isRpcError(value) &&
+        (value as Record<string, unknown>).used_selector === undefined
+          ? { ...(value as Record<string, unknown>), used_selector: params.selector }
+          : value;
       // A completed download transfers cleanup ownership to the daemon. Keep its
       // receipt even if control changed during final cleanup; dropping it would
       // orphan the file. The consumed context still requires a fresh next step.
       if (["tool.tab_close", "tool.download"].includes(req.method) && !isRpcError(result))
-        return result;
+        return withUsedSelector(result);
       // A handler receipt describes completed input, independently of whether its
       // document can authorize the next action. evaluate reports script exceptions
       // in-band; a successfully evaluated false value is still a completed script.
@@ -2502,12 +2529,14 @@ export class CooperationController implements ControlAuthority {
       // Even a successful CDP reply does not authorize a stale next step.
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) {
+        const effect = sent ? "unknown" : "none";
         if (targetPolicy && sent) state.context = undefined;
+        else maybeRestoreObservation(effect);
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
           data: {
-            effect_state: sent ? "unknown" : "none",
+            effect_state: effect,
             phase: sent ? "execution" : "precondition",
             ...(sent ? { tab_id: state.tabId } : {}),
           },
@@ -2519,12 +2548,16 @@ export class CooperationController implements ControlAuthority {
         (!completed && !isRpcError(result) && detachedByHandler
           ? "The observed page or control state changed; synchronize"
           : undefined);
-      if (checkFailure || reason)
-        return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
+      if (checkFailure || reason) {
+        const effect = sent ? "unknown" : "none";
+        maybeRestoreObservation(effect);
+        return reportFailure(checkFailure?.message ?? reason!, effect);
+      }
       if (isRpcError(result)) {
         const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
-        if (targetPolicy && (effect === "unknown" || detachedByHandler || postRefreshFailed))
+        if (targetPolicy && (effect !== "none" || detachedByHandler || postRefreshFailed))
           state.context = undefined;
+        else maybeRestoreObservation(effect);
         return {
           ...result,
           data: {
@@ -2540,16 +2573,18 @@ export class CooperationController implements ControlAuthority {
           },
         };
       }
-      return result;
+      return withUsedSelector(result);
     } catch (error) {
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) {
+        const effect = sent ? "unknown" : "none";
         if (targetPolicy && sent) state.context = undefined;
+        else maybeRestoreObservation(effect);
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
           data: {
-            effect_state: sent ? "unknown" : "none",
+            effect_state: effect,
             phase: sent ? "execution" : "precondition",
             ...(sent ? { tab_id: state.tabId } : {}),
           },
@@ -2582,12 +2617,10 @@ export class CooperationController implements ControlAuthority {
         fallbackBootstrap = true;
       } else {
         if (error instanceof ActionCheckError) checkFailure = error.rpcError;
-        if (error instanceof FrameCollectionError)
-          return error.toRpcError(sent ? "unknown" : "none");
-        return reportFailure(
-          error instanceof Error ? error.message : String(error),
-          sent ? "unknown" : "none",
-        );
+        const effect = sent ? "unknown" : "none";
+        maybeRestoreObservation(effect);
+        if (error instanceof FrameCollectionError) return error.toRpcError(effect);
+        return reportFailure(error instanceof Error ? error.message : String(error), effect);
       }
     } finally {
       finished = true;

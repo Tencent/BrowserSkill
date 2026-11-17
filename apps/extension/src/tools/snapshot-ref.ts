@@ -2,7 +2,7 @@
 // compound CDP node identity via the session RefStore, and build stable
 // `ref_not_found` errors for hard-failure tool paths.
 
-import type { FrameNodeHandle } from "@/browser-driver/frame-graph";
+import type { FrameNodeHandle } from "@/browser-driver/frame-handles";
 import type { SessionContext } from "@/session-manager/manager";
 import { normaliseRef, type RefEntry } from "@/session-manager/ref-store";
 import type { RpcError } from "@/transport/types";

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  type CdpDebuggee,
   type CdpDebuggerApi,
   ChromiumCdp,
   DEFAULT_IDLE_DETACH_MS,
@@ -81,7 +80,8 @@ afterEach(() => {
 });
 
 async function softDetachVisualFixture(oopif = false) {
-  const onEvent = fakeChromeEvent<[CdpDebuggee, string, unknown]>();
+  const onEvent =
+    fakeChromeEvent<Parameters<Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0]>>();
   const onDetach = fakeChromeEvent<[chrome.debugger.Debuggee, string]>();
   let attachGeneration = 0;
   let rootState = {

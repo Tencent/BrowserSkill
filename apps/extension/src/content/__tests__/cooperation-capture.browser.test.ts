@@ -9,6 +9,7 @@ import { collectCooperationFrames } from "@/cooperation/browser-bridge";
 import { CooperationController } from "@/cooperation/controller";
 import { COOPERATION_ARM, COOPERATION_READ, type FrameState } from "@/cooperation/types";
 import { SessionManager } from "@/session-manager/manager";
+import { createStubCdpRunner } from "@/tools/shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -302,10 +303,10 @@ globalThis.httpCooperationReady = true;`,
             expression: "document.querySelector('input').focus()",
           });
           const guarded = guardedRunner(
-            {
+            createStubCdpRunner({
               send: <T>(_tabId: number, method: string, params?: object) =>
                 enterSend<T>(method, params),
-            },
+            }),
             {
               prepare: async (input) => {
                 if (input)

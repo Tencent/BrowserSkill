@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { type BrowserNavigationApi, navigateWithBrowserApi } from "../browser-navigation";
 import {
@@ -7,7 +8,7 @@ import {
   handleNavigateForward,
   handleReload,
 } from "../navigation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 const denied = "Cannot access a chrome-extension:// URL of different extension";
 const url = "https://example.test/recovered";
@@ -52,7 +53,7 @@ async function fixture() {
     }
     if (method === "Runtime.evaluate") return { result: { value: "complete" } };
     if (method === "Page.setLifecycleEventsEnabled" && state.emitIdle) {
-      cdpEvents.fire({ tabId: 4 }, "Page.lifecycleEvent", {
+      cdpEvents.fire(rootEventSource(4), "Page.lifecycleEvent", {
         frameId: "main",
         loaderId: "new-loader",
         name: "networkIdle",
@@ -61,13 +62,13 @@ async function fixture() {
     if (method === "Page.navigate") return { frameId: "main", loaderId: "new-loader" };
     return {};
   });
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as CdpRunner["send"],
     onEvent: (_tabId, listener) => {
       cdpEvents.addListener(listener);
       return { dispose: () => cdpEvents.removeListener(listener) };
     },
-  };
+  });
   const main = { tabId: 4, frameId: 0, documentId: "new-document", url };
   const navigate = async () => {
     state.blocked = state.destinationBlocked;
@@ -656,14 +657,14 @@ it("keeps native succession active throughout network-idle waiting", async () =>
       f.send.mock.calls.filter(([, method]) => method === "Page.setLifecycleEventsEnabled"),
     ).toHaveLength(2),
   );
-  f.cdpEvents.fire({ tabId: 4 }, "Page.lifecycleEvent", {
+  f.cdpEvents.fire(rootEventSource(4), "Page.lifecycleEvent", {
     frameId: "main",
     loaderId: "first",
     name: "networkIdle",
   });
   await Promise.resolve();
   expect(settled).toBe(false);
-  f.cdpEvents.fire({ tabId: 4 }, "Page.lifecycleEvent", {
+  f.cdpEvents.fire(rootEventSource(4), "Page.lifecycleEvent", {
     frameId: "main",
     loaderId: "second",
     name: "networkIdle",
@@ -848,7 +849,7 @@ it("keeps waiting for load when a recovered same-document page is still loading"
   });
   await vi.waitFor(() => expect(f.cdpEvents.listeners.size).toBe(1));
   expect(settled).toBe(false);
-  f.cdpEvents.fire({ tabId: 4 }, "Page.lifecycleEvent", {
+  f.cdpEvents.fire(rootEventSource(4), "Page.lifecycleEvent", {
     frameId: "main",
     loaderId: "new-loader",
     name: "load",
