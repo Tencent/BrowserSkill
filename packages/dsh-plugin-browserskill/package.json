@@ -1,0 +1,73 @@
+{
+  "name": "@wxg-prc-cpg/browser-skill-dsh-plugin",
+  "description": "DeepSeek Harness plugin that bundles the BrowserSkill skill and on-demand bsk CLI setup",
+  "version": "0.5.0",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tencent/BrowserSkill.git",
+    "directory": "packages/dsh-plugin-browserskill"
+  },
+  "homepage": "https://github.com/Tencent/BrowserSkill/tree/main/packages/dsh-plugin-browserskill#readme",
+  "bugs": {
+    "url": "https://github.com/Tencent/BrowserSkill/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "browserskill",
+    "browser-automation"
+  ],
+  "type": "module",
+  "main": "./lib/index.mjs",
+  "types": "./lib/index.d.mts",
+  "bin": {
+    "bsk-dsh-install": "./bin/install-bsk.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.mts",
+      "default": "./lib/index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "skill",
+    "install.sh",
+    "install.ps1",
+    "AGENT_INSTALL.md",
+    "cordis.patch.yml",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build-bundle.mjs && tsc",
+    "typecheck": "node scripts/build-bundle.mjs && tsc --noEmit",
+    "test": "pnpm run build && vitest run",
+    "prepack": "pnpm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-llm": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-scope": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-skill": "0.1.5-rc.3",
+    "@deepseek-ai/schemastery": "3.18.2",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.6"
+  }
+}

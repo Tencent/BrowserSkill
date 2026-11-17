@@ -15,6 +15,7 @@
     "ext:dev": "pnpm --filter @browser-skill/extension dev",
     "ext:test": "pnpm --filter @browser-skill/extension test",
     "ext:test:browser": "node scripts/run-browser-tests.mjs",
+    "dsh:test": "pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin test",
     "vom:test": "pnpm --filter @browser-skill/vom test",
     "lint": "biome check . && stylelint \"**/*.css\"",
     "format": "biome format --write .",
