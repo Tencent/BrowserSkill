@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests of the audit helper, not BrowserSkill product tests."""
 
-import contextlib, csv, importlib.util, io, json, tempfile, time, unittest
+import contextlib, csv, importlib.util, io, json, sys, tempfile, time, unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -825,6 +825,10 @@ else:
         with patch.object(audit.sys, "platform", "win32"):
             win_home = audit.resolve_admin_home(deep_run)
             self.assertEqual(Path(win_home), (deep_run / "admin-runtime").resolve())
+        if sys.platform == "win32":
+            # Windows daemons use named pipes, so the AF_UNIX 96-byte cap and its
+            # symlink workaround do not apply there.
+            return
         resolved = Path(audit.resolve_admin_home(deep_run))
         try:
             self.assertLessEqual(len(str(resolved / "run" / "daemon.sock")), 96)
@@ -832,6 +836,21 @@ else:
         finally:
             if resolved.is_symlink():
                 resolved.unlink()
+
+    def test_launcher_runs_python_wrappers_through_the_interpreter(self):
+        wrapper = self.base / "bsk-wrapper"
+        wrapper.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
+        self.assertEqual(
+            audit.launcher(wrapper, "nt"), [sys.executable or "python", str(wrapper)]
+        )
+        self.assertEqual(audit.launcher(wrapper, "posix"), [wrapper])
+        for suffix in (".exe", ".cmd", ".bat"):
+            native = self.base / ("bsk" + suffix)
+            native.write_bytes(b"MZ")
+            self.assertEqual(audit.launcher(native, "nt"), [native])
+        plain = self.base / "bsk-script"
+        plain.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+        self.assertEqual(audit.launcher(plain, "nt"), [plain])
 
     def test_events_endpoint_serves_utf8_payloads(self):
         root = self.skill / "assets/fixtures"

@@ -151,6 +151,31 @@ def parse(text):
             return None
 
 
+def launcher(exe, platform=None):
+    """Return the argv prefix that actually starts ``exe``.
+
+    Windows cannot exec a file without an executable extension, even when it
+    carries a shebang, so the script-based ``--bsk`` wrappers described in the
+    evidence contract fail there with WinError 193. Run Python wrappers with the
+    current interpreter instead; native executables and ``.cmd``/``.bat`` shims
+    are launched unchanged. ``platform`` exists so the decision can be tested
+    without mutating ``os.name``, which would also change how ``pathlib`` builds
+    paths.
+    """
+    path = Path(exe)
+    platform = os.name if platform is None else platform
+    if platform != "nt" or path.suffix.lower() in {".exe", ".com", ".bat", ".cmd"}:
+        return [exe]
+    try:
+        with path.open("rb") as handle:
+            shebang = handle.readline(256).decode("utf-8", "replace").strip()
+    except OSError:
+        return [exe]
+    if shebang.startswith("#!") and "python" in shebang.lower():
+        return [sys.executable or "python", str(path)]
+    return [exe]
+
+
 def discover(bsk, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -165,7 +190,7 @@ def discover(bsk, directory):
             return
         seen.add(key)
         r = subprocess.run(
-            [bsk, *parts, "--help"],
+            [*launcher(bsk), *parts, "--help"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -189,7 +214,7 @@ def discover(bsk, directory):
         # exposes its subcommands when supported by the candidate binary.
         if not parts and "recipe" not in children:
             probe = subprocess.run(
-                [bsk, "recipe", "--help"],
+                [*launcher(bsk), "recipe", "--help"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -586,7 +611,11 @@ def execute(args):
             else (subprocess.PIPE if args.interactive else subprocess.DEVNULL)
         )
         p = subprocess.Popen(
-            [exe, *argv], stdout=stdout, stderr=stderr, stdin=input_handle, env=env
+            [*launcher(exe), *argv],
+            stdout=stdout,
+            stderr=stderr,
+            stdin=input_handle,
+            env=env,
         )
         if args.interactive:
 
