@@ -9,11 +9,29 @@ use bsk_protocol::{
     tools::{ControlPolicy, CooperateAction, CooperateParams},
 };
 use clap::{Args, ValueEnum};
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 pub(crate) mod presentation;
 pub(crate) mod saved_reply;
 pub(crate) mod settle;
+
+pub(crate) fn cooperate_ipc_timeout(timeout_ms: Option<u64>) -> Duration {
+    timeout_ms.map_or(TOOL_IPC_TIMEOUT, |ms| {
+        TOOL_IPC_TIMEOUT.max(Duration::from_millis(ms).saturating_add(Duration::from_secs(25)))
+    })
+}
+
+pub(crate) fn cooperate_rpc_ipc_timeout(method: &Method, req_val: &serde_json::Value) -> Duration {
+    if *method == Method::ToolCooperate {
+        cooperate_ipc_timeout(
+            req_val
+                .get("timeout_ms")
+                .and_then(serde_json::Value::as_u64),
+        )
+    } else {
+        TOOL_IPC_TIMEOUT
+    }
+}
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum Action {
@@ -148,13 +166,14 @@ pub fn dispatch(
                     ),
                 ..Default::default()
             };
+            let ipc_timeout = cooperate_ipc_timeout(current.timeout_ms);
             let (val, resp_meta) = op_ctx.call_envelope(
                 daemon.sock_path.clone(),
                 "cooperate",
                 Method::ToolCooperate,
                 Some(current),
                 meta,
-                TOOL_IPC_TIMEOUT,
+                ipc_timeout,
             )?;
             if let Some(sm) = resp_meta.scope_meta {
                 resolved_session = Some(sm.session_id);
@@ -170,13 +189,14 @@ pub fn dispatch(
                 ),
             ..Default::default()
         };
+        let ipc_timeout = cooperate_ipc_timeout(params.timeout_ms);
         let (val, resp_meta) = op_ctx.call_envelope(
             daemon.sock_path,
             "cooperate",
             Method::ToolCooperate,
             Some(params),
             meta,
-            TOOL_IPC_TIMEOUT,
+            ipc_timeout,
         )?;
         if let Some(sm) = resp_meta.scope_meta {
             resolved_session = Some(sm.session_id);

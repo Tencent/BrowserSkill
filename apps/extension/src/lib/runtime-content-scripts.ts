@@ -88,21 +88,69 @@ export async function ensureOverlayInjected(
     return;
   }
   const run = (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await chrome.scripting.executeScript({
+      const inject = chrome.scripting.executeScript({
         target: documentId ? { tabId, documentIds: [documentId] } : { tabId },
         files: [OVERLAY_CONTENT_SCRIPT_FILE],
       });
-      if (documentId) rememberOverlayDocument(key);
+      void inject.catch(() => {});
+      const outcome = await Promise.race([
+        inject.then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), ARM_INJECT_TIMEOUT_MS);
+        }),
+      ]);
+      if (outcome && documentId) rememberOverlayDocument(key);
     } catch {
       // Restricted pages (`about:blank`, `chrome://`, Web Store) or closing tabs
       // reject `executeScript`; callers handle unreachable receivers naturally.
     } finally {
+      clearTimeout(timer);
       inflightOverlayInjections.delete(key);
     }
   })();
   inflightOverlayInjections.set(key, run);
   await run;
+}
+
+const ARM_INJECT_TIMEOUT_MS = 3_000;
+const ARM_INJECT_TIMED_OUT = Symbol("arm_inject_timed_out");
+
+export async function sendTabMessageBounded(
+  tabId: number,
+  message: unknown,
+  timeoutMs = ARM_INJECT_TIMEOUT_MS,
+): Promise<void> {
+  if (typeof chrome === "undefined" || typeof chrome.tabs?.sendMessage !== "function") {
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const pending = chrome.tabs.sendMessage(tabId, message);
+    void pending?.catch?.(() => {});
+    await Promise.race([
+      pending,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sendArmMessageBounded(
+  tabId: number,
+  target: { documentId: string } | { frameId: number },
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    chrome.tabs.sendMessage(tabId, { kind: COOPERATION_ARM_FRAME }, target),
+    new Promise<typeof ARM_INJECT_TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(ARM_INJECT_TIMED_OUT), ARM_INJECT_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 function isMissingReceiverError(error: unknown): boolean {
@@ -132,12 +180,11 @@ export async function injectCooperationAllFrames(tabId: number): Promise<void> {
             ? { documentId: frame.documentId }
             : { frameId: frame.frameId };
           try {
-            const ack = await chrome.tabs.sendMessage(
-              tabId,
-              { kind: COOPERATION_ARM_FRAME },
-              msgTarget,
-            );
-            if (ack && typeof ack === "object" && (ack as { ok?: unknown }).ok === true) {
+            const ack = await sendArmMessageBounded(tabId, msgTarget);
+            if (
+              ack === ARM_INJECT_TIMED_OUT ||
+              (ack && typeof ack === "object" && (ack as { ok?: unknown }).ok === true)
+            ) {
               return;
             }
           } catch (error) {
@@ -151,7 +198,7 @@ export async function injectCooperationAllFrames(tabId: number): Promise<void> {
               files: [COOPERATION_CONTENT_SCRIPT_FILE],
               injectImmediately: true,
             });
-            await chrome.tabs.sendMessage(tabId, { kind: COOPERATION_ARM_FRAME }, msgTarget);
+            await sendArmMessageBounded(tabId, msgTarget);
           } catch {
             // Restricted pages or closing frames cannot receive scripts.
           }

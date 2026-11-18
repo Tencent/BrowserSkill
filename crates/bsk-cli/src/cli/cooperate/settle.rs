@@ -16,10 +16,15 @@ const SETTLING_PAUSES: [Duration; 3] = [
 const LEGACY_SETTLING: &str = "Previous operation is still settling";
 
 fn recoverable(error: &CliError) -> bool {
-    error.code() == Some(ErrorCode::PermissionDenied)
+    (error.code() == Some(ErrorCode::PermissionDenied)
         && error.data().is_some_and(|d| {
             d["reason"] == "cooperation_sync_required" && d["effect_state"] == "none"
-        })
+        }))
+        || (error.code() == Some(ErrorCode::NotFound)
+            && error
+                .data()
+                .is_some_and(|d| d["reason"] == "ref_not_found" && d["effect_state"] != "unknown")
+            && error.to_string().contains("changed during observation"))
 }
 
 /// The sync was refused before dispatch because an earlier command on the
@@ -307,6 +312,27 @@ mod tests {
             error.data().unwrap()["reason"],
             bsk_protocol::RpcErrorReason::OperationSettling.as_str()
         );
+    }
+
+    #[test]
+    fn mid_sync_document_change_retries_while_other_not_found_errors_fail_immediately() {
+        let mut calls = Vec::new();
+        let result = run(|action| {
+            calls.push(format!("{action:?}"));
+            match calls.len() {
+                1 => Err(CliError::from_rpc(RpcError {
+                    code: ErrorCode::NotFound,
+                    message: "Document changed during observation; synchronize again".into(),
+                    data: Some(json!({"reason": "ref_not_found", "effect_state": "none"})),
+                })),
+                2 => Ok(json!({"ready": true, "state": {"mode": "syncing"}})),
+                _ => Ok(json!({"context_id": "recovered"})),
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, ["Sync", "Wait", "Sync"]);
+        assert_eq!(result["context_id"], "recovered");
+        assert_eq!(result["settle"]["sync_attempts"], 2);
     }
 
     #[test]

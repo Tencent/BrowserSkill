@@ -1151,7 +1151,9 @@ async fn session(
                         wait_budget_ms,
                         "committed",
                         |_, method, params, meta| {
-                            rpc(&aux_ctx, method, params, meta, TOOL_IPC_TIMEOUT)
+                            let ipc_timeout =
+                                cooperate::cooperate_rpc_ipc_timeout(&method, &params);
+                            rpc(&aux_ctx, method, params, meta, ipc_timeout)
                         },
                         std::thread::sleep,
                     )
@@ -1301,7 +1303,9 @@ async fn session(
                             wait_budget_ms,
                             "none",
                             |_, method, params, meta| {
-                                rpc(&aux_ctx, method, params, meta, TOOL_IPC_TIMEOUT)
+                                let ipc_timeout =
+                                    cooperate::cooperate_rpc_ipc_timeout(&method, &params);
+                                rpc(&aux_ctx, method, params, meta, ipc_timeout)
                             },
                             std::thread::sleep,
                         )
@@ -1333,12 +1337,13 @@ async fn session(
                                 return_scope_meta: is_sync,
                                 ..Default::default()
                             };
+                            let ipc_timeout = cooperate::cooperate_ipc_timeout(current.timeout_ms);
                             let (val, resp_meta) = rpc(
                                 &aux_ctx,
                                 Method::ToolCooperate,
                                 serde_json::to_value(current).unwrap_or_default(),
                                 meta,
-                                TOOL_IPC_TIMEOUT,
+                                ipc_timeout,
                             )?;
                             if is_sync {
                                 latest_meta = resp_meta.scope_meta;
@@ -1353,13 +1358,14 @@ async fn session(
                         return_scope_meta: syncing,
                         ..Default::default()
                     };
+                    let ipc_timeout = cooperate::cooperate_ipc_timeout(params.timeout_ms);
                     let (val, resp_meta) = link
                         .rpc_envelope(
                             &ctx,
                             Method::ToolCooperate,
                             serde_json::to_value(params).unwrap_or_default(),
                             meta,
-                            TOOL_IPC_TIMEOUT,
+                            ipc_timeout,
                         )
                         .await?;
                     (val, resp_meta.scope_meta)

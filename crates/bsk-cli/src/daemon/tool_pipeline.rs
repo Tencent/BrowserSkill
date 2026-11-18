@@ -1417,7 +1417,17 @@ pub(super) fn tool_dispatch_transport_timeout(
         if parsed.timeout_ms.is_some_and(|ms| ms > 25_000) {
             return Err(invalid_params("cooperation wait is bounded to 25000ms"));
         }
-        return Ok(DEFAULT_TOOL_TIMEOUT);
+        let timeout = match parsed.action {
+            bsk_protocol::tools::CooperateAction::Sync
+            | bsk_protocol::tools::CooperateAction::Enable => {
+                parsed.timeout_ms.map_or(DEFAULT_TOOL_TIMEOUT, |ms| {
+                    DEFAULT_TOOL_TIMEOUT
+                        .max(Duration::from_millis(ms).saturating_add(Duration::from_secs(20)))
+                })
+            }
+            _ => DEFAULT_TOOL_TIMEOUT,
+        };
+        return Ok(timeout);
     }
     let policy = super::tool_policy::execution_policy(method);
     if policy.deadline == super::tool_policy::Deadline::BorrowConfirmation {

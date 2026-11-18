@@ -483,13 +483,14 @@ fn settled_sync_with_conditions(
         wait_budget_ms,
         prior_effect_state,
         |prefix, method, req_val, meta| {
+            let ipc_timeout = super::cooperate::cooperate_rpc_ipc_timeout(&method, &req_val);
             ctx.call_envelope(
                 sock_buf.clone(),
                 prefix,
                 method,
                 Some(req_val),
                 meta,
-                TOOL_IPC_TIMEOUT,
+                ipc_timeout,
             )
         },
         std::thread::sleep,
@@ -522,6 +523,11 @@ pub(crate) fn settled_sync_with_conditions_using(
     let mut last_snapshot_error: Option<String> = None;
 
     loop {
+        let remaining_ms = deadline
+            .saturating_sub(start.elapsed())
+            .as_nanos()
+            .div_ceil(1_000_000) as u64;
+        let sync_budget_ms = remaining_ms.min(25_000);
         let mut state = run_settled_cooperate_sync(
             explicit_session.unwrap_or_default(),
             tab_id,
@@ -529,6 +535,7 @@ pub(crate) fn settled_sync_with_conditions_using(
             tab_id,
             control_policy,
             max_tokens,
+            (sync_budget_ms > 0).then_some(sync_budget_ms),
             prior_effect_state,
             &mut call_rpc,
         )?;
@@ -588,6 +595,11 @@ pub(crate) fn settled_sync_with_conditions_using(
                 // The snapshot replaced the refs this frame's context names;
                 // synchronize the session and tab it read.
                 let (session_id, target_tab) = frame_target(&state, explicit_session, tab_id);
+                let resync_budget_ms = (deadline
+                    .saturating_sub(start.elapsed())
+                    .as_nanos()
+                    .div_ceil(1_000_000) as u64)
+                    .min(25_000);
                 let resynced = run_settled_cooperate_sync(
                     &session_id,
                     target_tab,
@@ -595,6 +607,7 @@ pub(crate) fn settled_sync_with_conditions_using(
                     tab_id,
                     control_policy,
                     max_tokens,
+                    (resync_budget_ms > 0).then_some(resync_budget_ms),
                     prior_effect_state,
                     &mut call_rpc,
                 )?;
@@ -820,6 +833,7 @@ fn run_settled_cooperate_sync(
     explicit_tab_id: Option<i64>,
     control_policy: ControlPolicy,
     max_tokens: Option<u32>,
+    sync_timeout_ms: Option<u64>,
     prior_effect_state: &'static str,
     call_rpc: &mut impl FnMut(
         &'static str,
@@ -837,7 +851,13 @@ fn run_settled_cooperate_sync(
             session_id: session_id_param.to_string(),
             tab_id: tab_id_param,
             action,
-            timeout_ms: is_wait.then_some(1000),
+            timeout_ms: if is_sync {
+                sync_timeout_ms
+            } else if is_wait {
+                Some(sync_timeout_ms.unwrap_or(1000).clamp(1000, 5000))
+            } else {
+                None
+            },
             max_tokens,
         })
         .map_err(|e| CliError::Local(e.into()))?;
@@ -2429,5 +2449,51 @@ mod tests {
         assert_eq!(data["effect_state"], "committed");
         assert_eq!(data["session_id"], "s-open");
         assert_eq!(data["tab_id"], 7);
+    }
+
+    #[test]
+    fn settled_sync_forwards_caller_wait_budget_to_cooperate_sync() {
+        let mut seen_timeout_ms = Vec::new();
+        let state = settled_sync_with_conditions_using(
+            Some("s-heavy"),
+            Some(9),
+            ControlPolicy::Target,
+            None,
+            None,
+            None,
+            20_000,
+            "none",
+            |_prefix, method, req, _meta| match method {
+                Method::ToolCooperate => {
+                    seen_timeout_ms.push(req["timeout_ms"].as_u64());
+                    Ok((
+                        json!({
+                            "tab_id": 9,
+                            "context_id": "ctx-heavy",
+                            "observation_id": "obs-heavy",
+                            "control_policy": "target",
+                            "kind": "baseline",
+                            "observation": {
+                                "url": "https://lark.test/base",
+                                "title": "Base",
+                                "text": "@e1 button \"Add\""
+                            }
+                        }),
+                        IpcResponseMeta::default(),
+                    ))
+                }
+                other => panic!("unexpected method: {other:?}"),
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(seen_timeout_ms.len(), 1);
+        let forwarded = seen_timeout_ms[0].expect("timeout_ms should be forwarded");
+        assert!(
+            (19_000..=20_000).contains(&forwarded),
+            "expected forwarded timeout_ms in 19000..=20000, got {forwarded}"
+        );
+        assert_eq!(state.reply["context_id"], "ctx-heavy");
     }
 }

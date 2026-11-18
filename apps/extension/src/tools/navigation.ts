@@ -90,19 +90,30 @@ interface ReadyStateProbeReply {
  * Read `document.readyState` on the tab's main execution context.
  * Returns `null` when CDP cannot evaluate (detached tab, etc.).
  */
+const CDP_READY_PROBE_TIMEOUT_MS = 1_500;
+const CDP_PREFLIGHT_TIMEOUT_MS = 2_500;
+
 export async function probeMainFrameReadyState(
   cdp: CdpRunner,
   tabId: number,
 ): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const reply = await cdp.send<ReadyStateProbeReply>(tabId, "Runtime.evaluate", {
-      expression: "document.readyState",
-      returnByValue: true,
-    });
-    const value = reply.result?.value;
+    const reply = await Promise.race([
+      cdp.send<ReadyStateProbeReply>(tabId, "Runtime.evaluate", {
+        expression: "document.readyState",
+        returnByValue: true,
+      }),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), CDP_READY_PROBE_TIMEOUT_MS);
+      }),
+    ]);
+    const value = reply?.result?.value;
     return typeof value === "string" ? value : null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -930,16 +941,24 @@ interface MainFrameInfo {
 }
 
 async function readMainFrameInfo(cdp: CdpRunner, tabId: number): Promise<MainFrameInfo> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const tree = await cdp.send<{
-      frameTree?: { frame?: { id?: string; loaderId?: string } };
-    }>(tabId, "Page.getFrameTree", {});
+    const tree = await Promise.race([
+      cdp.send<{
+        frameTree?: { frame?: { id?: string; loaderId?: string } };
+      }>(tabId, "Page.getFrameTree", {}),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), CDP_READY_PROBE_TIMEOUT_MS);
+      }),
+    ]);
     return {
-      frameId: tree.frameTree?.frame?.id ?? null,
-      loaderId: tree.frameTree?.frame?.loaderId ?? null,
+      frameId: tree?.frameTree?.frame?.id ?? null,
+      loaderId: tree?.frameTree?.frame?.loaderId ?? null,
     };
   } catch {
     return { frameId: null, loaderId: null };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1028,21 +1047,48 @@ async function prepareNavigation(
   ctx: SessionContext,
   target: ResolvedTargetTab,
   deps: NavigationDeps,
+  timeoutMs = DEFAULT_NAV_TIMEOUT_MS,
 ): Promise<"browser" | "cdp"> {
   deps.signal?.throwIfAborted();
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
   if (cdpBlockedUrlReason(target.url) || cdpBlockedUrlReason(target.pendingUrl)) return "browser";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let preflightTimedOut = false;
+  const preflightMs = Math.min(CDP_PREFLIGHT_TIMEOUT_MS, Math.max(500, Math.floor(timeoutMs / 2)));
   try {
-    await acquireNavigationExecution(manager, ctx, target.tabId, deps);
-    await ensureCdpReady(deps.cdp, target.tabId);
-    // Successor request termination is part of navigation waiting, even if
-    // optional network capture was unavailable during debugger attachment.
-    await deps.cdp.send(target.tabId, "Network.enable", {});
+    const preflight = (async () => {
+      await acquireNavigationExecution(manager, ctx, target.tabId, deps);
+      await ensureCdpReady(deps.cdp, target.tabId);
+      // Successor request termination is part of navigation waiting, even if
+      // optional network capture was unavailable during debugger attachment.
+      await deps.cdp.send(target.tabId, "Network.enable", {});
+    })();
+    void preflight.catch(() => {});
+    await Promise.race([
+      preflight,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          preflightTimedOut = true;
+          reject(new Error("CDP navigation preflight timed out"));
+        }, preflightMs);
+      }),
+    ]);
     return "cdp";
   } catch (error) {
-    // Only preflight access denial permits fallback. Never replay a sent action.
-    if (!isCdpExtensionAccessDenied(error)) throw error;
+    // Only preflight access denial or an unresponsive departing renderer permits
+    // browser-API fallback. Never replay an already-sent navigation.
+    if (deps.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error;
+    }
+    const reattachTimedOut =
+      error instanceof Error &&
+      error.message.includes("Chrome did not respond during debugger reattachment");
+    if (!isCdpExtensionAccessDenied(error) && !preflightTimedOut && !reattachTimedOut) {
+      throw error;
+    }
     return "browser";
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1191,7 +1237,7 @@ export async function handleNavigate(
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_NAV_TIMEOUT_MS;
 
   try {
-    if ((await prepareNavigation(manager, ctx, target, deps)) === "browser") {
+    if ((await prepareNavigation(manager, ctx, target, deps, timeoutMs)) === "browser") {
       const recovered = await recoverBrowserNavigation(
         deps,
         manager,
@@ -1346,7 +1392,7 @@ async function handleHistory(
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
 
   try {
-    if ((await prepareNavigation(manager, ctx, target, deps)) === "browser") {
+    if ((await prepareNavigation(manager, ctx, target, deps, timeoutMs)) === "browser") {
       const recovered = await recoverBrowserNavigation(
         deps,
         manager,
@@ -1478,7 +1524,7 @@ export async function handleReload(
   const ignoreCache = params.hard === true;
 
   try {
-    if ((await prepareNavigation(manager, ctx, target, deps)) === "browser") {
+    if ((await prepareNavigation(manager, ctx, target, deps, timeoutMs)) === "browser") {
       const previousUrl = await readTabUrl(deps.tabsApi, target.tabId);
       const recovered = await recoverBrowserNavigation(
         deps,

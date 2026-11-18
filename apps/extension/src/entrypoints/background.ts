@@ -40,6 +40,7 @@ import {
   forgetOverlayInjectedTab,
   injectCooperationAllFrames,
   RuntimeContentScriptCoordinator,
+  sendTabMessageBounded,
 } from "@/lib/runtime-content-scripts";
 import { captureTaskPreview, focusTask } from "@/lib/task-preview";
 import { attachUiChannel } from "@/lib/ui-channel";
@@ -369,7 +370,7 @@ export default defineBackground(() => {
     }
     const state = overlayStateForTab(tabId, windowId);
     try {
-      await chrome.tabs.sendMessage(tabId, state);
+      await sendTabMessageBounded(tabId, state);
     } catch {
       // Restricted pages and uninjected free tabs cannot receive messages.
     }
@@ -477,7 +478,7 @@ export default defineBackground(() => {
         await ensureOverlayInjected(tabId);
       }
       try {
-        await chrome.tabs.sendMessage(tabId, {
+        await sendTabMessageBounded(tabId, {
           type: OVERLAY_AUTOMATION_BYPASS,
           enabled,
         });
@@ -589,28 +590,34 @@ export default defineBackground(() => {
       "[browser-skill] chrome.notifications.onButtonClicked unavailable; borrow Allow/Deny buttons will be inactive",
     );
   }
-  // MV3 service worker keepalive + reconnect supervisor (review M4/M5
-  // C3 + C4). Every 30s the alarm wakes the SW; if the transport is
-  // not connected we force a fresh connect attempt so we never sit on
-  // a stale `disconnected` state when the setTimeout-based reconnect
-  // dies with the SW. Reconnect is skipped when the user has disabled
-  // the BrowserSkill connection.
-  startKeepalive({
-    transport,
-    requestConnect: () => controller.requestConnect(),
-  });
-
   // Application-level heartbeat (Chrome 116+): while the post-handshake
   // link is live, beat every 20s so WebSocket activity keeps the service
   // worker — and thus the daemon connection — alive during use, rather
   // than depending on the boundary-hugging 30s keepalive alarm. The
   // daemon also uses these beats to reap a silently-dead browser.
-  startHeartbeat({
+  const heartbeat = startHeartbeat({
     send: (frame) => transport.send(frame),
     onActiveChange: (cb) =>
       controller.subscribe((snap) =>
         cb(snap.state === "connected" || snap.state === "version_skew"),
       ),
+  });
+
+  // MV3 service worker keepalive + reconnect supervisor (review M4/M5
+  // C3 + C4). Every 30s the alarm wakes the SW; if the transport is
+  // not connected we force a fresh connect attempt so we never sit on
+  // a stale `disconnected` state when the setTimeout-based reconnect
+  // dies with the SW. When already connected post-handshake, also emit
+  // a heartbeat in case SW timer throttling delayed `setInterval`.
+  startKeepalive({
+    transport,
+    requestConnect: () => controller.requestConnect(),
+    onConnectedTick: () => {
+      const { state } = controller.snapshot();
+      if (state === "connected" || state === "version_skew") {
+        heartbeat.beat();
+      }
+    },
   });
 
   // Wake-driven reconnect (best effort). An MV3 service worker is killed

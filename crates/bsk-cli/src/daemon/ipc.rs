@@ -579,6 +579,14 @@ mod tests {
                     > Duration::from_millis(wait_ms)
             );
         }
+        for action in ["sync", "enable"] {
+            let sync_params =
+                serde_json::json!({"session_id":"s1", "action":action, "timeout_ms":25_000});
+            assert!(
+                tool_dispatch_transport_timeout(&Method::ToolCooperate, &sync_params).unwrap()
+                    >= Duration::from_secs(45)
+            );
+        }
         assert!(
             tool_dispatch_transport_timeout(
                 &Method::ToolCooperate,
