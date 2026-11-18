@@ -872,6 +872,28 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
       (_, idx) => `<div class="cell-${idx}"><span>Row ${idx}</span></div>`,
     ).join("");
 
+    let wedgedEarlyHits = 0;
+    const wedgedEarlyWaiters = new Set<() => void>();
+    const waitForWedgedEarly = async (previousHits: number) => {
+      if (wedgedEarlyHits <= previousHits) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            wedgedEarlyWaiters.delete(check);
+            reject(new Error("Timed out waiting for /wedged-early request"));
+          }, 10000);
+          const check = () => {
+            if (wedgedEarlyHits > previousHits) {
+              clearTimeout(timer);
+              wedgedEarlyWaiters.delete(check);
+              resolve();
+            }
+          };
+          wedgedEarlyWaiters.add(check);
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    };
+
     const server = createServer((request, response) => {
       const serverPort = (server.address() as { port: number }).port;
       if (request.url === "/app.css") {
@@ -902,12 +924,18 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
         return;
       }
       if (request.url === "/wedged-early") {
-        response.end("<!doctype html><title>Wedged Early</title><script>for (;;) {}</script>");
+        response.end(
+          "<!doctype html><title>Wedged Early</title><script>for (;;) {}</script>",
+          () => {
+            wedgedEarlyHits += 1;
+            for (const notify of wedgedEarlyWaiters) notify();
+          },
+        );
         return;
       }
       if (request.url === "/escaped") {
         response.end(
-          `<!doctype html><title>Escaped</title><h1>Escaped Healthy Page</h1><button id="ok" type="button">Continue</button><a id="open-wedged" href="http://127.0.0.1:${serverPort}/wedged">Open wedged</a>`,
+          `<!doctype html><title>Escaped</title><h1>Escaped Healthy Page</h1><button id="ok" type="button">Continue</button><a id="open-wedged" href="http://127.0.0.1:${serverPort}/wedged-early">Open wedged</a>`,
         );
         return;
       }
@@ -1197,9 +1225,10 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             // `bsk navigate` and `bsk session stop` both escape cleanly without hanging.
             const hovered = await runCli("hover", "#ok", ...scope);
             expect(hovered.exitCode, JSON.stringify(hovered)).toBe(0);
+            const hitsBeforeFirstClick = wedgedEarlyHits;
             const clickedIntoWedged = await runCli("click", "#open-wedged", ...scope);
             expect(clickedIntoWedged.exitCode, JSON.stringify(clickedIntoWedged)).toBe(0);
-            await new Promise((resolve) => setTimeout(resolve, 250));
+            await waitForWedgedEarly(hitsBeforeFirstClick);
 
             const escapedWithImplicitCtx = await runCli(
               "navigate",
@@ -1211,8 +1240,9 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             const resyncedEscaped = await runCli("sync", ...scope);
             expect(resyncedEscaped.exitCode, JSON.stringify(resyncedEscaped)).toBe(0);
             expect((await runCli("hover", "#ok", ...scope)).exitCode).toBe(0);
+            const hitsBeforeSecondClick = wedgedEarlyHits;
             expect((await runCli("click", "#open-wedged", ...scope)).exitCode).toBe(0);
-            await new Promise((resolve) => setTimeout(resolve, 250));
+            await waitForWedgedEarly(hitsBeforeSecondClick);
 
             const stopStarted = Date.now();
             const stopped = await runCli("session", "stop", session);
