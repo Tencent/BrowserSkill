@@ -14,9 +14,11 @@ import {
   chromeTabsApi,
   isRpcError,
   type PinnedSelectorTarget,
+  readReportedTimeoutMs,
   resolveTargetTab,
   sessionCdpRunner,
   withPinnedSelectorTargets,
+  withReportedTimeoutMs,
 } from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
 import { AccessibilityLease } from "@/tools/vom/capture-coordinator";
@@ -828,7 +830,9 @@ export class CooperationController implements ControlAuthority {
     let frames: Frames;
     try {
       const clampedTimeoutMs =
-        replyTimeoutMs !== undefined && replyTimeoutMs > DEFAULT_FRAME_REPLY_MS
+        replyTimeoutMs !== undefined &&
+        replyTimeoutMs > 0 &&
+        replyTimeoutMs !== DEFAULT_FRAME_REPLY_MS
           ? Math.min(replyTimeoutMs, MAX_FRAME_REPLY_MS)
           : undefined;
       const collection = signal
@@ -2483,9 +2487,20 @@ export class CooperationController implements ControlAuthority {
         this.changed(state);
       }
     };
+    const entryReplyTimeoutMs =
+      isNavigationAction &&
+      params.expect === undefined &&
+      params.observation_id === undefined &&
+      !params.depends_on?.length &&
+      typeof params.timeout_ms === "number" &&
+      Number.isFinite(params.timeout_ms) &&
+      params.timeout_ms > 0 &&
+      params.timeout_ms < DEFAULT_FRAME_REPLY_MS * 2
+        ? Math.max(200, Math.floor(params.timeout_ms / 2))
+        : actionReplyTimeoutMs;
     const runEnteredAt = Date.now();
     try {
-      await this.refresh(state, undefined, false, actionReplyTimeoutMs, signal);
+      await this.refresh(state, undefined, false, entryReplyTimeoutMs, signal);
       if (params.context_id && !bound) return invalidControlContext();
       initialRouteKey = routePathnameKey(state.frames.get(0)?.url ?? target.url);
       assert();
@@ -2917,10 +2932,13 @@ export class CooperationController implements ControlAuthority {
               : req.method === "tool.navigate"
                 ? 30_000
                 : 15_000;
-          req.params = {
-            ...(req.params as object),
-            timeout_ms: Math.max(1, baseTimeoutMs - refreshElapsedMs),
-          };
+          req.params = withReportedTimeoutMs(
+            {
+              ...(req.params as object),
+              timeout_ms: Math.max(1, baseTimeoutMs - refreshElapsedMs),
+            },
+            readReportedTimeoutMs(req.params) ?? baseTimeoutMs,
+          );
         }
         fallbackBootstrap = true;
       } else {

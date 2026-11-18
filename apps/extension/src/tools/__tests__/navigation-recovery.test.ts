@@ -954,6 +954,30 @@ it.each([
       error_text: expect.stringContaining("after 4000ms"),
     });
     stalled.expectCleanedUp();
+
+    // When `Page.enable` resolves on a destination that wedges before `Page.getFrameTree` answers
+    // during `networkidle` recovery, report `reached: "timeout"` rather than "No main frame".
+    const treeStalled = await fixture();
+    treeStalled.deps.cdp.acquireBackgroundExecution = vi
+      .fn()
+      .mockRejectedValueOnce(CdpReadTimeoutError.stillPending("Page.getFrameTree", 4))
+      .mockResolvedValue(undefined);
+    treeStalled.send.mockImplementation(async (_tabId, method) => {
+      if (method === "Page.getFrameTree") return new Promise<never>(() => {});
+      return {};
+    });
+    const idleWork = handleNavigate(
+      treeStalled.manager,
+      { session_id: "test", url, wait_until: "networkidle", timeout_ms: 4000 },
+      treeStalled.deps,
+    );
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(await idleWork).toMatchObject({
+      tab_id: 4,
+      reached: "timeout",
+      error_text: expect.stringContaining("after 4000ms"),
+    });
+    treeStalled.expectCleanedUp();
   } finally {
     vi.useRealTimers();
   }

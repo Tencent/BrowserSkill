@@ -47,6 +47,7 @@ import {
   isRpcError,
   lookupSession,
   type ResolvedTargetTab,
+  readReportedTimeoutMs,
   resolveTargetTab,
 } from "./shared";
 
@@ -1195,14 +1196,48 @@ async function recoverBrowserNavigation(
           }
           if (!(await isCurrent())) return false;
           if (waitUntil === "networkidle" || (sameDocument && waitUntil !== "commit")) {
-            const frameRes = await withinDeadline(() => readMainFrameInfo(deps.cdp, tabId));
-            if (!frameRes.ok) {
-              signal.throwIfAborted();
-              return false;
+            let frame: { frameId: string; loaderId: string | null } | null = null;
+            while (!frame) {
+              let readTimedOut = false;
+              const treeRes = await withinDeadline(async () => {
+                try {
+                  return await deps.cdp.send<{
+                    frameTree?: { frame?: { id?: string; loaderId?: string } };
+                  }>(tabId, "Page.getFrameTree", {});
+                } catch (error) {
+                  if (error instanceof Error && error.name === "CdpReadTimeoutError") {
+                    readTimedOut = true;
+                    return undefined;
+                  }
+                  throw error;
+                }
+              });
+              if (!treeRes.ok) {
+                signal.throwIfAborted();
+                return false;
+              }
+              if (!(await isCurrent())) return false;
+              if (readTimedOut) {
+                if (sameDocument) return false;
+                const delayMs = Math.min(50, deadline - Date.now());
+                if (delayMs <= 0) return false;
+                const waited = await withinDeadline(
+                  () => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
+                );
+                if (!waited.ok) {
+                  signal.throwIfAborted();
+                  return false;
+                }
+                if (!(await isCurrent())) return false;
+                continue;
+              }
+              const frameId = treeRes.value?.frameTree?.frame?.id ?? null;
+              if (!frameId) throw new Error("No main frame after navigation");
+              frame = {
+                frameId,
+                loaderId: treeRes.value?.frameTree?.frame?.loaderId ?? null,
+              };
             }
-            const frame = frameRes.value;
-            if (!(await isCurrent())) return false;
-            if (!frame.frameId) throw new Error("No main frame after navigation");
             const remaining = deadline - Date.now();
             if (remaining <= 0) return false;
             const waiting = linkedAbortSignal(signal);
@@ -1287,6 +1322,7 @@ export async function handleNavigate(
 
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_NAV_TIMEOUT_MS;
+  const reportedTimeoutMs = readReportedTimeoutMs(params) ?? timeoutMs;
   const startedAt = Date.now();
 
   try {
@@ -1302,7 +1338,7 @@ export async function handleNavigate(
         remainingMs,
         params.url,
         true,
-        timeoutMs,
+        reportedTimeoutMs,
       );
       if (isRpcError(recovered)) return recovered;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, { ...recovered, url: params.url });
@@ -1445,6 +1481,7 @@ async function handleHistory(
 
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
+  const reportedTimeoutMs = readReportedTimeoutMs(params) ?? timeoutMs;
   const startedAt = Date.now();
 
   try {
@@ -1460,7 +1497,7 @@ async function handleHistory(
         remainingMs,
         undefined,
         true,
-        timeoutMs,
+        reportedTimeoutMs,
       );
       if (isRpcError(recovered)) return recovered;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
@@ -1579,6 +1616,7 @@ export async function handleReload(
 
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
+  const reportedTimeoutMs = readReportedTimeoutMs(params) ?? timeoutMs;
   const ignoreCache = params.hard === true;
   const startedAt = Date.now();
 
@@ -1596,7 +1634,7 @@ export async function handleReload(
         remainingMs,
         undefined,
         false,
-        timeoutMs,
+        reportedTimeoutMs,
       );
       if (isRpcError(recovered)) return recovered;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {

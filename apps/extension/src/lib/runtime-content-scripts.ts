@@ -134,15 +134,18 @@ export async function sendTabMessageBounded(
   tabId: number,
   message: unknown,
   timeoutMs = ARM_INJECT_TIMEOUT_MS,
-): Promise<void> {
+  options?: chrome.tabs.MessageSendOptions,
+): Promise<unknown> {
   if (typeof chrome === "undefined" || typeof chrome.tabs?.sendMessage !== "function") {
-    return;
+    return undefined;
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const pending = chrome.tabs.sendMessage(tabId, message);
+    const pending = options
+      ? chrome.tabs.sendMessage(tabId, message, options)
+      : chrome.tabs.sendMessage(tabId, message);
     void pending?.catch?.(() => {});
-    await Promise.race([
+    return await Promise.race([
       pending,
       new Promise<undefined>((resolve) => {
         timer = setTimeout(() => resolve(undefined), timeoutMs);

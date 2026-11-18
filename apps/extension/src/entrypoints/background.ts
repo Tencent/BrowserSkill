@@ -212,6 +212,15 @@ export default defineBackground(() => {
         await ensureOverlayInjected(tabId);
       }
       try {
+        if (recordingId === null) {
+          await sendTabMessageBounded(
+            tabId,
+            { type: VIDEO_OVERLAY, recording_id: null },
+            undefined,
+            { frameId: 0 },
+          );
+          return {};
+        }
         // Another content script can receive messages before the overlay script
         // mounts, resolving undefined instead of reporting a missing receiver.
         // The overlay stays hidden until its own video handshake completes.
@@ -472,7 +481,7 @@ export default defineBackground(() => {
     cdp,
     frameCoordinator: recordFrameCoordinator,
     sendToTab: (tabId: number, msg: Parameters<typeof chrome.tabs.sendMessage>[1]) =>
-      chrome.tabs.sendMessage(tabId, msg),
+      sendTabMessageBounded(tabId, msg),
     bypassOverlay: async (tabId: number, enabled: boolean) => {
       if (enabled) {
         await ensureOverlayInjected(tabId);

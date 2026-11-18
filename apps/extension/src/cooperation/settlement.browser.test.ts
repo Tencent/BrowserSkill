@@ -906,6 +906,22 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
         return;
       }
       const parsed = new URL(request.url ?? "/", `http://127.0.0.1:${serverPort}`);
+      if (parsed.pathname === "/slow-pixel") {
+        setTimeout(() => {
+          response.setHeader("Content-Type", "image/gif");
+          response.end(
+            Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64"),
+          );
+        }, 250);
+        return;
+      }
+      if (parsed.pathname === "/record-wedged-child") {
+        response.end(`<!doctype html><title>Record With Wedged Child</title>
+          <button id="rec-btn" type="button">Record Action</button>
+          <img src="/slow-pixel" alt="">
+          <iframe src="http://accounts-rec.test:${serverPort}/session-tools/refresh" style="display:none"></iframe>`);
+        return;
+      }
       if (parsed.pathname === "/escaped") {
         const nextHost = parsed.searchParams.get("next") ?? "wedged3.test";
         response.end(
@@ -1017,7 +1033,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
           deviceScale: 1,
           zoom: 1,
           extraArgs: [
-            "--host-resolver-rules=MAP accounts.test 127.0.0.1,MAP widgets.test 127.0.0.1,MAP cdn.test 127.0.0.1,MAP wedged1.test 127.0.0.1,MAP wedged2.test 127.0.0.1,MAP wedged3.test 127.0.0.1,MAP wedged4.test 127.0.0.1,MAP healthy.test 127.0.0.1",
+            "--host-resolver-rules=MAP accounts.test 127.0.0.1,MAP accounts-rec.test 127.0.0.1,MAP widgets.test 127.0.0.1,MAP cdn.test 127.0.0.1,MAP wedged1.test 127.0.0.1,MAP wedged2.test 127.0.0.1,MAP wedged3.test 127.0.0.1,MAP wedged4.test 127.0.0.1,MAP healthy.test 127.0.0.1",
             "--no-proxy-server",
             "--disable-features=HttpsUpgrades",
           ],
@@ -1111,6 +1127,46 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             const shot = await runCli("screenshot", "--out", shotPath, ...scope);
             expect(shot.exitCode, JSON.stringify(shot)).toBe(0);
 
+            // `bsk record start` / `stop` succeeds on a page whose hidden cross-origin
+            // `accounts-rec.test/session-tools/refresh` OOPIF has already wedged before `armTab`.
+            const traceDir = path.join(directory, "record-trace");
+            const recordStart = Date.now();
+            const recordProc = spawn(
+              executable,
+              [
+                "record",
+                "start",
+                "--url",
+                `${baseUrl}/record-wedged-child`,
+                "--output",
+                traceDir,
+                "--json",
+              ],
+              { env, stdio: "ignore" },
+            );
+            const recExited = once(recordProc, "exit");
+            await expect
+              .poll(
+                async () => {
+                  try {
+                    const stateRaw = await readFile(
+                      path.join(env.BSK_HOME, "record-session.json"),
+                      "utf8",
+                    );
+                    return Boolean(JSON.parse(stateRaw).session_id);
+                  } catch {
+                    return false;
+                  }
+                },
+                { timeout: 15000 },
+              )
+              .toBe(true);
+            expect(Date.now() - recordStart).toBeLessThan(13000);
+            const recStopped = await runCli("record", "stop", "--output", traceDir);
+            expect(recStopped.exitCode, JSON.stringify(recStopped)).toBe(0);
+            const [recExitCode] = await recExited;
+            expect(recExitCode).toBe(0);
+
             // 2. Genuinely wedged main frame (`for (;;) {}`): settled `bsk sync --timeout-ms`
             // respects its wall-clock deadline without multiplying retries (Sync -> Wait -> Sync),
             // fails cleanly (`effect_state: "none"`) without freezing the ledger, and `bsk reload`
@@ -1172,13 +1228,21 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             expect(Date.now() - navEarlyWedgedStart).toBeLessThan(11000);
             expect(navEarlyWedged.exitCode, JSON.stringify(navEarlyWedged)).toBe(4);
             expect(navEarlyWedged.body.reached).toBe("timeout");
+            expect(navEarlyWedged.body.error_text).toContain("after 6000ms");
 
+            // Escaping with a tight `--timeout 3s` and `--wait-until networkidle` proportions
+            // entry refresh and waits cleanly for `Page.getFrameTree` on the healthy destination.
             const escaped = await runCli(
               "navigate",
               `http://healthy.test:${serverPort}/escaped?next=wedged3.test`,
+              "--wait-until",
+              "networkidle",
+              "--timeout",
+              "3s",
               ...scope,
             );
             expect(escaped.exitCode, JSON.stringify(escaped)).toBe(0);
+            expect(escaped.body.reached).toBe("networkidle");
 
             const afterEscapeSync = await runCli("sync", ...scope);
             expect(afterEscapeSync.exitCode, JSON.stringify(afterEscapeSync)).toBe(0);
