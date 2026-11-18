@@ -872,28 +872,6 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
       (_, idx) => `<div class="cell-${idx}"><span>Row ${idx}</span></div>`,
     ).join("");
 
-    let wedgedEarlyHits = 0;
-    const wedgedEarlyWaiters = new Set<() => void>();
-    const waitForWedgedEarly = async (previousHits: number) => {
-      if (wedgedEarlyHits <= previousHits) {
-        await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            wedgedEarlyWaiters.delete(check);
-            reject(new Error("Timed out waiting for /wedged-early request"));
-          }, 10000);
-          const check = () => {
-            if (wedgedEarlyHits > previousHits) {
-              clearTimeout(timer);
-              wedgedEarlyWaiters.delete(check);
-              resolve();
-            }
-          };
-          wedgedEarlyWaiters.add(check);
-        });
-      }
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    };
-
     const server = createServer((request, response) => {
       const serverPort = (server.address() as { port: number }).port;
       if (request.url === "/app.css") {
@@ -924,13 +902,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
         return;
       }
       if (request.url === "/wedged-early") {
-        response.end(
-          "<!doctype html><title>Wedged Early</title><script>for (;;) {}</script>",
-          () => {
-            wedgedEarlyHits += 1;
-            for (const notify of wedgedEarlyWaiters) notify();
-          },
-        );
+        response.end("<!doctype html><title>Wedged Early</title><script>for (;;) {}</script>");
         return;
       }
       if (request.url === "/escaped") {
@@ -1223,12 +1195,31 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             // 3. Cross-document link click into a wedged page while hover bypass and
             // daemon `ImplicitScopeRegistry` auto-injected `context_id` remain active:
             // `bsk navigate` and `bsk session stop` both escape cleanly without hanging.
+            const waitForWedgedCommit = async () => {
+              const deadline = Date.now() + 10000;
+              while (Date.now() < deadline) {
+                const listed = await runCli("tab", "list", "--scope", "agent", ...scope);
+                const tabs = Array.isArray(listed.body.tabs)
+                  ? (listed.body.tabs as { url?: unknown }[])
+                  : [];
+                if (
+                  tabs.some(
+                    (tab) => typeof tab.url === "string" && tab.url.endsWith("/wedged-early"),
+                  )
+                ) {
+                  await new Promise((resolve) => setTimeout(resolve, 150));
+                  return;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 50));
+              }
+              throw new Error("Timed out waiting for /wedged-early tab commit");
+            };
+
             const hovered = await runCli("hover", "#ok", ...scope);
             expect(hovered.exitCode, JSON.stringify(hovered)).toBe(0);
-            const hitsBeforeFirstClick = wedgedEarlyHits;
             const clickedIntoWedged = await runCli("click", "#open-wedged", ...scope);
             expect(clickedIntoWedged.exitCode, JSON.stringify(clickedIntoWedged)).toBe(0);
-            await waitForWedgedEarly(hitsBeforeFirstClick);
+            await waitForWedgedCommit();
 
             const escapedWithImplicitCtx = await runCli(
               "navigate",
@@ -1240,9 +1231,8 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             const resyncedEscaped = await runCli("sync", ...scope);
             expect(resyncedEscaped.exitCode, JSON.stringify(resyncedEscaped)).toBe(0);
             expect((await runCli("hover", "#ok", ...scope)).exitCode).toBe(0);
-            const hitsBeforeSecondClick = wedgedEarlyHits;
             expect((await runCli("click", "#open-wedged", ...scope)).exitCode).toBe(0);
-            await waitForWedgedEarly(hitsBeforeSecondClick);
+            await waitForWedgedCommit();
 
             const stopStarted = Date.now();
             const stopped = await runCli("session", "stop", session);
