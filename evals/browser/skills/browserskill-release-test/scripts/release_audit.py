@@ -164,8 +164,12 @@ def launcher(exe, platform=None):
     """
     path = Path(exe)
     platform = os.name if platform is None else platform
-    if platform != "nt" or path.suffix.lower() in {".exe", ".com", ".bat", ".cmd"}:
+    suffix = path.suffix.lower()
+    if platform != "nt" or suffix in {".exe", ".com", ".bat", ".cmd"}:
         return [exe]
+    # CreateProcessW rejects `.py`/`.pyw` too, with or without a shebang.
+    if suffix in {".py", ".pyw"}:
+        return [sys.executable or "python", str(path)]
     try:
         with path.open("rb") as handle:
             shebang = handle.readline(256).decode("utf-8", "replace").strip()
@@ -652,7 +656,11 @@ def execute(args):
             code = p.wait(timeout=args.timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            p.send_signal(signal.SIGINT)
+            if os.name == "nt":
+                # Windows has no SIGINT for processes; send_signal raises ValueError.
+                p.terminate()
+            else:
+                p.send_signal(signal.SIGINT)
             try:
                 code = p.wait(timeout=5)
             except subprocess.TimeoutExpired:

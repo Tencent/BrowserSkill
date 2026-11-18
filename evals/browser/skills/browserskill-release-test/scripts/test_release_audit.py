@@ -37,10 +37,10 @@ class AuditTests(unittest.TestCase):
         (self.skill / "references").mkdir(parents=True)
         (self.skill / "assets/fixtures").mkdir(parents=True)
         (self.skill / "assets/fixtures/minimal.html").write_text(
-            "<title>synthetic</title>"
+            "<title>synthetic</title>", encoding="utf-8"
         )
         self.binary = self.base / "bsk"
-        self.binary.write_text(FAKE)
+        self.binary.write_text(FAKE, encoding="utf-8")
         self.binary.chmod(0o755)
         self.patch = patch.object(audit, "SKILL", self.skill)
         self.patch.start()
@@ -139,14 +139,16 @@ class AuditTests(unittest.TestCase):
         self.init()
         rid = self.execute()
         self.fill(rid)
-        (self.root / "commands" / rid / "stdout.txt").write_text('{"ok":false}')
+        (self.root / "commands" / rid / "stdout.txt").write_text(
+            '{"ok":false}', encoding="utf-8"
+        )
         self.assertEqual(self.gate()[0], 1)
 
     def test_candidate_change_blocks(self):
         self.init()
         rid = self.execute()
         self.fill(rid)
-        self.binary.write_text(FAKE + "\n# changed\n")
+        self.binary.write_text(FAKE + "\n# changed\n", encoding="utf-8")
         self.assertEqual(self.gate()[0], 1)
 
     def test_deleted_scenario_blocks(self):
@@ -248,7 +250,7 @@ class AuditTests(unittest.TestCase):
             "elif '--unsatisfied'",
             "elif '--eval-false' in args:print(json.dumps({'ok':False,'marker':'present'}))\nelif '--unsatisfied'",
         )
-        self.binary.write_text(body)
+        self.binary.write_text(body, encoding="utf-8")
         self.init()
         good = self.execute()
         bad = self.execute(["evaluate", "--eval-false"], "CMD-evaluate")
@@ -337,7 +339,7 @@ if not p:print('Usage: bsk <COMMAND>\\n\\nCommands:\\n  navigate  Go\\n  navigat
 elif p==['navigate']:print('Usage: bsk navigate [URL]\\n\\nCommands:\\n  back  Back\\n\\nArguments:\\n  [URL] Destination\\n\\nOptions:\\n  --help Help')
 else:print('Usage: bsk '+' '.join(p))
 """
-        self.binary.write_text(body)
+        self.binary.write_text(body, encoding="utf-8")
         inv = audit.discover(str(self.binary), self.base / "help")
         self.assertEqual(
             set(inv["commands"]), {"help", "navigate", "navigate back", "navigate-back"}
@@ -355,7 +357,9 @@ else:print('Usage: bsk '+' '.join(p))
 
     def test_server_routes_and_event_oracle(self):
         root = self.skill / "assets/fixtures"
-        (root / "plan-recipe-lab.html").write_text("<title>plan-recipe-lab</title>")
+        (root / "plan-recipe-lab.html").write_text(
+            "<title>plan-recipe-lab</title>", encoding="utf-8"
+        )
         server = serve.make_server(root, 0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -407,7 +411,7 @@ elif args[:2] == ['recipe', 'save']:
 else:
     print(json.dumps({'ok': True, 'value': 'synthetic'}))
 """
-        self.binary.write_text(body)
+        self.binary.write_text(body, encoding="utf-8")
         inv = audit.discover(str(self.binary), self.base / "help")
         self.assertEqual(
             set(inv["commands"]),
@@ -608,8 +612,12 @@ else:
 
     def test_adversarial_server_routes_bfcache_cors_and_media_mimes(self):
         root = self.skill / "assets/fixtures"
-        (root / "arena-bfcache-detail.html").write_text("<title>bfcache</title>")
-        (root / "captions-zh.vtt").write_text("WEBVTT\n\n00:00.000 --> 00:01.000\n你好\n")
+        (root / "arena-bfcache-detail.html").write_text(
+            "<title>bfcache</title>", encoding="utf-8"
+        )
+        (root / "captions-zh.vtt").write_text(
+            "WEBVTT\n\n00:00.000 --> 00:01.000\n你好\n", encoding="utf-8"
+        )
         (root / "arena-audio.wav").write_bytes(b"RIFF\x24\x00\x00\x00WAVE")
         server = serve.make_server(root, 0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -753,15 +761,20 @@ else:
 
     def test_wave_commands_range_assertions_and_long_admin_home(self):
         (self.skill / "assets/fixtures/arena-frame-outer.html").write_text(
-            '<iframe src="http://localhost:4187/a"></iframe><iframe src="http://127.0.0.1:4187/b"></iframe>'
+            '<iframe src="http://localhost:4187/a"></iframe><iframe src="http://127.0.0.1:4187/b"></iframe>',
+            encoding="utf-8",
         )
         self.init()
-        rewritten = (self.root / "fixtures/arena-frame-outer.html").read_text()
+        rewritten = (self.root / "fixtures/arena-frame-outer.html").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("http://localhost:4567/a", rewritten)
         self.assertIn("http://127.0.0.1:4567/b", rewritten)
         rid = self.execute()
         d = self.root / "commands" / rid
-        (d / "stdout.txt").write_text('{"ok": true, "size": 42, "label": "9"}')
+        (d / "stdout.txt").write_text(
+            '{"ok": true, "size": 42, "label": "9"}', encoding="utf-8"
+        )
         m = audit.load(d / "meta.json")
         m["stdout_sha256"] = audit.digest(d / "stdout.txt")
         audit.write(d / "meta.json", m)
@@ -837,6 +850,33 @@ else:
             if resolved.is_symlink():
                 resolved.unlink()
 
+    def test_timeout_records_metadata_instead_of_crashing(self):
+        self.binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "if '--help' in sys.argv:\n"
+            "    print('Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n  status  Show status\\n\\nOptions:\\n  --help  Help' if sys.argv[1:] == ['--help'] else 'Usage: bsk status [OPTIONS]')\n"
+            "else:\n"
+            "    time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        self.init()
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.execute(
+                NS(
+                    run=str(self.root),
+                    case="FLOW",
+                    argv=["status"],
+                    timeout=1,
+                    lane="browser",
+                    stdin_file=None,
+                    interactive=False,
+                )
+            )
+        meta = audit.load(next((self.root / "commands").glob("*/meta.json")))
+        self.assertTrue(meta["timed_out"])
+        self.assertNotEqual(meta.get("exit_code"), 0)
+
     def test_launcher_runs_python_wrappers_through_the_interpreter(self):
         wrapper = self.base / "bsk-wrapper"
         wrapper.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
@@ -848,6 +888,13 @@ else:
             native = self.base / ("bsk" + suffix)
             native.write_bytes(b"MZ")
             self.assertEqual(audit.launcher(native, "nt"), [native])
+        for suffix in (".py", ".pyw"):
+            script = self.base / ("bsk" + suffix)
+            script.write_text("print('ok')\n", encoding="utf-8")
+            self.assertEqual(
+                audit.launcher(script, "nt"), [sys.executable or "python", str(script)]
+            )
+            self.assertEqual(audit.launcher(script, "posix"), [script])
         plain = self.base / "bsk-script"
         plain.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
         self.assertEqual(audit.launcher(plain, "nt"), [plain])
@@ -859,7 +906,7 @@ else:
         thread.start()
         try:
             url = f"http://127.0.0.1:{server.server_port}"
-            urllib.request.urlopen(
+            with urllib.request.urlopen(
                 urllib.request.Request(
                     url + "/event",
                     data=json.dumps(
@@ -868,12 +915,15 @@ else:
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
-            ).read()
-            body = urllib.request.urlopen(url + "/events").read().decode("utf-8")
+            ) as response:
+                response.read()
+            with urllib.request.urlopen(url + "/events") as response:
+                body = response.read().decode("utf-8")
             self.assertIn("中文事件", body)
         finally:
             server.shutdown()
             server.server_close()
+            thread.join()
 
     def test_shipped_scenarios_and_fixture_manifest_integrity(self):
         import re as _re
@@ -1054,7 +1104,7 @@ elif cmd in ("sync", "observe", "snapshot"):
     key = "vom" if cmd == "sync" else "text"
     print(json.dumps({key: vom}))
 """
-        self.binary.write_text(nested_cli)
+        self.binary.write_text(nested_cli, encoding="utf-8")
         self.binary.chmod(0o755)
         real_skill = Path(__file__).resolve().parents[1]
         nested_scenario = next(
@@ -1294,7 +1344,7 @@ elif args[:2] == ["extract", "list"]:
             "coverage": {"truncated": False, "dataset_complete": "unknown"}
         }))
 """
-        self.binary.write_text(slotted_cli)
+        self.binary.write_text(slotted_cli, encoding="utf-8")
         self.binary.chmod(0o755)
         real_skill = Path(__file__).resolve().parents[1]
         slotted_scenario = next(
