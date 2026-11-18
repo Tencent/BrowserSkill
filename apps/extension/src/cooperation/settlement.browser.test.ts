@@ -905,13 +905,14 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
         response.end("<!doctype html><title>Wedged Early</title><script>for (;;) {}</script>");
         return;
       }
-      if (request.url === "/escaped") {
+      const parsed = new URL(request.url ?? "/", `http://127.0.0.1:${serverPort}`);
+      if (parsed.pathname === "/escaped") {
+        const nextHost = parsed.searchParams.get("next") ?? "wedged3.test";
         response.end(
-          `<!doctype html><title>Escaped</title><h1>Escaped Healthy Page</h1><button id="ok" type="button">Continue</button><a id="open-wedged" href="http://127.0.0.1:${serverPort}/wedged-early">Open wedged</a>`,
+          `<!doctype html><title>Escaped</title><h1>Escaped Healthy Page</h1><button id="ok" type="button">Continue</button><a id="open-wedged" href="http://${nextHost}:${serverPort}/wedged-early">Open wedged</a>`,
         );
         return;
       }
-      const parsed = new URL(request.url ?? "/", `http://127.0.0.1:${serverPort}`);
       const hydrateMs = Number(parsed.searchParams.get("hydrate") ?? "0");
       response.end(`<!doctype html>
         <head>
@@ -1016,7 +1017,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
           deviceScale: 1,
           zoom: 1,
           extraArgs: [
-            "--host-resolver-rules=MAP accounts.test 127.0.0.1,MAP widgets.test 127.0.0.1,MAP cdn.test 127.0.0.1,MAP wedged.test 127.0.0.1,MAP healthy.test 127.0.0.1",
+            "--host-resolver-rules=MAP accounts.test 127.0.0.1,MAP widgets.test 127.0.0.1,MAP cdn.test 127.0.0.1,MAP wedged1.test 127.0.0.1,MAP wedged2.test 127.0.0.1,MAP wedged3.test 127.0.0.1,MAP wedged4.test 127.0.0.1,MAP healthy.test 127.0.0.1",
             "--no-proxy-server",
             "--disable-features=HttpsUpgrades",
           ],
@@ -1118,7 +1119,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             expect(preWedged.exitCode, JSON.stringify(preWedged)).toBe(0);
             const navWedged = await runCli(
               "navigate",
-              `${baseUrl}/wedged`,
+              `http://wedged1.test:${serverPort}/wedged`,
               "--wait-until",
               "load",
               "--context",
@@ -1163,7 +1164,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             const navEarlyWedgedStart = Date.now();
             const navEarlyWedged = await runCli(
               "navigate",
-              `http://wedged.test:${serverPort}/wedged-early`,
+              `http://wedged2.test:${serverPort}/wedged-early`,
               "--timeout",
               "6s",
               ...scope,
@@ -1174,7 +1175,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
 
             const escaped = await runCli(
               "navigate",
-              `http://healthy.test:${serverPort}/escaped`,
+              `http://healthy.test:${serverPort}/escaped?next=wedged3.test`,
               ...scope,
             );
             expect(escaped.exitCode, JSON.stringify(escaped)).toBe(0);
@@ -1195,7 +1196,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             // 3. Cross-document link click into a wedged page while hover bypass and
             // daemon `ImplicitScopeRegistry` auto-injected `context_id` remain active:
             // `bsk navigate` and `bsk session stop` both escape cleanly without hanging.
-            const waitForWedgedCommit = async () => {
+            const waitForWedgedCommit = async (expectedHost: string) => {
               const deadline = Date.now() + 10000;
               while (Date.now() < deadline) {
                 const listed = await runCli("tab", "list", "--scope", "agent", ...scope);
@@ -1204,7 +1205,10 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
                   : [];
                 if (
                   tabs.some(
-                    (tab) => typeof tab.url === "string" && tab.url.endsWith("/wedged-early"),
+                    (tab) =>
+                      typeof tab.url === "string" &&
+                      tab.url.startsWith(`http://${expectedHost}:`) &&
+                      tab.url.endsWith("/wedged-early"),
                   )
                 ) {
                   await new Promise((resolve) => setTimeout(resolve, 150));
@@ -1212,18 +1216,18 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
                 }
                 await new Promise((resolve) => setTimeout(resolve, 50));
               }
-              throw new Error("Timed out waiting for /wedged-early tab commit");
+              throw new Error(`Timed out waiting for ${expectedHost}/wedged-early tab commit`);
             };
 
             const hovered = await runCli("hover", "#ok", ...scope);
             expect(hovered.exitCode, JSON.stringify(hovered)).toBe(0);
             const clickedIntoWedged = await runCli("click", "#open-wedged", ...scope);
             expect(clickedIntoWedged.exitCode, JSON.stringify(clickedIntoWedged)).toBe(0);
-            await waitForWedgedCommit();
+            await waitForWedgedCommit("wedged3.test");
 
             const escapedWithImplicitCtx = await runCli(
               "navigate",
-              `http://healthy.test:${serverPort}/escaped`,
+              `http://healthy.test:${serverPort}/escaped?next=wedged4.test`,
               ...scope,
             );
             expect(escapedWithImplicitCtx.exitCode, JSON.stringify(escapedWithImplicitCtx)).toBe(0);
@@ -1232,7 +1236,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             expect(resyncedEscaped.exitCode, JSON.stringify(resyncedEscaped)).toBe(0);
             expect((await runCli("hover", "#ok", ...scope)).exitCode).toBe(0);
             expect((await runCli("click", "#open-wedged", ...scope)).exitCode).toBe(0);
-            await waitForWedgedCommit();
+            await waitForWedgedCommit("wedged4.test");
 
             const stopStarted = Date.now();
             const stopped = await runCli("session", "stop", session);
