@@ -1996,13 +1996,16 @@ export class CooperationController implements ControlAuthority {
       const node = lookupSnapshotRef(session, ref, target.tabId);
       return rootFrameId !== undefined && node?.frameId === rootFrameId;
     };
+    const mainDocumentResolved = (node?: ResolvedActionTarget) => {
+      if (!node) return true;
+      const frameId = node.frameId || node.handle?.frameId;
+      return !frameId || (rootFrameId !== undefined && frameId === rootFrameId);
+    };
     const mainDocumentTarget = (node?: DragTarget) =>
       node?.ref ? mainDocumentRef(node.ref) : !!node?.selector;
-    // Selectors are main-document only. Refs must prove their frame, including
-    // both drag endpoints and any refs whose facts authorize the action. A
-    // script runs in the main document, so only its stated facts can involve
-    // another frame.
-    const mainDocumentAction =
+    // Refs prove their frame up front; selectors optimistically pass pre-resolution
+    // checks for main-document targets and re-verify frame scope once resolved.
+    let mainDocumentAction =
       targeted &&
       (scopedScript ||
         (mainDocumentTarget(primaryTarget) &&
@@ -2545,6 +2548,10 @@ export class CooperationController implements ControlAuthority {
         if (isRpcError(resolved)) return targetError(resolved);
         destinationTarget = resolved;
         if (params.target.selector) pinSelector(params.target.selector, resolved);
+      }
+      if (!mainDocumentResolved(actionTarget) || !mainDocumentResolved(destinationTarget)) {
+        mainDocumentAction = false;
+        assert();
       }
       if (params.depends_on !== undefined) {
         if (

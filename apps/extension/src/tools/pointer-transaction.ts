@@ -83,9 +83,12 @@ export function pointerTransactionDeps(
       check();
       return deps.cdp.getMainFrameHandle(tabId, sig ?? signal);
     },
-    getFrameDocuments: (tabId, sig) => {
+    getFrameDocuments: (tabId, sig, options) => {
       check();
-      return deps.cdp.getFrameDocuments(tabId, sig ?? signal);
+      const combined = sig && signal ? AbortSignal.any([sig, signal]) : (sig ?? signal);
+      return options !== undefined
+        ? deps.cdp.getFrameDocuments(tabId, combined, options)
+        : deps.cdp.getFrameDocuments(tabId, combined);
     },
   });
   const cleanupInput = async (deadline: number): Promise<void> => {
