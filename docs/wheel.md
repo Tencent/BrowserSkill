@@ -51,8 +51,9 @@ Moving the pointer can itself trigger hover UI and change the page.
 Deltas are passed unchanged to CDP's `Input.dispatchMouseEvent`, whose input
 units are CSS pixels. Chromium applies native page-zoom and modifier behavior;
 DOM `WheelEvent.deltaX/deltaY` and actual scroll distance can differ from the
-requested values. For example, Chromium at 125% page zoom delivers a 120-unit
-input as a 96-unit DOM wheel delta. A page can also prevent the default scroll
+requested values (for example, Chromium < 158 at 125% page zoom delivers a
+120-unit input as a 96-unit DOM wheel delta, whereas Chromium 158+ preserves
+CSS-pixel deltas across browser zoom). A page can also prevent the default scroll
 or use the event to zoom a control. Browser behavior is preserved.
 
 Example result:

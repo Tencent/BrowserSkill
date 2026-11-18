@@ -642,6 +642,173 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             const unchangedAfterNav = await runCli("sync", ...scope);
             expect(unchangedAfterNav.exitCode).toBe(0);
             expect(unchangedAfterNav.body.vom).toContain("OTP Submitted");
+
+            // 7. Verify both offscreen creation failure and Chrome 157+ packed/policy
+            // `kRestrictedError` on `video-offscreen.html` fall back cleanly and cache
+            // non-transient restrictions across `NativeInputClock` invalidations (#742).
+            await expect
+              .poll(
+                async () => {
+                  const reply = await send<{ result: { value: boolean } }>(
+                    "Runtime.evaluate",
+                    {
+                      expression: "chrome.offscreen.hasDocument()",
+                      returnByValue: true,
+                      awaitPromise: true,
+                    },
+                    worker.sessionId,
+                  );
+                  return reply.result.value;
+                },
+                { timeout: 5000 },
+              )
+              .toBe(false);
+            const hookReply = await send<{ exceptionDetails?: unknown }>(
+              "Runtime.evaluate",
+              {
+                expression: `(() => {
+                  const offscreenUrl = chrome.runtime.getURL('video-offscreen.html');
+                  const originalPerfNow = performance.now.bind(performance);
+                  const originalCreate = chrome.offscreen.createDocument.bind(chrome.offscreen);
+                  const originalAttach = chrome.debugger.attach.bind(chrome.debugger);
+                  const originalGetTargets = chrome.debugger.getTargets.bind(chrome.debugger);
+                  let perfShiftMs = 0;
+                  let failNextCreate = true;
+                  globalThis.__bskForceRecalibrate = () => { perfShiftMs += 65_000; };
+                  globalThis.__bskOffscreenCreateAttempts = 0;
+                  globalThis.__bskOffscreenAttachAttempts = 0;
+                  performance.now = () => originalPerfNow() + perfShiftMs;
+                  chrome.offscreen.createDocument = async (params) => {
+                    if (failNextCreate) {
+                      failNextCreate = false;
+                      throw new Error('Only a single offscreen document may be created.');
+                    }
+                    globalThis.__bskOffscreenCreateAttempts++;
+                    return originalCreate(params);
+                  };
+                  chrome.debugger.attach = async (target, version) => {
+                    if (target.targetId) {
+                      const targets = await originalGetTargets();
+                      if (targets.some((item) => item.id === target.targetId && item.url === offscreenUrl)) {
+                        globalThis.__bskOffscreenAttachAttempts++;
+                        throw new Error('Cannot attach to this target.');
+                      }
+                    }
+                    return originalAttach(target, version);
+                  };
+                })()`,
+                returnByValue: true,
+              },
+              worker.sessionId,
+            );
+            expect(hookReply.exceptionDetails).toBeUndefined();
+            const forceRecalibrate = async () => {
+              const reply = await send<{ exceptionDetails?: unknown }>(
+                "Runtime.evaluate",
+                { expression: "globalThis.__bskForceRecalibrate()", returnByValue: true },
+                worker.sessionId,
+              );
+              expect(reply.exceptionDetails).toBeUndefined();
+            };
+            const readProbeCounts = async () => {
+              const reply = await send<{
+                result: { value: { creates: number; attaches: number } };
+                exceptionDetails?: unknown;
+              }>(
+                "Runtime.evaluate",
+                {
+                  expression:
+                    "({ creates: globalThis.__bskOffscreenCreateAttempts, attaches: globalThis.__bskOffscreenAttachAttempts })",
+                  returnByValue: true,
+                },
+                worker.sessionId,
+              );
+              expect(reply.exceptionDetails).toBeUndefined();
+              return reply.result.value;
+            };
+
+            expect(
+              (
+                await runCli(
+                  "navigate",
+                  url,
+                  ...scope,
+                  "--context",
+                  unchangedAfterNav.body.context_id,
+                  "--observation",
+                  unchangedAfterNav.body.observation_id,
+                )
+              ).exitCode,
+            ).toBe(0);
+            const createFallbackSync = await mcp.run("bsk_session", { action: "sync", session });
+            await forceRecalibrate();
+            const stepped = await runCli(
+              "step",
+              ...scope,
+              "--action",
+              "click",
+              "--params",
+              JSON.stringify({ selector: "#tab-anomalies" }),
+              "--context",
+              createFallbackSync.context_id,
+              "--observation",
+              createFallbackSync.observation_id,
+            );
+            expect(stepped.exitCode, JSON.stringify(stepped)).toBe(0);
+            expect(stepped.body).toMatchObject({ ok: true });
+            expect(await readProbeCounts()).toEqual({ creates: 0, attaches: 0 });
+
+            const restrictedSync = await mcp.run("bsk_session", { action: "sync", session });
+            await forceRecalibrate();
+            expect(
+              (
+                await runCli(
+                  "wheel",
+                  "--delta-y",
+                  "120",
+                  ...scope,
+                  "--context",
+                  restrictedSync.context_id,
+                  "--observation",
+                  restrictedSync.observation_id,
+                )
+              ).exitCode,
+            ).toBe(0);
+            const afterWheelSync = await mcp.run("bsk_session", { action: "sync", session });
+            expect(
+              (
+                await runCli(
+                  "press",
+                  "Tab",
+                  ...scope,
+                  "--context",
+                  afterWheelSync.context_id,
+                  "--observation",
+                  afterWheelSync.observation_id,
+                )
+              ).exitCode,
+            ).toBe(0);
+            expect((await runCli("cooperate", "status", ...scope)).body).toMatchObject({
+              ready: true,
+              state: { mode: "ready" },
+            });
+            expect((await runCli("ledger", "status", ...scope)).body.frozen).toBe(false);
+            expect(await readProbeCounts()).toEqual({ creates: 1, attaches: 1 });
+
+            const cachedRestrictedSync = await mcp.run("bsk_session", { action: "sync", session });
+            await forceRecalibrate();
+            expect(
+              (
+                await runCli(
+                  "click",
+                  "#apply",
+                  ...scope,
+                  "--context",
+                  cachedRestrictedSync.context_id,
+                )
+              ).exitCode,
+            ).toBe(0);
+            expect(await readProbeCounts()).toEqual({ creates: 1, attaches: 1 });
           } finally {
             if (session) await runCli("session", "stop", session).catch(() => {});
             await mcp.dispose();
