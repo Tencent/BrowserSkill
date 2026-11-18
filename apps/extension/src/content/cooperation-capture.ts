@@ -17,7 +17,7 @@ import {
 } from "@/cooperation/types";
 import { createRandomUuid } from "@/lib/random-uuid";
 import {
-  hasAddedSubframeElement,
+  isExtensionOverlayElement,
   isExtensionOverlayEvent,
   isExtensionOverlayNode,
   isInternalBskAttribute,
@@ -27,6 +27,8 @@ import {
   openOrClosedShadowRoot,
   primaryEventTarget,
   resolveDeepActiveElement,
+  SUBFRAME_OWNER_TAGS,
+  uncheckedElementShadowRoot,
 } from "./dom-primitives";
 
 const MAX_CHANGES = 64;
@@ -182,8 +184,27 @@ export function attachCooperationCapture() {
   const schedule = () => {
     if (!timer) timer = setTimeout(publish, 60);
   };
+  const DATA_ATTR_RE = /data-[-\w]+/gi;
+  const collectDataAttrs = (source: string | null | undefined, into: Set<string>) => {
+    if (!source || !/data-/i.test(source)) return;
+    for (const match of source.matchAll(DATA_ATTR_RE)) into.add(match[0].toLowerCase());
+  };
+  const nonOverlayElements: NodeFilter = {
+    acceptNode: (node) =>
+      isExtensionOverlayElement(node as Element)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT,
+  };
+  const nonOverlayTextAndElements: NodeFilter = {
+    acceptNode: (node) =>
+      node.nodeType === 1 && isExtensionOverlayElement(node as Element)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT,
+  };
   const roots = new Set<Document | ShadowRoot>();
-  let styles: { key: string; readable: boolean; text: string; focus: string[] } | undefined;
+  let styles:
+    | { key: string; readable: boolean; dataAttrs: Set<string>; focus: string[] }
+    | undefined;
   /** What the page's style sheets say about attributes and focus. Unreadable sheets say nothing. */
   const styleFacts = () => {
     const sheets = [...roots].flatMap((root) => [
@@ -201,11 +222,31 @@ export function attachCooperationCapture() {
     // missed until a count changes; hash the rule text if that ever matters.
     const key = top.map((rules) => rules?.length ?? -1).join();
     if (styles?.key === key) return styles;
-    const facts = { key, readable: top.every(Boolean), text: "", focus: [] as string[] };
-    const walk = (rules: CSSRuleList, outer: boolean) => {
+    const readable = top.every(Boolean);
+    const facts = { key, readable, dataAttrs: new Set<string>(), focus: [] as string[] };
+    if (!readable) {
+      styles = facts;
+      return facts;
+    }
+    const walk = (rules: CSSRuleList) => {
       for (const rule of rules) {
-        if (outer) facts.text += `${rule.cssText.toLowerCase()}\n`;
+        if (!facts.readable) return;
+        // Skip @font-face (5) and @keyframes (7), which cannot select DOM attributes or :focus.
+        if (rule.type === 5 || rule.type === 7) continue;
         const { selectorText, style } = rule as CSSStyleRule;
+        collectDataAttrs(selectorText, facts.dataAttrs);
+        if ("conditionText" in rule) {
+          collectDataAttrs((rule as CSSConditionRule).conditionText, facts.dataAttrs);
+        }
+        if ("start" in rule) {
+          collectDataAttrs((rule as { start?: string | null }).start, facts.dataAttrs);
+        }
+        if ("end" in rule) {
+          collectDataAttrs((rule as { end?: string | null }).end, facts.dataAttrs);
+        }
+        if (style) {
+          collectDataAttrs(style.getPropertyValue?.("content"), facts.dataAttrs);
+        }
         if (selectorText?.includes(":focus")) {
           // Without nesting or functions, each comma-separated selector stands alone.
           const plain = !/[(&]/.test(selectorText);
@@ -224,45 +265,60 @@ export function attachCooperationCapture() {
         try {
           if ("styleSheet" in rule) {
             const imported = (rule as CSSImportRule).styleSheet;
-            if (imported) walk(imported.cssRules, true);
-            else facts.readable = false;
+            if (imported) walk(imported.cssRules);
+            else {
+              facts.readable = false;
+              return;
+            }
           }
           const nested = (rule as CSSGroupingRule).cssRules;
-          if (nested) walk(nested, false);
+          if (nested && facts.readable) walk(nested);
         } catch {
           facts.readable = false;
+          return;
         }
       }
     };
-    for (const rules of top) if (rules) walk(rules, true);
+    for (const rules of top) {
+      if (!facts.readable) break;
+      if (rules) walk(rules);
+    }
     styles = facts;
     return facts;
   };
   /** No style that applies because of the current focus may show or hide content. */
   const focusNeutral = () => {
     const facts = styleFacts();
-    return (
-      facts.readable &&
-      !facts.focus.some((selector) => {
-        try {
-          return selector.includes("&") || [...roots].some((root) => root.querySelector(selector));
-        } catch {
-          return true;
-        }
-      })
-    );
+    if (!facts.readable) return false;
+    if (!facts.focus.length) return true;
+    if (
+      facts.focus.every((selector) => !selector.includes("&")) &&
+      [...roots].every((root) => !root.querySelector(":focus"))
+    ) {
+      return true;
+    }
+    return !facts.focus.some((selector) => {
+      try {
+        return selector.includes("&") || [...roots].some((root) => root.querySelector(selector));
+      } catch {
+        return true;
+      }
+    });
   };
   /** An attribute write the observation cannot see: unchanged, or page-private data no style reads. */
   const invisibleAttribute = (r: MutationRecord) => {
     const name = r.attributeName?.toLowerCase() ?? "";
     if (isInternalBskAttribute(name)) return true;
     if (r.target instanceof Element && r.target.getAttribute(name) === r.oldValue) return true;
-    if (!name.startsWith("data-") || OBSERVED_DATA_ATTRIBUTES.has(name)) return false;
+    if (!/^data-[-\w]+$/.test(name) || OBSERVED_DATA_ATTRIBUTES.has(name)) return false;
     const facts = styleFacts();
-    return facts.readable && !facts.text.includes(name);
+    return facts.readable && !facts.dataAttrs.has(name);
   };
   /** Prose whose replacement changes its own line and the names derived from it, nothing else. */
-  const plainText = (parent: Element) => {
+  const plainText = (
+    parent: Element,
+    referencedByRoot: Map<Document | ShadowRoot, Set<string>>,
+  ) => {
     if (
       parent.closest(NOT_PLAIN_TEXT) ||
       (parent instanceof HTMLElement && parent.isContentEditable)
@@ -271,13 +327,17 @@ export function attachCooperationCapture() {
     const transform = getComputedStyle(parent).textTransform;
     if (transform && transform !== "none") return false;
     const root = parent.getRootNode() as Document | ShadowRoot;
-    const referenced = new Set(
-      [...root.querySelectorAll("[aria-labelledby],[aria-describedby]")].flatMap((element) =>
-        `${element.getAttribute("aria-labelledby") ?? ""} ${element.getAttribute("aria-describedby") ?? ""}`.split(
-          /\s+/,
+    let referenced = referencedByRoot.get(root);
+    if (!referenced) {
+      referenced = new Set(
+        [...root.querySelectorAll("[aria-labelledby],[aria-describedby]")].flatMap((element) =>
+          `${element.getAttribute("aria-labelledby") ?? ""} ${element.getAttribute("aria-describedby") ?? ""}`.split(
+            /\s+/,
+          ),
         ),
-      ),
-    );
+      );
+      referencedByRoot.set(root, referenced);
+    }
     for (let element: Element | null = parent; element; element = element.parentElement)
       if (element.id && referenced.has(element.id)) return false;
     return true;
@@ -289,9 +349,10 @@ export function attachCooperationCapture() {
   const textChanges = (records: MutationRecord[]): Omit<TextChange, "sequence">[] | undefined => {
     const replaced = new Map<Text, string>();
     const removals = new Map<Node, MutationRecord>();
+    const attributeRecords: MutationRecord[] = [];
     for (const r of records) {
       if (r.type === "attributes") {
-        if (!invisibleAttribute(r)) return;
+        attributeRecords.push(r);
         continue;
       }
       let node: Node | undefined = r.target;
@@ -325,7 +386,11 @@ export function attachCooperationCapture() {
       if (!replaced.has(node)) replaced.set(node, before);
     }
     if (removals.size) return;
+    for (const r of attributeRecords) {
+      if (!invisibleAttribute(r)) return;
+    }
     const changes: Omit<TextChange, "sequence">[] = [];
+    const referencedByRoot = new Map<Document | ShadowRoot, Set<string>>();
     for (const [node, before] of replaced) {
       const parent = node.parentElement;
       const previous = cleanText(before);
@@ -337,7 +402,7 @@ export function attachCooperationCapture() {
         !value ||
         previous.length > MAX_TEXT ||
         value.length > MAX_TEXT ||
-        !plainText(parent)
+        !plainText(parent, referencedByRoot)
       )
         return;
       changes.push({
@@ -365,21 +430,28 @@ export function attachCooperationCapture() {
       burst = 0;
     }
     if (++burst > 10) return false;
-    for (const root of roots)
-      for (const parent of [root, ...root.querySelectorAll("*")]) {
-        if (isExtensionOverlayNode(parent)) continue;
-        for (const child of parent.childNodes)
-          if (isText(child) && texts.has(cleanText(child.data))) return false;
-        if (parent instanceof Element)
-          for (const name of ["aria-label", "title", "alt", "placeholder", "value"]) {
-            const value = parent.getAttribute(name);
-            if (value && texts.has(cleanText(value))) return false;
-          }
+    for (const root of roots) {
+      const walker = document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+        nonOverlayTextAndElements,
+      );
+      for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+        if (isText(current)) {
+          if (texts.has(cleanText(current.data))) return false;
+          continue;
+        }
+        const element = current as Element;
+        for (const name of ["aria-label", "title", "alt", "placeholder", "value"]) {
+          const value = element.getAttribute(name);
+          if (value && texts.has(cleanText(value))) return false;
+        }
       }
+    }
     return true;
   };
-  const notifySubframesIfAdded = (records: MutationRecord[]) => {
-    if (!enabled || subframeNotifyScheduled || !hasAddedSubframeElement(records)) return;
+  const scheduleSubframeNotify = () => {
+    if (!enabled || subframeNotifyScheduled) return;
     subframeNotifyScheduled = true;
     queueMicrotask(() => {
       subframeNotifyScheduled = false;
@@ -390,17 +462,43 @@ export function attachCooperationCapture() {
   // Page JS cannot see closed roots, but the extension can. Observation also
   // traverses these roots, so source and focus guards must cover the same DOM.
   const shadowRoot = (element: Element): ShadowRoot | null => openOrClosedShadowRoot(element);
+  const scanAddedSubtree = (target: Element | ShadowRoot, visited: Set<Node>): boolean => {
+    if (visited.has(target)) return false;
+    visited.add(target);
+    let foundSubframe = false;
+    if (target instanceof ShadowRoot) {
+      observeRoot(target);
+    } else {
+      if (isExtensionOverlayElement(target)) return false;
+      if (SUBFRAME_OWNER_TAGS.has(target.localName)) foundSubframe = true;
+      const nested = uncheckedElementShadowRoot(target);
+      if (nested && scanAddedSubtree(nested, visited)) foundSubframe = true;
+    }
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_ELEMENT, nonOverlayElements);
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+      if (visited.has(current)) continue;
+      visited.add(current);
+      const element = current as Element;
+      if (SUBFRAME_OWNER_TAGS.has(element.localName)) foundSubframe = true;
+      const nested = uncheckedElementShadowRoot(element);
+      if (nested && scanAddedSubtree(nested, visited)) foundSubframe = true;
+    }
+    return foundSubframe;
+  };
   const mutations = (records: MutationRecord[]) => {
     markFormerPasswords(records);
     if (enabled) {
+      const visited = new Set<Node>();
+      let addedSubframe = false;
       for (const r of records) {
         if (r.type !== "childList" || isExtensionOverlayNode(r.target)) continue;
         for (const node of r.addedNodes) {
-          if (node instanceof Element) observeShadowSubtree(node);
+          if (!(node instanceof Element) || isExtensionOverlayNode(node)) continue;
+          if (scanAddedSubtree(node, visited)) addedSubframe = true;
         }
       }
+      if (addedSubframe) scheduleSubframeNotify();
     }
-    notifySubframesIfAdded(records);
     if (!enabled || !lease) return;
     const seen = records.filter((r) => !isInternalBskMutation(r));
     if (!seen.length) return;
@@ -435,22 +533,31 @@ export function attachCooperationCapture() {
       observeRoot(target as Document | ShadowRoot);
     } else if (target instanceof Element) {
       if (isExtensionOverlayNode(target)) return;
-      const nested = shadowRoot(target);
+      const nested = uncheckedElementShadowRoot(target);
       if (nested) observeShadowSubtree(nested);
     }
-    for (const element of target.querySelectorAll("*")) {
-      if (isExtensionOverlayNode(element)) continue;
-      const nested = shadowRoot(element);
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_ELEMENT, nonOverlayElements);
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+      const nested = uncheckedElementShadowRoot(current as Element);
       if (nested) observeShadowSubtree(nested);
     }
   };
   const activeElement = () => resolveDeepActiveElement(document, shadowRoot);
   const controls = function* (root: Document | ShadowRoot): Generator<Element> {
     observeRoot(root);
-    for (const element of root.querySelectorAll("*")) {
-      if (isExtensionOverlayNode(element)) continue;
-      if (element.matches("input,textarea,select,[contenteditable=true]")) yield element;
-      const nested = shadowRoot(element);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, nonOverlayElements);
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+      const element = current as Element;
+      const tag = element.localName;
+      if (
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        element.getAttribute("contenteditable") === "true"
+      ) {
+        yield element;
+      }
+      const nested = uncheckedElementShadowRoot(element);
       if (nested) yield* controls(nested);
     }
   };
@@ -943,14 +1050,25 @@ export function attachCooperationCapture() {
     }
   };
   const onMessage = (
-    message: { kind?: string; input?: InputExpectation; lease?: string },
+    message: {
+      kind?: string;
+      input?: InputExpectation;
+      lease?: string;
+      includeDeclaredSrc?: boolean;
+    },
     _sender: chrome.runtime.MessageSender,
     reply: (value: unknown) => void,
   ) => {
     if (message.kind === COOPERATION_OWNERS) {
       // Layout facts for proving a child frame hidden. It grants nothing, so it
       // needs no lease and leaves collection state untouched.
-      reply(describeFrameOwners(document, shadowRoot));
+      reply(
+        describeFrameOwners(
+          document,
+          shadowRoot,
+          message.includeDeclaredSrc ? { includeDeclaredSrc: true } : undefined,
+        ),
+      );
       return false;
     }
     if (message.kind === COOPERATION_ARM_FRAME) {

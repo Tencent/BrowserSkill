@@ -243,12 +243,27 @@ async function captureFullTabPng(
       cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       await cdp.ensureAttachedToUrl?.(target.tabId, target.url);
       if (signal?.aborted) return cancelled("screenshot");
-      const shot = await withAuraCompositorKeepalive(cdp, target.tabId, true, signal, () =>
-        cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
-          format: "png",
-          fromSurface: true,
-        }),
-      );
+      const shot = await withAuraCompositorKeepalive(cdp, target.tabId, true, signal, async () => {
+        let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const pending = cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
+            format: "png",
+            fromSurface: true,
+          });
+          void pending?.catch?.(() => {});
+          return await Promise.race([
+            pending,
+            new Promise<never>((_, reject) => {
+              fallbackTimer = setTimeout(
+                () => reject(new Error("Viewport capture timed out")),
+                10_500,
+              );
+            }),
+          ]);
+        } finally {
+          clearTimeout(fallbackTimer);
+        }
+      });
       if (signal?.aborted) return cancelled("screenshot");
       if (shot.data) return shot.data;
       fallbackMsg = "Page.captureScreenshot returned no data";

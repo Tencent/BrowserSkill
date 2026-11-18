@@ -1,5 +1,4 @@
 import {
-  BSK_OVERLAY_SELECTOR,
   OVERLAY_HOST_LEGACY_ATTR,
   RECORD_PASSWORD_ATTRIBUTE,
   sensitiveAutocomplete,
@@ -20,6 +19,43 @@ export function isExtensionOverlayElement(element: Element): boolean {
   );
 }
 
+const SHADOW_HOST_HTML_TAGS = new Set([
+  "article",
+  "aside",
+  "blockquote",
+  "body",
+  "div",
+  "footer",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "main",
+  "nav",
+  "p",
+  "section",
+  "span",
+]);
+
+export function canHostShadowRoot(localName: string): boolean {
+  return localName.includes("-") || SHADOW_HOST_HTML_TAGS.has(localName);
+}
+
+/**
+ * Resolves an element's open or closed `ShadowRoot` without walking ancestors.
+ * Callers must already have excluded extension overlay elements.
+ */
+export function uncheckedElementShadowRoot(element: Element): ShadowRoot | null {
+  if (element.shadowRoot) return element.shadowRoot;
+  if (!(element instanceof HTMLElement) || !canHostShadowRoot(element.localName)) {
+    return null;
+  }
+  return globalThis.chrome?.dom?.openOrClosedShadowRoot?.(element) ?? null;
+}
+
 /**
  * True when `target` is the extension's `<browser-skill-overlay>` host, any
  * `[data-bsk-overlay]` subtree, or any node inside its open/closed ShadowRoot.
@@ -32,17 +68,10 @@ export function isExtensionOverlayNode(target: EventTarget | null): boolean {
       current = current.host;
       continue;
     }
-    if (current instanceof Element) {
-      if (isExtensionOverlayElement(current) || current.closest(BSK_OVERLAY_SELECTOR)) {
-        return true;
-      }
+    if (current instanceof Element && isExtensionOverlayElement(current)) {
+      return true;
     }
-    const root: Node = current.getRootNode();
-    if (root instanceof ShadowRoot) {
-      current = root.host;
-    } else {
-      current = current instanceof Element ? null : current.parentElement;
-    }
+    current = current.parentNode;
   }
   return false;
 }
@@ -56,12 +85,7 @@ export function isExtensionOverlayEvent(event: Event): boolean {
 
 export function openOrClosedShadowRoot(element: Element): ShadowRoot | null {
   if (isExtensionOverlayNode(element)) return null;
-  return (
-    element.shadowRoot ??
-    (element instanceof HTMLElement
-      ? (globalThis.chrome?.dom?.openOrClosedShadowRoot?.(element) ?? null)
-      : null)
-  );
+  return uncheckedElementShadowRoot(element);
 }
 
 export function resolveDeepActiveElement(
@@ -138,33 +162,45 @@ export function isSensitiveFormField(
   );
 }
 
-const SUBFRAME_OWNER_SELECTOR = "iframe,frame,object,embed,fencedframe";
-const SUBFRAME_OWNER_TAGS = new Set(["iframe", "frame", "object", "embed", "fencedframe"]);
+export const SUBFRAME_OWNER_TAGS = new Set(["iframe", "frame", "object", "embed", "fencedframe"]);
 
-function subtreeHasSubframeElement(root: Element | ShadowRoot): boolean {
+const NON_OVERLAY_ELEMENT_FILTER: NodeFilter = {
+  acceptNode(node) {
+    return isExtensionOverlayElement(node as Element)
+      ? NodeFilter.FILTER_REJECT
+      : NodeFilter.FILTER_ACCEPT;
+  },
+};
+
+function subtreeHasSubframeElement(root: Element | ShadowRoot, visited: Set<Node>): boolean {
+  if (visited.has(root)) return false;
+  visited.add(root);
+  const doc = root.ownerDocument ?? document;
   if (root instanceof Element) {
-    if (isExtensionOverlayNode(root)) return false;
+    if (isExtensionOverlayElement(root)) return false;
     if (SUBFRAME_OWNER_TAGS.has(root.localName)) return true;
-    const nestedShadow = openOrClosedShadowRoot(root);
-    if (nestedShadow && subtreeHasSubframeElement(nestedShadow)) return true;
+    const nestedShadow = uncheckedElementShadowRoot(root);
+    if (nestedShadow && subtreeHasSubframeElement(nestedShadow, visited)) return true;
   }
-  for (const match of root.querySelectorAll(SUBFRAME_OWNER_SELECTOR)) {
-    if (!isExtensionOverlayNode(match)) return true;
-  }
-  for (const element of root.querySelectorAll("*")) {
-    if (isExtensionOverlayNode(element)) continue;
-    const nestedShadow = openOrClosedShadowRoot(element);
-    if (nestedShadow && subtreeHasSubframeElement(nestedShadow)) return true;
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, NON_OVERLAY_ELEMENT_FILTER);
+  for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const element = current as Element;
+    if (SUBFRAME_OWNER_TAGS.has(element.localName)) return true;
+    const nestedShadow = uncheckedElementShadowRoot(element);
+    if (nestedShadow && subtreeHasSubframeElement(nestedShadow, visited)) return true;
   }
   return false;
 }
 
 export function hasAddedSubframeElement(records: MutationRecord[]): boolean {
+  const visited = new Set<Node>();
   for (const record of records) {
     if (record.type !== "childList" || isExtensionOverlayNode(record.target)) continue;
     for (const node of record.addedNodes) {
-      if (!(node instanceof Element)) continue;
-      if (subtreeHasSubframeElement(node)) return true;
+      if (!(node instanceof Element) || isExtensionOverlayNode(node)) continue;
+      if (subtreeHasSubframeElement(node, visited)) return true;
     }
   }
   return false;

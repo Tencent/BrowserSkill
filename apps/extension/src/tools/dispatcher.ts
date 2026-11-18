@@ -2,6 +2,7 @@ import type { CooperationController } from "@/cooperation/controller";
 import type { DebugManager, DebugTicket } from "@/debug/manager";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
+import { sendTabMessageBounded } from "@/lib/runtime-content-scripts";
 import { ScreenshotExports } from "@/long-screenshot/exports";
 import {
   isAgentControlledTab,
@@ -1518,7 +1519,7 @@ function sessionIdForBrowserControlMethod(req: ToolRequest): string | null {
 
 async function bypassOverlay(tabId: number, enabled: boolean): Promise<void> {
   try {
-    await chrome.tabs.sendMessage(tabId, {
+    await sendTabMessageBounded(tabId, {
       type: OVERLAY_AUTOMATION_BYPASS,
       enabled,
     });

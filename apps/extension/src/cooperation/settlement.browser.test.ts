@@ -828,3 +828,499 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
   },
   60000,
 );
+
+it.skipIf(!process.env.BSK_TEST_CHROME)(
+  "synchronizes heavy main frames (>3s) alongside silent hidden cross-origin refresh iframes and escapes wedged renderers via navigate",
+  async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "bsk-coop-766-"));
+    const executable = path.resolve(process.env.BSK_TEST_CLI ?? defaultCli);
+    const fixtureHome = path.join(directory, "user");
+    const env = {
+      ...process.env,
+      HOME: fixtureHome,
+      USERPROFILE: fixtureHome,
+      KIMI_CODE_HOME: path.join(fixtureHome, ".kimi-code"),
+      HERMES_HOME: path.join(fixtureHome, ".hermes"),
+      DSH_HOME: path.join(fixtureHome, ".dsh"),
+      CODEX_HOME: path.join(fixtureHome, ".codex"),
+      BSK_HOME: path.join(directory, "state"),
+      BSK_AUTO_START: "0",
+      BSK_AUTO_UPDATE: "off",
+    };
+    for (const key of [
+      "BSK_SESSION",
+      "BSK_SCOPE",
+      "CLAUDE_CODE_AGENT_ID",
+      "CODEX_THREAD_ID",
+      "ANTIGRAVITY_CONVERSATION_ID",
+      "CURSOR_TRACE_ID",
+      "DSH_SESSION_ID",
+    ]) {
+      delete (env as NodeJS.ProcessEnv)[key];
+    }
+    const daemon = spawn(executable, ["daemon", "start", "--foreground", "--port", "0"], {
+      env,
+      stdio: "ignore",
+    });
+
+    const largeInlineCss = Array.from(
+      { length: 400 },
+      (_, idx) => `.cell-${idx} { padding: ${(idx % 4) + 1}px; }`,
+    ).join("\n");
+    const largeGridRows = Array.from(
+      { length: 300 },
+      (_, idx) => `<div class="cell-${idx}"><span>Row ${idx}</span></div>`,
+    ).join("");
+
+    const server = createServer((request, response) => {
+      const serverPort = (server.address() as { port: number }).port;
+      if (request.url === "/app.css") {
+        // Cross-origin stylesheet intentionally served without Access-Control-Allow-Origin
+        // so `sheet.cssRules` throws SecurityError on CDN-styled apps like Lark Base.
+        response.setHeader("Content-Type", "text/css; charset=utf-8");
+        response.end("body { font-family: sans-serif; }");
+        return;
+      }
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      if (request.url === "/widget") {
+        response.end(
+          '<!doctype html><label>Widget filter <input id="widget-input" aria-label="Widget filter" value="open"></label>',
+        );
+        return;
+      }
+      if (request.url === "/session-tools/refresh") {
+        // Cross-site hidden session-refresh iframe whose renderer stops answering IPC.
+        response.end(
+          "<!doctype html><p>session-refresh</p><script>setTimeout(() => { for (;;) {} }, 80)</script>",
+        );
+        return;
+      }
+      if (request.url === "/wedged") {
+        response.end(
+          "<!doctype html><title>Wedged Page</title><h1>Wedged</h1><script>setTimeout(() => { for (;;) {} }, 80)</script>",
+        );
+        return;
+      }
+      if (request.url === "/wedged-early") {
+        response.end("<!doctype html><title>Wedged Early</title><script>for (;;) {}</script>");
+        return;
+      }
+      const parsed = new URL(request.url ?? "/", `http://127.0.0.1:${serverPort}`);
+      if (parsed.pathname === "/slow-pixel") {
+        setTimeout(() => {
+          response.setHeader("Content-Type", "image/gif");
+          response.end(
+            Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64"),
+          );
+        }, 250);
+        return;
+      }
+      if (parsed.pathname === "/record-wedged-child") {
+        response.end(`<!doctype html><title>Record With Wedged Child</title>
+          <button id="rec-btn" type="button">Record Action</button>
+          <img src="/slow-pixel" alt="">
+          <iframe src="http://accounts-rec.test:${serverPort}/session-tools/refresh" style="display:none"></iframe>`);
+        return;
+      }
+      if (parsed.pathname === "/escaped") {
+        const nextHost = parsed.searchParams.get("next") ?? "wedged3.test";
+        response.end(
+          `<!doctype html><title>Escaped</title><h1>Escaped Healthy Page</h1><button id="ok" type="button">Continue</button><a id="open-wedged" href="http://${nextHost}:${serverPort}/wedged-early">Open wedged</a>`,
+        );
+        return;
+      }
+      const hydrateMs = Number(parsed.searchParams.get("hydrate") ?? "0");
+      response.end(`<!doctype html>
+        <head>
+          <title>Lark Base Loading</title>
+          <link rel="stylesheet" href="http://cdn.test:${serverPort}/app.css">
+          <style>
+            @keyframes pulse { from { opacity: 1; } to { opacity: 0.8; } }
+            [data-row-selected="true"] { font-weight: 600; }
+            ${largeInlineCss}
+          </style>
+        </head>
+        <body>
+          <h1>Lark Base Table</h1>
+          <button id="add-row" type="button">Add record</button>
+          <output id="row-count">0</output>
+          <object type="image/svg+xml" style="display:none"></object>
+          <iframe id="widget" src="http://widgets.test:${serverPort}/widget" style="width:220px;height:60px"></iframe>
+          <iframe id="session-refresh" src="http://accounts.test:${serverPort}/session-tools/refresh"
+            style="pointer-events:none;position:fixed;left:-9999px;top:-9999px;width:8px;height:8px;border:0"></iframe>
+          <div id="grid">${largeGridRows}</div>
+          <script>
+            document.getElementById('add-row').addEventListener('click', () => {
+              const out = document.getElementById('row-count');
+              out.textContent = String(Number(out.textContent) + 1);
+            });
+            if (${hydrateMs} > 0) {
+              setTimeout(() => {
+                const deadline = Date.now() + ${hydrateMs};
+                while (Date.now() < deadline) {}
+                document.title = 'Lark Base Ready';
+              }, 80);
+            } else {
+              document.title = 'Lark Base Ready';
+            }
+          </script>
+        </body>`);
+    });
+
+    const runCli = async (...args: string[]) => {
+      try {
+        const { stdout } = await promisify(execFile)(executable, [...args, "--json"], {
+          env,
+          timeout: 45000,
+        });
+        return { exitCode: 0, body: JSON.parse(stdout) };
+      } catch (error) {
+        const failed = error as { code?: number; stdout?: string };
+        if (failed.stdout) {
+          return { exitCode: failed.code ?? 1, body: JSON.parse(failed.stdout) };
+        }
+        throw error;
+      }
+    };
+
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const serverPort = (server.address() as { port: number }).port;
+      const baseUrl = `http://127.0.0.1:${serverPort}`;
+      let wsPort = 0;
+      await expect
+        .poll(
+          async () => {
+            try {
+              wsPort = JSON.parse(
+                await readFile(path.join(env.BSK_HOME, "daemon.json"), "utf8"),
+              ).ws_port;
+              return wsPort;
+            } catch {
+              return 0;
+            }
+          },
+          { timeout: 15000 },
+        )
+        .toBeGreaterThan(0);
+
+      const { copyPairingExtension, pairLocalBrowser } = await import(
+        new URL("../../../../evals/browser/local-pairing.mjs", import.meta.url).href
+      );
+      const distPath = fileURLToPath(new URL("../../dist/chrome-mv3", import.meta.url));
+      const extension = await copyPairingExtension(
+        distPath,
+        path.join(directory, "extension"),
+        wsPort,
+      );
+      const manifestPath = path.join(extension, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.name = "BrowserSkill #766 unresponsive frame regression";
+      await writeFile(manifestPath, JSON.stringify(manifest));
+
+      const { withChrome } = await import(
+        new URL(
+          "../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+          import.meta.url,
+        ).href
+      );
+
+      await withChrome(
+        {
+          executable: process.env.BSK_TEST_CHROME,
+          extensionPath: extension,
+          extensionViaCdp: process.env.BSK_TEST_LOAD_CDP === "1",
+          deviceScale: 1,
+          zoom: 1,
+          extraArgs: [
+            "--host-resolver-rules=MAP accounts.test 127.0.0.1,MAP accounts-rec.test 127.0.0.1,MAP widgets.test 127.0.0.1,MAP cdn.test 127.0.0.1,MAP wedged1.test 127.0.0.1,MAP wedged2.test 127.0.0.1,MAP wedged3.test 127.0.0.1,MAP wedged4.test 127.0.0.1,MAP healthy.test 127.0.0.1",
+            "--no-proxy-server",
+            "--disable-features=HttpsUpgrades",
+          ],
+        },
+        async (send: BrowserSend) => {
+          const worker = await attachVideoBackground(send, manifest.name);
+          await pairLocalBrowser(send, { executable, env, worker });
+          await expect
+            .poll(async () => (await runCli("browsers")).body.length, { timeout: 15000 })
+            .toBeGreaterThan(0);
+
+          const started = await runCli("session", "start");
+          expect(started.exitCode).toBe(0);
+          const session = started.body.session_id as string;
+          const scope = ["--session", session];
+
+          try {
+            // 1. Heavy workspace: Frame 0 blocks for 4s (> default 3s FRAME_REPLY_TIMEOUT_MS),
+            // while cross-origin `accounts.test/session-tools/refresh` spins forever alongside
+            // a visible cross-origin `widgets.test/widget` iframe and an <object> placeholder.
+            const navHeavy = await runCli(
+              "navigate",
+              `${baseUrl}/workspace?hydrate=4000`,
+              "--wait-until",
+              "load",
+              ...scope,
+            );
+            expect(navHeavy.exitCode, JSON.stringify(navHeavy)).toBe(0);
+            // Let the 80ms timer enter both Frame 0's 4s hydration block and the refresh iframe spin.
+            await new Promise((resolve) => setTimeout(resolve, 250));
+
+            const syncStarted = Date.now();
+            const coopSync = await runCli("cooperate", "sync", "--timeout-ms", "15000", ...scope);
+            const syncElapsed = Date.now() - syncStarted;
+            expect(coopSync.exitCode, JSON.stringify(coopSync)).toBe(0);
+            // Must wait past Frame 0's ~3.75s remaining block (>3s default), retire the
+            // silent hidden refresh iframe right after Frame 0 answers (instead of burning 15s
+            // in collectCooperationFrames on top of the one-time 10s CdpReadGate trip), and
+            // gate subsequent full baseline snapshots to complete without waiting again.
+            expect(syncElapsed).toBeLessThan(21000);
+            expect(coopSync.body.observation.text).toContain("Add record");
+            expect(coopSync.body.observation.text).toContain("Widget filter");
+            expect(coopSync.body.frame_gaps).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  url: `http://accounts.test:${serverPort}/session-tools/refresh`,
+                  reason: "hidden_frame",
+                }),
+              ]),
+            );
+
+            // Subsequent zero-ceremony `bsk sync --timeout-ms 15000` and budget-switching
+            // baseline `cooperate sync` reuse hidden-frame memory + CdpReadGate without waiting.
+            const fastStart = Date.now();
+            const quickSync = await runCli("sync", "--timeout-ms", "15000", ...scope);
+            expect(quickSync.exitCode, JSON.stringify(quickSync)).toBe(0);
+            expect(Date.now() - fastStart).toBeLessThan(3000);
+
+            const budgetStart = Date.now();
+            const budgetSync = await runCli(
+              "cooperate",
+              "sync",
+              "--max-tokens",
+              "4000",
+              "--timeout-ms",
+              "15000",
+              ...scope,
+            );
+            expect(budgetSync.exitCode, JSON.stringify(budgetSync)).toBe(0);
+            expect(budgetSync.body.kind).toBe("baseline");
+            expect(Date.now() - budgetStart).toBeLessThan(4000);
+
+            // `bsk evaluate --unverified` and `bsk click` succeed on the synchronized workspace.
+            const evaluated = await runCli("evaluate", "document.title", "--unverified", ...scope);
+            expect(evaluated.exitCode, JSON.stringify(evaluated)).toBe(0);
+            expect(evaluated.body.value).toBe("Lark Base Ready");
+
+            const clicked = await runCli(
+              "click",
+              "#add-row",
+              "--context",
+              budgetSync.body.context_id,
+              ...scope,
+            );
+            expect(clicked.exitCode, JSON.stringify(clicked)).toBe(0);
+            const rowCount = await runCli("read", "--selector", "#row-count", ...scope);
+            expect(rowCount.body.items[0].values.text).toBe("1");
+            expect((await runCli("ledger", "status", ...scope)).body.frozen).toBe(false);
+
+            const shotPath = path.join(directory, "workspace.png");
+            const shot = await runCli("screenshot", "--out", shotPath, ...scope);
+            expect(shot.exitCode, JSON.stringify(shot)).toBe(0);
+
+            // `bsk record start` / `stop` succeeds on a page whose hidden cross-origin
+            // `accounts-rec.test/session-tools/refresh` OOPIF has already wedged before `armTab`.
+            const traceDir = path.join(directory, "record-trace");
+            const recordStart = Date.now();
+            const recordProc = spawn(
+              executable,
+              [
+                "record",
+                "start",
+                "--url",
+                `${baseUrl}/record-wedged-child`,
+                "--output",
+                traceDir,
+                "--json",
+              ],
+              { env, stdio: "ignore" },
+            );
+            const recExited = once(recordProc, "exit");
+            await expect
+              .poll(
+                async () => {
+                  try {
+                    const stateRaw = await readFile(
+                      path.join(env.BSK_HOME, "record-session.json"),
+                      "utf8",
+                    );
+                    return Boolean(JSON.parse(stateRaw).session_id);
+                  } catch {
+                    return false;
+                  }
+                },
+                { timeout: 15000 },
+              )
+              .toBe(true);
+            expect(Date.now() - recordStart).toBeLessThan(13000);
+            const recStopped = await runCli("record", "stop", "--output", traceDir);
+            expect(recStopped.exitCode, JSON.stringify(recStopped)).toBe(0);
+            const [recExitCode] = await recExited;
+            expect(recExitCode).toBe(0);
+
+            // 2. Genuinely wedged main frame (`for (;;) {}`): settled `bsk sync --timeout-ms`
+            // respects its wall-clock deadline without multiplying retries (Sync -> Wait -> Sync),
+            // fails cleanly (`effect_state: "none"`) without freezing the ledger, and `bsk reload`
+            // / `bsk navigate` still escape cleanly even after `bsk snapshot` trips `CdpReadGate`.
+            const preWedged = await runCli("sync", ...scope);
+            expect(preWedged.exitCode, JSON.stringify(preWedged)).toBe(0);
+            const navWedged = await runCli(
+              "navigate",
+              `http://wedged1.test:${serverPort}/wedged`,
+              "--wait-until",
+              "load",
+              "--context",
+              preWedged.body.context_id,
+              "--observation",
+              preWedged.body.observation_id,
+              ...scope,
+            );
+            expect(navWedged.exitCode, JSON.stringify(navWedged)).toBe(0);
+            await new Promise((resolve) => setTimeout(resolve, 250));
+
+            const wedgedSyncStart = Date.now();
+            const wedgedSync = await runCli("sync", "--timeout-ms", "7000", ...scope);
+            const wedgedSyncElapsed = Date.now() - wedgedSyncStart;
+            expect(wedgedSync.exitCode).not.toBe(0);
+            expect(wedgedSyncElapsed).toBeGreaterThanOrEqual(6500);
+            expect(wedgedSyncElapsed).toBeLessThan(12000);
+            expect(wedgedSync.body.message).toContain("A page frame is not responding: 0");
+            expect(wedgedSync.body.data).toMatchObject({
+              reason: "cooperation_sync_required",
+              effect_state: "none",
+            });
+            expect(wedgedSync.body.data.recovery).toContain("navigate or reload");
+            expect((await runCli("ledger", "status", ...scope)).body.frozen).toBe(false);
+
+            // Follow the recovery hint with `bsk snapshot`, tripping `CdpReadGate` on the root target.
+            const firstSnap = await runCli("snapshot", ...scope);
+            expect(firstSnap.exitCode).not.toBe(0);
+            expect(firstSnap.body.data?.reason).toBe("renderer_read_timeout");
+
+            const blockedSnapStart = Date.now();
+            const blockedSnap = await runCli("snapshot", ...scope);
+            expect(blockedSnap.exitCode).not.toBe(0);
+            expect(Date.now() - blockedSnapStart).toBeLessThan(2500);
+            expect(blockedSnap.body.data).toMatchObject({
+              reason: "renderer_read_timeout",
+              phase: "blocked",
+            });
+
+            // Navigating from the `CdpReadGate`-tripped tab to a synchronously wedged destination
+            // with `--timeout 6s` falls back to browser navigation and bounds post-commit handoff.
+            const navEarlyWedgedStart = Date.now();
+            const navEarlyWedged = await runCli(
+              "navigate",
+              `http://wedged2.test:${serverPort}/wedged-early`,
+              "--timeout",
+              "6s",
+              ...scope,
+            );
+            expect(Date.now() - navEarlyWedgedStart).toBeLessThan(11000);
+            expect(navEarlyWedged.exitCode, JSON.stringify(navEarlyWedged)).toBe(4);
+            expect(navEarlyWedged.body.reached).toBe("timeout");
+            expect(navEarlyWedged.body.error_text).toContain("after 6000ms");
+
+            // Escaping with a tight `--timeout 3s` and `--wait-until networkidle` proportions
+            // entry refresh and waits cleanly for `Page.getFrameTree` on the healthy destination.
+            const escaped = await runCli(
+              "navigate",
+              `http://healthy.test:${serverPort}/escaped?next=wedged3.test`,
+              "--wait-until",
+              "networkidle",
+              "--timeout",
+              "3s",
+              ...scope,
+            );
+            expect(escaped.exitCode, JSON.stringify(escaped)).toBe(0);
+            expect(escaped.body.reached).toBe("networkidle");
+
+            const afterEscapeSync = await runCli("sync", ...scope);
+            expect(afterEscapeSync.exitCode, JSON.stringify(afterEscapeSync)).toBe(0);
+            expect(afterEscapeSync.body.vom).toContain("Escaped Healthy Page");
+
+            const escapedTitle = await runCli(
+              "evaluate",
+              "document.title",
+              "--unverified",
+              ...scope,
+            );
+            expect(escapedTitle.exitCode, JSON.stringify(escapedTitle)).toBe(0);
+            expect(escapedTitle.body.value).toBe("Escaped");
+
+            // 3. Cross-document link click into a wedged page while hover bypass and
+            // daemon `ImplicitScopeRegistry` auto-injected `context_id` remain active:
+            // `bsk navigate` and `bsk session stop` both escape cleanly without hanging.
+            const waitForWedgedCommit = async (expectedHost: string) => {
+              const deadline = Date.now() + 10000;
+              while (Date.now() < deadline) {
+                const listed = await runCli("tab", "list", "--scope", "agent", ...scope);
+                const tabs = Array.isArray(listed.body.tabs)
+                  ? (listed.body.tabs as { url?: unknown }[])
+                  : [];
+                if (
+                  tabs.some(
+                    (tab) =>
+                      typeof tab.url === "string" &&
+                      tab.url.startsWith(`http://${expectedHost}:`) &&
+                      tab.url.endsWith("/wedged-early"),
+                  )
+                ) {
+                  await new Promise((resolve) => setTimeout(resolve, 150));
+                  return;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 50));
+              }
+              throw new Error(`Timed out waiting for ${expectedHost}/wedged-early tab commit`);
+            };
+
+            const hovered = await runCli("hover", "#ok", ...scope);
+            expect(hovered.exitCode, JSON.stringify(hovered)).toBe(0);
+            const clickedIntoWedged = await runCli("click", "#open-wedged", ...scope);
+            expect(clickedIntoWedged.exitCode, JSON.stringify(clickedIntoWedged)).toBe(0);
+            await waitForWedgedCommit("wedged3.test");
+
+            const escapedWithImplicitCtx = await runCli(
+              "navigate",
+              `http://healthy.test:${serverPort}/escaped?next=wedged4.test`,
+              ...scope,
+            );
+            expect(escapedWithImplicitCtx.exitCode, JSON.stringify(escapedWithImplicitCtx)).toBe(0);
+
+            const resyncedEscaped = await runCli("sync", ...scope);
+            expect(resyncedEscaped.exitCode, JSON.stringify(resyncedEscaped)).toBe(0);
+            expect((await runCli("hover", "#ok", ...scope)).exitCode).toBe(0);
+            expect((await runCli("click", "#open-wedged", ...scope)).exitCode).toBe(0);
+            await waitForWedgedCommit("wedged4.test");
+
+            const stopStarted = Date.now();
+            const stopped = await runCli("session", "stop", session);
+            expect(stopped.exitCode, JSON.stringify(stopped)).toBe(0);
+            expect(Date.now() - stopStarted).toBeLessThan(10000);
+          } finally {
+            await runCli("session", "stop", session).catch(() => {});
+          }
+        },
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (daemon.exitCode === null && daemon.signalCode === null) {
+        const exited = once(daemon, "exit");
+        daemon.kill();
+        await exited;
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  150000,
+);

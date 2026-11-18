@@ -59,21 +59,46 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function sendInSettleScope<T>(
+async function sendInSettleScope<T>(
   cdp: CdpRunner,
   scope: DocumentSettleScope,
   method: string,
   params: object,
+  deadline: number,
+  signal?: AbortSignal,
 ): Promise<T> {
-  if (scope.handle) {
-    return sendToFrameHandle<T>(cdp, scope.handle, method, params);
+  signal?.throwIfAborted();
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error("document settle probe timed out");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    const pending = scope.handle
+      ? sendToFrameHandle<T>(cdp, scope.handle, method, params)
+      : cdp.send<T>(scope.tabId, method, params);
+    void pending.catch(() => {});
+    return await Promise.race([
+      pending,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("document settle probe timed out")), remaining);
+        if (signal) {
+          onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+          if (signal.aborted) onAbort();
+          else signal.addEventListener("abort", onAbort, { once: true });
+        }
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort && signal) signal.removeEventListener("abort", onAbort);
   }
-  return cdp.send<T>(scope.tabId, method, params);
 }
 
 async function executionContextForScope(
   cdp: CdpRunner,
   scope: DocumentSettleScope,
+  deadline: number,
+  signal?: AbortSignal,
 ): Promise<number | undefined> {
   const frameId = scope.frameId ?? scope.handle?.frameId;
   if (!frameId) return undefined;
@@ -86,6 +111,8 @@ async function executionContextForScope(
       worldName: SETTLE_WORLD_NAME,
       grantUniveralAccess: false,
     },
+    deadline,
+    signal,
   );
   return result.executionContextId;
 }
@@ -94,11 +121,13 @@ async function readQuietProbe(
   cdp: CdpRunner,
   scope: DocumentSettleScope,
   context: ProbeContext,
+  deadline: number,
+  signal?: AbortSignal,
 ): Promise<QuietProbe | null> {
   try {
     const frameId = scope.frameId ?? scope.handle?.frameId;
     if (frameId && context.executionContextId === undefined) {
-      context.executionContextId = await executionContextForScope(cdp, scope);
+      context.executionContextId = await executionContextForScope(cdp, scope, deadline, signal);
       if (context.executionContextId === undefined) return null;
     }
     const reply = await sendInSettleScope<{ result?: { value?: unknown } }>(
@@ -112,6 +141,8 @@ async function readQuietProbe(
           ? { contextId: context.executionContextId }
           : {}),
       },
+      deadline,
+      signal,
     );
     const value = reply.result?.value;
     if (!value || typeof value !== "object") return null;
@@ -138,11 +169,13 @@ export async function waitForDocumentSettled(
     if (options.signal?.aborted) return "cancelled";
     await sleep(SETTLE_POLL_MS, options.signal);
     if (options.signal?.aborted) return "cancelled";
+    if (Date.now() >= deadline) return "timeout";
 
-    const probe = await readQuietProbe(cdp, scope, context);
+    const probe = await readQuietProbe(cdp, scope, context, deadline, options.signal);
+    if (options.signal?.aborted) return "cancelled";
     const now = Date.now();
-    if (now < floor) continue;
     if (now >= deadline) return "timeout";
+    if (now < floor) continue;
     if (!probe || probe.readyState === "loading") continue;
     if (probe.idleMs >= SETTLE_QUIET_MS) return "quiet";
   }

@@ -1,3 +1,4 @@
+import { sendTabMessageBounded } from "@/lib/runtime-content-scripts";
 import { withUiTeardown } from "@/session-manager/ui-activity";
 import type {
   TabBorrowParams,
@@ -206,7 +207,7 @@ export const chromeAgentOverlayResetApi: AgentOverlayResetApi = {
       sessionId,
       ...nextOverlayVersion(),
     };
-    await chrome.tabs.sendMessage(tabId, message);
+    await sendTabMessageBounded(tabId, message);
   },
 };
 

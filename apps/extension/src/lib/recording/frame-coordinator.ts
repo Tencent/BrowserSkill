@@ -1,3 +1,4 @@
+import { provenHiddenFrames } from "@/cooperation/hidden-frames";
 import { createRandomUuid } from "../random-uuid";
 import { injectRecordFrameAllFrames } from "../runtime-content-scripts";
 import {
@@ -41,6 +42,7 @@ interface BrowserFrameNavigation extends BrowserFrame {
   lifecycle: "committed" | "completed";
 }
 
+const RECORD_FRAME_START_TIMEOUT_MS = 3_000;
 const RECORD_FRAME_STOP_TIMEOUT_MS = 5_000;
 
 export interface RecordFrameCoordinatorDeps {
@@ -199,12 +201,56 @@ export class RecordFrameCoordinator {
     if (!recording) return true;
     recording.finishing = true;
     const commandId = createRandomUuid();
+    const agents = [...recording.agents.values()];
     const results = await Promise.all(
-      [...recording.agents.values()].map((agent) => this.#stopAgent(agent, requestId, commandId)),
+      agents.map((agent) => this.#stopAgent(agent, requestId, commandId)),
     );
-    const succeeded = results.every(Boolean);
-    if (succeeded) this.#recordings.delete(requestId);
-    else recording.finishing = false;
+    let failedAgents = agents.filter((_, index) => !results[index]);
+    if (
+      failedAgents.length > 0 &&
+      failedAgents.every((agent) => agent.browserFrameId !== 0) &&
+      typeof chrome !== "undefined" &&
+      typeof chrome.webNavigation?.getAllFrames === "function"
+    ) {
+      const byTab = new Map<number, FrameAgent[]>();
+      for (const agent of failedAgents) {
+        const list = byTab.get(agent.tabId) ?? [];
+        list.push(agent);
+        byTab.set(agent.tabId, list);
+      }
+      const hiddenByTab = new Map<number, Set<number>>();
+      for (const [tabId, tabAgents] of byTab) {
+        try {
+          const allFrames = await chrome.webNavigation.getAllFrames({ tabId });
+          if (!allFrames?.length) continue;
+          const failedIds = new Set(tabAgents.map((agent) => agent.browserFrameId));
+          const failedFrames = allFrames.filter((frame) => failedIds.has(frame.frameId));
+          if (failedFrames.length > 0) {
+            hiddenByTab.set(tabId, await provenHiddenFrames(tabId, allFrames, failedFrames));
+          }
+        } catch {
+          // Unreadable frame hierarchies remain unconfirmed.
+        }
+      }
+      failedAgents = failedAgents.filter(
+        (agent) => !hiddenByTab.get(agent.tabId)?.has(agent.browserFrameId),
+      );
+    }
+    const succeeded = failedAgents.length === 0;
+    if (succeeded) {
+      agents.forEach((agent, index) => {
+        if (!results[index]) {
+          try {
+            agent.port.disconnect();
+          } catch {
+            // Ignore already-closed ports.
+          }
+        }
+      });
+      this.#recordings.delete(requestId);
+    } else {
+      recording.finishing = false;
+    }
     return succeeded;
   }
 
@@ -464,13 +510,23 @@ export class RecordFrameCoordinator {
       requestId: recording.requestId,
       startedAtMs: recording.startedAtMs,
     };
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const response = await this.#deps.sendToDocument(tabId, message, {
+      const pending = this.#deps.sendToDocument(tabId, message, {
         ...(frame.documentId ? { documentId: frame.documentId } : { frameId: frame.frameId }),
       });
+      void pending?.catch?.(() => {});
+      const response = await Promise.race([
+        pending,
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), RECORD_FRAME_START_TIMEOUT_MS);
+        }),
+      ]);
       return isStarted(response);
     } catch {
       return false;
+    } finally {
+      clearTimeout(timer);
     }
   }
 

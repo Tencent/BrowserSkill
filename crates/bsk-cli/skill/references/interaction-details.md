@@ -213,18 +213,23 @@ refresh business facts; sync after intervention/navigation and observe changes r
 For an action followed by a transient synchronization refusal, use
 `bsk cooperate sync --settle --session <id>`. It performs at most three read-only
 sync attempts, each retry preceded by `cooperate wait` (default 1s per wait;
-`--timeout-ms` overrides it). It retries only `cooperation_sync_required` with
-`effect_state: none`. Unknown effects, cancellation, user stop and other errors
-are returned without retries. A wait reporting `state.mode: unavailable` uses the
-remaining sync attempts, allowing navigation or slow frames to finish. If all
-three attempts fail, the last sync error is returned with a non-zero exit code;
-the CLI does not invent a frame failure or suggest reloading a loading page. Human control
-or a stopped wait still returns `settle.outcome: not_ready` and no action context;
-continue the cooperation hand-back workflow unless the user stopped the task.
-An explicit human hold takes priority over unavailable coverage in the returned state.
-Inspect `settle`, ownership and context, not just exit code. This does not prove
-application readiness: use an observed loading-complete signal where available.
-Never replay the preceding click, drag or submission because sync was refused.
+`--timeout-ms` bounds the total settle budget). It retries only `cooperation_sync_required` (and
+mid-observation document replacements) with `effect_state: none`. Unknown
+effects, cancellation, user stop and other errors are returned without retries.
+On heavy pages whose main thread briefly stalls past the default 3s frame budget,
+pass `--timeout-ms` (up to `25000`) to `bsk sync`, `cooperate sync` or
+`cooperate enable` to extend the per-frame reply deadline while still retiring
+silent hidden child frames after 3s. A wait reporting `state.mode: unavailable`
+uses the remaining sync attempts, allowing navigation or slow frames to finish.
+If all three attempts fail, the last sync error is returned with a non-zero exit
+code; the CLI does not invent a frame failure or suggest reloading a loading page.
+Human control or a stopped wait still returns `settle.outcome: not_ready` and no
+action context; continue the cooperation hand-back workflow unless the user
+stopped the task. An explicit human hold takes priority over unavailable coverage
+in the returned state. Inspect `settle`, ownership and context, not just exit code.
+This does not prove application readiness: use an observed loading-complete signal
+where available. Never replay the preceding click, drag or submission because sync
+was refused.
 
 `frame_unobservable` means an active document still lacks interaction coverage
 after one targeted collector repair. Reload once; if it persists, use read-only
@@ -232,10 +237,12 @@ commands such as `get-html` or `snapshot`. `page_load_failed` means the main pag
 failed to load: check its URL and network, then reload. Neither reason is retried
 by `--settle`. A frame that does not answer in time may only be busy, so its
 refusal stays `cooperation_sync_required` and names it in `data.frames` (tab
-operations add `tab_id`). If the same frame keeps failing, use read-only commands
-or stop the session; stopping also returns borrowed tabs. Failed child frames,
-inactive documents and child frames that cannot be collected while hidden
-(`hidden_frame`: not displayed, no area or invisible, and unfocused) are listed in
+operations add `tab_id`). If the same frame keeps failing, use `navigate`,
+`reload`, `navigate-back` or `navigate-forward` to leave the stuck page, use
+read-only commands, or stop the session; stopping also returns borrowed tabs.
+Failed child frames, inactive documents and child frames that cannot be collected
+while hidden (`hidden_frame`: not displayed, no area, invisible, offscreen
+`position: fixed`, or `pointer-events: none`, and unfocused) are listed in
 `frame_gaps` without blocking sync; other active frames must remain observable.
 Frame diagnostic URLs retain only HTTP(S) origins and paths. Other URLs show
 only their protocol, and malformed URLs show `[unavailable]`.

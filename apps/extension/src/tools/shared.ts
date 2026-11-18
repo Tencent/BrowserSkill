@@ -1098,3 +1098,16 @@ export function enforceToolTargetScope(
   if (effect === "passive_read" && !ctx.remote) return null;
   return enforceAgentWindow(ctx, target, toolName);
 }
+
+const reportedTimeoutMsByParams = new WeakMap<object, number>();
+
+export function withReportedTimeoutMs<T extends object>(params: T, reportedTimeoutMs: number): T {
+  reportedTimeoutMsByParams.set(params, reportedTimeoutMs);
+  return params;
+}
+
+export function readReportedTimeoutMs(params: unknown): number | undefined {
+  return params !== null && typeof params === "object"
+    ? reportedTimeoutMsByParams.get(params)
+    : undefined;
+}

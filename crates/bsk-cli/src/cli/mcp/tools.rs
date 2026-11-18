@@ -1151,7 +1151,9 @@ async fn session(
                         wait_budget_ms,
                         "committed",
                         |_, method, params, meta| {
-                            rpc(&aux_ctx, method, params, meta, TOOL_IPC_TIMEOUT)
+                            let ipc_timeout =
+                                cooperate::cooperate_rpc_ipc_timeout(&method, &params);
+                            rpc(&aux_ctx, method, params, meta, ipc_timeout)
                         },
                         std::thread::sleep,
                     )
@@ -1301,7 +1303,9 @@ async fn session(
                             wait_budget_ms,
                             "none",
                             |_, method, params, meta| {
-                                rpc(&aux_ctx, method, params, meta, TOOL_IPC_TIMEOUT)
+                                let ipc_timeout =
+                                    cooperate::cooperate_rpc_ipc_timeout(&method, &params);
+                                rpc(&aux_ctx, method, params, meta, ipc_timeout)
                             },
                             std::thread::sleep,
                         )
@@ -1318,27 +1322,31 @@ async fn session(
                     max_tokens: args.max_tokens,
                 };
                 if args.settle.unwrap_or(false) {
-                    let wait_ms = args.timeout_ms;
+                    let budget = args.timeout_ms.map(Duration::from_millis);
                     link.blocking_envelope(move |rpc| {
                         let mut latest_meta = None;
-                        let val = cooperate::settle::run(|mode| {
+                        let val = cooperate::settle::run_bounded(budget, |mode, rem| {
+                            let rem_ms = rem.map(|d| d.as_nanos().div_ceil(1_000_000) as u64);
                             let mut current = params.clone();
+                            current.action = mode;
                             if matches!(mode, CooperateAction::Wait) {
                                 current.control_policy = None;
-                                current.timeout_ms = Some(wait_ms.unwrap_or(1000));
+                                current.timeout_ms = Some(rem_ms.unwrap_or(1000).min(25_000));
+                            } else if let Some(ms) = rem_ms {
+                                current.timeout_ms = Some(ms.min(25_000));
                             }
                             let is_sync = matches!(mode, CooperateAction::Sync);
-                            current.action = mode;
                             let meta = crate::ipc_client::IpcRequestMeta {
                                 return_scope_meta: is_sync,
                                 ..Default::default()
                             };
+                            let ipc_timeout = cooperate::cooperate_ipc_timeout(current.timeout_ms);
                             let (val, resp_meta) = rpc(
                                 &aux_ctx,
                                 Method::ToolCooperate,
                                 serde_json::to_value(current).unwrap_or_default(),
                                 meta,
-                                TOOL_IPC_TIMEOUT,
+                                ipc_timeout,
                             )?;
                             if is_sync {
                                 latest_meta = resp_meta.scope_meta;
@@ -1353,13 +1361,14 @@ async fn session(
                         return_scope_meta: syncing,
                         ..Default::default()
                     };
+                    let ipc_timeout = cooperate::cooperate_ipc_timeout(params.timeout_ms);
                     let (val, resp_meta) = link
                         .rpc_envelope(
                             &ctx,
                             Method::ToolCooperate,
                             serde_json::to_value(params).unwrap_or_default(),
                             meta,
-                            TOOL_IPC_TIMEOUT,
+                            ipc_timeout,
                         )
                         .await?;
                     (val, resp_meta.scope_meta)
