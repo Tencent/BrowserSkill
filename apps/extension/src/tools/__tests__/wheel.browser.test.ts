@@ -37,6 +37,13 @@ async function withBrowser(
 }
 
 async function harness(send: Send) {
+  const { product } = await send<{ product: string }>("Browser.getVersion");
+  const chromeMajor = Number(/\/(\d+)\./.exec(product)?.[1] ?? 0);
+  // Chromium < 158 left CDP mouseWheel deltas unscaled at ingress so Blink's
+  // viewport-to-CSS conversion divided them by page zoom; Chromium 158+ scales
+  // CDP mouseWheel deltas as CSS pixels across browser zoom.
+  const expectedDelta = (delta: number, zoom: number) =>
+    chromeMajor >= 158 ? delta : delta / zoom;
   const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
     url: "about:blank",
   });
@@ -193,7 +200,18 @@ async function harness(send: Send) {
     cdp.getFrameDocuments = async () => graph;
     return frames;
   };
-  return { send, rootSession, evaluate, ref, rememberRef, wheel, loadFrames, calls, after };
+  return {
+    send,
+    rootSession,
+    evaluate,
+    ref,
+    rememberRef,
+    wheel,
+    loadFrames,
+    expectedDelta,
+    calls,
+    after,
+  };
 }
 
 const LISTEN = `window.wheels = []; window.blockWheel = false;
@@ -230,13 +248,19 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wheel", () => {
     1, 1.25,
   ])("targets a nested scroller and respects preventDefault at zoom %s", async (zoom) => {
     await withBrowser(async (h) => {
+      const metrics = await h.send<{ cssVisualViewport: { zoom: number } }>(
+        "Page.getLayoutMetrics",
+        {},
+        h.rootSession,
+      );
+      expect(metrics.cssVisualViewport.zoom).toBeCloseTo(zoom, 4);
       await h.evaluate(
         `document.body.innerHTML = '<div id="panel" style="margin:50px;width:400px;height:250px;overflow:auto"><div id="content" style="width:2000px;height:3000px"></div></div>'; ${LISTEN}`,
       );
       expect(await h.wheel({ selector: "#panel", delta_y: 120 })).not.toHaveProperty("code");
       await expect
         .poll(() => h.evaluate<number>("document.querySelector('#panel').scrollTop"))
-        .toBeCloseTo(120 / zoom, 0);
+        .toBeCloseTo(h.expectedDelta(120, zoom), 0);
       expect(await h.evaluate("scrollY")).toBe(0);
       expect(await h.evaluate("window.wheels[0].ids")).toContain("panel");
       const before = await h.evaluate<number>("document.querySelector('#panel').scrollTop");
@@ -252,9 +276,8 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wheel", () => {
       await expect.poll(() => h.evaluate<number>("window.wheels.length")).toBe(1);
       const event = await h.evaluate<{ dx: number; dy: number }>("window.wheels[0]");
       expect(event).toMatchObject({ trusted: true, ctrl: true, shift: true });
-      // Native Chromium adjusts wheel deltas by page zoom before DOM delivery.
-      expect(event.dx).toBeCloseTo(25 / zoom, 3);
-      expect(event.dy).toBeCloseTo(-50 / zoom, 3);
+      expect(event.dx).toBeCloseTo(h.expectedDelta(25, zoom), 3);
+      expect(event.dy).toBeCloseTo(h.expectedDelta(-50, zoom), 3);
       await h.evaluate(
         "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))",
       );
@@ -316,7 +339,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wheel", () => {
             dx: 0,
             ids: expect.arrayContaining(["probe"]),
           });
-          expect(event.dy).toBeCloseTo(90 / zoom, 3);
+          expect(event.dy).toBeCloseTo(h.expectedDelta(90, zoom), 3);
           for (const other of frames.filter((other) => other !== frame))
             expect(await h.evaluate("window.wheels.length", other)).toBe(0);
         }
