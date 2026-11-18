@@ -43,10 +43,29 @@ function labelledByText(el: Element): string | null {
   if (!ids) return null;
   const parts = ids
     .split(/\s+/)
-    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .map((id) => idReferenceText(el, id))
     .map(normalizeWhitespace)
     .filter(Boolean);
   return parts.length ? truncate(parts.join(" ")) : null;
+}
+
+/**
+ * Resolve one IDREF in the element's own tree, as ARIA does.
+ *
+ * A Shadow DOM button commonly labels itself with a sibling inside the same
+ * shadow root. Looking the id up on `document` misses that label, and when the
+ * outer page happens to use the same id it silently returns unrelated text.
+ */
+function idReferenceText(el: Element, id: string): string {
+  const root = el.getRootNode() as Document | ShadowRoot | Element;
+  const scoped =
+    typeof (root as Document).getElementById === "function"
+      ? (root as Document).getElementById(id)
+      : null;
+  if (scoped) return scoped.textContent ?? "";
+  // Shadow labels are local; only fall back to the outer document when the
+  // element's own tree has no such id.
+  return root === el.ownerDocument ? "" : (el.ownerDocument?.getElementById(id)?.textContent ?? "");
 }
 
 function associatedLabelText(el: Element): string | null {
