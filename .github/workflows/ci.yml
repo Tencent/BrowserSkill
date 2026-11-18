@@ -318,6 +318,7 @@ jobs:
           src/tools/__tests__/click-listener-observation.browser.test.ts
           src/tools/__tests__/dom-multiclick.browser.test.ts
           src/tools/__tests__/soft-detach-click.browser.test.ts
+          src/tools/__tests__/upload-iframe.browser.test.ts
           src/tools/__tests__/target-hit.browser.test.ts
           src/tools/__tests__/observation-layers.browser.test.ts
           src/tools/__tests__/stealth-stripper.browser.test.ts

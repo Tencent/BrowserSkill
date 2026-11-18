@@ -17,7 +17,7 @@
 Use `bsk drag <source-ref-or-selector> --to <target-ref-or-selector> --session <id>`,
 or replace `--to` with `--dx <pixels> --dy <pixels>` for sliders, resize handles,
 and panning. Prefer refs from the latest VOM observation. Selectors must match
-exactly one element in the main document; frame/shadow targets require refs.
+exactly one element across the main document and child frames; shadow targets require refs.
 
 `--hold 500ms` waits after pressing, before moving; `--duration 800ms` controls
 travel pacing. Both are bounded at 5s each. `--button` and `--modifiers` work as
@@ -110,9 +110,10 @@ Rich-text framework state and undo behavior require application-specific checks.
 absent or not visible; `detached` requires absence. Both include initial absence.
 `visible` does not imply enabled, unobstructed or application-ready. Choose an
 actual post-action readiness signal; an absent or hidden mask may not have started
-loading yet. Selectors check only the first match in the main document: scope a
-mask selector to its component, for example `#orders-panel .el-loading-mask`.
-Use fresh refs for frame/shadow-root targets. Unknown/invalidated/cross-tab refs
+loading yet. Selectors check the first match in the main document, then child
+frames in frame order: scope a mask selector to its component, for example
+`#orders-panel .el-loading-mask`. Use fresh refs for shadow-root targets.
+Unknown/invalidated/cross-tab refs
 and CDP failures remain errors for every state. Full-document navigation invalidates
 old refs: use `wait-for-navigation`, then `observe`. A removed out-of-process iframe
 can invalidate its CDP session; to wait for the frame's removal, target the parent

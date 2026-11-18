@@ -58,7 +58,7 @@ pub struct PlanArgs {
     /// fields (ref/selector/value/values/key/etc.) and optional `expect`.
     #[arg(long)]
     pub steps: String,
-    /// Known main-document CSS selector that should become visible after the last step.
+    /// Known CSS selector (main document and accessible iframes) that should become visible after the last step.
     #[arg(long)]
     pub until_visible: Option<String>,
     /// Readiness budget in milliseconds, independent of the steps' timeouts.

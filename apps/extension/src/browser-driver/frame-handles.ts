@@ -54,6 +54,15 @@ export interface FrameDocumentGraph {
   readonly unavailableFrames?: UnavailableFrameDocument[];
 }
 
+export interface FrameDocumentGraphOptions {
+  /** Skip `DOM.getFrameOwner` lookups when callers only need frame IDs and handles. */
+  includeOwners?: boolean;
+  /** Override timeout (ms) for child OOPIF tree reads instead of `READ_TIMEOUT_MS`. */
+  childReadTimeoutMs?: number;
+  /** Skip the trailing auto-attach quiet delay when discovery is already active and idle. */
+  skipQuietWaitWhenIdle?: boolean;
+}
+
 /**
  * Opaque CDP event source emitted by `ChromiumCdp.onEvent(...)`.
  * Never exposes transient CDP `sessionId`; `ChromiumCdp` maps `targetKey`

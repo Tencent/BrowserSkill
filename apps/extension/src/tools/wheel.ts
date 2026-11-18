@@ -103,12 +103,25 @@ export async function handleWheel(
           : {}),
       });
     }
+    const combinedSignal =
+      guard?.signal && deps.signal
+        ? AbortSignal.any([guard.signal, deps.signal])
+        : (guard?.signal ?? deps.signal);
     const result = await sendToFrameHandle<T>(
       deps.cdp,
       handle,
       method,
       method === "DOM.resolveNode" ? { ...args, objectGroup } : args,
-      guard,
+      guard || combinedSignal
+        ? {
+            ...guard,
+            signal: combinedSignal,
+            onDispatch: () => {
+              checkActive();
+              guard?.onDispatch?.();
+            },
+          }
+        : undefined,
     );
     checkActive();
     return result;
@@ -130,10 +143,17 @@ export async function handleWheel(
       checkActive();
       return result;
     },
-    getFrameDocuments: async (tabId, sig) => {
+    getFrameDocuments: async (tabId, sig, options) => {
       checkActive();
-      graph ??= deps.cdp.getFrameDocuments(tabId, sig);
-      const result = await graph;
+      const combined =
+        sig && deps.signal ? AbortSignal.any([sig, deps.signal]) : (sig ?? deps.signal);
+      const promise =
+        graph ??
+        (options !== undefined
+          ? deps.cdp.getFrameDocuments(tabId, combined, options)
+          : deps.cdp.getFrameDocuments(tabId, combined));
+      if (options?.includeOwners !== false) graph ??= promise;
+      const result = await promise;
       checkActive();
       return result;
     },
@@ -230,7 +250,9 @@ async function resolveWheelPoint(
   const hasRef = typeof params.ref === "string" && params.ref.length > 0;
   const hasSelector = typeof params.selector === "string" && params.selector.length > 0;
   if (hasRef || hasSelector) {
-    const node = await resolveBackendNode(cdp, ctx, target, params, "wheel");
+    const node = await resolveBackendNode(cdp, ctx, target, params, "wheel", false, {
+      childTimeoutMs: Math.max(1, deadline - Date.now()),
+    });
     if (isRpcError(node)) return node;
     const geometry = await resolveNodeGeometry(cdp, target.tabId, node.handle, {
       scrollIntoView: true,

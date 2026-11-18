@@ -155,6 +155,7 @@ export async function resolveBackendNode(
   params: { ref?: string; selector?: string },
   toolName: string,
   strictSelector = false,
+  options?: { childTimeoutMs?: number; stopSignal?: AbortSignal },
 ): Promise<
   | {
       handle: FrameNodeHandle;
@@ -192,11 +193,14 @@ export async function resolveBackendNode(
       ...(resolved.rowAnchor ? { rowAnchor: resolved.rowAnchor } : {}),
     };
   }
-  // selector path
+  // selector path (`expect` preconditions intentionally stay main-document-scoped)
   cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
   return resolveMainDocumentSelector(cdp, target.tabId, params.selector as string, {
     toolName,
     multiMatch: strictSelector ? "reject" : "first",
+    scope: toolName === "precondition" ? "main" : "all",
+    childTimeoutMs: options?.childTimeoutMs,
+    stopSignal: options?.stopSignal,
   });
 }
 
@@ -217,13 +221,20 @@ function checkFocusAbort(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new DOMException("interaction aborted", "AbortError");
 }
 
+function combineSignals(
+  first: AbortSignal | undefined,
+  second: AbortSignal | undefined,
+): AbortSignal | undefined {
+  return first && second ? AbortSignal.any([first, second]) : (first ?? second);
+}
+
 // Only focus/blur use this view. Guard every CDP boundary, including commands
 // inside selector resolution and frame scrolling, without changing other tools.
 function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
   return delegateCdpRunner(cdp, {
     send: <T = unknown>(tabId: number, method: string, params?: object, sig?: AbortSignal) => {
       checkFocusAbort(signal);
-      return cdp.send<T>(tabId, method, params, sig ?? signal);
+      return cdp.send<T>(tabId, method, params, combineSignals(sig, signal));
     },
     sendToFrame: <T = unknown>(
       handle: FrameDocumentHandle | FrameNodeHandle,
@@ -232,21 +243,25 @@ function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
       guard?: CdpDispatchGuard,
     ) => {
       checkFocusAbort(signal);
+      const combined = combineSignals(guard?.signal, signal);
       return sendToFrameHandle<T>(
         cdp,
         handle,
         method,
         params,
-        guard?.signal || !signal ? guard : { ...guard, signal },
+        combined ? { ...guard, signal: combined } : guard,
       );
     },
-    getFrameDocuments: (tabId, sig) => {
+    getFrameDocuments: (tabId, sig, options) => {
       checkFocusAbort(signal);
-      return cdp.getFrameDocuments(tabId, sig ?? signal);
+      const combined = combineSignals(sig, signal);
+      return options !== undefined
+        ? cdp.getFrameDocuments(tabId, combined, options)
+        : cdp.getFrameDocuments(tabId, combined);
     },
     getMainFrameHandle: (tabId, sig) => {
       checkFocusAbort(signal);
-      return cdp.getMainFrameHandle(tabId, sig ?? signal);
+      return cdp.getMainFrameHandle(tabId, combineSignals(sig, signal));
     },
   });
 }

@@ -8,7 +8,11 @@ bsk download @e3 --out ./report.pdf --session <id>
 Upload discloses the file to the site; download accepts site-controlled bytes.
 Use agent-local paths, not browser-internal staging paths.
 
-- Default upload clicks an upload button/label and intercepts its file chooser.
+- Default upload (`--mode input`) accepts either the observed `@eN` ref of the
+  visible upload button/label (preferred — clicks the trigger and intercepts
+  hidden `input[type=file]` choosers such as Layui/Upload widgets, including
+  inside iframes) or a `--selector` / ref targeting `input[type=file]` directly
+  (assigns files without clicking, even when `display: none`).
 - If `reason=file_input_not_activated` and `effect_state=none`, re-observe. Try
   `--mode drop` once only on a clear attachment target such as a drop zone or
   composer, never whitespace or an ambiguous container. Otherwise follow

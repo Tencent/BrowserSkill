@@ -40,6 +40,7 @@ import {
 } from "./frame-graph";
 import {
   type FrameDocumentGraph,
+  type FrameDocumentGraphOptions,
   type FrameDocumentHandle,
   type FrameDocumentInfo,
   type FrameNodeHandle,
@@ -55,6 +56,7 @@ import { sampleNativeInputClock } from "./native-input-probe";
 
 export {
   type FrameDocumentGraph,
+  type FrameDocumentGraphOptions,
   type FrameDocumentHandle,
   type FrameDocumentInfo,
   type FrameNodeHandle,
@@ -180,6 +182,7 @@ interface FrameDiscoveryState {
   pending: Set<Promise<void>>;
   generation: number;
   enabled: Map<string, Promise<void>>;
+  settled: Set<string>;
   frameIds: Map<string, string>;
   targetKeys: Map<string, string>;
   sessionsByTargetKey: Map<string, string>;
@@ -333,6 +336,7 @@ function createFrameDiscoveryState(): FrameDiscoveryState {
     pending: new Set(),
     generation: 0,
     enabled: new Map(),
+    settled: new Set(),
     frameIds: new Map(),
     targetKeys: new Map(),
     sessionsByTargetKey: new Map(),
@@ -1002,18 +1006,25 @@ export class ChromiumCdp {
       throw new Error("debugger detached");
     }
     try {
-      return (await this.command(target, method, params ?? {}, guard.readTimeoutMs, () => {
-        guard.signal?.throwIfAborted();
-        if (guard.allowReattach === false && !this.isAttached(target.tabId)) {
-          throw new Error("debugger detached");
-        }
-        if (
-          guard.attachmentId !== undefined &&
-          this.getAttachmentId(target.tabId) !== guard.attachmentId
-        )
-          throw new Error("Debugger attachment changed before dispatch");
-        guard.onDispatch?.();
-      })) as T;
+      return (await this.command(
+        target,
+        method,
+        params ?? {},
+        guard.readTimeoutMs,
+        () => {
+          guard.signal?.throwIfAborted();
+          if (guard.allowReattach === false && !this.isAttached(target.tabId)) {
+            throw new Error("debugger detached");
+          }
+          if (
+            guard.attachmentId !== undefined &&
+            this.getAttachmentId(target.tabId) !== guard.attachmentId
+          )
+            throw new Error("Debugger attachment changed before dispatch");
+          guard.onDispatch?.();
+        },
+        guard.signal,
+      )) as T;
     } catch (err) {
       throw normalizeError(err);
     }
@@ -1498,8 +1509,12 @@ export class ChromiumCdp {
    * Discover all document frames for `tabId` as handle-addressed `FrameDocumentInfo`
    * entries without exposing transient CDP `sessionId` strings.
    */
-  async getFrameDocuments(tabId: number, signal?: AbortSignal): Promise<FrameDocumentGraph> {
-    const graph = await this.getFrameGraph(tabId, signal);
+  async getFrameDocuments(
+    tabId: number,
+    signal?: AbortSignal,
+    options?: FrameDocumentGraphOptions,
+  ): Promise<FrameDocumentGraph> {
+    const graph = await this.getFrameGraph(tabId, signal, options);
     const attachmentId = this.getAttachmentId(tabId);
     const entry = this.tabs.get(tabId);
     const processKeyOf = (target: CdpTarget, fallbackFrameId: string): string => {
@@ -1544,7 +1559,11 @@ export class ChromiumCdp {
     };
   }
 
-  private async getFrameGraph(tabId: number, signal?: AbortSignal): Promise<CdpFrameGraph> {
+  private async getFrameGraph(
+    tabId: number,
+    signal?: AbortSignal,
+    options?: FrameDocumentGraphOptions,
+  ): Promise<CdpFrameGraph> {
     signal?.throwIfAborted();
     await this.ensureAttached(tabId);
     const attachmentId = this.getAttachmentId(tabId);
@@ -1573,12 +1592,27 @@ export class ChromiumCdp {
       }
     };
     check();
+    const entryBeforeDiscovery = this.tabs.get(tabId);
+    const discoveryWasSettled =
+      isActiveAttachment(entryBeforeDiscovery) &&
+      entryBeforeDiscovery.frameDiscovery.settled.has("root");
     await this.enableFrameDiscovery({ tabId }).catch(rethrowReadTimeout);
     check();
     this.retryChildFrameDiscovery(tabId);
-    await this.drainFrameAttachTasks(tabId);
-    check();
+    const entryAfterRetry = this.tabs.get(tabId);
+    const skipDrain =
+      options?.skipQuietWaitWhenIdle === true &&
+      discoveryWasSettled &&
+      (!isActiveAttachment(entryAfterRetry) || entryAfterRetry.frameDiscovery.pending.size === 0);
+    if (!skipDrain) {
+      await this.drainFrameAttachTasks(tabId);
+      check();
+    }
 
+    const childReadTimeoutMs =
+      options?.childReadTimeoutMs !== undefined && options.childReadTimeoutMs > 0
+        ? options.childReadTimeoutMs
+        : READ_TIMEOUT_MS;
     const sources: CdpFrameTreeSource[] = [];
     const unavailable = new Map<string, CdpTarget>();
     const isolateChildTimeout = (error: unknown, target: CdpTarget) => {
@@ -1619,7 +1653,7 @@ export class ChromiumCdp {
             target,
             "Page.getFrameTree",
             {},
-            READ_TIMEOUT_MS,
+            childReadTimeoutMs,
           );
           const current = this.tabs.get(tabId);
           if (reply.frameTree && isActiveAttachment(current)) {
@@ -1643,6 +1677,9 @@ export class ChromiumCdp {
       this.syncRoutesFromSources(entryAfterTrees, sources);
     }
     const graph = omitFrameSubtrees(discovered, unavailable);
+    if (options?.includeOwners === false) {
+      return graph;
+    }
     const frameById = new Map(graph.frames.map((frame) => [frame.frameId, frame]));
     await Promise.all(
       graph.frames.map(async (frame) => {
@@ -1650,9 +1687,12 @@ export class ChromiumCdp {
         const parent = frameById.get(frame.parentFrameId);
         if (!parent) return;
         try {
-          const owner = await read<{ backendNodeId?: number }>(parent.target, "DOM.getFrameOwner", {
-            frameId: frame.frameId,
-          });
+          const owner = await read<{ backendNodeId?: number }>(
+            parent.target,
+            "DOM.getFrameOwner",
+            { frameId: frame.frameId },
+            parent.target.sessionId ? childReadTimeoutMs : READ_TIMEOUT_MS,
+          );
           if (owner.backendNodeId !== undefined) frame.ownerBackendNodeId = owner.backendNodeId;
         } catch (err) {
           isolateChildTimeout(err, parent.target);
@@ -2660,18 +2700,29 @@ export class ChromiumCdp {
           filter: [{ type: "iframe", exclude: false }],
         }).then(
           () => {
-            if (state.enabled.get(key) === work) state.enabled.set(key, Promise.resolve());
+            if (state.enabled.get(key) === work) {
+              state.enabled.set(key, Promise.resolve());
+              state.settled.add(key);
+            }
           },
           (error) => {
-            if (state.enabled.get(key) === work) state.enabled.delete(key);
+            if (state.enabled.get(key) === work) {
+              state.enabled.delete(key);
+              state.settled.delete(key);
+            }
             throw error;
           },
         );
       })
       .then(() => {})
       .catch((error) => {
-        if ((!issued || !(error instanceof CdpReadTimeoutError)) && state.enabled.get(key) === work)
+        if (
+          (!issued || !(error instanceof CdpReadTimeoutError)) &&
+          state.enabled.get(key) === work
+        ) {
           state.enabled.delete(key);
+          state.settled.delete(key);
+        }
         throw error;
       });
     state.enabled.set(key, work);
@@ -2839,6 +2890,7 @@ export class ChromiumCdp {
     if (method === "Target.detachedFromTarget") {
       const state = entry.frameDiscovery;
       state.enabled.delete(sessionId);
+      state.settled.delete(sessionId);
       state.frameIds.delete(sessionId);
       const targetKey = state.targetKeys.get(sessionId);
       if (targetKey) {

@@ -68,12 +68,25 @@ export async function handleScrollTo(
           : {}),
       });
     }
+    const combinedSignal =
+      guard?.signal && deps.signal
+        ? AbortSignal.any([guard.signal, deps.signal])
+        : (guard?.signal ?? deps.signal);
     const result = await sendToFrameHandle<T>(
       deps.cdp,
       handle,
       method,
       method === "DOM.resolveNode" ? { ...args, objectGroup } : args,
-      guard,
+      guard || combinedSignal
+        ? {
+            ...guard,
+            signal: combinedSignal,
+            onDispatch: () => {
+              checkActive();
+              guard?.onDispatch?.();
+            },
+          }
+        : undefined,
     );
     checkActive();
     return result;
@@ -95,10 +108,17 @@ export async function handleScrollTo(
       checkActive();
       return result;
     },
-    getFrameDocuments: async (tabId, sig) => {
+    getFrameDocuments: async (tabId, sig, options) => {
       checkActive();
-      graph ??= deps.cdp.getFrameDocuments(tabId, sig);
-      const result = await graph;
+      const combined =
+        sig && deps.signal ? AbortSignal.any([sig, deps.signal]) : (sig ?? deps.signal);
+      const promise =
+        graph ??
+        (options !== undefined
+          ? deps.cdp.getFrameDocuments(tabId, combined, options)
+          : deps.cdp.getFrameDocuments(tabId, combined));
+      if (options?.includeOwners !== false) graph ??= promise;
+      const result = await promise;
       checkActive();
       return result;
     },
@@ -111,7 +131,9 @@ export async function handleScrollTo(
     const denied = enforceAgentWindow(ctx, target, "scroll-to");
     if (denied) return denied;
     const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
-    const node = await resolveBackendNode(cdp, ctx, target, params, "scroll-to");
+    const node = await resolveBackendNode(cdp, ctx, target, params, "scroll-to", false, {
+      childTimeoutMs: Math.max(1, deadline - Date.now()),
+    });
     checkActive();
     if (isRpcError(node)) return node;
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
