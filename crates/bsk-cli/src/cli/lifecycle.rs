@@ -523,11 +523,7 @@ pub(crate) fn settled_sync_with_conditions_using(
     let mut last_snapshot_error: Option<String> = None;
 
     loop {
-        let remaining_ms = deadline
-            .saturating_sub(start.elapsed())
-            .as_nanos()
-            .div_ceil(1_000_000) as u64;
-        let sync_budget_ms = remaining_ms.min(25_000);
+        let sync_budget = deadline.saturating_sub(start.elapsed());
         let mut state = run_settled_cooperate_sync(
             explicit_session.unwrap_or_default(),
             tab_id,
@@ -535,7 +531,7 @@ pub(crate) fn settled_sync_with_conditions_using(
             tab_id,
             control_policy,
             max_tokens,
-            (sync_budget_ms > 0).then_some(sync_budget_ms),
+            sync_budget,
             prior_effect_state,
             &mut call_rpc,
         )?;
@@ -595,11 +591,7 @@ pub(crate) fn settled_sync_with_conditions_using(
                 // The snapshot replaced the refs this frame's context names;
                 // synchronize the session and tab it read.
                 let (session_id, target_tab) = frame_target(&state, explicit_session, tab_id);
-                let resync_budget_ms = (deadline
-                    .saturating_sub(start.elapsed())
-                    .as_nanos()
-                    .div_ceil(1_000_000) as u64)
-                    .min(25_000);
+                let resync_budget = deadline.saturating_sub(start.elapsed());
                 let resynced = run_settled_cooperate_sync(
                     &session_id,
                     target_tab,
@@ -607,7 +599,7 @@ pub(crate) fn settled_sync_with_conditions_using(
                     tab_id,
                     control_policy,
                     max_tokens,
-                    (resync_budget_ms > 0).then_some(resync_budget_ms),
+                    resync_budget,
                     prior_effect_state,
                     &mut call_rpc,
                 )?;
@@ -833,7 +825,7 @@ fn run_settled_cooperate_sync(
     explicit_tab_id: Option<i64>,
     control_policy: ControlPolicy,
     max_tokens: Option<u32>,
-    sync_timeout_ms: Option<u64>,
+    sync_budget: Duration,
     prior_effect_state: &'static str,
     call_rpc: &mut impl FnMut(
         &'static str,
@@ -843,7 +835,8 @@ fn run_settled_cooperate_sync(
     ) -> Result<(Value, IpcResponseMeta), CliError>,
 ) -> Result<SyncedState, CliError> {
     let mut latest_meta: Option<ScopeResultMeta> = None;
-    let reply = cooperate::settle::run(|action| {
+    let reply = cooperate::settle::run_bounded(Some(sync_budget), |action, rem| {
+        let rem_ms = rem.map(|d| d.as_nanos().div_ceil(1_000_000) as u64);
         let is_sync = matches!(action, CooperateAction::Sync);
         let is_wait = matches!(action, CooperateAction::Wait);
         let req_val = serde_json::to_value(CooperateParams {
@@ -852,9 +845,9 @@ fn run_settled_cooperate_sync(
             tab_id: tab_id_param,
             action,
             timeout_ms: if is_sync {
-                sync_timeout_ms
+                rem_ms.filter(|&ms| ms > 0).map(|ms| ms.min(25_000))
             } else if is_wait {
-                Some(sync_timeout_ms.unwrap_or(1000).clamp(1000, 5000))
+                Some(rem_ms.unwrap_or(1_000).min(5_000))
             } else {
                 None
             },

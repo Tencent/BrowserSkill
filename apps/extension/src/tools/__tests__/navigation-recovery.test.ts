@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { CdpReadTimeoutError } from "@/browser-driver/command-deadline";
 import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { type BrowserNavigationApi, navigateWithBrowserApi } from "../browser-navigation";
@@ -905,4 +906,55 @@ it("follows a new document that replaces a same-document browser handoff", async
   f.events.onCompleted.fire(next);
   expect(await work).toMatchObject({ reached: "load", final_url: next.url });
   f.expectCleanedUp();
+});
+
+it.each([
+  "navigate",
+  "reload",
+  "back",
+  "forward",
+] as const)("falls back to browser navigation when CdpReadGate rejects preflight on %s and bounds post-commit handoff to remaining timeout_ms", async (operation) => {
+  const f = await fixture();
+  f.deps.cdp.acquireBackgroundExecution = vi
+    .fn()
+    .mockRejectedValueOnce(CdpReadTimeoutError.stillPending("Page.getFrameTree", 4))
+    .mockResolvedValue(undefined);
+  f.state.blocked = false;
+
+  const result =
+    operation === "navigate"
+      ? await handleNavigate(f.manager, { session_id: "test", url }, f.deps)
+      : operation === "reload"
+        ? await handleReload(f.manager, { session_id: "test" }, f.deps)
+        : operation === "back"
+          ? await handleNavigateBack(f.manager, { session_id: "test" }, f.deps)
+          : await handleNavigateForward(f.manager, { session_id: "test" }, f.deps);
+  expect(result).toMatchObject({ tab_id: 4, reached: "load" });
+  f.expectCleanedUp();
+
+  // When preflight times out and destination Page.enable also hangs, total elapsed stays bounded by timeout_ms.
+  vi.useFakeTimers();
+  try {
+    const stalled = await fixture();
+    stalled.deps.cdp.acquireBackgroundExecution = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<void>(() => {}))
+      .mockResolvedValue(undefined);
+    stalled.send.mockImplementation(() => new Promise<never>(() => {}));
+    const navWork = handleNavigate(
+      stalled.manager,
+      { session_id: "test", url, timeout_ms: 4000 },
+      stalled.deps,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await navWork).toMatchObject({
+      tab_id: 4,
+      reached: "timeout",
+      error_text: expect.stringContaining("after 4000ms"),
+    });
+    stalled.expectCleanedUp();
+  } finally {
+    vi.useRealTimers();
+  }
 });

@@ -1,4 +1,4 @@
-import { injectCooperationAllFrames } from "@/lib/runtime-content-scripts";
+import { executeScriptBounded, injectCooperationAllFrames } from "@/lib/runtime-content-scripts";
 import type { SessionManager } from "@/session-manager/manager";
 import { CooperationController } from "./controller";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
@@ -478,32 +478,25 @@ export function attachCooperation(
     }
     const armTask = (async () => {
       try {
-        const ack = await sendArmFrameBounded(details.tabId, target);
-        if (
-          ack === undefined &&
-          details.documentId &&
-          typeof chrome.scripting?.executeScript === "function"
-        ) {
-          await chrome.scripting.executeScript({
-            target: { tabId: details.tabId, documentIds: [details.documentId] },
-            files: ["content-scripts/cooperation.js"],
-            injectImmediately: true,
-          });
-          await sendArmFrameBounded(details.tabId, target);
+        let needsInject = false;
+        try {
+          const ack = await sendArmFrameBounded(details.tabId, target);
+          needsInject = ack === undefined;
+        } catch (error) {
+          needsInject = missingReceiver(error);
         }
-      } catch (error) {
         if (
-          missingReceiver(error) &&
+          needsInject &&
           details.documentId &&
           typeof chrome.scripting?.executeScript === "function"
         ) {
           try {
-            await chrome.scripting.executeScript({
+            const injected = await executeScriptBounded({
               target: { tabId: details.tabId, documentIds: [details.documentId] },
               files: ["content-scripts/cooperation.js"],
               injectImmediately: true,
             });
-            await sendArmFrameBounded(details.tabId, target);
+            if (injected) await sendArmFrameBounded(details.tabId, target);
           } catch {
             // Restricted or replaced documents are handled during frame collection.
           }

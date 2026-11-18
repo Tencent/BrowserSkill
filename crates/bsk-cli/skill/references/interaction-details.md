@@ -212,7 +212,7 @@ refresh business facts; sync after intervention/navigation and observe changes r
 For an action followed by a transient synchronization refusal, use
 `bsk cooperate sync --settle --session <id>`. It performs at most three read-only
 sync attempts, each retry preceded by `cooperate wait` (default 1s per wait;
-`--timeout-ms` overrides it). It retries only `cooperation_sync_required` (and
+`--timeout-ms` bounds the total settle budget). It retries only `cooperation_sync_required` (and
 mid-observation document replacements) with `effect_state: none`. Unknown
 effects, cancellation, user stop and other errors are returned without retries.
 On heavy pages whose main thread briefly stalls past the default 3s frame budget,

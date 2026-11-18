@@ -1264,6 +1264,10 @@ it.each<[string, () => unknown]>([
   // The observation reads data-state, and a style sheet reads data-shown.
   ["observed data changes", () => document.querySelector("#cell")!.setAttribute("data-state", "x")],
   ["styled data changes", () => document.querySelector("#cell")!.setAttribute("data-shown", "no")],
+  [
+    "punctuated data-* attribute changes",
+    () => document.querySelector("#cell")!.setAttribute("data-shown.now", "no"),
+  ],
   ["a heading changes", () => (document.querySelector("h2")!.textContent = "Renamed")],
   ["a label changes", () => (document.querySelector("label")!.textContent = "Renamed")],
   // Refs inside a row or list item are identified by its text.

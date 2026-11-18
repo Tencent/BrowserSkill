@@ -4114,6 +4114,46 @@ describe("tool.record_start cooperation guard", () => {
     });
   });
 
+  it("forwards default 15s wait budget to refresh and bounds post-action evaluate/upload refresh", async () => {
+    const f = await fixture();
+    f.readFrames.mockClear();
+    const waitRes = await f.controller.command(
+      { session_id: "shared", tab_id: 7, action: "wait" },
+      f.cdp,
+      f.abort.signal,
+    );
+    expect(waitRes).toMatchObject({ ready: true });
+    const waitCall = (f.readFrames.mock.calls as unknown[][])[0];
+    expect(waitCall?.[5]).toBeGreaterThan(14000);
+    expect(waitCall?.[6]).toBe(f.abort.signal);
+
+    f.readFrames.mockClear();
+    const evalRes = await f.controller.run(
+      {
+        id: "eval-timeout-forward",
+        method: "tool.evaluate",
+        params: {
+          session_id: "shared",
+          tab_id: 7,
+          context_id: f.first.context_id,
+          expression: "1 + 1",
+          unverified: true,
+          timeout_ms: 12000,
+        },
+      },
+      f.cdp,
+      f.abort.signal,
+      async (cdp) => {
+        await cdp.send(7, "Runtime.evaluate", { expression: "1 + 1" });
+        return { ok: true, value: 2, tab_id: 7 };
+      },
+    );
+    expect(evalRes).toMatchObject({ ok: true, value: 2 });
+    const postActionCall = (f.readFrames.mock.calls as unknown[][]).at(-1);
+    expect(postActionCall?.[5]).toBeGreaterThan(11000);
+    expect(postActionCall?.[6]).toBe(f.abort.signal);
+  });
+
   it("preserves pre-dispatch cooperation rejections inside withObjectGroup and withRemoteObject when no tab resources were owned yet", async () => {
     const f = await fixture();
     f.change({ human: 1, lastInput: 10000 });

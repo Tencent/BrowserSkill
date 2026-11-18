@@ -1054,7 +1054,7 @@ async function prepareNavigation(
   if (cdpBlockedUrlReason(target.url) || cdpBlockedUrlReason(target.pendingUrl)) return "browser";
   let timer: ReturnType<typeof setTimeout> | undefined;
   let preflightTimedOut = false;
-  const preflightMs = Math.min(CDP_PREFLIGHT_TIMEOUT_MS, Math.max(500, Math.floor(timeoutMs / 2)));
+  const preflightMs = Math.min(CDP_PREFLIGHT_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs / 2)));
   try {
     const preflight = (async () => {
       await acquireNavigationExecution(manager, ctx, target.tabId, deps);
@@ -1083,7 +1083,13 @@ async function prepareNavigation(
     const reattachTimedOut =
       error instanceof Error &&
       error.message.includes("Chrome did not respond during debugger reattachment");
-    if (!isCdpExtensionAccessDenied(error) && !preflightTimedOut && !reattachTimedOut) {
+    const readTimedOut = error instanceof Error && error.name === "CdpReadTimeoutError";
+    if (
+      !isCdpExtensionAccessDenied(error) &&
+      !preflightTimedOut &&
+      !reattachTimedOut &&
+      !readTimedOut
+    ) {
       throw error;
     }
     return "browser";
@@ -1109,6 +1115,7 @@ async function recoverBrowserNavigation(
   timeoutMs: number,
   requestedUrl?: string,
   allowSameDocument = false,
+  reportedTimeoutMs = timeoutMs,
 ): Promise<ReloadResult | RpcError> {
   const tabId = target.tabId;
   const controlled = isAgentControlledTab(ctx, tabId);
@@ -1144,17 +1151,56 @@ async function recoverBrowserNavigation(
           signal.throwIfAborted();
           return !!event.documentId && frame?.documentId === event.documentId;
         };
+        const withinDeadline = async <T>(
+          work: () => Promise<T>,
+        ): Promise<{ ok: true; value: T } | { ok: false }> => {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) return { ok: false };
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          let onAbort: (() => void) | undefined;
+          try {
+            const pending = work();
+            void pending.catch(() => {});
+            return await Promise.race([
+              pending.then((value) => ({ ok: true as const, value })),
+              new Promise<{ ok: false }>((resolve) => {
+                timer = setTimeout(() => resolve({ ok: false }), remaining);
+                onAbort = () => resolve({ ok: false });
+                if (signal.aborted) onAbort();
+                else signal.addEventListener("abort", onAbort, { once: true });
+              }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+            if (onAbort) signal.removeEventListener("abort", onAbort);
+          }
+        };
         try {
           if (!(await isCurrent())) return false;
           const tab = await checkControl(signal);
           if (cdpBlockedUrlReason(event.url ?? tab.url))
             throw new Error("Navigation remains on a restricted page");
-          await acquireNavigationExecution(manager, ctx, tabId, deps, signal);
+          const acquired = await withinDeadline(() =>
+            acquireNavigationExecution(manager, ctx, tabId, deps, signal),
+          );
+          if (!acquired.ok) {
+            signal.throwIfAborted();
+            return false;
+          }
           if (!(await isCurrent())) return false;
-          await deps.cdp.send(tabId, "Page.enable", {});
+          const enabled = await withinDeadline(() => deps.cdp.send(tabId, "Page.enable", {}));
+          if (!enabled.ok) {
+            signal.throwIfAborted();
+            return false;
+          }
           if (!(await isCurrent())) return false;
           if (waitUntil === "networkidle" || (sameDocument && waitUntil !== "commit")) {
-            const frame = await readMainFrameInfo(deps.cdp, tabId);
+            const frameRes = await withinDeadline(() => readMainFrameInfo(deps.cdp, tabId));
+            if (!frameRes.ok) {
+              signal.throwIfAborted();
+              return false;
+            }
+            const frame = frameRes.value;
             if (!(await isCurrent())) return false;
             if (!frame.frameId) throw new Error("No main frame after navigation");
             const remaining = deadline - Date.now();
@@ -1170,7 +1216,13 @@ async function recoverBrowserNavigation(
               { loaderId: frame.loaderId ?? undefined },
             );
             try {
-              await deps.cdp.send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
+              const lifecycleEnabled = await withinDeadline(() =>
+                deps.cdp.send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true }),
+              );
+              if (!lifecycleEnabled.ok) {
+                signal.throwIfAborted();
+                return false;
+              }
               if ((await wait.promise).reached !== "match") return false;
             } finally {
               waiting.abort();
@@ -1198,7 +1250,7 @@ async function recoverBrowserNavigation(
       reached: outcome.reached === "match" ? waitUntil : "timeout",
       ...(outcome.reached === "timeout"
         ? {
-            error_text: `timed out waiting for ${waitUntil} during navigation recovery after ${timeoutMs}ms`,
+            error_text: `timed out waiting for ${waitUntil} during navigation recovery after ${reportedTimeoutMs}ms`,
           }
         : {}),
     };
@@ -1235,9 +1287,11 @@ export async function handleNavigate(
 
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_NAV_TIMEOUT_MS;
+  const startedAt = Date.now();
 
   try {
     if ((await prepareNavigation(manager, ctx, target, deps, timeoutMs)) === "browser") {
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
       const recovered = await recoverBrowserNavigation(
         deps,
         manager,
@@ -1245,9 +1299,10 @@ export async function handleNavigate(
         target,
         (api) => api.update(target.tabId, { url: params.url }),
         waitUntil,
-        timeoutMs,
+        remainingMs,
         params.url,
         true,
+        timeoutMs,
       );
       if (isRpcError(recovered)) return recovered;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, { ...recovered, url: params.url });
@@ -1390,9 +1445,11 @@ async function handleHistory(
 
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
+  const startedAt = Date.now();
 
   try {
     if ((await prepareNavigation(manager, ctx, target, deps, timeoutMs)) === "browser") {
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
       const recovered = await recoverBrowserNavigation(
         deps,
         manager,
@@ -1400,9 +1457,10 @@ async function handleHistory(
         target,
         (api) => (direction === "back" ? api.goBack(target.tabId) : api.goForward(target.tabId)),
         waitUntil,
-        timeoutMs,
+        remainingMs,
         undefined,
         true,
+        timeoutMs,
       );
       if (isRpcError(recovered)) return recovered;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
@@ -1522,10 +1580,12 @@ export async function handleReload(
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
   const ignoreCache = params.hard === true;
+  const startedAt = Date.now();
 
   try {
     if ((await prepareNavigation(manager, ctx, target, deps, timeoutMs)) === "browser") {
       const previousUrl = await readTabUrl(deps.tabsApi, target.tabId);
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
       const recovered = await recoverBrowserNavigation(
         deps,
         manager,
@@ -1533,6 +1593,9 @@ export async function handleReload(
         target,
         (api) => api.reload(target.tabId, { bypassCache: ignoreCache }),
         waitUntil,
+        remainingMs,
+        undefined,
+        false,
         timeoutMs,
       );
       if (isRpcError(recovered)) return recovered;

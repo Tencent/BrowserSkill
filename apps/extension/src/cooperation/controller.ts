@@ -977,9 +977,15 @@ export class CooperationController implements ControlAuthority {
     try {
       if (params.action === "enable")
         await cdp.releaseBackgroundExecution?.(session.sessionId, state.tabId);
-      const requestedTimeoutMs =
+      const rawTimeoutMs =
         typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms)
-          ? Math.min(Math.max(params.timeout_ms, 0), MAX_FRAME_REPLY_MS)
+          ? params.timeout_ms
+          : params.action === "wait"
+            ? 15000
+            : undefined;
+      const requestedTimeoutMs =
+        rawTimeoutMs !== undefined
+          ? Math.min(Math.max(rawTimeoutMs, 0), MAX_FRAME_REPLY_MS)
           : undefined;
       const commandDeadline =
         requestedTimeoutMs !== undefined ? commandEnteredAt + requestedTimeoutMs : undefined;
@@ -1011,7 +1017,7 @@ export class CooperationController implements ControlAuthority {
       };
       await refresh();
       if (params.action === "wait") {
-        const timeout = Math.min(Math.max(params.timeout_ms ?? 15000, 0), 25000);
+        const timeout = requestedTimeoutMs ?? 15000;
         const deadline = commandEnteredAt + timeout;
         while (
           (state.unavailable ||
@@ -1347,10 +1353,12 @@ export class CooperationController implements ControlAuthority {
     invoke: (cdp: T) => Promise<unknown>,
     epoch = state.epoch,
     allowFailedPageRecovery = false,
+    allowPendingUrlRecovery = false,
   ): Promise<unknown> {
     if (state.working) return failure("Another operation is settling on this tab");
     let sent = false;
     let revoked: string | undefined;
+    let navTimedOutOrFailed = true;
     const assert = () => {
       signal.throwIfAborted();
       if (
@@ -1372,7 +1380,8 @@ export class CooperationController implements ControlAuthority {
             const session = this.deps.sessions.get(state.sessionId);
             const allowedBlank = state.bootstrap
               ? isInitialBlank(tab)
-              : isUnobservableInitialTab(tab) || (allowFailedPageRecovery && !tab.pendingUrl);
+              : isUnobservableInitialTab(tab) ||
+                (allowFailedPageRecovery && (allowPendingUrlRecovery || !tab.pendingUrl));
             if (!session || tab.windowId !== session.agentWindowId || !allowedBlank)
               throw new Error(
                 (revoked = "The initial task tab changed; synchronize before acting"),
@@ -1390,6 +1399,10 @@ export class CooperationController implements ControlAuthority {
           },
         }),
       );
+      navTimedOutOrFailed =
+        Boolean(revoked) ||
+        isRpcError(result) ||
+        (result as { reached?: unknown } | undefined)?.reached === "timeout";
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted)
         return {
@@ -1436,8 +1449,13 @@ export class CooperationController implements ControlAuthority {
         ["tool.navigate", "tool.reload", "tool.navigate_back", "tool.navigate_forward"].includes(
           method,
         )
-      )
-        await this.observeTab(state.tabId);
+      ) {
+        if (navTimedOutOrFailed || signal.aborted) {
+          void this.observeTab(state.tabId);
+        } else {
+          await this.observeTab(state.tabId);
+        }
+      }
       this.changed(state);
     }
   }
@@ -1468,11 +1486,14 @@ export class CooperationController implements ControlAuthority {
   }
   private async unrecoverableNavigationSource(state: TabState, error: unknown): Promise<boolean> {
     if (await this.unobservableFailedRootLoad(state, error)) return true;
+    if (error instanceof FrameUnresponsiveError && error.frames.length > 0) {
+      const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
+      return !!tab;
+    }
     if (
-      (error instanceof FrameUnresponsiveError && error.frames.length > 0) ||
-      (error instanceof FrameCollectionError &&
-        error.reason === "frame_unobservable" &&
-        error.frames.length > 0)
+      error instanceof FrameCollectionError &&
+      error.reason === "frame_unobservable" &&
+      error.frames.length > 0
     ) {
       const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
       return !!tab && !tab.pendingUrl;
@@ -2149,6 +2170,13 @@ export class CooperationController implements ControlAuthority {
         throw new Error((revoked = reason));
       }
     };
+    const actionReplyTimeoutMs =
+      !isNavigationAction &&
+      typeof params.timeout_ms === "number" &&
+      Number.isFinite(params.timeout_ms) &&
+      params.timeout_ms > DEFAULT_FRAME_REPLY_MS
+        ? Math.min(params.timeout_ms, MAX_FRAME_REPLY_MS)
+        : undefined;
     const verifyEvidence = async () => {
       if (!context || !verifiedFrames) throw new Error((revoked = "Synchronize before acting"));
       if (sameFrames(verifiedFrames, state.frames, "revision")) return;
@@ -2173,7 +2201,7 @@ export class CooperationController implements ControlAuthority {
           evidence = observationEvidence(scene);
         },
       });
-      await this.refresh(state);
+      await this.refresh(state, undefined, false, actionReplyTimeoutMs, signal);
       assert();
       // A refusal always requires a fresh sync; the refused context cannot retry.
       const consumeRefused = () => {
@@ -2428,6 +2456,7 @@ export class CooperationController implements ControlAuthority {
     };
     let fallbackBootstrap = false;
     let failedLoadRecovery = false;
+    let unresponsiveSourceRecovery = false;
     let restoreStrictObservation = false;
     const maybeRestoreObservation = (effect: string) => {
       if (
@@ -2451,13 +2480,7 @@ export class CooperationController implements ControlAuthority {
         this.changed(state);
       }
     };
-    const actionReplyTimeoutMs =
-      !isNavigationAction &&
-      typeof params.timeout_ms === "number" &&
-      Number.isFinite(params.timeout_ms) &&
-      params.timeout_ms > DEFAULT_FRAME_REPLY_MS
-        ? Math.min(params.timeout_ms, MAX_FRAME_REPLY_MS)
-        : undefined;
+    const runEnteredAt = Date.now();
     try {
       await this.refresh(state, undefined, false, actionReplyTimeoutMs, signal);
       if (params.context_id && !bound) return invalidControlContext();
@@ -2745,8 +2768,15 @@ export class CooperationController implements ControlAuthority {
         (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
       if (["tool.evaluate", "tool.upload"].includes(req.method)) {
         const intact = !state.unavailable && state.epoch === epoch;
+        const postActionReplyTimeoutMs =
+          actionReplyTimeoutMs !== undefined
+            ? Math.max(
+                DEFAULT_FRAME_REPLY_MS,
+                Math.min(actionReplyTimeoutMs, deadline - Date.now()),
+              )
+            : undefined;
         try {
-          await this.refresh(state);
+          await this.refresh(state, undefined, false, postActionReplyTimeoutMs, signal);
         } catch (error) {
           if (!completed && !(isRpcError(result) && intact)) throw error;
           // A new frame may not yet expose its collector. Retain the completed
@@ -2844,6 +2874,8 @@ export class CooperationController implements ControlAuthority {
         !state.held &&
         !this.humanActive(state) &&
         (await this.unrecoverableNavigationSource(state, error));
+      unresponsiveSourceRecovery =
+        failedLoadRecovery && error instanceof FrameUnresponsiveError && error.frames.length > 0;
       if (
         failedLoadRecovery ||
         (!sent &&
@@ -2870,6 +2902,19 @@ export class CooperationController implements ControlAuthority {
               : "The initial blank tab has no observed content; omit expect, observation_id and depends_on or synchronize first",
             data: { phase: "precondition", effect_state: "none" },
           };
+        const refreshElapsedMs = Date.now() - runEnteredAt;
+        if (failedLoadRecovery && refreshElapsedMs > 0) {
+          const baseTimeoutMs =
+            typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms)
+              ? params.timeout_ms
+              : req.method === "tool.navigate"
+                ? 30_000
+                : 15_000;
+          req.params = {
+            ...(req.params as object),
+            timeout_ms: Math.max(1, baseTimeoutMs - refreshElapsedMs),
+          };
+        }
         fallbackBootstrap = true;
       } else {
         if (error instanceof ActionCheckError) checkFailure = error.rpcError;
@@ -2897,7 +2942,16 @@ export class CooperationController implements ControlAuthority {
       this.changed(state);
     }
     return fallbackBootstrap
-      ? this.bootstrap(state, req.method, cdp, signal, invoke, epoch, failedLoadRecovery)
+      ? this.bootstrap(
+          state,
+          req.method,
+          cdp,
+          signal,
+          invoke,
+          epoch,
+          failedLoadRecovery,
+          unresponsiveSourceRecovery,
+        )
       : undefined;
   }
 }

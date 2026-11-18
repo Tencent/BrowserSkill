@@ -151,13 +151,17 @@ pub fn dispatch(
     let need_scope_meta = session.trim().is_empty();
     let mut resolved_session: Option<String> = None;
     let mut reply: serde_json::Value = if args.settle {
-        settle::run(|action| {
+        let budget = args.timeout_ms.map(Duration::from_millis);
+        settle::run_bounded(budget, |action, rem| {
+            let rem_ms = rem.map(|d| d.as_nanos().div_ceil(1_000_000) as u64);
             let mut current = params.clone();
+            current.action = action;
             if matches!(action, CooperateAction::Wait) {
                 current.control_policy = None;
-                current.timeout_ms = Some(args.timeout_ms.unwrap_or(1000));
+                current.timeout_ms = Some(rem_ms.unwrap_or(1000).min(25_000));
+            } else if let Some(ms) = rem_ms {
+                current.timeout_ms = Some(ms.min(25_000));
             }
-            current.action = action;
             let meta = crate::ipc_client::IpcRequestMeta {
                 return_scope_meta: need_scope_meta
                     && matches!(

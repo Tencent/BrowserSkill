@@ -901,6 +901,10 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
         );
         return;
       }
+      if (request.url === "/wedged-early") {
+        response.end("<!doctype html><title>Wedged Early</title><script>for (;;) {}</script>");
+        return;
+      }
       if (request.url === "/escaped") {
         response.end(
           `<!doctype html><title>Escaped</title><h1>Escaped Healthy Page</h1><button id="ok" type="button">Continue</button><a id="open-wedged" href="http://127.0.0.1:${serverPort}/wedged">Open wedged</a>`,
@@ -950,7 +954,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
       try {
         const { stdout } = await promisify(execFile)(executable, [...args, "--json"], {
           env,
-          timeout: 30000,
+          timeout: 45000,
         });
         return { exitCode: 0, body: JSON.parse(stdout) };
       } catch (error) {
@@ -1012,7 +1016,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
           deviceScale: 1,
           zoom: 1,
           extraArgs: [
-            "--host-resolver-rules=MAP accounts.test 127.0.0.1,MAP widgets.test 127.0.0.1,MAP cdn.test 127.0.0.1,MAP healthy.test 127.0.0.1",
+            "--host-resolver-rules=MAP accounts.test 127.0.0.1,MAP widgets.test 127.0.0.1,MAP cdn.test 127.0.0.1,MAP wedged.test 127.0.0.1,MAP healthy.test 127.0.0.1",
             "--no-proxy-server",
             "--disable-features=HttpsUpgrades",
           ],
@@ -1106,9 +1110,10 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             const shot = await runCli("screenshot", "--out", shotPath, ...scope);
             expect(shot.exitCode, JSON.stringify(shot)).toBe(0);
 
-            // 2. Genuinely wedged main frame (`for (;;) {}`): `cooperate sync` fails cleanly
-            // (`effect_state: "none"`) without freezing the ledger, and `bsk navigate` escapes
-            // the wedged tab without requiring `bsk session stop`.
+            // 2. Genuinely wedged main frame (`for (;;) {}`): settled `bsk sync --timeout-ms`
+            // respects its wall-clock deadline without multiplying retries (Sync -> Wait -> Sync),
+            // fails cleanly (`effect_state: "none"`) without freezing the ledger, and `bsk reload`
+            // / `bsk navigate` still escape cleanly even after `bsk snapshot` trips `CdpReadGate`.
             const preWedged = await runCli("sync", ...scope);
             expect(preWedged.exitCode, JSON.stringify(preWedged)).toBe(0);
             const navWedged = await runCli(
@@ -1125,8 +1130,12 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             expect(navWedged.exitCode, JSON.stringify(navWedged)).toBe(0);
             await new Promise((resolve) => setTimeout(resolve, 250));
 
-            const wedgedSync = await runCli("cooperate", "sync", ...scope);
+            const wedgedSyncStart = Date.now();
+            const wedgedSync = await runCli("sync", "--timeout-ms", "7000", ...scope);
+            const wedgedSyncElapsed = Date.now() - wedgedSyncStart;
             expect(wedgedSync.exitCode).not.toBe(0);
+            expect(wedgedSyncElapsed).toBeGreaterThanOrEqual(6500);
+            expect(wedgedSyncElapsed).toBeLessThan(12000);
             expect(wedgedSync.body.message).toContain("A page frame is not responding: 0");
             expect(wedgedSync.body.data).toMatchObject({
               reason: "cooperation_sync_required",
@@ -1134,6 +1143,34 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             });
             expect(wedgedSync.body.data.recovery).toContain("navigate or reload");
             expect((await runCli("ledger", "status", ...scope)).body.frozen).toBe(false);
+
+            // Follow the recovery hint with `bsk snapshot`, tripping `CdpReadGate` on the root target.
+            const firstSnap = await runCli("snapshot", ...scope);
+            expect(firstSnap.exitCode).not.toBe(0);
+            expect(firstSnap.body.data?.reason).toBe("renderer_read_timeout");
+
+            const blockedSnapStart = Date.now();
+            const blockedSnap = await runCli("snapshot", ...scope);
+            expect(blockedSnap.exitCode).not.toBe(0);
+            expect(Date.now() - blockedSnapStart).toBeLessThan(2500);
+            expect(blockedSnap.body.data).toMatchObject({
+              reason: "renderer_read_timeout",
+              phase: "blocked",
+            });
+
+            // Navigating from the `CdpReadGate`-tripped tab to a synchronously wedged destination
+            // with `--timeout 6s` falls back to browser navigation and bounds post-commit handoff.
+            const navEarlyWedgedStart = Date.now();
+            const navEarlyWedged = await runCli(
+              "navigate",
+              `http://wedged.test:${serverPort}/wedged-early`,
+              "--timeout",
+              "6s",
+              ...scope,
+            );
+            expect(Date.now() - navEarlyWedgedStart).toBeLessThan(11000);
+            expect(navEarlyWedged.exitCode, JSON.stringify(navEarlyWedged)).toBe(4);
+            expect(navEarlyWedged.body.reached).toBe("timeout");
 
             const escaped = await runCli(
               "navigate",
@@ -1197,5 +1234,5 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
       await rm(directory, { recursive: true, force: true });
     }
   },
-  90000,
+  150000,
 );

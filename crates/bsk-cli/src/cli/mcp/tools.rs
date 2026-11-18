@@ -1322,17 +1322,20 @@ async fn session(
                     max_tokens: args.max_tokens,
                 };
                 if args.settle.unwrap_or(false) {
-                    let wait_ms = args.timeout_ms;
+                    let budget = args.timeout_ms.map(Duration::from_millis);
                     link.blocking_envelope(move |rpc| {
                         let mut latest_meta = None;
-                        let val = cooperate::settle::run(|mode| {
+                        let val = cooperate::settle::run_bounded(budget, |mode, rem| {
+                            let rem_ms = rem.map(|d| d.as_nanos().div_ceil(1_000_000) as u64);
                             let mut current = params.clone();
+                            current.action = mode;
                             if matches!(mode, CooperateAction::Wait) {
                                 current.control_policy = None;
-                                current.timeout_ms = Some(wait_ms.unwrap_or(1000));
+                                current.timeout_ms = Some(rem_ms.unwrap_or(1000).min(25_000));
+                            } else if let Some(ms) = rem_ms {
+                                current.timeout_ms = Some(ms.min(25_000));
                             }
                             let is_sync = matches!(mode, CooperateAction::Sync);
-                            current.action = mode;
                             let meta = crate::ipc_client::IpcRequestMeta {
                                 return_scope_meta: is_sync,
                                 ..Default::default()

@@ -310,7 +310,7 @@ export function attachCooperationCapture() {
     const name = r.attributeName?.toLowerCase() ?? "";
     if (isInternalBskAttribute(name)) return true;
     if (r.target instanceof Element && r.target.getAttribute(name) === r.oldValue) return true;
-    if (!name.startsWith("data-") || OBSERVED_DATA_ATTRIBUTES.has(name)) return false;
+    if (!/^data-[-\w]+$/.test(name) || OBSERVED_DATA_ATTRIBUTES.has(name)) return false;
     const facts = styleFacts();
     return facts.readable && !facts.dataAttrs.has(name);
   };
@@ -349,9 +349,10 @@ export function attachCooperationCapture() {
   const textChanges = (records: MutationRecord[]): Omit<TextChange, "sequence">[] | undefined => {
     const replaced = new Map<Text, string>();
     const removals = new Map<Node, MutationRecord>();
+    const attributeRecords: MutationRecord[] = [];
     for (const r of records) {
       if (r.type === "attributes") {
-        if (!invisibleAttribute(r)) return;
+        attributeRecords.push(r);
         continue;
       }
       let node: Node | undefined = r.target;
@@ -385,6 +386,9 @@ export function attachCooperationCapture() {
       if (!replaced.has(node)) replaced.set(node, before);
     }
     if (removals.size) return;
+    for (const r of attributeRecords) {
+      if (!invisibleAttribute(r)) return;
+    }
     const changes: Omit<TextChange, "sequence">[] = [];
     const referencedByRoot = new Map<Document | ShadowRoot, Set<string>>();
     for (const [node, before] of replaced) {

@@ -88,25 +88,16 @@ export async function ensureOverlayInjected(
     return;
   }
   const run = (async () => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const inject = chrome.scripting.executeScript({
+      const outcome = await executeScriptBounded({
         target: documentId ? { tabId, documentIds: [documentId] } : { tabId },
         files: [OVERLAY_CONTENT_SCRIPT_FILE],
       });
-      void inject.catch(() => {});
-      const outcome = await Promise.race([
-        inject.then(() => true),
-        new Promise<false>((resolve) => {
-          timer = setTimeout(() => resolve(false), ARM_INJECT_TIMEOUT_MS);
-        }),
-      ]);
       if (outcome && documentId) rememberOverlayDocument(key);
     } catch {
       // Restricted pages (`about:blank`, `chrome://`, Web Store) or closing tabs
       // reject `executeScript`; callers handle unreachable receivers naturally.
     } finally {
-      clearTimeout(timer);
       inflightOverlayInjections.delete(key);
     }
   })();
@@ -116,6 +107,28 @@ export async function ensureOverlayInjected(
 
 const ARM_INJECT_TIMEOUT_MS = 3_000;
 const ARM_INJECT_TIMED_OUT = Symbol("arm_inject_timed_out");
+
+export async function executeScriptBounded(
+  injection: chrome.scripting.ScriptInjection<unknown[], unknown>,
+  timeoutMs = ARM_INJECT_TIMEOUT_MS,
+): Promise<boolean> {
+  if (typeof chrome === "undefined" || typeof chrome.scripting?.executeScript !== "function") {
+    return false;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const pending = chrome.scripting.executeScript(injection);
+    void pending?.catch?.(() => {});
+    return await Promise.race([
+      pending.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export async function sendTabMessageBounded(
   tabId: number,
@@ -191,14 +204,14 @@ export async function injectCooperationAllFrames(tabId: number): Promise<void> {
             if (!isMissingReceiverError(error)) return;
           }
           try {
-            await chrome.scripting.executeScript({
+            const injected = await executeScriptBounded({
               target: frame.documentId
                 ? { tabId, documentIds: [frame.documentId] }
                 : { tabId, frameIds: [frame.frameId] },
               files: [COOPERATION_CONTENT_SCRIPT_FILE],
               injectImmediately: true,
             });
-            await sendArmMessageBounded(tabId, msgTarget);
+            if (injected) await sendArmMessageBounded(tabId, msgTarget);
           } catch {
             // Restricted pages or closing frames cannot receive scripts.
           }
@@ -208,7 +221,7 @@ export async function injectCooperationAllFrames(tabId: number): Promise<void> {
     }
   }
   try {
-    await chrome.scripting.executeScript({
+    await executeScriptBounded({
       target: { tabId, allFrames: true },
       files: [COOPERATION_CONTENT_SCRIPT_FILE],
       injectImmediately: true,
@@ -228,7 +241,7 @@ export async function injectRecordFrameAllFrames(tabId: number): Promise<void> {
     // ever hosts `record-frame.js`'s `onMessage` listener (`undefined` reply)
     // without `cooperation.js` already mounted. `claimIdempotentContentScript`
     // makes repeated execution on already-mounted frames a zero-cost no-op.
-    await chrome.scripting.executeScript({
+    await executeScriptBounded({
       target: { tabId, allFrames: true },
       files: [COOPERATION_CONTENT_SCRIPT_FILE, RECORD_FRAME_CONTENT_SCRIPT_FILE],
       injectImmediately: true,
