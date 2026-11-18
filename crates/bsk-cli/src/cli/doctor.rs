@@ -477,7 +477,10 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
             details.extend(conflicts.iter().cloned());
         }
         hints.push(format!(
-            "{id}: keep your instructions with `bsk install-skill --harness {id} --source <existing-skill-directory> --force`, or restore the bundled skill with `bsk install-skill --harness {id} --force` (overwrites existing instructions)"
+            "{id} — Keep local changes (recommended): `bsk install-skill --harness {id} --source <existing-skill-directory> --force`"
+        ));
+        hints.push(format!(
+            "{id} — Overwrite local changes with the bundled skill: `bsk install-skill --harness {id} --force`"
         ));
     }
     for (harness, message) in &report.errors {
@@ -496,9 +499,9 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
             0,
             "check filesystem access for the failing harness, then re-run `bsk doctor`".into(),
         );
-        CheckResult::fail(name, detail, hints.join("; "))
+        CheckResult::fail(name, detail, hints.join("\n"))
     } else if !report.paused.is_empty() {
-        CheckResult::warn(name, detail, hints.join("; "))
+        CheckResult::warn(name, detail, hints.join("\n"))
     } else if !report.updated.is_empty() || !report.up_to_date.is_empty() {
         CheckResult::ok(name, detail)
     } else if !details.is_empty() {
@@ -767,24 +770,35 @@ fn render_human(checks: &[CheckResult]) {
         .max()
         .unwrap_or(0);
     for c in checks {
-        let mark = match c.status {
-            CheckStatus::Ok => "ok  ",
-            CheckStatus::Fail => "FAIL",
-            CheckStatus::Warning => "WARN",
-            CheckStatus::NotApplicable => "N/A ",
-        };
-        let detail = match (&c.hint, c.status) {
-            (Some(h), CheckStatus::Fail | CheckStatus::Warning) => {
-                format!("{} — hint: {}", c.detail, style_hint(h))
-            }
-            _ => c.detail.clone(),
-        };
-        let name = &c.name;
-        // Use chars().count() for padding (names are now ASCII).
-        let pad = name_width.saturating_sub(name.chars().count());
-        let padding = " ".repeat(pad);
-        println!("{mark}  {name}{padding}  {detail}");
+        println!("{}", format_human_check(c, name_width));
     }
+}
+
+fn format_human_check(check: &CheckResult, name_width: usize) -> String {
+    let mark = match check.status {
+        CheckStatus::Ok => "ok  ",
+        CheckStatus::Fail => "FAIL",
+        CheckStatus::Warning => "WARN",
+        CheckStatus::NotApplicable => "N/A ",
+    };
+    let name = &check.name;
+    let pad = name_width.saturating_sub(name.chars().count());
+    let padding = " ".repeat(pad);
+    let mut row = format!("{mark}  {name}{padding}  {}", check.detail);
+    if let (Some(hint), CheckStatus::Fail | CheckStatus::Warning) = (&check.hint, check.status) {
+        if hint.contains('\n') {
+            let indent = " ".repeat(mark.len() + 4 + name_width);
+            for line in hint.lines() {
+                row.push('\n');
+                row.push_str(&indent);
+                row.push_str(&style_hint(line));
+            }
+        } else {
+            row.push_str(" — hint: ");
+            row.push_str(&style_hint(hint));
+        }
+    }
+    row
 }
 
 fn render_json(checks: &[CheckResult]) -> Result<()> {
@@ -1127,12 +1141,18 @@ mod m2_tests {
                 let json = serde_json::to_value(&check).unwrap();
                 assert_eq!(json["status"], "warn");
                 assert_eq!(json["ok"], true);
+                let actions = [
+                    "cursor — Keep local changes (recommended): `bsk install-skill --harness cursor --source <existing-skill-directory> --force`",
+                    "cursor — Overwrite local changes with the bundled skill: `bsk install-skill --harness cursor --force`",
+                ];
                 let hint = json["hint"].as_str().unwrap();
-                assert!(
-                    hint.contains("--harness cursor --source <existing-skill-directory> --force")
-                );
-                assert!(hint.contains("--harness cursor --force"));
-                assert!(hint.contains("overwrites existing instructions"));
+                assert_eq!(hint.lines().collect::<Vec<_>>(), actions);
+                let human = format_human_check(&check, check.name.chars().count());
+                let mut lines = human.lines();
+                let status = lines.next().unwrap();
+                assert!(status.contains("content preserved"));
+                assert!(!status.contains("bsk install-skill"));
+                assert_eq!(lines.map(str::trim_start).collect::<Vec<_>>(), actions);
                 // An I/O failure takes precedence without hiding paused installations.
                 report
                     .errors
