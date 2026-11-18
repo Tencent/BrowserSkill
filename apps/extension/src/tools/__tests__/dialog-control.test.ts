@@ -183,4 +183,66 @@ describe("native dialog control", () => {
     }
     expect(cdp.resolveDialog).not.toHaveBeenCalled();
   });
+
+  it("attaches effect_state none on pre-CDP rejections and unknown with tab_id when CDP fails mid-resolution", async () => {
+    const { sessions, cdp } = await fixture();
+    expect(
+      await handleDialog(
+        sessions,
+        "tool.dialog_accept",
+        { session_id: "owner", dialog_id: "missing-dialog" },
+        cdp,
+      ),
+    ).toMatchObject({
+      code: "not_found",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+
+    const preAborted = new AbortController();
+    preAborted.abort();
+    expect(
+      await handleDialog(
+        sessions,
+        "tool.dialog_accept",
+        { session_id: "owner", dialog_id: pending.id },
+        cdp,
+        { signal: preAborted.signal },
+      ),
+    ).toMatchObject({
+      code: "cancelled",
+      data: {
+        dispatched: false,
+        effect_state: "none",
+        phase: "precondition",
+        tab_id: 7,
+      },
+    });
+
+    const failingCdp = {
+      ...cdp,
+      resolveDialog: vi.fn(async (_id, _accept, _text, guard) => {
+        guard?.onDispatch?.();
+        throw new Error("WebSocket closed mid-handleJavaScriptDialog");
+      }),
+    } as unknown as CdpRunner;
+
+    expect(
+      await handleDialog(
+        sessions,
+        "tool.dialog_accept",
+        { session_id: "owner", dialog_id: pending.id },
+        failingCdp,
+      ),
+    ).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        effect_state: "unknown",
+        phase: "execution",
+        tab_id: 7,
+      },
+    });
+  });
 });

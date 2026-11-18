@@ -6,8 +6,20 @@
 // exactly the same sandbox + visibility rules as the M6 observation
 // handlers (review parity).
 
-import type { CdpDebuggee, CdpDispatchGuard, DialogCursor } from "@/browser-driver/chromium-cdp";
-import type { CdpFrameGraph, CdpFrameGraphOptions, CdpTarget } from "@/browser-driver/frame-graph";
+import type { CdpDispatchGuard, DialogCursor } from "@/browser-driver/chromium-cdp";
+
+export type { CdpDispatchGuard };
+
+import {
+  type FrameDocumentGraph,
+  type FrameDocumentGraphOptions,
+  type FrameDocumentHandle,
+  type FrameNodeHandle,
+  StaleFrameHandleError,
+  type TabEventSource,
+  toFrameDocumentHandle,
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import type { NativeInputTimestamp } from "@/browser-driver/native-input-clock";
 import { shareScreencasts } from "@/browser-driver/screencast-coordinator";
 import {
@@ -52,19 +64,20 @@ export interface ResolvedTargetTab {
   pendingUrl?: string;
 }
 
-export type { CdpFrameGraphOptions, DialogCursor };
+export type { DialogCursor, FrameDocumentGraphOptions };
 
 /**
- * Minimal CDP surface every tool handler needs. Backed by
- * `ChromiumCdp` in production; tests inject a fake.
+ * Typed CDP driver surface every tool handler uses. Backed by `ChromiumCdp`
+ * in production; unit tests construct typed stubs via `createStubCdpRunner`.
  *
- * `trackSessionTab` is optional so test doubles need not implement it
- * — production `ChromiumCdp` always supplies it for ref-aware session
- * teardown.
+ * Contextual `CooperationController` hooks (`runBrowserMutation`, `resourceCleanup`,
+ * `beginDomMutation`, `verifyPointerTarget`) and shared-tab-stripped background
+ * execution hooks (`acquireBackgroundExecution`, `ownsBackgroundExecution`,
+ * `restoreBackgroundExecution`) remain capability-gated.
  */
 export interface CdpRunner {
   /** Measure the browser's native epoch conversion before arming page input. */
-  prepareInputTimestamp?(): Promise<NativeInputTimestamp>;
+  prepareInputTimestamp(): Promise<NativeInputTimestamp>;
   /** Fence a browser API effect at invocation, after asynchronous ownership checks. */
   runBrowserMutation?<T>(operation: () => Promise<T>): Promise<T>;
   /** Only release resources acquired by this request; never restore page/user state. */
@@ -73,61 +86,74 @@ export interface CdpRunner {
   beginDomMutation?(): Promise<void>;
   /** Shared control validates the live pointer target again after hover. */
   verifyPointerTarget?(
-    target: { tabId: number; cdpTarget: CdpTarget; backendNodeId: number; frameId?: string },
+    target: { handle: FrameNodeHandle },
     point: { x: number; y: number },
     /** Intentional displacement from the observed action point, in viewport CSS pixels. */
     offset?: { x: number; y: number },
   ): Promise<void>;
-  send<T = unknown>(tabId: number, method: string, params?: object): Promise<T>;
-  sendToTarget?<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T>;
-  /** Production dispatch boundary; optional for lightweight test runners. */
-  sendGuarded?<T = unknown>(
-    target: CdpTarget,
+  send<T = unknown>(
+    tabId: number,
     method: string,
-    params: object | undefined,
-    guard: CdpDispatchGuard,
+    params?: object,
+    signal?: AbortSignal,
   ): Promise<T>;
-  detach?(tabId: number, expectedAttachmentId?: string): Promise<void>;
-  getFrameGraph?(
+  /** Stable frame/node handle dispatch; validates `frameId` + `loaderId` inside `ChromiumCdp`. */
+  sendToFrame<T = unknown>(
+    handle: FrameDocumentHandle | FrameNodeHandle,
+    method: string,
+    params?: object,
+    guard?: CdpDispatchGuard,
+  ): Promise<T>;
+  getMainFrameHandle(tabId: number, signal?: AbortSignal): Promise<FrameDocumentHandle>;
+  getFrameDocuments(
     tabId: number,
     signal?: AbortSignal,
-    options?: CdpFrameGraphOptions,
-  ): Promise<CdpFrameGraph>;
-  getAttachmentId?(tabId: number): string | undefined;
-  resolveTarget?<T extends CdpDebuggee>(target: T): T;
-  retainTabAttachment?(tabId: number): () => void;
-  reattachIfSoftDetached?(tabId: number): Promise<void>;
-  reconcileSoftDetachedFrames?(tabId: number): Promise<void>;
-  ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
+    options?: FrameDocumentGraphOptions,
+  ): Promise<FrameDocumentGraph>;
+  isEventFromFrame(source: TabEventSource, handle: FrameDocumentHandle): boolean;
+  hasOwnFrameTarget(tabId: number, frameId: string, parentFrameId?: string): boolean;
+  recordFrameDocumentElement(
+    tabId: number,
+    frameId: string,
+    loaderId: string,
+    documentElementBackendNodeId: number,
+  ): void;
+  detach(tabId: number, expectedAttachmentId?: string): Promise<void>;
+  getAttachmentId(tabId: number): string | undefined;
+  retainTabAttachment(tabId: number): () => void;
+  ensureAttachedToUrl(tabId: number, expectedUrl: string | undefined): Promise<void>;
   acquireBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
   /** Whether this session requests the persistent override, regardless of applied CDP state. */
   ownsBackgroundExecution?(sessionId: string, tabId: number): boolean;
-  releaseBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
+  releaseBackgroundExecution(sessionId: string, tabId: number): Promise<void>;
   /** Resend this session's owned override, even when the applied-state cache reports it active. */
   restoreBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
-  trackSessionTab?(sessionId: string, tabId: number): void;
-  releaseSessionTab?(sessionId: string, tabId: number): Promise<void>;
-  onEvent?(handler: (source: CdpDebuggee, method: string, params: unknown) => void): {
+  trackSessionTab(sessionId: string, tabId: number): void;
+  releaseSessionTab(sessionId: string, tabId: number): Promise<void>;
+  onEvent(
+    tabId: number,
+    handler: (source: TabEventSource, method: string, params: unknown) => void,
+  ): {
     dispose(): void;
   };
-  dialogCursor?(tabId: number): DialogCursor;
-  dialogsSince?(tabId: number, cursor: DialogCursor): JavaScriptDialogInfo[];
-  pendingDialogs?(tabId?: number): PendingJavaScriptDialog[];
-  resolveDialog?(
+  dialogCursor(tabId: number): DialogCursor;
+  dialogsSince(tabId: number, cursor: DialogCursor): JavaScriptDialogInfo[];
+  pendingDialogs(tabId?: number): PendingJavaScriptDialog[];
+  resolveDialog(
     id: string,
     accept: boolean,
     text?: string,
     guard?: Pick<CdpDispatchGuard, "signal" | "onDispatch">,
   ): Promise<JavaScriptDialogInfo>;
-  onDialogChanged?(
+  onDialogChanged(
     handler: (
       tabId: number,
       dialog: PendingJavaScriptDialog | null,
       reason?: "decision_timeout",
     ) => void,
   ): { dispose(): void };
-  ensureConsoleCapture?(tabId: number, signal?: AbortSignal): Promise<void>;
-  consoleEntriesSince?(
+  ensureConsoleCapture(tabId: number, signal?: AbortSignal): Promise<void>;
+  consoleEntriesSince(
     tabId: number,
     since: number | undefined,
     limit: number,
@@ -136,28 +162,531 @@ export interface CdpRunner {
   ): ConsoleResult;
 }
 
-export function sendToCdpTarget<T = unknown>(
-  cdp: CdpRunner,
-  target: CdpTarget,
-  method: string,
-  params?: object,
-): Promise<T> {
-  if (target.sessionId && cdp.sendToTarget) {
-    return cdp.sendToTarget<T>(target, method, params);
-  }
-  return cdp.send<T>(target.tabId, method, params);
+export interface PinnedSelectorTarget {
+  readonly handle: FrameNodeHandle;
+  readonly backendNodeId: number;
+  readonly frameId?: string;
+  readonly usedSelector: string;
 }
 
-export function cdpRunnerForTarget(cdp: CdpRunner, target: CdpTarget): CdpRunner {
+const pinnedSelectorTargets = new WeakMap<object, ReadonlyMap<string, PinnedSelectorTarget>>();
+
+function sharePinnedSelectorTargets(source: object, target: object): void {
+  const existing = pinnedSelectorTargets.get(source);
+  if (existing) pinnedSelectorTargets.set(target, existing);
+}
+
+export function withPinnedSelectorTargets<T extends CdpRunner>(
+  cdp: T,
+  targets: ReadonlyMap<string, PinnedSelectorTarget>,
+): T {
+  const merged = new Map(pinnedSelectorTargets.get(cdp));
+  for (const [selector, entry] of targets) merged.set(selector, entry);
+  const wrapped = delegateCdpRunner(cdp, {});
+  pinnedSelectorTargets.set(wrapped, merged);
+  return wrapped;
+}
+
+export function lookupPinnedSelectorTarget(
+  cdp: CdpRunner,
+  tabId: number,
+  selector: string,
+): PinnedSelectorTarget | undefined {
+  const entry = pinnedSelectorTargets.get(cdp)?.get(selector);
+  return entry && entry.handle.tabId === tabId ? entry : undefined;
+}
+
+export interface DelegateCdpRunnerOptions<T extends CdpRunner = CdpRunner> {
+  /** Keys hidden from both property lookup and the `in` operator. */
+  omit?: ReadonlySet<PropertyKey>;
+  /** Methods whose `this` should be bound to the wrapper Proxy (so internal `this.send` calls stay guarded). */
+  bindReceiver?: ReadonlySet<PropertyKey>;
+  /** Optional dynamic method interceptor (used by `sessionCdpRunner`). */
+  intercept?: (target: T, key: PropertyKey, value: unknown, wrapper: T) => unknown;
+}
+
+/**
+ * Wrap `base` via prototype-preserving delegation so overriding `send` /
+ * `sendToFrame` / hooks never silently strips `CdpRunner` capabilities or
+ * breaks `"method" in runner` invariants.
+ */
+export function delegateCdpRunner<T extends CdpRunner = CdpRunner>(
+  base: T,
+  overrides: Partial<CdpRunner>,
+  options?: DelegateCdpRunnerOptions<T>,
+): T {
+  const omit = options?.omit;
+  const bindReceiver = options?.bindReceiver;
+  const intercept = options?.intercept;
+  const wrapper = new Proxy(base, {
+    has(target, key) {
+      if (omit?.has(key)) return false;
+      if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+        const desc = Object.getOwnPropertyDescriptor(overrides, key);
+        if (desc?.get || desc?.value !== undefined) return true;
+        return false;
+      }
+      return Reflect.has(target, key);
+    },
+    get(target, key, receiver) {
+      if (omit?.has(key)) return undefined;
+      if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+        const desc = Object.getOwnPropertyDescriptor(overrides, key);
+        if (desc?.get) return desc.get.call(wrapper);
+        if (desc?.value !== undefined) return desc.value;
+      }
+      const raw = Reflect.get(target, key, receiver === wrapper ? target : receiver);
+      const intercepted = intercept ? intercept(target, key, raw, wrapper) : undefined;
+      if (intercepted !== undefined) return intercepted;
+      if (typeof raw !== "function") return raw;
+      return bindReceiver?.has(key) ? raw.bind(wrapper) : raw.bind(target);
+    },
+  });
+  shareScreencasts(base, wrapper);
+  sharePinnedSelectorTargets(base, wrapper);
+  return wrapper;
+}
+
+/**
+ * Construct a complete, strongly-typed `CdpRunner` test double from a minimal
+ * `{ send, ... }` partial so unit tests exercise the exact `sendToFrame` /
+ * `getFrameDocuments` driver contract without polluting production `CdpRunner`
+ * with optional mock-only methods.
+ */
+export type CdpRunnerStubOverrides = Partial<Omit<CdpRunner, "send">> & {
+  send: (tabId: number, method: string, params?: object, signal?: AbortSignal) => Promise<unknown>;
+};
+
+export function createStubCdpRunner<T extends CdpRunnerStubOverrides>(
+  overrides: T,
+): CdpRunner & Omit<NoInfer<T>, keyof CdpRunner> {
+  const { send, sendToFrame: rawSendToFrame, ...restOverrides } = overrides;
+  const typedSend = send as CdpRunner["send"];
+  const resolveSelf = (self: unknown): CdpRunner =>
+    self !== null &&
+    typeof self === "object" &&
+    typeof (self as Partial<CdpRunner>).send === "function" &&
+    typeof (self as Partial<CdpRunner>).getAttachmentId === "function"
+      ? (self as CdpRunner)
+      : stub;
+  const applyDispatchGuard = (
+    self: CdpRunner,
+    handle: FrameDocumentHandle | FrameNodeHandle,
+    guard?: CdpDispatchGuard,
+  ) => {
+    guard?.signal?.throwIfAborted();
+    if (guard?.allowReattach === false && self.getAttachmentId(handle.tabId) === undefined) {
+      throw new Error("debugger detached");
+    }
+    if (guard?.attachmentId !== undefined) {
+      const currentAttachment = self.getAttachmentId(handle.tabId);
+      if (currentAttachment !== guard.attachmentId) {
+        throw new Error("Debugger attachment changed before dispatch");
+      }
+    }
+    guard?.onDispatch?.();
+  };
+
+  let wrappedSendToFrame: CdpRunner["sendToFrame"] | undefined;
+  if (rawSendToFrame) {
+    const mockFn = rawSendToFrame as CdpRunner["sendToFrame"] & {
+      getMockImplementation?: () => CdpRunner["sendToFrame"] | undefined;
+      mockImplementation?: (fn: CdpRunner["sendToFrame"]) => unknown;
+    };
+    if (
+      typeof mockFn.getMockImplementation === "function" &&
+      typeof mockFn.mockImplementation === "function"
+    ) {
+      const impl = mockFn.getMockImplementation();
+      if (impl && impl.length < 4) {
+        mockFn.mockImplementation(async function <R = unknown>(
+          this: unknown,
+          handle: FrameDocumentHandle | FrameNodeHandle,
+          _method: string,
+          _params?: object,
+          guard?: CdpDispatchGuard,
+        ): Promise<R> {
+          applyDispatchGuard(resolveSelf(this), handle, guard);
+          return (await impl.apply(
+            this,
+            arguments as unknown as Parameters<CdpRunner["sendToFrame"]>,
+          )) as R;
+        });
+      }
+      wrappedSendToFrame = mockFn;
+    } else if (rawSendToFrame.length < 4) {
+      wrappedSendToFrame = async function <R = unknown>(
+        this: unknown,
+        handle: FrameDocumentHandle | FrameNodeHandle,
+        _method: string,
+        _params?: object,
+        guard?: CdpDispatchGuard,
+      ): Promise<R> {
+        applyDispatchGuard(resolveSelf(this), handle, guard);
+        return (await rawSendToFrame.apply(
+          this,
+          arguments as unknown as Parameters<CdpRunner["sendToFrame"]>,
+        )) as R;
+      };
+    } else {
+      wrappedSendToFrame = rawSendToFrame;
+    }
+  }
+
+  const stub: CdpRunner = {
+    prepareInputTimestamp: async () => ({
+      timestamp: Date.now(),
+      nativeTimestamp: Date.now() / 1000,
+      assertValid: () => {},
+    }),
+    send: typedSend,
+    sendToFrame: async function <R = unknown>(
+      this: unknown,
+      handle: FrameDocumentHandle | FrameNodeHandle,
+      method: string,
+      params?: object,
+      guard?: CdpDispatchGuard,
+    ): Promise<R> {
+      const self = resolveSelf(this);
+      applyDispatchGuard(self, handle, guard);
+      if (guard?.signal !== undefined) {
+        return self.send<R>(handle.tabId, method, params, guard.signal);
+      }
+      return params !== undefined
+        ? self.send<R>(handle.tabId, method, params)
+        : self.send<R>(handle.tabId, method);
+    },
+    getMainFrameHandle: async function (this: unknown, tabId: number, signal?: AbortSignal) {
+      const self = resolveSelf(this);
+      signal?.throwIfAborted();
+      try {
+        const tree = await (signal !== undefined
+          ? self.send<{ frameTree?: { frame?: { id?: string; loaderId?: string } } }>(
+              tabId,
+              "Page.getFrameTree",
+              {},
+              signal,
+            )
+          : self.send<{ frameTree?: { frame?: { id?: string; loaderId?: string } } }>(
+              tabId,
+              "Page.getFrameTree",
+              {},
+            ));
+        const rootFrame = tree?.frameTree?.frame;
+        if (rootFrame?.id) {
+          return toFrameDocumentHandle(tabId, {
+            frameId: rootFrame.id,
+            loaderId: rootFrame.loaderId ?? "",
+          });
+        }
+      } catch (err) {
+        if (
+          err instanceof Error &&
+          (err.name === "AbortError" || err.name === "CdpReadTimeoutError")
+        ) {
+          throw err;
+        }
+      }
+      return toFrameDocumentHandle(tabId, { frameId: "root", loaderId: "" });
+    },
+    getFrameDocuments: async function (
+      this: unknown,
+      tabId: number,
+      signal?: AbortSignal,
+      _options?: FrameDocumentGraphOptions,
+    ): Promise<FrameDocumentGraph> {
+      const self = resolveSelf(this);
+      signal?.throwIfAborted();
+      try {
+        type RawFrameNode = {
+          frame?: {
+            id?: string;
+            parentId?: string;
+            loaderId?: string;
+            url?: string;
+            urlFragment?: string;
+          };
+          childFrames?: RawFrameNode[];
+        };
+        const tree = await (signal !== undefined
+          ? self.send<{ frameTree?: RawFrameNode }>(tabId, "Page.getFrameTree", {}, signal)
+          : self.send<{ frameTree?: RawFrameNode }>(tabId, "Page.getFrameTree", {}));
+        const rootFrame = tree?.frameTree?.frame;
+        if (rootFrame?.id) {
+          const rootLoaderId = rootFrame.loaderId ?? "";
+          const frames: FrameDocumentGraph["frames"][number][] = [
+            {
+              handle: toFrameDocumentHandle(tabId, {
+                frameId: rootFrame.id,
+                loaderId: rootLoaderId,
+              }),
+              frameId: rootFrame.id,
+              loaderId: rootLoaderId,
+              ...(rootFrame.url ? { url: rootFrame.url } : {}),
+              ...(rootFrame.urlFragment !== undefined
+                ? { urlFragment: rootFrame.urlFragment }
+                : {}),
+              processKey: "root",
+              isOutOfProcess: false,
+            },
+          ];
+          const walkChildren = (children: RawFrameNode[] | undefined, fallbackParentId: string) => {
+            for (const child of children ?? []) {
+              if (!child.frame?.id) continue;
+              const childLoader = child.frame.loaderId ?? "";
+              frames.push({
+                handle: toFrameDocumentHandle(tabId, {
+                  frameId: child.frame.id,
+                  loaderId: childLoader,
+                }),
+                frameId: child.frame.id,
+                loaderId: childLoader,
+                parentFrameId: child.frame.parentId ?? fallbackParentId,
+                ...(child.frame.url ? { url: child.frame.url } : {}),
+                ...(child.frame.urlFragment !== undefined
+                  ? { urlFragment: child.frame.urlFragment }
+                  : {}),
+                processKey: "root",
+                isOutOfProcess: false,
+              });
+              walkChildren(child.childFrames, child.frame.id);
+            }
+          };
+          walkChildren(tree.frameTree?.childFrames, rootFrame.id);
+          const attachmentId = self.getAttachmentId(tabId);
+          return {
+            ...(attachmentId !== undefined ? { attachmentId } : {}),
+            rootFrameId: rootFrame.id,
+            frames,
+          };
+        }
+      } catch (err) {
+        if (
+          err instanceof Error &&
+          (err.name === "AbortError" || err.name === "CdpReadTimeoutError")
+        ) {
+          throw err;
+        }
+      }
+      const attachmentId = self.getAttachmentId(tabId);
+      return {
+        ...(attachmentId !== undefined ? { attachmentId } : {}),
+        rootFrameId: "",
+        frames: [],
+      };
+    },
+    isEventFromFrame: (source, handle) =>
+      source.tabId === handle.tabId && (!handle.frameId ? source.isRootTarget : true),
+    hasOwnFrameTarget: () => false,
+    recordFrameDocumentElement: () => {},
+    detach: async () => {},
+    getAttachmentId: () => "stub-attachment",
+    retainTabAttachment: () => () => {},
+    ensureAttachedToUrl: async () => {},
+    releaseBackgroundExecution: async () => {},
+    trackSessionTab: () => {},
+    releaseSessionTab: async () => {},
+    onEvent: () => ({ dispose: () => {} }),
+    dialogCursor: () => 0,
+    dialogsSince: () => [],
+    pendingDialogs: () => [],
+    resolveDialog: async () => {
+      throw new Error("No pending JavaScript dialog");
+    },
+    onDialogChanged: () => ({ dispose: () => {} }),
+    ensureConsoleCapture: async () => {},
+    consoleEntriesSince: (tabId) => ({
+      tab_id: tabId,
+      entries: [],
+      next_since: 0,
+      truncated: false,
+    }),
+    ...restOverrides,
+    ...(wrappedSendToFrame ? { sendToFrame: wrappedSendToFrame } : {}),
+  };
+  return stub as CdpRunner & NoInfer<T>;
+}
+
+export function sendToFrameHandle<T = unknown>(
+  cdp: CdpRunner,
+  handle: FrameDocumentHandle | FrameNodeHandle,
+  method: string,
+  params?: object,
+  guard?: CdpDispatchGuard,
+): Promise<T> {
+  if (guard !== undefined) {
+    return cdp.sendToFrame<T>(handle, method, params, guard);
+  }
+  return params !== undefined
+    ? cdp.sendToFrame<T>(handle, method, params)
+    : cdp.sendToFrame<T>(handle, method);
+}
+
+const RELEASE_OBJECT_METHODS = new Set(["Runtime.releaseObjectGroup", "Runtime.releaseObject"]);
+
+function buildFrameCleanupGuard(
+  baseGuard: CdpDispatchGuard | undefined,
+  callGuard: CdpDispatchGuard | undefined,
+): CdpDispatchGuard {
+  const attachmentId = callGuard?.attachmentId ?? baseGuard?.attachmentId;
+  const ignoreFrameNavigation =
+    callGuard?.ignoreFrameNavigation ?? baseGuard?.ignoreFrameNavigation;
   return {
-    send: <T = unknown>(_tabId: number, method: string, params?: object) =>
-      sendToCdpTarget<T>(cdp, target, method, params),
+    ...(attachmentId !== undefined ? { attachmentId } : {}),
+    ...(ignoreFrameNavigation !== undefined ? { ignoreFrameNavigation } : {}),
+    allowReattach: false,
   };
 }
 
+export function cdpRunnerForFrame(
+  cdp: CdpRunner,
+  handle: FrameDocumentHandle | FrameNodeHandle,
+  guard?: CdpDispatchGuard,
+): CdpRunner {
+  const remapTarget = (
+    target: FrameDocumentHandle | FrameNodeHandle,
+  ): FrameDocumentHandle | FrameNodeHandle =>
+    target.tabId === handle.tabId && !target.frameId && !target.loaderId ? handle : target;
+  const resourceCleanup = cdp.resourceCleanup
+    ? delegateCdpRunner(cdp.resourceCleanup, {
+        send: <T = unknown>(_tabId: number, method: string, params?: object) =>
+          cdp.resourceCleanup!.sendToFrame<T>(
+            handle,
+            method,
+            params,
+            buildFrameCleanupGuard(guard, undefined),
+          ),
+        sendToFrame: <T = unknown>(
+          target: FrameDocumentHandle | FrameNodeHandle,
+          method: string,
+          params?: object,
+          callGuard?: CdpDispatchGuard,
+        ) =>
+          cdp.resourceCleanup!.sendToFrame<T>(
+            remapTarget(target),
+            method,
+            params,
+            buildFrameCleanupGuard(guard, callGuard),
+          ),
+      })
+    : undefined;
+  return delegateCdpRunner(cdp, {
+    ...(resourceCleanup ? { resourceCleanup } : {}),
+    send: <T = unknown>(_tabId: number, method: string, params?: object, signal?: AbortSignal) => {
+      if (RELEASE_OBJECT_METHODS.has(method)) {
+        return (cdp.resourceCleanup ?? cdp).sendToFrame<T>(
+          handle,
+          method,
+          params,
+          buildFrameCleanupGuard(guard, undefined),
+        );
+      }
+      const effectiveGuard = signal && !guard?.signal ? { ...guard, signal } : guard;
+      if (effectiveGuard !== undefined) {
+        return cdp.sendToFrame<T>(handle, method, params, effectiveGuard);
+      }
+      return params !== undefined
+        ? cdp.sendToFrame<T>(handle, method, params)
+        : cdp.sendToFrame<T>(handle, method);
+    },
+    sendToFrame: <T = unknown>(
+      target: FrameDocumentHandle | FrameNodeHandle,
+      method: string,
+      params?: object,
+      callGuard?: CdpDispatchGuard,
+    ) => {
+      const remapped = remapTarget(target);
+      if (RELEASE_OBJECT_METHODS.has(method)) {
+        return (cdp.resourceCleanup ?? cdp).sendToFrame<T>(
+          remapped,
+          method,
+          params,
+          buildFrameCleanupGuard(guard, callGuard),
+        );
+      }
+      const mergedGuard =
+        guard || callGuard
+          ? {
+              ...guard,
+              ...callGuard,
+              signal: callGuard?.signal ?? guard?.signal,
+            }
+          : undefined;
+      if (mergedGuard !== undefined) {
+        return cdp.sendToFrame<T>(remapped, method, params, mergedGuard);
+      }
+      return params !== undefined
+        ? cdp.sendToFrame<T>(remapped, method, params)
+        : cdp.sendToFrame<T>(remapped, method);
+    },
+  });
+}
+
+/**
+ * Deterministic RAII scope for a CDP V8 `objectGroup`. Always calls
+ * `Runtime.releaseObjectGroup` via `cdp.resourceCleanup ?? cdp` on exit
+ * (including errors and cancellation) without resurrecting detached tabs.
+ */
+export async function withObjectGroup<T>(
+  cdp: CdpRunner,
+  target: number | FrameDocumentHandle | FrameNodeHandle,
+  prefix: string,
+  fn: (objectGroup: string) => Promise<T>,
+): Promise<T> {
+  const objectGroup = `${prefix}-${crypto.randomUUID()}`;
+  const cleanup = cdp.resourceCleanup ?? cdp;
+  const handle = typeof target === "number" ? toRootFrameHandle(target) : target;
+  try {
+    return await fn(objectGroup);
+  } finally {
+    try {
+      await cleanup.sendToFrame(
+        handle,
+        "Runtime.releaseObjectGroup",
+        { objectGroup },
+        { allowReattach: false },
+      );
+    } catch {
+      // Never let cleanup failures (detached tab, unowned tab, or navigated frame) mask caller outcome.
+    }
+  }
+}
+
+/**
+ * Deterministic RAII scope for an individual V8 `RemoteObject` (`objectId`).
+ * Always calls `Runtime.releaseObject` via `cdp.resourceCleanup ?? cdp` on exit
+ * without resurrecting detached tabs.
+ */
+export async function withRemoteObject<T>(
+  cdp: CdpRunner,
+  target: number | FrameDocumentHandle | FrameNodeHandle,
+  objectId: string,
+  fn: (objectId: string) => Promise<T>,
+): Promise<T> {
+  const cleanup = cdp.resourceCleanup ?? cdp;
+  const handle = typeof target === "number" ? toRootFrameHandle(target) : target;
+  try {
+    return await fn(objectId);
+  } finally {
+    try {
+      await cleanup.sendToFrame(
+        handle,
+        "Runtime.releaseObject",
+        { objectId },
+        { allowReattach: false },
+      );
+    } catch {
+      // Never let cleanup failures (detached tab, unowned tab, or navigated frame) mask caller outcome.
+    }
+  }
+}
+
+export { toFrameDocumentHandle, toRootFrameHandle };
+
 const sessionRunners = new WeakMap<object, Map<string, CdpRunner>>();
-const TAB_SCOPED_CDP_METHODS = new Set([
-  "getFrameGraph",
+const TAB_SCOPED_CDP_METHODS = new Set<PropertyKey>([
+  "getFrameDocuments",
+  "getMainFrameHandle",
   "ensureAttached",
   "ensureAttachedToUrl",
   "ensureConsoleCapture",
@@ -183,58 +712,57 @@ export function sessionCdpRunner<T extends CdpRunner>(
 
   const track = (tabId: number) => {
     if (typeof tabId === "number" && (!isLive || isLive())) {
-      cdp.trackSessionTab?.(sessionId, tabId);
+      cdp.trackSessionTab(sessionId, tabId);
     }
   };
-  const wrapper = new Proxy(cdp, {
-    get(target, key, receiver) {
-      if (key === "send") {
-        return (tabId: number, ...rest: [string, object?]) => {
+  const wrapper = delegateCdpRunner<T>(
+    cdp,
+    {
+      send: <R = unknown>(
+        tabId: number,
+        method: string,
+        params?: object,
+        signal?: AbortSignal,
+      ): Promise<R> => {
+        track(tabId);
+        if (signal !== undefined) {
+          return cdp.send<R>(tabId, method, params, signal);
+        }
+        return params !== undefined
+          ? cdp.send<R>(tabId, method, params)
+          : cdp.send<R>(tabId, method);
+      },
+      sendToFrame: <R = unknown>(
+        handle: FrameDocumentHandle | FrameNodeHandle,
+        method: string,
+        params?: object,
+        guard?: CdpDispatchGuard,
+      ): Promise<R> => {
+        if (guard?.attachmentId === undefined && guard?.allowReattach !== false) {
+          track(handle.tabId);
+        }
+        if (guard !== undefined) {
+          return cdp.sendToFrame<R>(handle, method, params, guard);
+        }
+        return params !== undefined
+          ? cdp.sendToFrame<R>(handle, method, params)
+          : cdp.sendToFrame<R>(handle, method);
+      },
+    },
+    {
+      intercept: (target, key, raw, self) => {
+        if (!TAB_SCOPED_CDP_METHODS.has(key) || typeof raw !== "function") return undefined;
+        return function (this: unknown, tabId: number, ...rest: unknown[]) {
           track(tabId);
-          return (target.send as (tabId: number, ...args: unknown[]) => Promise<unknown>).call(
-            target,
+          return (raw as (tabId: number, ...args: unknown[]) => unknown).call(
+            this === self ? target : this,
             tabId,
             ...rest,
           );
         };
-      }
-      if (key === "sendToTarget" && typeof target.sendToTarget === "function") {
-        return (cdpTarget: CdpTarget, ...rest: [string, object?]) => {
-          track(cdpTarget.tabId);
-          return (
-            target.sendToTarget as (target: CdpTarget, ...args: unknown[]) => Promise<unknown>
-          ).call(target, cdpTarget, ...rest);
-        };
-      }
-      if (key === "sendGuarded" && typeof target.sendGuarded === "function") {
-        return (
-          cdpTarget: CdpTarget,
-          method: string,
-          params: object | undefined,
-          guard: CdpDispatchGuard,
-        ) => {
-          if (guard?.attachmentId === undefined) track(cdpTarget.tabId);
-          return target.sendGuarded!(cdpTarget, method, params, guard);
-        };
-      }
-      if (typeof key === "string" && TAB_SCOPED_CDP_METHODS.has(key)) {
-        const fn = Reflect.get(target, key, receiver);
-        if (typeof fn === "function") {
-          return function (this: unknown, tabId: number, ...rest: unknown[]) {
-            track(tabId);
-            return (fn as (tabId: number, ...args: unknown[]) => unknown).call(
-              this === wrapper ? target : this,
-              tabId,
-              ...rest,
-            );
-          };
-        }
-      }
-      const value = Reflect.get(target, key, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
+      },
     },
-  });
-  shareScreencasts(cdp, wrapper);
+  );
   if (!bySession) {
     bySession = new Map();
     sessionRunners.set(cdp, bySession);
@@ -341,8 +869,11 @@ export async function resolveTargetTab(
   return target;
 }
 
-function isPendingTabRouting(ctx: SessionContext, tabId: number): boolean {
-  return (ctx.pendingRoutingTabs?.has(tabId) ?? false) && !isAgentControlledTab(ctx, tabId);
+function isExcludedImplicitTarget(ctx: SessionContext, tabId: number): boolean {
+  return (
+    ((ctx.pendingRoutingTabs?.has(tabId) ?? false) && !isAgentControlledTab(ctx, tabId)) ||
+    (ctx.temporaryInputTabs?.has(tabId) ?? false)
+  );
 }
 
 async function resolveVisibleTargetTab(
@@ -390,8 +921,8 @@ async function resolveVisibleTargetTab(
   }
   const tabs = await api.query({ active: true, windowId: ctx.agentWindowId });
   let first = tabs.find((t) => typeof t.id === "number");
-  if (first?.id !== undefined && isPendingTabRouting(ctx, first.id)) {
-    // External arrivals can become active before Chrome lets us move them.
+  if (first?.id !== undefined && isExcludedImplicitTarget(ctx, first.id)) {
+    // External arrivals and temporary input-deselection tabs must not become default targets.
     // Prefer the most recently accessed controlled page without activating tabs.
     const available = await api.query({ windowId: ctx.agentWindowId });
     first = available
@@ -399,7 +930,8 @@ async function resolveVisibleTargetTab(
         (tab) =>
           tab.id !== undefined &&
           tab.windowId === ctx.agentWindowId &&
-          isAgentControlledTab(ctx, tab.id),
+          isAgentControlledTab(ctx, tab.id) &&
+          !(ctx.temporaryInputTabs?.has(tab.id) ?? false),
       )
       .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
     if (!first) {
@@ -516,7 +1048,7 @@ export async function resolveCdpAccessibleTargetTab(
   const tabs = await api.query({ windowId: ctx.agentWindowId });
   for (const tab of tabs) {
     if (ctx.remote && (tab.id === undefined || !isAgentControlledTab(ctx, tab.id))) continue;
-    if (tab.id !== undefined && isPendingTabRouting(ctx, tab.id)) continue;
+    if (tab.id !== undefined && isExcludedImplicitTarget(ctx, tab.id)) continue;
     const candidate = resolvedTargetFromChromeTab(tab, ctx.agentWindowId);
     if (!candidate) continue;
     if (!enforceCdpAccessibleTarget(candidate, toolName)) return candidate;

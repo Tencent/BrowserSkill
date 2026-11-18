@@ -154,7 +154,7 @@
       "unavailableHint": "手順をコピーするには、このブラウザプロファイルを bsk に接続してください。",
       "copyButton": "指示をコピー",
       "copyFailed": "手順をコピーできませんでした。もう一度お試しください。",
-      "promptTemplate": "このタスクでは、ブラウザ {{name}}（インスタンス ID: {{instanceId}}）の BrowserSkill を使用してください。このタスクの新しいセッションを開始するたびに、利用するインターフェースに応じて次のいずれかを実行してください:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nDeepSeek Harness ではツールを呼び出し、CLI コマンドを別途実行しないでください。\nこのインスタンスが未接続の場合は、作業を止め、このプロファイルの再接続を私に依頼してください。--browser / browser を省略したり、別のインスタンスに切り替えたりしないでください。",
+      "promptTemplate": "このタスクでは、ブラウザ {{name}}（インスタンス ID: {{instanceId}}）の BrowserSkill を使用してください。このタスクの新しいセッションを開始するたびに、利用するインターフェースに応じて次のいずれかを実行してください:\nCLI: {{command}}\nMCP: {{toolCall}}\nMCP ツールを使用する場合はツールを呼び出し、CLI コマンドを別途実行しないでください。\nこのインスタンスが未接続の場合は、作業を止め、このプロファイルの再接続を私に依頼してください。--browser / browser を省略したり、別のインスタンスに切り替えたりしないでください。",
       "title": "現在のブラウザ",
       "unnamed": "名前のないブラウザ"
     },
@@ -389,7 +389,21 @@
       "recordStop": "操作の記録を停止",
       "recordAwait": "記録の完了を待機",
       "resize": "ウィンドウサイズを変更",
-      "emulate": "エミュレーション設定を変更"
+      "emulate": "エミュレーション設定を変更",
+      "cooperate": "共有タブを同期",
+      "sessionStart": "セッションを開始",
+      "sessionStop": "セッションを停止",
+      "screenshotFullPage": "ページ全体のスクリーンショットを撮影",
+      "screenshotRead": "スクリーンショットを読み取る",
+      "screenshotRelease": "スクリーンショットを解放",
+      "debug": "デバッグ操作を実行",
+      "video": "画面録画を管理",
+      "dialogStatus": "ダイアログ状態を確認",
+      "dialogAccept": "ダイアログを承認",
+      "dialogDismiss": "ダイアログを閉じる",
+      "waitForElement": "要素を待機",
+      "operationAwait": "操作完了を待機",
+      "operationCancel": "操作をキャンセル"
     }
   },
   "debug": {

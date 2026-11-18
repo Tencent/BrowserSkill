@@ -102,7 +102,7 @@ pub(crate) fn ensure_daemon_optimistic_with_protocol() -> Result<(DaemonInfo, St
         && let Some(protocol) = info.protocol_version.clone()
         && optimistic_endpoint_present(&info.sock_path)
     {
-        super::protocol::record_daemon_protocol(&info.sock_path, &protocol);
+        crate::ipc_client::record_endpoint_ipc_envelope(&info.sock_path, info.ipc_envelope);
         mark_optimistic_candidate(&info.sock_path);
         return Ok((info, protocol));
     }
@@ -120,23 +120,17 @@ pub fn ensure_daemon() -> Result<DaemonInfo> {
 }
 
 /// Same discovery and startup as [`ensure_daemon`], also returning the
-/// daemon's protocol version so long-lived callers can check features per call.
+/// daemon's protocol version so long-lived callers can verify compatibility.
 pub(crate) fn ensure_daemon_with_protocol() -> Result<(DaemonInfo, String)> {
     let deadline = Instant::now() + SPAWN_DEADLINE;
     if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
-        super::protocol::record_daemon_protocol(
-            &daemon.info.sock_path,
-            &daemon.status.protocol_version,
-        );
         return Ok((daemon.info, daemon.status.protocol_version));
     }
     ensure!(auto_start_enabled(), DaemonStartFailure::AutoStartDisabled);
-    let info = start_background(&StartArgs::default(), deadline)
-        .context("automatic daemon startup failed")?;
-    // A daemon this process just started runs this binary's protocol.
-    let protocol = crate::daemon::state::PROTOCOL_VERSION.to_string();
-    super::protocol::record_daemon_protocol(&info.sock_path, &protocol);
-    Ok((info, protocol))
+    // `start_background` waits via `probe::wait_for_ready`, which records the
+    // winning daemon's `status.ipc_envelope` and returns its live `protocol_version`
+    // even if a concurrent starter won `daemon.lock`.
+    start_background(&StartArgs::default(), deadline).context("automatic daemon startup failed")
 }
 
 #[cfg(test)]
@@ -167,8 +161,21 @@ mod tests {
         let (resolved, protocol) = ensure_daemon_optimistic_with_protocol().unwrap();
         assert_eq!(resolved.sock_path, sock);
         assert_eq!(protocol, crate::daemon::state::PROTOCOL_VERSION);
+        assert!(
+            !crate::ipc_client::endpoint_supports_ipc_envelope(&sock),
+            "legacy 2.0 daemon.json without ipc_envelope must record legacy framing mode"
+        );
         assert!(take_optimistic_candidate(&sock));
         assert!(!take_optimistic_candidate(&sock));
+
+        let upgraded = expected.with_ipc_envelope(true);
+        daemon_info::write(&upgraded).unwrap();
+        let _ = ensure_daemon_optimistic_with_protocol().unwrap();
+        assert!(
+            crate::ipc_client::endpoint_supports_ipc_envelope(&sock),
+            "upgraded daemon.json with ipc_envelope=true must record native envelope mode"
+        );
+        let _ = take_optimistic_candidate(&sock);
 
         let fresh = home.join("run").join("fresh.sock");
         record_redirected_sock(&sock, &fresh);

@@ -239,6 +239,7 @@ export class AgentWindowRouting {
     const tab = await this.api.tabs.get(id).catch(() => undefined);
     if (!tab || tab.windowId !== task.agentWindowId || !this.live(task) || this.protected(task, id))
       return;
+    const windowSnapshotRevision = this.focusRevision;
     const windows = await this.api.windows.getAll({ windowTypes: ["normal"] });
     const available = windows.filter(
       (window) =>
@@ -262,7 +263,13 @@ export class AgentWindowRouting {
     )
       return;
     const focusRevision = this.focusRevision;
-    const show = current.active && this.focusedWindow === task.agentWindowId;
+    // X11 can report WINDOW_ID_NONE during a transition that leaves the task focused.
+    const taskFocused =
+      this.focusedWindow === task.agentWindowId ||
+      (this.focusedWindow === -1 &&
+        focusRevision === windowSnapshotRevision &&
+        windows.some((window) => window.id === task.agentWindowId && window.focused));
+    const show = current.active && taskFocused;
     let destinationId = destination?.id;
     if (destinationId !== undefined) {
       await this.api.tabs.move(id, { windowId: destinationId, index: -1 });

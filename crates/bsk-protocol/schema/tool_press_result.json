@@ -108,7 +108,8 @@
   "required": [
     "tab_id",
     "key",
-    "code"
+    "code",
+    "modifiers"
   ],
   "title": "PressResult",
   "type": "object"

@@ -540,7 +540,7 @@ fn concurrent_starters_share_a_single_ready_daemon() {
 fn automatic_start_returns_eof_and_reuses_the_same_daemon() {
     // Auto-start intentionally uses the production default port. Never stop an
     // unrelated developer daemon to free it; CI must supply a free port.
-    match TcpListener::bind("127.0.0.1:52800") {
+    match TcpListener::bind(("127.0.0.1", bsk_protocol::DEFAULT_DAEMON_PORT)) {
         Ok(listener) => drop(listener),
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
             assert!(

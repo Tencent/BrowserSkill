@@ -154,7 +154,7 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
     ]);
     const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
       tab_id: tabId,
-      code: "cdp_failed",
+      code: "cdp_failed" as const,
       message: "Agent Window was closed before borrowed tab could be returned",
     }));
     if (returnFailures.length > 0) {

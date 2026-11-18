@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecordStepPayload } from "@/lib/record-bridge";
 import { startRecordCapture } from "../record-capture";
+import { collectHoverSurfaceStates } from "../record-hover-surface";
 
 vi.stubGlobal("chrome", {
   runtime: {
@@ -1685,5 +1686,66 @@ describe("record-capture semantic", () => {
         geometry: { tag: "summary", rect: { x: 30, y: 30, w: 194, h: 25 } },
       }),
     ]);
+  });
+
+  it("ignores interactions inside browser-skill-overlay ShadowRoot and leaves history.pushState untouched", () => {
+    const originalPushState = window.history.pushState;
+    const originalReplaceState = window.history.replaceState;
+    const overlayHost = document.createElement("browser-skill-overlay");
+    overlayHost.setAttribute("data-bsk-overlay", "");
+    overlayHost.setAttribute("role", "dialog");
+    mockRect(overlayHost, { left: 20, top: 20, width: 240, height: 120 });
+    const shadow = overlayHost.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <div role="dialog" aria-label="Help request">
+        <label for="overlay-note">Note</label>
+        <input id="overlay-note" />
+        <select id="overlay-select"><option value="a">A</option><option value="b">B</option></select>
+        <button id="overlay-finish" type="button">Finish recording</button>
+      </div>
+    `;
+    document.documentElement.appendChild(overlayHost);
+
+    try {
+      const capture = startRecordCapture("rec-overlay-ignore", (step) => steps.push(step));
+      expect(window.history.pushState).toBe(originalPushState);
+      expect(window.history.replaceState).toBe(originalReplaceState);
+      expect(collectHoverSurfaceStates()).toEqual([]);
+
+      const overlayInput = shadow.querySelector<HTMLInputElement>("#overlay-note")!;
+      const overlaySelect = shadow.querySelector<HTMLSelectElement>("#overlay-select")!;
+      const overlayButton = shadow.querySelector<HTMLButtonElement>("#overlay-finish")!;
+
+      overlayButton.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, composed: true }));
+      overlayInput.dispatchEvent(new FocusEvent("focusin", { bubbles: true, composed: true }));
+      overlayInput.dispatchEvent(
+        new CompositionEvent("compositionstart", { bubbles: true, composed: true }),
+      );
+      overlayInput.value = "help explanation";
+      overlayInput.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      overlayInput.dispatchEvent(
+        new CompositionEvent("compositionend", { bubbles: true, composed: true }),
+      );
+      overlayInput.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, composed: true }),
+      );
+      overlayInput.dispatchEvent(new FocusEvent("focusout", { bubbles: true, composed: true }));
+      overlaySelect.value = "b";
+      overlaySelect.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      overlayButton.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, composed: true, button: 0, detail: 1 }),
+      );
+
+      expect(steps).toEqual([]);
+
+      // Real webpage controls on the same document continue recording normally.
+      const pageButton = document.querySelector<HTMLButtonElement>("button")!;
+      click(pageButton);
+      capture.dispose();
+
+      expect(steps.map((s) => s.op)).toEqual(["click"]);
+    } finally {
+      overlayHost.remove();
+    }
   });
 });

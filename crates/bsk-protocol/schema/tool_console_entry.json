@@ -98,7 +98,8 @@
     "sequence",
     "kind",
     "level",
-    "text"
+    "text",
+    "truncated"
   ],
   "title": "ConsoleEntry",
   "type": "object"

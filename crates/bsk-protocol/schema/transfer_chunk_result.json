@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "data_base64": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "eof": {
+      "default": false,
+      "type": "boolean"
+    },
+    "next_offset": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "next_offset",
+    "eof"
+  ],
+  "title": "TransferChunkResult",
+  "type": "object"
+}

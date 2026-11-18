@@ -71,7 +71,8 @@
       },
       "required": [
         "sequence",
-        "kind"
+        "kind",
+        "truncated"
       ],
       "type": "object"
     },
@@ -114,7 +115,9 @@
   },
   "required": [
     "tab_id",
-    "next_since"
+    "entries",
+    "next_since",
+    "truncated"
   ],
   "title": "NetworkResult",
   "type": "object"

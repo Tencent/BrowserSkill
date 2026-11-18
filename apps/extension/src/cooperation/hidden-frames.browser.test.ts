@@ -16,7 +16,7 @@ type Frame = chrome.webNavigation.GetAllFrameResultDetails;
 
 // #614: a hidden child frame that never answers must not block a whole page,
 // while a displayed one must still be named and block it.
-describe.skipIf(!process.env.BSK_COOP_CHROME)("hidden frames that do not answer", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("hidden frames that do not answer", () => {
   it("records a hidden silent frame as a gap, stops waiting for it and requires it once displayed", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-hidden-frames-"));
     const server = createServer((request, response) => {
@@ -86,7 +86,7 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("hidden frames that do not answer"
       );
       await withChrome(
         {
-          executable: process.env.BSK_COOP_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           extensionPath: directory,
           extensionViaCdp: true,
           deviceScale: 1,

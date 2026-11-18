@@ -16,7 +16,8 @@ import type {
 } from "@/transport/types";
 import { rpcError } from "./errors";
 import { clearHelpForSession } from "./human-loop";
-import { clearRecordingForSession } from "./record";
+import { clearObserveIdentityStreaksForSession } from "./observation";
+import { clearRecordingForSession, type RecordDeps } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
 import { isRpcError } from "./shared";
 import { chromeAgentOverlayResetApi, returnBorrowedTab, type TabManagementDeps } from "./tabs";
@@ -74,7 +75,7 @@ export interface SessionStartDeps {
 
 export interface SessionStopDeps {
   signal?: AbortSignal;
-  cdp?: Pick<CdpRunner, "releaseSessionTab"> & {
+  cdp?: Partial<Pick<CdpRunner, "releaseSessionTab">> & {
     detachSession(sessionId: string): Promise<void>;
   };
   /**
@@ -91,6 +92,8 @@ export interface SessionStopDeps {
    * pure. Tests can inject a fake `ChromeTabsApi` too.
    */
   tabsQuery?: ChromeTabsApi;
+  /** Optional recording runtime deps forwarded to `clearRecordingForSession`. */
+  recording?: Partial<RecordDeps>;
 }
 
 /**
@@ -218,8 +221,10 @@ async function stopSession(
   // Remote access must end before returning a tab. Preserve the local recording
   // and help request when a failed return keeps its session alive for a retry.
   if (ctx.remote) {
-    clearRecordingForSession(params.session_id);
+    if (deps.recording) clearRecordingForSession(params.session_id, deps.recording);
+    else clearRecordingForSession(params.session_id);
     clearHelpForSession(params.session_id);
+    clearObserveIdentityStreaksForSession(params.session_id);
   }
 
   // Step 1: auto-return borrowed tabs. Iterate over a snapshot of the
@@ -300,8 +305,10 @@ async function stopSession(
   ctx.refStore.clear();
 
   if (!ctx.remote) {
-    clearRecordingForSession(params.session_id);
+    if (deps.recording) clearRecordingForSession(params.session_id, deps.recording);
+    else clearRecordingForSession(params.session_id);
     clearHelpForSession(params.session_id);
+    clearObserveIdentityStreaksForSession(params.session_id);
   }
 
   // Step 3: detach CDP sessions this session opened (no-op if none).

@@ -16,13 +16,14 @@ Dependencies for third-party fixtures are test-only and version-locked.
 Run with an installed Chrome executable (no browser download required):
 
 ```sh
-BSK_DRAG_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension exec vitest run \
-  src/tools/__tests__/drag.browser.test.ts src/tools/__tests__/drag.test.ts
+BSK_TEST_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension test:browser \
+  src/tools/__tests__/drag.browser.test.ts
+pnpm --filter @browser-skill/extension test src/tools/__tests__/drag.test.ts
 pnpm eval:browser:check
 ```
 
-The suite owns an isolated browser/profile and closes each page. CI enables the
-browser tests explicitly; without the environment variable they are skipped.
+The suite owns an isolated browser/profile and closes each page. CI runs the
+browser tests directly; `BSK_TEST_CHROME` is required for `test:browser`.
 
 For the full CLI/IPC/WS/installed-extension path, use current stable Chrome or
 Chrome for Testing with `Extensions.loadUnpacked` support:
@@ -30,7 +31,7 @@ Chrome for Testing with `Extensions.loadUnpacked` support:
 ```sh
 cargo build -p bsk --locked
 BSK_DAEMON_WS_URL=ws://127.0.0.1:52839 pnpm --filter @browser-skill/extension build
-BSK_DRAG_CHROME=/path/to/chrome node evals/browser/cases/regression/drag-interactions/run.mjs
+BSK_TEST_CHROME=/path/to/chrome node evals/browser/cases/regression/drag-interactions/run.mjs
 ```
 
 This runner owns its daemon home, browser/profile and session; it stops the
@@ -66,7 +67,7 @@ interpret it as a held drag.
 Run the real browser regression with an isolated Chrome profile:
 
 ```sh
-BSK_DRAG_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension exec vitest run src/tools/__tests__/drag.browser.test.ts
+BSK_TEST_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension test:browser src/tools/__tests__/drag.browser.test.ts
 ```
 
 To measure actual CLI/daemon/extension round trips (including initial and final
@@ -75,7 +76,7 @@ To measure actual CLI/daemon/extension round trips (including initial and final
 ```sh
 cargo build -p bsk --locked
 BSK_DAEMON_WS_URL=ws://127.0.0.1:52943 pnpm ext:build
-BSK_DRAG_CHROME=/path/to/chrome BSK_RANGE_REPORT=/tmp/range-benchmark.json \
+BSK_TEST_CHROME=/path/to/chrome BSK_RANGE_REPORT=/tmp/range-benchmark.json \
   node evals/browser/cases/regression/drag-interactions/range-selection.bench.mjs
 ```
 

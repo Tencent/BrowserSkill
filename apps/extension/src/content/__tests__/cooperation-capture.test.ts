@@ -2,13 +2,14 @@ import { afterEach, expect, it, vi } from "vitest";
 import { guardedRunner } from "@/cooperation/action-guard";
 import {
   COOPERATION_ARM,
+  COOPERATION_ARM_FRAME,
   COOPERATION_DISABLE,
   COOPERATION_READ,
-  COOPERATION_READY,
+  COOPERATION_SUBFRAME_READY,
   type FrameState,
   type InputExpectation,
 } from "@/cooperation/types";
-import type { CdpRunner } from "@/tools/shared";
+import { createStubCdpRunner } from "@/tools/shared";
 import { attachCooperationCapture } from "../cooperation-capture";
 
 let dispose: (() => void) | undefined;
@@ -626,7 +627,7 @@ it("clears text attribution when preparation fails before native dispatch", asyn
   const target = document.querySelector("input")!;
   target.focus();
   const native = vi.fn();
-  const runner = guardedRunner({ send: native } as CdpRunner, {
+  const runner = guardedRunner(createStubCdpRunner({ send: native }), {
     prepare: async (input) => {
       read(COOPERATION_ARM, "first", input);
       throw new Error("target changed");
@@ -746,13 +747,13 @@ it("attributes a keyless caret command to the Agent while preserving subsequent 
     });
     completeInput(document.querySelector("input")!, event);
   };
-  const cdp = {
-    send: vi.fn(async (_tabId, _method, params) => {
+  const cdp = createStubCdpRunner({
+    send: vi.fn(async (_tabId, _method, params: any) => {
       // Chromium emits an empty key for native editor commands without a key descriptor.
-      press(params.key ?? "", params.timestamp * 1000);
-      return {};
+      press(params?.key ?? "", (params?.timestamp ?? 0) * 1000);
+      return {} as never;
     }),
-  } as CdpRunner;
+  });
   const runner = guardedRunner(cdp, {
     prepare: async (input) => {
       read(COOPERATION_ARM, "first", input);
@@ -918,10 +919,141 @@ it("preserves editing across a focus transition into a shadow field", async () =
   expect(read()).toMatchObject({ editing: false });
 });
 
-it("announces renderer readiness once after the collection listener exists", () => {
+it("loads silently with zero startup messages and zero DOM listeners until explicitly armed", async () => {
+  const closedRoots = new WeakMap<HTMLElement, ShadowRoot>();
+  document.body.innerHTML =
+    '<input aria-label="City" value="Shanghai"><div id="preexisting-closed"></div>';
+  const preHost = document.querySelector<HTMLElement>("#preexisting-closed")!;
+  const preClosed = preHost.attachShadow({ mode: "closed" });
+  closedRoots.set(preHost, preClosed);
+
+  const read = collector((el) => closedRoots.get(el) ?? null);
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+
+  // Unarmed mutations and human pointer events are ignored before COOPERATION_ARM_FRAME / COOPERATION_READ.
+  const field = document.querySelector<HTMLInputElement>("input")!;
+  const press = new MouseEvent("pointerdown", { bubbles: true, clientX: 5, clientY: 5 });
+  Object.defineProperty(press, "isTrusted", { value: true });
+  field.dispatchEvent(press);
+  document.body.appendChild(document.createElement("span")).textContent = "unarmed";
+
+  expect(read(COOPERATION_ARM_FRAME)).toEqual({ ok: true });
+
+  // Once armed (even before any `COOPERATION_READ` grants a lease or traverses `controls()`),
+  // dynamically inserted light-DOM and closed-ShadowRoot subframes emit `COOPERATION_SUBFRAME_READY`.
+  const firstFrame = document.createElement("iframe");
+  const secondFrame = document.createElement("iframe");
+  document.body.append(firstFrame, secondFrame);
+  await vi.waitFor(
+    () => {
+      expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+        kind: COOPERATION_SUBFRAME_READY,
+      });
+    },
+    { interval: 5 },
+  );
+
+  // Pre-existing closed ShadowRoot observed solely by `COOPERATION_ARM_FRAME` reports dynamic iframes.
+  vi.mocked(chrome.runtime.sendMessage).mockClear();
+  preClosed.appendChild(document.createElement("iframe"));
+  await vi.waitFor(
+    () => {
+      expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+        kind: COOPERATION_SUBFRAME_READY,
+      });
+    },
+    { interval: 5 },
+  );
+
+  // Dynamically inserted closed ShadowRoot host containing an iframe reports `COOPERATION_SUBFRAME_READY`
+  // AND continues observing subsequent iframe insertions inside that closed ShadowRoot.
+  vi.mocked(chrome.runtime.sendMessage).mockClear();
+  const dynamicHost = document.createElement("div");
+  const dynamicClosed = dynamicHost.attachShadow({ mode: "closed" });
+  closedRoots.set(dynamicHost, dynamicClosed);
+  dynamicClosed.appendChild(document.createElement("iframe"));
+  document.body.appendChild(dynamicHost);
+  await vi.waitFor(
+    () => {
+      expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+        kind: COOPERATION_SUBFRAME_READY,
+      });
+    },
+    { interval: 5 },
+  );
+
+  vi.mocked(chrome.runtime.sendMessage).mockClear();
+  dynamicClosed.appendChild(document.createElement("iframe"));
+  await vi.waitFor(
+    () => {
+      expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+        kind: COOPERATION_SUBFRAME_READY,
+      });
+    },
+    { interval: 5 },
+  );
+
+  expect(read()).toMatchObject({
+    human: 0,
+    structure: 0,
+  });
+});
+
+it("ignores internal data-bsk-* attributes and browser-skill-overlay mutations and UI interactions", async () => {
+  document.body.innerHTML =
+    '<input id="search" aria-label="Search" value="ok"><input id="secret" aria-label="Secret" value="s3cr3t">';
   const read = collector();
-  expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({ kind: COOPERATION_READY });
-  expect(read()).toHaveProperty("document");
+  const initial = read()!;
+
+  // Recording / sensitive-field private markers and overlay host mount must not advance `structure` or `revision`.
+  document.documentElement.setAttribute("data-bsk-record-document", "doc-1");
+  const secret = document.querySelector<HTMLInputElement>("#secret")!;
+  secret.setAttribute("data-bsk-record-password", "");
+  const overlayHost = document.createElement("browser-skill-overlay");
+  overlayHost.setAttribute("data-bsk-overlay", "");
+  const shadow = overlayHost.attachShadow({ mode: "open" });
+  shadow.innerHTML =
+    '<div class="help-card"><input id="help-note" aria-label="Help note"><button id="help-send">Continue</button></div>';
+  document.documentElement.appendChild(overlayHost);
+
+  await Promise.resolve();
+  expect(read()).toMatchObject({
+    document: initial.document,
+    revision: initial.revision,
+    structure: 0,
+    human: 0,
+    editing: false,
+  });
+
+  // Clicking, focusing, and typing inside the extension's own ShadowRoot UI must not advance `human` or `editing`.
+  const helpNote = shadow.querySelector<HTMLInputElement>("#help-note")!;
+  const helpSend = shadow.querySelector<HTMLButtonElement>("#help-send")!;
+  for (const target of [helpNote, helpSend]) {
+    const down = new MouseEvent("pointerdown", {
+      bubbles: true,
+      composed: true,
+      clientX: 4,
+      clientY: 4,
+    });
+    Object.defineProperty(down, "isTrusted", { value: true });
+    target.dispatchEvent(down);
+  }
+  helpNote.focus();
+  helpNote.value = "User typed note inside HelpRequestOverlay";
+  const inputEvent = new InputEvent("input", { bubbles: true, composed: true });
+  Object.defineProperty(inputEvent, "isTrusted", { value: true });
+  helpNote.dispatchEvent(inputEvent);
+
+  const afterOverlay = read()!;
+  expect(afterOverlay).toMatchObject({
+    revision: initial.revision,
+    structure: 0,
+    human: 0,
+    editing: false,
+  });
+  expect(afterOverlay.fields).toEqual([expect.objectContaining({ label: "Search", value: "ok" })]);
+  overlayHost.remove();
+  document.documentElement.removeAttribute("data-bsk-record-document");
 });
 
 it("classifies a non-submitted media timeline without masking business fields", () => {

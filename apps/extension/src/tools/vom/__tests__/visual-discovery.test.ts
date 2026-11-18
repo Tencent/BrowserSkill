@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { CdpFrame } from "@/browser-driver/frame-graph";
+import {
+  createFrameDocumentInfo,
+  type FrameDocumentInfo,
+  frameProcessBoundary,
+} from "@/browser-driver/frame-handles";
 import { OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 import type { GeometryProjection } from "../../geometry";
 import { buildDocumentIndex, type DocumentFacts, type ObservationFacts } from "../facts";
@@ -49,14 +53,14 @@ interface Spec {
 async function document(
   nodes: Spec[],
   options: {
-    frame?: CdpFrame;
+    frame?: FrameDocumentInfo;
     projection?: GeometryProjection;
     pageScale?: number;
     scrollY?: number;
     layoutScale?: number;
   } = {},
 ): Promise<DocumentFacts<FrameOwnedAxNode>> {
-  const frame = options.frame ?? { frameId: "main", target: { tabId: 1 } };
+  const frame = options.frame ?? createFrameDocumentInfo({ tabId: 1, frameId: "main" });
   const strings: string[] = [];
   const str = (value: string) => {
     const index = strings.indexOf(value);
@@ -98,11 +102,11 @@ async function document(
     {
       frameId: frame.frameId,
       ownerFrameBackendNodeId: frame.ownerBackendNodeId ?? null,
-      target: frame.target,
+      process: frameProcessBoundary(frame),
       projection: {
         status: "available",
         projection: {
-          source: { target: frame.target, frameId: frame.frameId },
+          source: { process: frameProcessBoundary(frame), frameId: frame.frameId },
           geometry: options.projection ?? projection,
         },
       },
@@ -119,8 +123,9 @@ async function document(
     frame,
     identity: {
       attachmentId: "attached",
-      target: frame.target,
+      tabId: frame.handle.tabId,
       frameId: frame.frameId,
+      loaderId: frame.loaderId || "loader-1",
       documentElementBackendNodeId: 1,
     },
     index: normalized.index,
@@ -153,12 +158,12 @@ describe("Canvas discovery", () => {
         { id: 4, parent: 1 },
       ],
       {
-        frame: {
+        frame: createFrameDocumentInfo({
+          tabId: 1,
           frameId: "child",
           parentFrameId: "main",
           ownerBackendNodeId: 2,
-          target: { tabId: 1 },
-        },
+        }),
       },
     );
     const result = await discoverVisualCandidates(facts([child, parent]));
@@ -197,12 +202,12 @@ describe("Canvas discovery", () => {
     });
     const parent = await document([{ id: 2, parent: 1, tag: "iframe", styles: {} }]);
     const child = await document([{ id: 3, parent: 1 }], {
-      frame: {
+      frame: createFrameDocumentInfo({
+        tabId: 1,
         frameId: "child",
         parentFrameId: "main",
         ownerBackendNodeId: 2,
-        target: { tabId: 1 },
-      },
+      }),
     });
     expect(await discoverVisualCandidates(facts([parent, child]))).toMatchObject({
       candidates: [{ backendNodeId: 3 }],
@@ -345,12 +350,14 @@ describe("Canvas discovery", () => {
     ]);
     parent.domNodes.splice(0); // Visual discovery never reads the semantic subset.
     const child = await document([{ id: 2, parent: 1, bounds: [0, 0, 200, 200] }], {
-      frame: {
+      frame: createFrameDocumentInfo({
+        tabId: 1,
         frameId: "child",
         parentFrameId: "main",
         ownerBackendNodeId: 3,
-        target: { tabId: 1, sessionId: "remote" },
-      },
+        processKey: "oopif:remote",
+        isOutOfProcess: true,
+      }),
       projection: {
         ...projection,
         edges: [
@@ -369,7 +376,7 @@ describe("Canvas discovery", () => {
     const result = await discoverVisualCandidates(facts([child, parent]));
     expect(result.complete).toBe(true);
     expect(result.candidates[0]).toMatchObject({
-      document: { frameId: "child", target: { sessionId: "remote" } },
+      document: { tabId: 1, frameId: "child" },
       region: { crop: { x: 100, y: 0, width: 100, height: 100 } },
     });
     const owner = parent.index.nodes.get(3)!;
@@ -437,7 +444,15 @@ describe("Canvas discovery", () => {
     const doc = await document([{ id: 2, parent: 1 }]);
     const partial = facts(
       [doc],
-      [{ target: doc.frame.target, frameId: "main", stage: "ax", reason: "capture-unavailable" }],
+      [
+        {
+          tabId: doc.frame.handle.tabId,
+          processKey: doc.frame.processKey,
+          frameId: "main",
+          stage: "ax",
+          reason: "capture-unavailable",
+        },
+      ],
     );
     const result = await discoverVisualCandidates(partial);
     expect(result.candidates).toHaveLength(1);

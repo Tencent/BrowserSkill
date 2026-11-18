@@ -1,5 +1,5 @@
 import { isVomReferenceNode } from "@browser-skill/vom";
-import { type CdpRunner, sendToCdpTarget } from "../shared";
+import { type CdpRunner, withRemoteObject } from "../shared";
 import type { FrameDocument, FrameOwnedAxNode } from "./frame-document";
 import { clearHover, ProbeBudget, waitForHover } from "./hover-perception";
 import { stableIdentifierName } from "./semantic-graph/name-evidence";
@@ -42,7 +42,7 @@ function cacheKey<T extends FrameOwnedAxNode>(
   document: FrameDocument<T>,
   backendNodeId: number,
 ): string {
-  return `${document.target.tabId}\u0000${document.frameId}\u0000${document.url ?? ""}\u0000${backendNodeId}`;
+  return `${document.handle.tabId}\u0000${document.frameId}\u0000${document.url ?? ""}\u0000${backendNodeId}`;
 }
 
 /** Returns the cache entry, or `undefined` when this control was never probed. */
@@ -181,9 +181,8 @@ async function executionContextId<T extends FrameOwnedAxNode>(
   cdp: CdpRunner,
   document: FrameDocument<T>,
 ): Promise<number | undefined> {
-  const result = await sendToCdpTarget<{ executionContextId?: number }>(
-    cdp,
-    document.target,
+  const result = await cdp.sendToFrame<{ executionContextId?: number }>(
+    document.handle,
     "Page.createIsolatedWorld",
     {
       frameId: document.frameId,
@@ -200,9 +199,9 @@ async function resolvedObjectId<T extends FrameOwnedAxNode>(
   contextId: number,
   backendNodeId: number,
 ): Promise<string | undefined> {
-  const result = await sendToCdpTarget<{
+  const result = await cdp.sendToFrame<{
     object?: { objectId?: string };
-  }>(cdp, document.target, "DOM.resolveNode", {
+  }>(document.handle, "DOM.resolveNode", {
     backendNodeId,
     executionContextId: contextId,
   });
@@ -214,24 +213,14 @@ async function tooltipTexts<T extends FrameOwnedAxNode>(
   document: FrameDocument<T>,
   objectId: string,
 ): Promise<string[]> {
-  const result = await sendToCdpTarget<{
+  const result = await cdp.sendToFrame<{
     result?: { value?: string[] };
-  }>(cdp, document.target, "Runtime.callFunctionOn", {
+  }>(document.handle, "Runtime.callFunctionOn", {
     functionDeclaration: tooltipCollectorFunction(),
     objectId,
     returnByValue: true,
   });
   return result.result?.value ?? [];
-}
-
-async function releaseObject<T extends FrameOwnedAxNode>(
-  cdp: CdpRunner,
-  document: FrameDocument<T>,
-  objectId: string,
-): Promise<void> {
-  await sendToCdpTarget(cdp, document.target, "Runtime.releaseObject", { objectId }).catch(
-    () => undefined,
-  );
 }
 
 export async function probeTooltipNames<T extends FrameOwnedAxNode>(
@@ -265,7 +254,6 @@ export async function probeTooltipNames<T extends FrameOwnedAxNode>(
     for (const candidate of pending) {
       if (options.signal?.aborted) throw new DOMException("observation aborted", "AbortError");
       if (!budget.canAfford(TOOLTIP_SETTLE_MS)) break;
-      let objectId: string | undefined;
       try {
         let contextId = contexts.get(candidate.document.frameId);
         if (contextId === undefined) {
@@ -273,30 +261,32 @@ export async function probeTooltipNames<T extends FrameOwnedAxNode>(
           if (contextId === undefined) continue;
           contexts.set(candidate.document.frameId, contextId);
         }
-        objectId = await resolvedObjectId(
+        const objectId = await resolvedObjectId(
           cdp,
           candidate.document,
           contextId,
           candidate.backendNodeId,
         );
         if (!objectId) continue;
-        await clearHover(cdp, tabId);
-        const before = await tooltipTexts(cdp, candidate.document, objectId);
-        await cdp.send(tabId, "Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: candidate.x,
-          y: candidate.y,
+        await withRemoteObject(cdp, candidate.document.handle, objectId, async (id) => {
+          await clearHover(cdp, tabId);
+          const before = await tooltipTexts(cdp, candidate.document, id);
+          await cdp.send(tabId, "Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            x: candidate.x,
+            y: candidate.y,
+          });
+          await waitForHover(TOOLTIP_SETTLE_MS, options.signal);
+          const after = await tooltipTexts(cdp, candidate.document, id);
+          const name = cleanTooltipDiff(before, after);
+          storeName(candidate.document, candidate.backendNodeId, name ?? null);
+          if (name) {
+            names.set(frameBackendKey(candidate.document.frameId, candidate.backendNodeId), name);
+          }
         });
-        await waitForHover(TOOLTIP_SETTLE_MS, options.signal);
-        const after = await tooltipTexts(cdp, candidate.document, objectId);
-        const name = cleanTooltipDiff(before, after);
-        storeName(candidate.document, candidate.backendNodeId, name ?? null);
-        if (!name) continue;
-        names.set(frameBackendKey(candidate.document.frameId, candidate.backendNodeId), name);
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw error;
       } finally {
-        if (objectId) await releaseObject(cdp, candidate.document, objectId);
         await clearHover(cdp, tabId);
       }
     }

@@ -18,6 +18,7 @@ import {
   isHelpResponseMessage,
 } from "@/lib/help-bridge";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
+import { ensureOverlayInjected } from "@/lib/runtime-content-scripts";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   HelpCompletionCondition,
@@ -29,6 +30,7 @@ import type {
   RpcError,
 } from "@/transport/types";
 import { resolveNodeGeometry } from "./frame-geometry";
+import { selectorExistsInMainDocument } from "./selector-resolution";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -173,6 +175,7 @@ async function sendHelpRequestWithAck(
   for (let attempt = 0; attempt < HELP_SEND_RETRIES; attempt += 1) {
     if (!isActive()) return null;
     try {
+      await ensureOverlayInjected(tabId);
       const response = await deps.sendToTab(tabId, msg);
       if (!isActive()) {
         await deps
@@ -196,23 +199,6 @@ async function sendHelpRequestWithAck(
     if (attempt + 1 < HELP_SEND_RETRIES) await sleep(HELP_SEND_RETRY_DELAY_MS);
   }
   throw lastError ?? new Error("failed to show help overlay");
-}
-
-async function selectorExists(
-  cdp: CdpRunner,
-  tabId: number,
-  rootNodeId: number,
-  selector: string,
-): Promise<boolean> {
-  try {
-    const res = await cdp.send<{ nodeId?: number }>(tabId, "DOM.querySelector", {
-      nodeId: rootNodeId,
-      selector,
-    });
-    return typeof res.nodeId === "number" && res.nodeId !== 0;
-  } catch {
-    return false;
-  }
 }
 
 async function resolveHelpTargets(
@@ -247,31 +233,18 @@ async function resolveHelpTargets(
       selectors.push(tgt.selector);
       const matched =
         deps.cdp && rootNodeId !== undefined
-          ? await selectorExists(deps.cdp, tabId, rootNodeId, tgt.selector)
+          ? await selectorExistsInMainDocument(deps.cdp, tabId, tgt.selector, rootNodeId)
           : deps.cdp
             ? false
             : true;
       resolved.push({ matched, selector: tgt.selector });
     } else if (tgt.ref) {
-      await deps.cdp?.reattachIfSoftDetached?.(tabId);
       const looked = ctx ? lookupSnapshotRef(ctx, tgt.ref, tabId) : null;
       let rect: HelpHighlightRect | null = null;
       if (looked && deps.cdp) {
-        const rawTarget = {
-          tabId,
-          ...(looked.cdpSessionId ? { sessionId: looked.cdpSessionId } : {}),
-        };
-        const target = deps.cdp.resolveTarget ? deps.cdp.resolveTarget(rawTarget) : rawTarget;
-        const geometry = await resolveNodeGeometry(
-          deps.cdp,
-          tabId,
-          {
-            target,
-            backendNodeId: looked.backendNodeId,
-            ...(looked.frameId ? { frameId: looked.frameId } : {}),
-          },
-          { scrollIntoView: options.scrollIntoView },
-        );
+        const geometry = await resolveNodeGeometry(deps.cdp, tabId, looked.handle, {
+          scrollIntoView: options.scrollIntoView,
+        });
         if (!isRpcError(geometry)) {
           rect = {
             top: geometry.topBounds.y,

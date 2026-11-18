@@ -49,3 +49,9 @@ bsk-protocol = { version = "0.5.0", path = "crates/bsk-protocol" }
 strip = "symbols"
 lto = "thin"
 codegen-units = 1
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

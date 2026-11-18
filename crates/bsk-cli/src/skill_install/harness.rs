@@ -24,6 +24,7 @@ pub enum HarnessId {
     PiAgent,
     Hermes,
     KimiCode,
+    Dsh,
 }
 
 impl HarnessId {
@@ -42,6 +43,7 @@ impl HarnessId {
         HarnessId::PiAgent,
         HarnessId::Hermes,
         HarnessId::KimiCode,
+        HarnessId::Dsh,
     ];
 
     pub fn index(self) -> usize {
@@ -64,6 +66,7 @@ impl HarnessId {
             HarnessId::PiAgent => "pi",
             HarnessId::Hermes => "hermes",
             HarnessId::KimiCode => "kimi-code",
+            HarnessId::Dsh => "dsh",
         }
     }
 
@@ -83,6 +86,7 @@ impl HarnessId {
             HarnessId::PiAgent => "Pi",
             HarnessId::Hermes => "Hermes Agent",
             HarnessId::KimiCode => "Kimi Code",
+            HarnessId::Dsh => "DeepSeek Harness",
         }
     }
 
@@ -105,6 +109,7 @@ impl HarnessId {
             // 默认 ~/.kimi-code/skills，见
             // https://github.com/MoonshotAI/kimi-code/blob/main/docs/en/customization/skills.md
             HarnessId::KimiCode => kimi_code_home_for_user_home(home).join("skills"),
+            HarnessId::Dsh => dsh_home_for_user_home(home).join("skills"),
         }
     }
 
@@ -270,6 +275,23 @@ impl HarnessId {
                     push("`kimi` on PATH");
                 }
             }
+            HarnessId::Dsh => {
+                let dsh_home = dsh_home_for_user_home(home);
+                if dsh_home.is_dir() {
+                    let label = if std::env::var("DSH_HOME")
+                        .ok()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        format!("$DSH_HOME ({})", dsh_home.display())
+                    } else {
+                        "~/.dsh".to_string()
+                    };
+                    push(&label);
+                }
+                if command_exists("dsh") {
+                    push("`dsh` on PATH");
+                }
+            }
         }
 
         let detected = !signals.is_empty();
@@ -323,6 +345,7 @@ pub fn parse_harness_id(raw: &str) -> Result<HarnessId> {
         "pi" | "pi-agent" | "pi_agent" | "piagent" => Ok(HarnessId::PiAgent),
         "hermes" | "hermes-agent" | "hermes_agent" | "hermesagent" => Ok(HarnessId::Hermes),
         "kimi-code" | "kimi" | "kimicode" | "kimi-cli" | "kimi_cli" => Ok(HarnessId::KimiCode),
+        "dsh" | "deepseek-harness" | "deepseek_harness" | "deepseekharness" => Ok(HarnessId::Dsh),
         other => bail!(
             "unknown harness '{other}'; expected one of: {}",
             HarnessId::ALL
@@ -348,6 +371,27 @@ fn kimi_code_home_for_user_home(home: &Path) -> PathBuf {
         }
     }
     home.join(".kimi-code")
+}
+
+/// DeepSeek Harness (`dsh`) data root: `$DSH_HOME` when set and non-empty
+/// (expanding leading `~`, `~/`, or `~\`), otherwise `~/.dsh`.
+fn dsh_home_for_user_home(home: &Path) -> PathBuf {
+    if let Ok(override_home) = std::env::var("DSH_HOME") {
+        let trimmed = override_home.trim();
+        if !trimmed.is_empty() {
+            if trimmed == "~" {
+                return home.to_path_buf();
+            }
+            if let Some(rest) = trimmed
+                .strip_prefix("~/")
+                .or_else(|| trimmed.strip_prefix("~\\"))
+            {
+                return home.join(rest);
+            }
+            return PathBuf::from(trimmed);
+        }
+    }
+    home.join(".dsh")
 }
 
 /// Mirrors [`get_hermes_home()`](https://github.com/NousResearch/hermes-agent/blob/main/hermes_constants.py):
@@ -452,6 +496,7 @@ mod tests {
             .env("BSK_HARNESS_TEST_HOME", root.path())
             .env_remove("HERMES_HOME")
             .env_remove("KIMI_CODE_HOME")
+            .env_remove("DSH_HOME")
             .env_remove("LOCALAPPDATA");
         configure(&mut command, root.path());
         let output = command.output().unwrap();
@@ -488,6 +533,11 @@ mod tests {
         assert_eq!(parse_harness_id("kimi").unwrap(), HarnessId::KimiCode);
         assert_eq!(parse_harness_id("kimi-code").unwrap(), HarnessId::KimiCode);
         assert_eq!(parse_harness_id("kimi-cli").unwrap(), HarnessId::KimiCode);
+        assert_eq!(parse_harness_id("dsh").unwrap(), HarnessId::Dsh);
+        assert_eq!(
+            parse_harness_id("deepseek-harness").unwrap(),
+            HarnessId::Dsh
+        );
     }
 
     #[test]
@@ -558,6 +608,31 @@ mod tests {
             HarnessId::KimiCode.skills_dir_for_home(home),
             PathBuf::from("/home/user/.kimi-code/skills")
         );
+        assert_eq!(
+            HarnessId::Dsh.skills_dir_for_home(home),
+            PathBuf::from("/home/user/.dsh/skills")
+        );
+    }
+
+    #[test]
+    fn detects_dsh_from_home_layout_and_honors_dsh_home_env() {
+        if !in_harness_environment(
+            "detects_dsh_from_home_layout_and_honors_dsh_home_env",
+            |command, _home| {
+                command.env("DSH_HOME", "~/custom-dsh");
+            },
+        ) {
+            return;
+        }
+        let home = PathBuf::from(std::env::var_os("BSK_HARNESS_TEST_HOME").unwrap());
+        let custom = home.join("custom-dsh");
+        std::fs::create_dir_all(&custom).unwrap();
+        let report = HarnessId::Dsh.report_for_home(&home);
+        assert!(report.detected);
+        assert_eq!(report.skills_dir, custom.join("skills"));
+        assert_eq!(HarnessId::Dsh.cli_name(), "dsh");
+        assert_eq!(HarnessId::Dsh.display_name(), "DeepSeek Harness");
+        assert!(report.detection_detail.unwrap().contains("$DSH_HOME"));
     }
 
     #[test]

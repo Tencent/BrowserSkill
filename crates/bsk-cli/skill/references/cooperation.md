@@ -36,14 +36,11 @@ Prefer a targeted key, such as `press Enter --ref @e3`, when the intended recipi
 Scripts have their own rules; see [Scripts](#scripts).
 
 For the legacy whole-page policy, choose `cooperate sync --policy strict` on the first sync.
-With protocol-1.8-capable peers, later ordinary syncs and steps preserve it. Policy is fixed for
-that session. Strict contexts authorize one action and refs follow the latest observation.
-`--depends-on` remains available only in strict policy; target policy uses explicit conditions
-below. Declare the facts behind those regions; a region list cannot be translated automatically.
-Target policy and conditions require compatible protocol 1.x peers at version 1.8 or later.
-Unsupported peers return an error, never a silent downgrade. With a current CLI and an older
-extension, pass `--policy strict` on **every** sync/enable and step; `--expect` still requires
-updated peers. If a plugin reports that `--policy` is unknown, upgrade the CLI and restart its daemon.
+Later ordinary syncs and steps preserve the session's fixed policy. Strict contexts authorize one
+action and refs follow the latest observation. `--depends-on` remains available only in strict
+policy; target policy uses explicit `expect` conditions below. Declare the facts behind those
+regions; a region list cannot be translated automatically. CLI, daemon, and extension require
+protocol 2.0 (incompatible peers below 2.0 are rejected before dispatch).
 
 A strict refusal reports `observed_change`: the first differing node, field and check (`target`,
 `dependency`, `page`, ...). Values and sensitive text are never included. A DOM-targeted action
@@ -149,9 +146,9 @@ its own preconditions and `throw` when they do not hold, which is the only check
 together with the effect. A script bypasses hit testing, so a dialog that opened meanwhile does
 not stop it. When that matters, use the declared-facts path with an `exists` check for the dialog.
 
-Requires daemon and extension protocol 1.9 or later compatible 1.x. Peers below 1.9 are rejected
-before dispatch. Earlier 1.9 development builds cannot be distinguished by this version gate;
-update the CLI, restart its daemon and reload the matching extension together.
+Requires CLI, daemon, and extension protocol 2.0; incompatible peers below 2.0 are rejected
+before handshake/dispatch. Update the CLI, restart its daemon and reload the matching
+extension together.
 
 After a refusal, read `observed_changes` and choose from the list above. Do not resubmit the
 same script in a sync loop, and do not reach for `--unverified` when a fact can be stated.

@@ -1,28 +1,34 @@
-import { type CdpDispatchGuard, ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import type { CdpDispatchGuard } from "@/browser-driver/chromium-cdp";
+import {
+  type FrameDocumentGraph,
+  type FrameDocumentHandle,
+  type FrameNodeHandle,
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type { RpcError, WheelParams, WheelResult } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { cdpError, rpcError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
 import { clipPolygon, polygonArea, polygonCentroid, rectPolygon } from "./geometry";
-import { waitForInputPaint, withInputReady } from "./input-readiness";
+import { type InputWindowsApi, waitForInputPaint, withInputReady } from "./input-readiness";
 import { modifiersBitfield, resolveBackendNode } from "./interaction";
 import { scrollVisibleBounds } from "./scroll-visibility";
 import {
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
+  delegateCdpRunner,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
   resolveTargetTab,
-  sendToCdpTarget,
+  sendToFrameHandle,
 } from "./shared";
 
 export interface WheelDeps {
   cdp: CdpRunner;
   tabsApi: ChromeTabsApi;
+  windowsApi?: InputWindowsApi;
   signal?: AbortSignal;
   /** Temporarily disable the Agent Window overlay's input blocker. */
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
@@ -35,16 +41,10 @@ interface WheelPoint {
   usedSelector?: string;
 }
 
-let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
-function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
-  if (!defaultDeps) defaultDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi };
-  return defaultDeps;
-}
-
 export async function handleWheel(
   manager: SessionManager,
   params: WheelParams,
-  deps: WheelDeps = getDefaultDeps(),
+  deps: WheelDeps,
 ): Promise<WheelResult | RpcError> {
   const ctxOrErr = lookupSession(manager, params, "wheel");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
@@ -85,85 +85,79 @@ export async function handleWheel(
   // Guard the shared target/geometry helpers without changing other tools.
   // Own fallback scrolling and visibility objects, even if allocation is cancelled.
   const objectGroup = `bsk-wheel-${crypto.randomUUID()}`;
-  const objectTargets = new Map<string, CdpTarget>();
-  const send = async <T>(target: CdpTarget, method: string, args?: object): Promise<T> => {
+  const objectHandles = new Map<string, FrameDocumentHandle>();
+  const sendFrame = async <T>(
+    handle: FrameDocumentHandle | FrameNodeHandle,
+    method: string,
+    args?: object,
+    guard?: CdpDispatchGuard,
+  ): Promise<T> => {
     checkActive();
-    if (method === "DOM.resolveNode") objectTargets.set(cdpTargetKey(target), target);
-    const result = await sendToCdpTarget<T>(
+    if (method === "DOM.resolveNode") {
+      objectHandles.set(`${handle.tabId}:${handle.frameId}:${handle.loaderId}`, {
+        tabId: handle.tabId,
+        frameId: handle.frameId,
+        loaderId: handle.loaderId,
+        ...(handle.documentElementBackendNodeId !== undefined
+          ? { documentElementBackendNodeId: handle.documentElementBackendNodeId }
+          : {}),
+      });
+    }
+    const combinedSignal =
+      guard?.signal && deps.signal
+        ? AbortSignal.any([guard.signal, deps.signal])
+        : (guard?.signal ?? deps.signal);
+    const result = await sendToFrameHandle<T>(
       deps.cdp,
-      target,
+      handle,
       method,
       method === "DOM.resolveNode" ? { ...args, objectGroup } : args,
+      guard || combinedSignal
+        ? {
+            ...guard,
+            signal: combinedSignal,
+            onDispatch: () => {
+              checkActive();
+              guard?.onDispatch?.();
+            },
+          }
+        : undefined,
     );
     checkActive();
     return result;
   };
-  let graph: ReturnType<NonNullable<CdpRunner["getFrameGraph"]>> | undefined;
-  const cdp: CdpRunner = {
-    send: (tabId, method, args) => send({ tabId }, method, args),
-    sendToTarget: send,
-    sendGuarded: deps.cdp.sendGuarded
-      ? async <T>(
-          target: CdpTarget,
-          method: string,
-          args: object | undefined,
-          guard: CdpDispatchGuard,
-        ) => {
-          checkActive();
-          if (method === "DOM.resolveNode") objectTargets.set(cdpTargetKey(target), target);
-          const combinedSignal =
-            guard.signal && deps.signal
-              ? AbortSignal.any([guard.signal, deps.signal])
-              : (guard.signal ?? deps.signal);
-          const result = await deps.cdp.sendGuarded!<T>(
-            target,
-            method,
-            method === "DOM.resolveNode" ? { ...args, objectGroup } : args,
-            {
-              ...guard,
-              signal: combinedSignal,
-              onDispatch: () => {
-                checkActive();
-                guard.onDispatch?.();
-              },
-            },
-          );
-          checkActive();
-          return result;
-        }
-      : undefined,
-    getAttachmentId: deps.cdp.getAttachmentId?.bind(deps.cdp),
-    trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
-    resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
-    reattachIfSoftDetached: deps.cdp.reattachIfSoftDetached
-      ? async (tabId) => {
-          checkActive();
-          await deps.cdp.reattachIfSoftDetached!(tabId);
-          checkActive();
-        }
-      : undefined,
-    reconcileSoftDetachedFrames: deps.cdp.reconcileSoftDetachedFrames
-      ? async (tabId) => {
-          checkActive();
-          await deps.cdp.reconcileSoftDetachedFrames!(tabId);
-          checkActive();
-        }
-      : undefined,
-    getFrameGraph: deps.cdp.getFrameGraph
-      ? async (tabId, signal, options) => {
-          checkActive();
-          const combinedSignal =
-            signal && deps.signal
-              ? AbortSignal.any([signal, deps.signal])
-              : (signal ?? deps.signal);
-          const promise = graph ?? deps.cdp.getFrameGraph!(tabId, combinedSignal, options);
-          if (options?.includeOwners !== false) graph ??= promise;
-          const result = await promise;
-          checkActive();
-          return result;
-        }
-      : undefined,
-  };
+  let graph: Promise<FrameDocumentGraph> | undefined;
+  const cdp: CdpRunner = delegateCdpRunner(deps.cdp, {
+    resourceCleanup: deps.cdp.resourceCleanup ?? deps.cdp,
+    send: <T>(tabId: number, method: string, args?: object, sig?: AbortSignal) =>
+      sendFrame<T>(toRootFrameHandle(tabId), method, args, sig ? { signal: sig } : undefined),
+    sendToFrame: sendFrame,
+    ensureAttachedToUrl: async (tabId, expectedUrl) => {
+      checkActive();
+      await deps.cdp.ensureAttachedToUrl(tabId, expectedUrl);
+      checkActive();
+    },
+    getMainFrameHandle: async (tabId, sig) => {
+      checkActive();
+      const result = await deps.cdp.getMainFrameHandle(tabId, sig);
+      checkActive();
+      return result;
+    },
+    getFrameDocuments: async (tabId, sig, options) => {
+      checkActive();
+      const combined =
+        sig && deps.signal ? AbortSignal.any([sig, deps.signal]) : (sig ?? deps.signal);
+      const promise =
+        graph ??
+        (options !== undefined
+          ? deps.cdp.getFrameDocuments(tabId, combined, options)
+          : deps.cdp.getFrameDocuments(tabId, combined));
+      if (options?.includeOwners !== false) graph ??= promise;
+      const result = await promise;
+      checkActive();
+      return result;
+    },
+  });
   let bypassTab: number | undefined;
 
   try {
@@ -233,10 +227,15 @@ export async function handleWheel(
         console.debug("[bsk wheel] overlay bypass disable failed", error);
       }
     }
-    for (const target of objectTargets.values()) {
-      await sendToCdpTarget(deps.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }).catch(
-        () => {},
-      );
+    const cleanup = deps.cdp.resourceCleanup ?? deps.cdp;
+    for (const handle of objectHandles.values()) {
+      await sendToFrameHandle(
+        cleanup,
+        handle,
+        "Runtime.releaseObjectGroup",
+        { objectGroup },
+        { allowReattach: false },
+      ).catch(() => {});
     }
   }
 }
@@ -251,25 +250,15 @@ async function resolveWheelPoint(
   const hasRef = typeof params.ref === "string" && params.ref.length > 0;
   const hasSelector = typeof params.selector === "string" && params.selector.length > 0;
   if (hasRef || hasSelector) {
-    const node = await resolveBackendNode(cdp, ctx, target, params, "wheel");
+    const node = await resolveBackendNode(cdp, ctx, target, params, "wheel", false, {
+      childTimeoutMs: Math.max(1, deadline - Date.now()),
+    });
     if (isRpcError(node)) return node;
-    const geometry = await resolveNodeGeometry(
-      cdp,
-      target.tabId,
-      {
-        target: node.cdpTarget,
-        backendNodeId: node.backendNodeId,
-        ...(node.frameId ? { frameId: node.frameId } : {}),
-      },
-      { scrollIntoView: true },
-    );
+    const geometry = await resolveNodeGeometry(cdp, target.tabId, node.handle, {
+      scrollIntoView: true,
+    });
     if (isRpcError(geometry)) return geometry;
-    const bounds = await scrollVisibleBounds(
-      cdp,
-      target.tabId,
-      { target: node.cdpTarget, backendNodeId: node.backendNodeId, frameId: node.frameId },
-      deadline,
-    );
+    const bounds = await scrollVisibleBounds(cdp, target.tabId, node.handle, deadline);
     const clip =
       bounds && rectPolygon({ x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height });
     const regions = clip

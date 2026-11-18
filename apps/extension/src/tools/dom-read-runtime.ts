@@ -1,6 +1,5 @@
-import type { CdpFrame } from "@/browser-driver/frame-graph";
-import type { CdpRunner } from "./shared";
-import { sendToCdpTarget } from "./shared";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
+import { type CdpRunner, sendToFrameHandle, withObjectGroup } from "./shared";
 import type { DocumentIdentity } from "./vom/facts";
 export const SERIALIZATION = {
   serialization: "deep",
@@ -40,25 +39,24 @@ export function unwrap(reply: RuntimeReply): unknown {
 }
 export async function documentIdentity(
   cdp: CdpRunner,
-  frame: CdpFrame,
+  frameHandle: FrameDocumentHandle,
   attachmentId: string,
   unavailable: () => never = () => {
     throw new Error("Could not establish DOM document identity");
   },
 ): Promise<{ identity: DocumentIdentity; contextId: number }> {
-  const world = await sendToCdpTarget<{ executionContextId: number }>(
+  const world = await sendToFrameHandle<{ executionContextId: number }>(
     cdp,
-    frame.target,
+    frameHandle,
     "Page.createIsolatedWorld",
     {
-      frameId: frame.frameId,
+      frameId: frameHandle.frameId,
       worldName: "bsk-extract",
     },
   );
-  const group = `bsk-extract-root-${crypto.randomUUID()}`;
-  try {
+  return withObjectGroup(cdp, frameHandle, "bsk-extract-root", async (group) => {
     const root = unwrap(
-      await sendToCdpTarget<RuntimeReply>(cdp, frame.target, "Runtime.evaluate", {
+      await sendToFrameHandle<RuntimeReply>(cdp, frameHandle, "Runtime.evaluate", {
         expression: "document.documentElement",
         contextId: world.executionContextId,
         objectGroup: group,
@@ -66,18 +64,21 @@ export async function documentIdentity(
       }),
     ) as { backendNodeId?: number } | null;
     if (!root?.backendNodeId) unavailable();
+    cdp.recordFrameDocumentElement(
+      frameHandle.tabId,
+      frameHandle.frameId,
+      frameHandle.loaderId,
+      root.backendNodeId,
+    );
     return {
       identity: {
         attachmentId,
-        target: frame.target,
-        frameId: frame.frameId,
+        tabId: frameHandle.tabId,
+        frameId: frameHandle.frameId,
+        loaderId: frameHandle.loaderId,
         documentElementBackendNodeId: root.backendNodeId,
       },
       contextId: world.executionContextId,
     };
-  } finally {
-    await sendToCdpTarget(cdp, frame.target, "Runtime.releaseObjectGroup", {
-      objectGroup: group,
-    }).catch(() => {});
-  }
+  });
 }

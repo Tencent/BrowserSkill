@@ -16,7 +16,8 @@ produces partial video even when the task action has succeeded. A failed start i
 reported before continuing without video. Recording is opt-in; choosing a save
 location does not block start.
 
-Both CLI and DSH agents can manage this sequence. The extension's Features → Video
+CLI agents manage this sequence with `bsk video` (MCP agents can invoke `bsk video`
+over shell when needed; `bsk mcp` does not expose a video tool). The extension's Features → Video
 recording offers a harness-neutral prompt even with no running task. Its duration
 and quality settings are included in the copied instructions. Manual recording is
 in a secondary section: choose a running task and an authorized tab (a sole choice
@@ -86,7 +87,7 @@ Intentional user/cap stops are complete; interruptions are partial if playable.
 The catalog preserves the reason and any failure, independently of live sessions.
 
 The CDP screencast coordinator owns one stream and ACK per tab/attachment. Video
-and Windows long-screenshot keepalive share leases. Releasing an old lease cannot
+and Windows/Linux long-screenshot keepalive share leases. Releasing an old lease cannot
 stop a replacement attachment or another consumer. Capture retains only an
 in-flight frame and the newest pending frame. Canvas dimensions stay fixed and
 resizes are letterboxed. A monotonic timeline preserves elapsed static time and
@@ -172,30 +173,15 @@ use Chrome for Testing to allow loading the isolated unpacked extension.
 ```sh
 cargo build -p bsk --locked
 pnpm --filter @browser-skill/extension build
-pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
-cd apps/extension
-BSK_VIDEO_CHROME=/path/to/chrome BSK_VIDEO_BSK=../../target/debug/bsk \
-  pnpm exec vitest run src/video/*.browser.test.ts
+BSK_TEST_CHROME=/path/to/chrome BSK_TEST_CLI="$PWD/target/debug/bsk" \
+  pnpm --filter @browser-skill/extension test:browser src/video/capture.browser.test.ts src/video/encoder.browser.test.ts
 ```
 
 The extension's minimum Chrome version remains 125. Codec support is validated at
-runtime. DSH uses `bsk_inspect(action=video)` with `videoAction` set to start, status,
-stop, save, list, or discard. Its six public tool schemas are retained. Start
-follows the session queue; artifact operations bypass that queue so status/stop
-remain available during human help. A plugin-local allowlist of returned recording
-IDs outlives session teardown; retry keys are scoped to the plugin and session
-lifetime. A shared CLI cache or an arbitrary ID does not grant
-access to other tasks' videos. List is filtered to these IDs. Plugin reloads clear
-this allowlist; the extension library remains available for recovery. CLI partial
-stop/save errors retain their recording metadata and saved path in the tool error.
-
-```text
-bsk_inspect({ action: "video", videoAction: "start", session: "<task>", durationMs: 60000 })
-// Execute task operations after state=recording.
-bsk_inspect({ action: "video", videoAction: "stop", recordingId: "<recording_id>" })
-// End the task. Preview and Save As remain available in the extension.
-bsk_inspect({ action: "video", videoAction: "save", recordingId: "<recording_id>", output: "<explicit-path.mp4>" })
-```
+runtime. `bsk video start` follows the session queue; artifact operations (`status`,
+`stop`, `save`, `list`, `discard`) bypass that queue so `status` and `stop` remain
+available during human help. Partial stop/save errors retain their recording metadata
+and saved path in the error details.
 
 
 ## Capacity benchmark
@@ -211,10 +197,9 @@ watchdog. It measures encoder flush, journal finalization and remux for real
 capture, and remux separately for the capacity fixture.
 
 ```sh
-cd apps/extension
-BSK_VIDEO_CHROME=/path/to/chrome BSK_VIDEO_STRESS=size \
+BSK_TEST_CHROME=/path/to/chrome BSK_VIDEO_STRESS=size \
   BSK_VIDEO_BENCHMARK_OUT=/tmp/video-capacity.json \
-  pnpm exec vitest run src/video/stress.browser.test.ts
+  pnpm --filter @browser-skill/extension test:browser src/video/stress.bench.ts
 # Repeat with BSK_VIDEO_STRESS=duration for the full ten-minute capture.
 ```
 

@@ -16,18 +16,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::JavaScriptDialogInfo;
-
-/// First protocol whose extension honours `unverified`. An older extension
-/// would ignore the field and apply its page checks, which looks like a
-/// refusal the caller cannot explain, so peers below this are rejected.
-pub const UNVERIFIED_SCRIPT_PROTOCOL: &str = "1.9";
-pub fn supports_unverified_script(protocol: &str) -> bool {
-    crate::compatibility::Feature::UnverifiedScript
-        .supports(crate::compatibility::Peer::Extension, protocol)
-}
+use super::{ActionExpectation, JavaScriptDialogInfo};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EvaluateParams {
     pub session_id: String,
     pub expression: String,
@@ -52,6 +44,28 @@ pub struct EvaluateParams {
     /// what the script relies on; use this only when that cannot be stated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unverified: Option<bool>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 /// Outcome of an `evaluate` call.
@@ -104,6 +118,10 @@ mod tests {
             return_by_value: None,
             timeout_ms: None,
             unverified: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert!(v.get("tab_id").is_none());

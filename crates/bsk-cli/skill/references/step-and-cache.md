@@ -2,10 +2,9 @@
 
 Use `step` when one action is already decided from current evidence. It invokes
 that action exactly once, optionally waits for a known CSS selector to
-be visible, then synchronizes. It uses the session's negotiated guard policy;
-target policy requires compatible protocol 1.x peers at version 1.8 or later. With a current CLI
-and an older extension, pass `--policy strict` on every step for its post-action sync. Choose
-strict with an explicit sync before the action; a post-sync failure does not undo a completed action.
+be visible, then synchronizes. It uses the session's negotiated guard policy under
+protocol 2.0 (`target` by default, or `strict` when the session selected
+`--policy strict` on its initial sync); a post-sync failure does not undo a completed action.
 
 ```sh
 bsk step --session SID --context CURRENT --action click \
@@ -102,8 +101,9 @@ all literal matching line numbers (including duplicates), the shown line range,
 local omissions and original truncation. It returns `source_context_id`, never
 an actionable `context_id`. A no-match is not proof of absence from the live page.
 A cache cannot recover content missing from the original capture. Prefer an
-uncapped capture for large pages, then local views; raising a later sync's token
-budget does not force an unchanged page to be recaptured.
+uncapped capture for large pages, then local views (`view` accepts saved `step`,
+`cooperate sync`, or `bsk sync --json` files); changing `--max-tokens` on a later
+sync invalidates cached VOM reuse and triggers `baseline_reason: "token_budget_changed"`.
 
 To carry a saved baseline through an unchanged sync:
 
@@ -133,10 +133,9 @@ nothing is merged: apply the line patch yourself or sync again for a baseline.
 Anything the extension cannot express as such a patch returns a fresh `baseline` with
 a `baseline_reason`, for example `structure_changed`, `refs_replaced`, `frame_replaced`,
 `focus_changed`, `human_activity`, `text_log_gap`, `text_outside_observation`,
-`text_ambiguous`, `token_budget_changed` or `token_budget_shift`. Keep the same
-`--max-tokens` across syncs you want patched. Pages with child frames, and text inside
-controls, headings, labels, form fields, table rows or list items, always take the
-baseline path.
+`text_ambiguous`, `token_budget_changed` or `token_budget_shift`. Pass the same
+`--max-tokens` on `step` and `plan` as well as `sync` across calls you want patched.
+Pages with child frames, and text inside controls, headings, labels, form fields, table rows or list items, always take the baseline path.
 
 For readonly date pickers, click to open the picker instead of filling it. If VOM
 exposes only a containing control, inspect that observed ref with `get-html --ref`

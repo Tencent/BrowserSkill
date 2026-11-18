@@ -124,6 +124,26 @@ describe("estimateTokens", () => {
     expect(estimateLineTokens("😀") - 1).toBeLessThan(2);
   });
 
+  it.each([
+    "\uDBFF\uE000",
+    "\uDBFF\uFFFF",
+    "\uDBFF😀",
+    "\uD800A",
+    "\uDC00",
+    "\uD800",
+  ])("estimates ill-formed UTF-16 without throwing: %j", (text) => {
+    for (const value of [text, `Page text: ${text}!`]) {
+      expect(estimateTokens(value)).toBeGreaterThan(0);
+      expect(Number.isFinite(estimateTokens(value))).toBe(true);
+      expect(Number.isFinite(estimateLineTokens(value))).toBe(true);
+    }
+  });
+
+  it("keeps the symbol after an unpaired high surrogate in the estimate", () => {
+    expect(estimateLineTokens("\uDBFF\uE000")).toBeGreaterThan(estimateLineTokens("\uDBFF"));
+    expect(estimateLineTokens("\uDBFF😀")).toBeGreaterThan(estimateLineTokens("😀"));
+  });
+
   it("keeps the cost of every emoji when a variation selector follows one", () => {
     expect(estimateTokens(`${SMILEYS}❤️`)).toBeGreaterThanOrEqual(81);
     expect(estimateTokens(`${SMILEYS}❤️`)).toBeGreaterThan(estimateTokens(SMILEYS));

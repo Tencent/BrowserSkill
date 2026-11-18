@@ -11,11 +11,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bsk_protocol::system::{
+    DaemonSessionStartParams, DaemonSessionStartTrackedParams, SessionRequestAction,
+    SessionRequestParams, SessionRequestResult, SessionRequestState,
+};
 use bsk_protocol::{ErrorCode, ResponseBody, RpcError};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
-use super::sessions::{Session, SessionId, stop_session};
+use crate::ipc_client::IpcRequestMeta;
+
+use super::sessions::{Session, SessionId};
 use super::state::DaemonState;
 
 const MAX_ADMISSION_MS: u64 = 10 * 60 * 1000;
@@ -101,27 +107,29 @@ impl StartRequest {
             data.closed = true;
         }
         let phase = if data.closed {
-            "closed"
+            SessionRequestState::Closed
         } else if data.cleanup_error.is_some() {
-            "cleanup_failed"
+            SessionRequestState::CleanupFailed
         } else if data.cancelled {
-            "cancelling"
+            SessionRequestState::Cancelling
         } else if !self.started.load(Ordering::SeqCst) {
-            "prepared"
+            SessionRequestState::Prepared
         } else if data.result.is_none() {
-            "starting"
+            SessionRequestState::Starting
         } else if matches!(data.result, Some(ResponseBody::Err(_))) {
-            "failed"
+            SessionRequestState::Failed
         } else if data.claimed {
-            "active"
+            SessionRequestState::Active
         } else {
-            "ready"
+            SessionRequestState::Ready
         };
-        json!({
-            "request_id": self.id, "state": phase,
-            "session": data.session.as_ref().map(Session::status_entry),
-            "cleanup_error": data.cleanup_error,
+        serde_json::to_value(SessionRequestResult {
+            request_id: self.id.clone(),
+            state: phase,
+            session: data.session.as_ref().map(Session::status_entry),
+            cleanup_error: data.cleanup_error.clone(),
         })
+        .unwrap_or(Value::Null)
     }
 }
 
@@ -133,18 +141,59 @@ fn same_session(state: &DaemonState, session: &Session) -> bool {
     })
 }
 
+impl SessionRequests {
+    /// Reconcile any tracked start request whose session was torn down.
+    /// Returns the synthetic RPC IDs of matching entries so `abort_registry`
+    /// can drop/cancel any stale registration.
+    pub(super) fn on_session_ended(&self, session_id: &SessionId) -> Vec<String> {
+        let mut rpc_ids = Vec::new();
+        let requests = self.0.lock().unwrap();
+        for entry in requests.values() {
+            let mut data = entry.data.lock().unwrap();
+            if data.result.is_some() && data.session.as_ref().is_some_and(|s| &s.id == session_id) {
+                data.session = None;
+                data.closed = true;
+                data.cleanup_error = None;
+                rpc_ids.push(entry.rpc_id());
+            }
+        }
+        rpc_ids
+    }
+}
+
 pub(super) async fn start(
     state: &Arc<DaemonState>,
     rpc_id: String,
-    mut params: Value,
+    params: Value,
+    req_meta: &IpcRequestMeta,
 ) -> ResponseBody {
-    let Some(id) = params
-        .get("request_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return error(ErrorCode::InvalidParams, "request_id is required");
+    let tracked: DaemonSessionStartTrackedParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(err) => return error(ErrorCode::InvalidParams, err.to_string()),
     };
+    let DaemonSessionStartTrackedParams {
+        request_id: id,
+        controller,
+        incognito,
+        browser_instance_id,
+        width,
+        height,
+        focused,
+        task_name,
+        unattended: _,
+    } = tracked;
+    let params = serde_json::to_value(DaemonSessionStartParams {
+        controller,
+        incognito,
+        browser_instance_id,
+        width,
+        height,
+        focused,
+        task_name,
+        request_id: None,
+        unattended: None,
+    })
+    .unwrap_or(Value::Null);
     let Some(expires) = token_expiry(&id) else {
         return error(
             ErrorCode::InvalidParams,
@@ -158,7 +207,6 @@ pub(super) async fn start(
             "request expired or admission deadline exceeds ten minutes; use a new request_id",
         );
     }
-    params.as_object_mut().unwrap().remove("request_id");
     let (entry, fresh) = {
         let requests = state.session_requests.0.lock().unwrap();
         let Some(entry) = requests.get(&id) else {
@@ -183,13 +231,27 @@ pub(super) async fn start(
     if fresh {
         let state = state.clone();
         let entry = entry.clone();
-        // Owned by the daemon, not the IPC reader or a plugin process.
+        // Defer `bind_scope` until `Method::SessionStartTracked` returns uncancelled
+        // in `ipc.rs` so a cancelled in-flight tracked start never overwrites and
+        // tombstones an active bound session during `cleanup`.
+        let mut inner_meta = req_meta.clone();
+        inner_meta.bind_scope = false;
+        inner_meta.reuse_or_start_scope = false;
+        // Owned by the daemon, not the IPC reader.
         tokio::spawn(async move {
             let cancelled = entry.data.lock().unwrap().cancelled;
             let result = if cancelled {
                 error(ErrorCode::Cancelled, "start request cancelled")
             } else {
-                match super::ipc::handle_session_start(&state, entry.rpc_id(), params, true).await {
+                match super::ipc::handle_session_start_scoped(
+                    &state,
+                    entry.rpc_id(),
+                    params,
+                    true,
+                    &inner_meta,
+                )
+                .await
+                {
                     Ok(value) => ResponseBody::Ok(value),
                     Err(err) => ResponseBody::Err(err),
                 }
@@ -243,27 +305,24 @@ pub(super) async fn start(
 }
 
 pub(super) async fn operate(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
-    let Some(id) = params.get("request_id").and_then(Value::as_str) else {
-        return error(ErrorCode::InvalidParams, "request_id is required");
+    let parsed: SessionRequestParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(err) => return error(ErrorCode::InvalidParams, err.to_string()),
     };
+    let id = parsed.request_id.as_str();
     let Some(expires) = token_expiry(id) else {
         return error(ErrorCode::InvalidParams, "invalid request_id");
     };
-    let action = params
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or("status");
-    if !matches!(action, "status" | "prepare" | "cancel" | "claim") {
-        return error(
-            ErrorCode::InvalidParams,
-            "action must be status, prepare, cancel, or claim",
-        );
-    }
+    let action = parsed.action.unwrap_or_default();
     let entry = {
         let mut requests = state.session_requests.0.lock().unwrap();
         if let Some(entry) = requests.get(id) {
             Some(entry.clone())
-        } else if matches!(action, "prepare" | "cancel") && expires > now_ms() {
+        } else if matches!(
+            action,
+            SessionRequestAction::Prepare | SessionRequestAction::Cancel
+        ) && expires > now_ms()
+        {
             if expires > now_ms().saturating_add(MAX_ADMISSION_MS) || requests.len() >= MAX_REQUESTS
             {
                 return error(
@@ -276,7 +335,7 @@ pub(super) async fn operate(state: &Arc<DaemonState>, params: Value) -> Response
                 id.into(),
                 expires,
                 Value::Null,
-                action == "cancel",
+                action == SessionRequestAction::Cancel,
             ));
             requests.insert(id.into(), entry.clone());
             Some(entry)
@@ -285,18 +344,26 @@ pub(super) async fn operate(state: &Arc<DaemonState>, params: Value) -> Response
         }
     };
     let Some(entry) = entry else {
-        return if action == "claim" {
+        return if action == SessionRequestAction::Claim {
             error(ErrorCode::NotFound, "start request not found")
         } else {
-            ResponseBody::Ok(
-                json!({"request_id": id, "state": if expires <= now_ms() {"closed"} else {"unknown"}, "session": null}),
-            )
+            let reply = SessionRequestResult {
+                request_id: id.into(),
+                state: if expires <= now_ms() {
+                    SessionRequestState::Closed
+                } else {
+                    SessionRequestState::Unknown
+                },
+                session: None,
+                cleanup_error: None,
+            };
+            ResponseBody::Ok(serde_json::to_value(reply).unwrap_or(Value::Null))
         };
     };
-    if action == "cancel" {
+    if action == SessionRequestAction::Cancel {
         cancel(state, &entry).await;
     }
-    if action == "claim" {
+    if action == SessionRequestAction::Claim {
         let mut data = entry.data.lock().unwrap();
         if data.cancelled
             || data.closed
@@ -338,18 +405,16 @@ async fn cleanup(state: &Arc<DaemonState>, entry: &StartRequest) {
     let _serial = entry.cleanup.lock().await;
     let session = entry.data.lock().unwrap().session.clone();
     let result = match session {
-        Some(session) if same_session(state, &session) => stop_session(
-            &state.browsers,
-            &state.sessions,
-            &state.tool_queues,
-            &state.session_interrupts,
-            &session.id,
-            Duration::from_secs(10),
-            None,
-        )
-        .await
-        .map(|_| state.transfers.release_session(&session.id.0))
-        .map_err(|err| err.to_string()),
+        Some(session) if same_session(state, &session) => state
+            .stop_session_with_reason(
+                &session.id,
+                bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+                Duration::from_secs(10),
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
         _ => Ok(()),
     };
     let mut data = entry.data.lock().unwrap();
@@ -402,6 +467,7 @@ pub(super) fn reap(state: &Arc<DaemonState>) {
 mod tests {
     use super::super::start::DaemonConfig;
     use super::*;
+    use serde_json::json;
 
     fn state() -> Arc<DaemonState> {
         Arc::new(DaemonState::new(DaemonConfig::new(0)))
@@ -429,7 +495,13 @@ mod tests {
             "closed"
         );
         assert!(matches!(
-            start(&state, "late".into(), json!({"request_id":id})).await,
+            start(
+                &state,
+                "late".into(),
+                json!({"request_id":id}),
+                &IpcRequestMeta::default(),
+            )
+            .await,
             ResponseBody::Err(RpcError {
                 code: ErrorCode::Cancelled,
                 ..
@@ -447,7 +519,13 @@ mod tests {
         );
         let new = state();
         assert!(matches!(
-            start(&new, "late".into(), json!({"request_id":id})).await,
+            start(
+                &new,
+                "late".into(),
+                json!({"request_id":id}),
+                &IpcRequestMeta::default(),
+            )
+            .await,
             ResponseBody::Err(RpcError {
                 code: ErrorCode::InvalidParams,
                 ..
@@ -474,7 +552,13 @@ mod tests {
         reap(&state);
         assert!(!state.session_requests.0.lock().unwrap().contains_key(&id));
         assert!(matches!(
-            start(&state, "late".into(), json!({"request_id":id})).await,
+            start(
+                &state,
+                "late".into(),
+                json!({"request_id":id}),
+                &IpcRequestMeta::default(),
+            )
+            .await,
             ResponseBody::Err(_)
         ));
     }
@@ -491,7 +575,13 @@ mod tests {
                 ResponseBody::Err(_)
             ));
             assert!(matches!(
-                start(&state, "bad".into(), json!({"request_id":id})).await,
+                start(
+                    &state,
+                    "bad".into(),
+                    json!({"request_id":id}),
+                    &IpcRequestMeta::default(),
+                )
+                .await,
                 ResponseBody::Err(_)
             ));
         }
@@ -503,6 +593,7 @@ mod tests {
 mod ownership_tests {
     use super::super::{browsers::BrowserId, start::DaemonConfig};
     use super::*;
+    use serde_json::json;
 
     fn session(id: &str, window: i64) -> Session {
         Session {

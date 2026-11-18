@@ -15,8 +15,9 @@ function visual(): VisualRefInput {
     candidate: {
       document: {
         attachmentId: "a",
-        target: { tabId: 4, sessionId: "child" },
+        tabId: 4,
         frameId: "frame",
+        loaderId: "loader-1",
         documentElementBackendNodeId: 1,
       },
       backendNodeId: 42,
@@ -46,7 +47,7 @@ async function setup() {
   const send = vi.fn(async () => {
     throw new Error("unexpected target operation");
   });
-  const cdp = { send, sendToTarget: send, trackSessionTab: vi.fn() } as unknown as CdpRunner;
+  const cdp = { send, sendToFrame: send, trackSessionTab: vi.fn() } as unknown as CdpRunner;
   const tab = { id: 4, windowId: 100, active: true, url: "https://example.com" } as chrome.tabs.Tab;
   const tabsApi = { get: vi.fn(async () => tab), query: vi.fn(async () => [tab]) };
   return { manager, ctx, send, cdp, tabsApi };

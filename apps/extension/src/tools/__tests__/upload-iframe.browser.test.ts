@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; exercises Layui-style hidden input[type=file]
+// Opt in with BSK_TEST_CHROME; exercises Layui-style hidden input[type=file]
 // uploads and cross-frame --selector resolution across same-origin iframes and
 // cross-origin OOPIFs (standalone + CooperationController) in real Chrome.
 
@@ -8,14 +8,16 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { CooperationController } from "@/cooperation/controller";
 import type { CooperationFrames, FrameState } from "@/cooperation/types";
 import { SessionManager } from "@/session-manager/manager";
 import { handleClick } from "../interaction";
+import { handleScrollTo } from "../scroll";
 import { sessionCdpRunner } from "../shared";
 import { handleUpload } from "../upload";
 import { handleWaitForElement } from "../waits";
+import { handleWheel } from "../wheel";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -29,7 +31,7 @@ interface CdpEvent {
   params?: object;
 }
 
-type CdpEventListener = (source: CdpDebuggee, method: string, params: unknown) => void;
+type CdpEventListener = Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0];
 
 const stubInputClock = (cdp: ChromiumCdp) => {
   vi.spyOn(cdp, "prepareInputTimestamp").mockImplementation(async () => ({
@@ -39,7 +41,7 @@ const stubInputClock = (cdp: ChromiumCdp) => {
   }));
 };
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)(
+describe.skipIf(!process.env.BSK_TEST_CHROME)(
   "real browser iframe + hidden input[type=file] (Layui-style) upload & cross-frame selector",
   () => {
     it("uploads via visible trigger @ref and direct hidden input[type=file] --selector across same-origin iframes and cross-origin OOPIFs", async () => {
@@ -110,7 +112,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
         }
         if (req.url === "/oopif-next") {
           res.end(
-            `<!doctype html><input class="oopif-layui-file" type="file" style="display:none">`,
+            `<!doctype html><div id="oopif-next-ready">Next Frame Ready</div><input class="oopif-layui-file" type="file" style="display:none">`,
           );
           return;
         }
@@ -144,7 +146,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
         let forwardEvent: ((event: CdpEvent) => void) | undefined;
         await withChrome(
           {
-            executable: process.env.BSK_CLICK_CHROME,
+            executable: process.env.BSK_TEST_CHROME,
             deviceScale: 1,
             zoom: 1,
             startupTimeout: 30_000,
@@ -293,12 +295,11 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
                 sessions.invalidateTabRefs(tabId);
                 controller.invalidate(tabId);
               },
-              onChildFramesRemapped: (tabId, remapped) =>
-                sessions.remapTabChildFrames(tabId, remapped),
               onChildFramesInvalidated: (tabId, stale) => {
                 sessions.invalidateTabChildFrames(tabId, stale);
                 controller.invalidateChildFrames(tabId);
               },
+              onSoftDetached: (tabId) => controller.markAccessibilityNeedsEnable(tabId),
             });
             stubInputClock(cdp);
             const runner = sessionCdpRunner(cdp, ctx.sessionId, () => sessions.has(ctx.sessionId));
@@ -561,7 +562,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
               ]);
               expect(await evalOopif<number>("window.oopifBtnClicks")).toBe(1);
 
-              // 6. Cross-frame --selector sibling tools (wait-for-element & click) + strict ambiguity check.
+              // 6. Cross-frame --selector sibling tools (wait-for-element, scroll-to, wheel, click) + strict ambiguity check.
               const waited = await handleWaitForElement(
                 sessions,
                 {
@@ -577,6 +578,34 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
                 attached: true,
                 visible: false,
                 used_selector: "input.oopif-layui-file",
+              });
+
+              const scrolledOopif = await handleScrollTo(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 4, selector: "#oopif-action-btn" },
+                { cdp: runner, tabsApi },
+              );
+              expect(scrolledOopif).toMatchObject({
+                tab_id: 4,
+                used_selector: "#oopif-action-btn",
+                width: expect.any(Number),
+                height: expect.any(Number),
+              });
+
+              const wheeledOopif = await handleWheel(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 4,
+                  selector: "#oopif-action-btn",
+                  delta_y: 40,
+                },
+                { cdp: runner, tabsApi, bypassOverlay: async () => {} },
+              );
+              expect(wheeledOopif).toMatchObject({
+                tab_id: 4,
+                used_selector: "#oopif-action-btn",
+                delta_y: 40,
               });
 
               const clickedOopif = await handleClick(
@@ -599,22 +628,32 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
                 data: { phase: "target", effect_state: "none" },
               });
 
-              // 7. Cooperation frame-epoch safety: when the OOPIF navigates, child-frame --selector
+              // 7. Mid-poll child-frame navigation resilience + Cooperation frame-epoch safety:
+              //    `wait-for-element --selector` survives OOPIF navigation, while stale context
               //    is refused with document_changed + effect_state: "none" until re-synchronized.
+              const waitAcrossNav = handleWaitForElement(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 4,
+                  selector: "#oopif-next-ready",
+                  state: "visible",
+                  poll_ms: 20,
+                  timeout_ms: 8_000,
+                },
+                { cdp: runner, tabsApi },
+              );
+              await new Promise((resolve) => setTimeout(resolve, 40));
               oopifDoc = "doc-oopif-2";
               await evalHost(
                 `document.getElementById('oopif-frame').src = 'http://localhost:${port}/oopif-next'`,
               );
-              await expect
-                .poll(async () => {
-                  const { targetInfos } = await send<{
-                    targetInfos: { type: string; url: string }[];
-                  }>("Target.getTargets");
-                  return targetInfos.some(
-                    (t) => t.type === "iframe" && t.url === `http://localhost:${port}/oopif-next`,
-                  );
-                })
-                .toBe(true);
+              expect(await waitAcrossNav).toMatchObject({
+                satisfied: true,
+                attached: true,
+                visible: true,
+                used_selector: "#oopif-next-ready",
+              });
 
               const staleChildSelector = await runCoopUpload("stale-oopif-sel", {
                 selector: "input.oopif-layui-file",
@@ -702,7 +741,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
         let forwardEvent: ((event: CdpEvent) => void) | undefined;
         await withChrome(
           {
-            executable: process.env.BSK_CLICK_CHROME,
+            executable: process.env.BSK_TEST_CHROME,
             deviceScale: 1,
             zoom: 1,
             startupTimeout: 30_000,
@@ -860,12 +899,11 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
                 sessions.invalidateTabRefs(tabId);
                 controller.invalidate(tabId);
               },
-              onChildFramesRemapped: (tabId, remapped) =>
-                sessions.remapTabChildFrames(tabId, remapped),
               onChildFramesInvalidated: (tabId, stale) => {
                 sessions.invalidateTabChildFrames(tabId, stale);
                 controller.invalidateChildFrames(tabId);
               },
+              onSoftDetached: (tabId) => controller.markAccessibilityNeedsEnable(tabId),
             });
             stubInputClock(cdp);
             const runner = sessionCdpRunner(cdp, ctx.sessionId, () => sessions.has(ctx.sessionId));

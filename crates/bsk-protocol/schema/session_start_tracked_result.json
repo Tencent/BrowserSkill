@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "BorrowConfirmationPolicy": {
+      "enum": [
+        "always",
+        "never"
+      ],
+      "type": "string"
+    },
+    "InteractionPolicy": {
+      "properties": {
+        "borrow_confirmation": {
+          "$ref": "#/definitions/BorrowConfirmationPolicy"
+        },
+        "request_help": {
+          "$ref": "#/definitions/RequestHelpPolicy"
+        }
+      },
+      "required": [
+        "borrow_confirmation",
+        "request_help"
+      ],
+      "type": "object"
+    },
+    "RequestHelpPolicy": {
+      "enum": [
+        "enabled",
+        "disabled"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "agent_window_id": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "browser_instance_id": {
+      "type": "string"
+    },
+    "interaction": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/InteractionPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "browser_instance_id"
+  ],
+  "title": "DaemonSessionStartResult",
+  "type": "object"
+}

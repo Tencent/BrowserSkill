@@ -1,5 +1,6 @@
 import type { Viewport } from "@browser-skill/vom";
-import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle, FrameDocumentInfo } from "@/browser-driver/frame-handles";
+import { INTERACTIVE_ARIA_ROLES } from "@/lib/dom-predicates";
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "@/lib/overlay-bridge";
 import type { GeometryProjection } from "../geometry";
 import type { FrameProjectionIssue, SnapshotCoordinates } from "../geometry/coordinate-types";
@@ -58,26 +59,6 @@ const INTERACTIVE_OR_VISUAL_TAGS = new Set([
   "video",
   "audio",
   "dialog",
-]);
-
-const INTERACTIVE_ARIA_ROLES = new Set([
-  "button",
-  "checkbox",
-  "combobox",
-  "link",
-  "listbox",
-  "menuitem",
-  "menuitemcheckbox",
-  "menuitemradio",
-  "option",
-  "radio",
-  "searchbox",
-  "slider",
-  "spinbutton",
-  "switch",
-  "tab",
-  "textbox",
-  "treeitem",
 ]);
 
 const INLINE_OPACITY_RE = /(?:^|;)\s*opacity\s*:\s*([+-]?\d*\.?\d+)/i;
@@ -1744,10 +1725,8 @@ export async function buildDocumentIndex<T extends DecodedNode>(
   return { nodes, ...(ancestryComplete ? { ancestryComplete } : {}), excludedBackendNodeIds };
 }
 
-export interface DocumentIdentity {
+export interface DocumentIdentity extends FrameDocumentHandle {
   attachmentId: string;
-  target: CdpTarget;
-  frameId: string;
   documentElementBackendNodeId: number;
 }
 
@@ -1762,7 +1741,8 @@ export interface CapturedSceneInput {
 export interface CaptureIssue {
   /** Owner failure or inherited blockage; absent for other geometry failures. */
   projectionIssue?: FrameProjectionIssue;
-  target: CdpTarget;
+  tabId: number;
+  processKey: string;
   frameId?: string;
   stage: "dom" | "ax" | "identity" | "ownership" | "geometry" | "forms";
   reason:
@@ -1784,7 +1764,7 @@ export interface DocumentGeometry {
 
 export interface DocumentFacts<T extends FrameOwnedAxNode> {
   readonly geometry?: DocumentGeometry;
-  readonly frame: CdpFrame;
+  readonly frame: FrameDocumentInfo;
   readonly identity?: DocumentIdentity;
   readonly index: DocumentIndex;
   readonly domNodes: CapturedNode[];

@@ -1,4 +1,9 @@
-import { type CdpFrame, type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentInfo,
+  type FrameProcessBoundary,
+  frameProcessIdentityKey,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 import { createCaptureCheckpoint } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
@@ -350,14 +355,15 @@ export async function decodeDocument(
  * The earlier graph only supplies compatible metadata and cross-target edges. */
 export function describeSnapshotFrames(
   snapshot: SnapshotReply,
-  target: CdpTarget,
-  hintById: ReadonlyMap<string, CdpFrame>,
+  process: FrameProcessBoundary,
+  hintById: ReadonlyMap<string, FrameDocumentInfo>,
   pageUrl?: string,
-): { frames: CdpFrame[]; ids: Set<string>; rootFrameId?: string } {
+): { frames: FrameDocumentInfo[]; ids: Set<string>; rootFrameId?: string } {
   const raw = snapshot.documents ?? [];
   const strings = snapshot.strings ?? [];
   const ids = new Set<string>();
   const invalid = new Set<string>();
+  const processIdentity = frameProcessIdentityKey(process);
   const frames = raw.map((doc) => {
     const frameId = snapshotFrameId(doc, strings);
     if (!frameId) return undefined;
@@ -365,26 +371,52 @@ export function describeSnapshotFrames(
     ids.add(frameId);
     const hint = hintById.get(frameId);
     const compatible =
-      hint && cdpTargetKey(hint.target) === cdpTargetKey(target) ? hint : undefined;
+      hint &&
+      frameProcessIdentityKey({ tabId: hint.handle.tabId, processKey: hint.processKey }) ===
+        processIdentity
+        ? hint
+        : undefined;
+    const loaderId = compatible?.loaderId ?? "";
     const url =
       (doc.documentURL === undefined ? undefined : strings[doc.documentURL]) || compatible?.url;
-    return { frameId, target, ...(url ? { url } : {}) } as CdpFrame;
+    const next: {
+      handle: FrameDocumentInfo["handle"];
+      frameId: string;
+      loaderId: string;
+      parentFrameId?: string;
+      ownerBackendNodeId?: number;
+      url?: string;
+      urlFragment?: string;
+      processKey: string;
+      isOutOfProcess: boolean;
+    } = {
+      handle: compatible?.handle ?? toFrameDocumentHandle(process.tabId, { frameId, loaderId }),
+      frameId,
+      loaderId,
+      ...(url ? { url } : {}),
+      ...(compatible?.urlFragment !== undefined ? { urlFragment: compatible.urlFragment } : {}),
+      processKey: process.processKey,
+      isOutOfProcess: process.isOutOfProcess,
+    };
+    return next;
   });
   const root = frames[0];
   if (root) {
     const hint = hintById.get(root.frameId);
     const parent = hint?.parentFrameId ? hintById.get(hint.parentFrameId) : undefined;
     if (
-      target.sessionId &&
+      process.isOutOfProcess &&
       hint &&
-      cdpTargetKey(hint.target) === cdpTargetKey(target) &&
+      frameProcessIdentityKey({ tabId: hint.handle.tabId, processKey: hint.processKey }) ===
+        processIdentity &&
       parent &&
-      cdpTargetKey(parent.target) !== cdpTargetKey(target)
+      frameProcessIdentityKey({ tabId: parent.handle.tabId, processKey: parent.processKey }) !==
+        processIdentity
     ) {
       root.parentFrameId = parent.frameId;
       root.ownerBackendNodeId = hint.ownerBackendNodeId;
     }
-    if (!target.sessionId && !root.url && pageUrl) root.url = pageUrl;
+    if (!process.isOutOfProcess && !root.url && pageUrl) root.url = pageUrl;
   }
   const owned = new Set<string>();
   for (let i = 0; i < raw.length; i++) {
@@ -405,7 +437,9 @@ export function describeSnapshotFrames(
     }
   }
   return {
-    frames: frames.filter((frame): frame is CdpFrame => !!frame && !invalid.has(frame.frameId)),
+    frames: frames.filter(
+      (frame): frame is FrameDocumentInfo => !!frame && !invalid.has(frame.frameId),
+    ),
     ids,
     rootFrameId: root?.frameId,
   };

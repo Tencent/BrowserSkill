@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "chunk_size": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "transfer_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "transfer_id",
+    "chunk_size"
+  ],
+  "title": "TransferBeginResult",
+  "type": "object"
+}

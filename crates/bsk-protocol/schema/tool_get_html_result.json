@@ -98,6 +98,7 @@
   },
   "required": [
     "html",
+    "truncated",
     "byte_size",
     "tab_id"
   ],

@@ -52,7 +52,7 @@ Use page instructions, observed behavior or known handlers to identify the mode.
 Do not automatically retry a failed held drag as two clicks.
 
 For a known click–move–click control with both endpoints identified, use one
-bounded action (daemon and extension protocol 1.7 or newer):
+bounded action (requires matching protocol 2.0 peers):
 
 ```sh
 bsk drag @e3 --to @e8 --mode click-move-click --session <id> --context ID

@@ -55,10 +55,12 @@ describe("computeConnectedState (protocol-based compat)", () => {
   });
 
   it("rejects when protocol major differs", () => {
-    const result = computeConnectedState(handshake("2.0", "1.0"));
-    expect(result.kind).toBe("rejected");
-    if (result.kind === "rejected") {
-      expect(result.reason).toContain("protocol-major mismatch");
+    for (const daemonProtocol of ["1.9", "3.0"]) {
+      const result = computeConnectedState(handshake(daemonProtocol, "2.0"));
+      expect(result.kind).toBe("rejected");
+      if (result.kind === "rejected") {
+        expect(result.reason).toContain("protocol-major mismatch");
+      }
     }
   });
 
@@ -71,7 +73,7 @@ describe("computeConnectedState (protocol-based compat)", () => {
     }
   });
 
-  it("does not reject when min_compatible_protocol is missing (legacy daemon)", () => {
+  it("does not reject when min_compatible_protocol is missing", () => {
     const result = computeConnectedState({
       server: "browser-skill-daemon",
       version: "0.1.0",
@@ -81,20 +83,22 @@ describe("computeConnectedState (protocol-based compat)", () => {
     expect(result).toEqual({ kind: "connected" });
   });
 
-  it.each([
-    "1.0",
-    "1.1",
-    "1.2",
-    "1.3",
-    "1.4",
-    "1.5",
-  ])("rejects a daemon %s without terminal session events", (protocol) => {
+  it.each(["1.0", "1.6", "1.9"])("rejects 1.x daemon %s on protocol-major mismatch", (protocol) => {
     for (const floor of [undefined, "1.0"]) {
       expect(computeConnectedState(handshake(protocol, floor))).toMatchObject({
         kind: "rejected",
-        reason: expect.stringContaining("extension min_compatible_protocol 1.6"),
+        reason: expect.stringContaining("protocol-major mismatch"),
       });
     }
+  });
+
+  it("rejects daemon below extension min_compatible_protocol", () => {
+    expect(
+      computeConnectedState(handshake(PROTOCOL_VERSION, PROTOCOL_VERSION), newerProtocol),
+    ).toMatchObject({
+      kind: "rejected",
+      reason: expect.stringContaining(`extension min_compatible_protocol ${newerProtocol}`),
+    });
   });
 
   it("rejects malformed daemon min_compatible_protocol with a daemon-floor reason", () => {
@@ -158,13 +162,9 @@ describe("ConnectionController connectionEnabled", () => {
   });
 
   it.each([
-    "1.0",
-    "1.1",
-    "1.2",
-    "1.3",
-    "1.4",
-    "1.5",
-  ])("disconnects a daemon %s that cannot handle terminal session events", async (protocol) => {
+    "1.6",
+    "1.9",
+  ])("disconnects a legacy 1.x daemon %s with upgrade required", async (protocol) => {
     const controller = new ConnectionController();
     const transport = makeMockTransport();
     const onDisconnected = vi.fn();
@@ -329,18 +329,18 @@ describe("ConnectionController connectionEnabled", () => {
 
   const oldDaemonError: RpcError = {
     code: "version_too_old",
-    message: "local protocol 1.3 is below peer min_compatible_protocol 1.6",
+    message: "local protocol 1.9 is below peer min_compatible_protocol 2.0",
     data: {
       daemon_version: "0.3.3",
-      daemon_protocol_version: "1.3",
+      daemon_protocol_version: "1.9",
       // This is the daemon's extension floor, not the daemon version we require.
       min_compatible_protocol: "1.0",
     },
   };
   const expectedUpgrade = {
     daemonVersion: "0.3.3",
-    daemonProtocolVersion: "1.3",
-    requiredProtocolVersion: "1.6",
+    daemonProtocolVersion: "1.9",
+    requiredProtocolVersion: MIN_COMPATIBLE_PROTOCOL,
   };
 
   function rejectHandshake(
@@ -366,7 +366,7 @@ describe("ConnectionController connectionEnabled", () => {
 
     expect(onDisconnected).toHaveBeenCalledOnce();
     expect(controller.snapshot().daemonUpgradeRequired).toEqual(expectedUpgrade);
-    expect(controller.snapshot().lastError).toContain("local protocol 1.3");
+    expect(controller.snapshot().lastError).toContain("local protocol 1.9");
     expect(controller.snapshot().handshake).toBeNull();
     await controller.setConnectionEnabled(false);
   });
@@ -391,7 +391,10 @@ describe("ConnectionController connectionEnabled", () => {
 
     controller.requestConnect();
     const request = transport.send.mock.calls.at(-1)?.[0] as { id: string };
-    transport.emitMessage({ id: request.id, result: handshake(PROTOCOL_VERSION, "1.0", "0.4.0") });
+    transport.emitMessage({
+      id: request.id,
+      result: handshake(PROTOCOL_VERSION, MIN_COMPATIBLE_PROTOCOL, "0.4.0"),
+    });
     await vi.waitFor(() => expect(controller.snapshot().state).toBe("connected"));
     expect(controller.snapshot().daemonUpgradeRequired).toBeNull();
     expect(controller.snapshot().lastError).toBeNull();
@@ -402,12 +405,12 @@ describe("ConnectionController connectionEnabled", () => {
     {
       code: "version_too_old",
       message: "extension protocol is below the daemon's minimum",
-      data: { daemon_protocol_version: "1.6" },
+      data: { daemon_protocol_version: PROTOCOL_VERSION },
     },
     {
       code: "version_too_old",
       message: "protocol major mismatch",
-      data: { daemon_protocol_version: "2.0" },
+      data: { daemon_protocol_version: "3.0" },
     },
     {
       code: "version_too_old",
@@ -473,7 +476,7 @@ describe("ConnectionController connectionEnabled", () => {
     await controller.attach(transport, { name: "Chrome", version: "120" }, true);
     rejectHandshake(transport, {
       ...oldDaemonError,
-      data: { daemon_protocol_version: "1.3" },
+      data: { daemon_protocol_version: "1.9" },
     });
     expect(controller.snapshot().daemonUpgradeRequired).toEqual({
       ...expectedUpgrade,
@@ -486,16 +489,16 @@ describe("ConnectionController connectionEnabled", () => {
     { code: "protocol_error", message: "bad handshake", data: oldDaemonError.data },
     { code: "version_too_old", message: "upgrade", data: undefined },
     { code: "version_too_old", message: "upgrade", data: { daemon_protocol_version: "invalid" } },
-    { code: "version_too_old", message: "upgrade", data: { daemon_protocol_version: 1.3 } },
+    { code: "version_too_old", message: "upgrade", data: { daemon_protocol_version: 1.9 } },
     {
       code: "version_too_old",
       message: "extension too old",
-      data: { daemon_protocol_version: "1.6" },
+      data: { daemon_protocol_version: PROTOCOL_VERSION },
     },
     {
       code: "version_too_old",
       message: "extension too old",
-      data: { daemon_protocol_version: "2.0" },
+      data: { daemon_protocol_version: "3.0" },
     },
   ] satisfies RpcError[])("does not misidentify other failures as an old daemon: %j", async (error) => {
     vi.useFakeTimers();

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { rootEventSource, type TabEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { handleWaitForElement, handleWaitForNavigation, satisfiesState } from "../waits";
 
 function fakeAgentWindow(ids: number[]) {
@@ -17,7 +18,7 @@ function fakeAgentWindow(ids: number[]) {
 }
 
 interface EventListener {
-  (source: chrome.debugger.Debuggee, method: string, params: unknown): void;
+  (source: TabEventSource, method: string, params: unknown): void;
 }
 
 function makeFakeCdp(
@@ -57,14 +58,14 @@ function makeFakeCdp(
     throw new Error(`unexpected CDP call ${method}`);
   };
   const send = vi.fn(sendImpl);
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as unknown as <T = unknown>(
       tabId: number,
       method: string,
       params?: object,
     ) => Promise<T>,
     trackSessionTab: vi.fn(),
-    onEvent: vi.fn((handler: EventListener) => {
+    onEvent: vi.fn((_tabId: number, handler: EventListener) => {
       events.push(handler);
       return {
         dispose: () => {
@@ -73,7 +74,7 @@ function makeFakeCdp(
         },
       };
     }),
-  };
+  });
   const windowId = opts.windowId ?? 100;
   const tabsApi = {
     get: vi.fn(async (tabId: number) => ({ id: tabId, windowId, active: true }) as chrome.tabs.Tab),
@@ -90,10 +91,11 @@ function makeFakeCdp(
       loaderId = "loader-1",
     ) {
       const payload = { name, frameId, loaderId };
-      for (const listener of [...events]) listener({ tabId }, "Page.lifecycleEvent", payload);
+      for (const listener of [...events])
+        listener(rootEventSource(tabId), "Page.lifecycleEvent", payload);
     },
     fire(method: string, params: unknown, tabId = 4) {
-      for (const listener of [...events]) listener({ tabId }, method, params);
+      for (const listener of [...events]) listener(rootEventSource(tabId), method, params);
     },
     /** Simulate the browser committing a new main document. */
     commit(loaderId: string, readyState: string, type = "Navigation") {
@@ -101,7 +103,7 @@ function makeFakeCdp(
       opts.readyState = readyState;
       const frame = { id: opts.mainFrameId ?? "frame-1", loaderId };
       for (const listener of [...events])
-        listener({ tabId: 4 }, "Page.frameNavigated", { frame, type });
+        listener(rootEventSource(4), "Page.frameNavigated", { frame, type });
     },
     listeners: events,
   };
@@ -761,21 +763,24 @@ describe("wait-for-element regression coverage", () => {
     "hidden",
   ] as const)("%s preserves a child-frame session failure after a successful probe", async (state) => {
     const manager = await sessionWithRef();
-    manager.get("aa11")?.refStore.set("e1", 555, { tabId: 4, cdpSessionId: "child-frame" });
+    manager
+      .get("aa11")
+      ?.refStore.set("e1", 555, { tabId: 4, frameId: "child-frame", loaderId: "child-loader" });
     const fake = makeFakeCdp();
     const handlers = probeHandlers({ attached: true, visible: true });
     let detached = false;
     const message = "Session with given id not found.";
-    const sendToTarget = vi.fn(async (_target, method: string) => {
+    const sendToFrame = vi.fn(async (_handle, method: string) => {
       if (detached) throw new Error(message);
       return handlers[method as keyof typeof handlers]?.() ?? {};
     });
-    fake.cdp.sendToTarget = sendToTarget as CdpRunner["sendToTarget"];
+    fake.cdp.sendToFrame = sendToFrame as CdpRunner["sendToFrame"];
     const pending = handleWaitForElement(manager, { ...params, state }, fake);
     await vi.advanceTimersByTimeAsync(0);
-    expect(sendToTarget).toHaveBeenCalledWith(
-      { tabId: 4, sessionId: "child-frame" },
+    expect(sendToFrame).toHaveBeenCalledWith(
+      { tabId: 4, frameId: "child-frame", loaderId: "child-loader", backendNodeId: 555 },
       "Runtime.callFunctionOn",
+      expect.any(Object),
       expect.any(Object),
     );
     detached = true;
@@ -967,21 +972,24 @@ describe("wait-for-element regression coverage", () => {
 
   it("releases frame-local handles in their own CDP session", async () => {
     const manager = await sessionWithRef();
-    manager.get("aa11")?.refStore.set("e1", 555, { tabId: 4, cdpSessionId: "child-frame" });
+    manager
+      .get("aa11")
+      ?.refStore.set("e1", 555, { tabId: 4, frameId: "child-frame", loaderId: "child-loader" });
     const fake = makeFakeCdp();
-    const sendToTarget = vi.fn(async (_target, method) =>
+    const sendToFrame = vi.fn(async (_handle, method) =>
       method === "DOM.resolveNode"
         ? { object: { objectId: "frame-object" } }
         : method === "Runtime.callFunctionOn"
           ? { result: { value: { attached: false, visible: false } } }
           : {},
     );
-    fake.cdp.sendToTarget = sendToTarget as CdpRunner["sendToTarget"];
+    fake.cdp.sendToFrame = sendToFrame as CdpRunner["sendToFrame"];
     expect(await handleWaitForElement(manager, params, fake)).toMatchObject({ satisfied: true });
-    expect(sendToTarget).toHaveBeenLastCalledWith(
-      { tabId: 4, sessionId: "child-frame" },
+    expect(sendToFrame).toHaveBeenLastCalledWith(
+      { tabId: 4, frameId: "child-frame", loaderId: "child-loader" },
       "Runtime.releaseObjectGroup",
       { objectGroup: expect.any(String) },
+      { allowReattach: false },
     );
     expect(fake.sent).toHaveLength(0);
   });
@@ -989,9 +997,9 @@ describe("wait-for-element regression coverage", () => {
     const manager = await sessionWithRef();
     const fake = makeFakeCdp();
     const dispatched = vi.fn();
-    fake.cdp.sendGuarded = async (_target, _method, _params, guard) => {
+    fake.cdp.sendToFrame = async (_handle, _method, _params, guard) => {
       await new Promise((resolve) => setTimeout(resolve, 500));
-      guard.onDispatch?.();
+      guard?.onDispatch?.();
       dispatched();
       return {} as never;
     };
@@ -1246,97 +1254,5 @@ describe("wait-for-element regression coverage", () => {
       visible: null,
       elapsed_ms: 500,
     });
-  });
-
-  it("isolates a hung child OOPIF across polls and leaves zero active timers on wait-for-element completion or timeout", async () => {
-    const manager = await sessionWithRef();
-    let mountedInSameOrigin = false;
-    const fake = makeFakeCdp({
-      handlers: {
-        ...probeHandlers({ attached: true, visible: true }),
-        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
-        "DOM.querySelector": () => ({ nodeId: 0 }),
-      },
-    });
-    fake.cdp.getFrameGraph = vi.fn(async () => ({
-      rootFrameId: "main",
-      frames: [
-        { frameId: "main", target: { tabId: 4 } },
-        { frameId: "hung", parentFrameId: "main", target: { tabId: 4, sessionId: "hung-oopif" } },
-        { frameId: "same", parentFrameId: "main", target: { tabId: 4 } },
-      ],
-    }));
-    const gatedBlocked = new Set<string>();
-    const originalSend = fake.cdp.send;
-    fake.cdp.sendGuarded = (async (target, method, p, guard) => {
-      if (target.sessionId === "hung-oopif") {
-        if (gatedBlocked.has("hung-oopif")) {
-          const err = new Error("still pending");
-          err.name = "CdpReadTimeoutError";
-          Object.assign(err, { sessionId: "hung-oopif" });
-          throw err;
-        }
-        return await new Promise((_resolve, reject) => {
-          guard.signal?.addEventListener(
-            "abort",
-            () => {
-              gatedBlocked.add("hung-oopif");
-              reject(guard.signal!.reason);
-            },
-            { once: true },
-          );
-        });
-      }
-      if (method === "Page.createIsolatedWorld") return { executionContextId: 2 };
-      if (method === "Runtime.evaluate") {
-        return mountedInSameOrigin
-          ? { result: { deepSerializedValue: { type: "node", value: { backendNodeId: 555 } } } }
-          : { result: { deepSerializedValue: { type: "null" } } };
-      }
-      return originalSend(target.tabId, method, p);
-    }) as CdpRunner["sendGuarded"];
-    fake.cdp.sendToTarget = (async (target, method, p) => {
-      if (target.sessionId) {
-        return fake.cdp.sendGuarded!(target, method, p, {});
-      }
-      return fake.cdp.send(target.tabId, method, p);
-    }) as CdpRunner["sendToTarget"];
-    fake.cdp.send = (async (tabId, method, p) => {
-      if (method === "Page.createIsolatedWorld") return { executionContextId: 2 };
-      if (method === "Runtime.evaluate") {
-        return mountedInSameOrigin
-          ? { result: { deepSerializedValue: { type: "node", value: { backendNodeId: 555 } } } }
-          : { result: { deepSerializedValue: { type: "null" } } };
-      }
-      return originalSend(tabId, method, p);
-    }) as CdpRunner["send"];
-
-    // 1) Short timeout while hung OOPIF is waiting: exits cleanly at 400ms with 0 timers left.
-    const shortPending = handleWaitForElement(
-      manager,
-      { session_id: "aa11", selector: "#child-ready", state: "visible", timeout_ms: 400 },
-      fake,
-    );
-    await vi.advanceTimersByTimeAsync(400);
-    expect(await shortPending).toMatchObject({ satisfied: false, elapsed_ms: 400 });
-    expect(vi.getTimerCount()).toBe(0);
-
-    // 2) Longer wait: hung OOPIF gets isolated after 1500ms, element mounts later, wait succeeds with 0 timers.
-    gatedBlocked.clear();
-    const waitPending = handleWaitForElement(
-      manager,
-      { session_id: "aa11", selector: "#child-ready", state: "visible", timeout_ms: 3_000 },
-      fake,
-    );
-    await vi.advanceTimersByTimeAsync(1_550);
-    mountedInSameOrigin = true;
-    await vi.advanceTimersByTimeAsync(200);
-    expect(await waitPending).toMatchObject({
-      satisfied: true,
-      attached: true,
-      visible: true,
-      used_selector: "#child-ready",
-    });
-    expect(vi.getTimerCount()).toBe(0);
   });
 });

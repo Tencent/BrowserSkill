@@ -82,6 +82,7 @@ export async function handleUpload(
             cdp: deps.cdp,
             signal: deps.signal,
             deadline,
+            preserveWindowFocus: true,
             registerCleanup: trigger.deps.registerClickCleanup,
           },
           (input) => clickResolvedTarget(ctx, address, {}, trigger.deps, input.markSent),

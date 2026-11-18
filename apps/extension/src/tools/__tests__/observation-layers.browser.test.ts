@@ -2,18 +2,22 @@
 // Reuses the CI browser opt-in; every run owns its Chrome profile.
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
-import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentGraph,
+  type FrameDocumentInfo,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleClick } from "../interaction";
 import { handleObserve } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
   params?: object,
   sessionId?: string,
 ) => Promise<T>;
-type FrameTree = { frame: { id: string }; childFrames?: FrameTree[] };
+type FrameTree = { frame: { id: string; loaderId?: string }; childFrames?: FrameTree[] };
 
 const cases = [
   { name: "sidebar 64%", width: 64 },
@@ -57,7 +61,7 @@ function fixture(c: (typeof cases)[number]): string {
   </${tag}>`;
 }
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser observation layers", () => {
   it.each([
     { deviceScale: 1, zoom: 1 },
     { deviceScale: 1.25, zoom: 1 },
@@ -82,7 +86,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers"
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     try {
       await withChrome(
-        { executable: process.env.BSK_CLICK_CHROME, deviceScale, zoom, startupTimeout: 30_000 },
+        { executable: process.env.BSK_TEST_CHROME, deviceScale, zoom, startupTimeout: 30_000 },
         async (send: Send) => {
           const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
             url: "about:blank",
@@ -109,32 +113,36 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers"
           );
           expect(metrics.cssVisualViewport.zoom).toBeCloseTo(zoom, 4);
           expect(await evaluate<number>("devicePixelRatio")).toBeCloseTo(deviceScale * zoom, 4);
-          const graph = async (): Promise<CdpFrameGraph> => {
+          const graph = async (): Promise<FrameDocumentGraph> => {
             const { frameTree } = await local<{ frameTree: FrameTree }>("Page.getFrameTree");
-            const frames: CdpFrame[] = [];
+            const frames: FrameDocumentInfo[] = [];
             const visit = async (tree: FrameTree, parentFrameId?: string) => {
               const owner = parentFrameId
                 ? await local<{ backendNodeId: number }>("DOM.getFrameOwner", {
                     frameId: tree.frame.id,
                   })
                 : undefined;
+              const loaderId = tree.frame.loaderId ?? "";
               frames.push({
+                handle: toFrameDocumentHandle(4, { frameId: tree.frame.id, loaderId }),
                 frameId: tree.frame.id,
+                loaderId,
                 parentFrameId,
-                target: { tabId: 4 },
                 ownerBackendNodeId: owner?.backendNodeId,
+                processKey: "root",
+                isOutOfProcess: false,
               });
               for (const child of tree.childFrames ?? []) await visit(child, tree.frame.id);
             };
             await visit(frameTree);
             return { rootFrameId: frameTree.frame.id, frames };
           };
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: (_tabId, method, params) => local(method, params),
-            sendToTarget: (_target, method, params) => local(method, params),
+            sendToFrame: (_handle, method, params) => local(method, params),
             getAttachmentId: () => sessionId,
-            getFrameGraph: graph,
-          };
+            getFrameDocuments: graph,
+          });
           const manager = new SessionManager({
             agentWindow: {
               create: async () => ({ windowId: 100, initialTabIds: [] }),

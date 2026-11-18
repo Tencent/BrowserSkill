@@ -1,6 +1,6 @@
 # 浏览器能力测试语料库
 
-这里是一套供 BrowserSkill、DSH 以及其他命令行 Agent 共用的本地确定性浏览器测试环境。
+这里是一套供 BrowserSkill 以及各类命令行或 MCP Agent 共用的本地确定性浏览器测试环境。
 case、测试页面、`bsk` 直连流程和断言都会自动发现；新增 case 不需要修改中央 `switch`。
 
 [English](README.md)
@@ -182,7 +182,7 @@ pnpm eval:browser smoke --case generated-form --seed 4,7,14
 逗号分隔或重复的 seed 会生成相互独立的结果。任何失败都能按报告中的规范化 seed 精确重放；
 若它代表独立 bug，再提升为命名 regression case。
 
-## 测任意 Agent 与比较 28/6 工具
+## 测任意 Agent 与比较 CLI/MCP 配置
 
 把 `agents.example.json` 复制为已被 Git 忽略的 `agents.local.json`，分别配置两个隔离的 Agent
 profile/build。参数以数组直接传给可执行程序，不经过 shell。
@@ -190,7 +190,7 @@ profile/build。参数以数组直接传给可执行程序，不经过 shell。
 ```sh
 pnpm eval:browser run-agent \
   --config evals/browser/agents.local.json \
-  --agent dsh-granular,dsh-domain \
+  --agent codex-cli,codex-mcp \
   --suite core \
   --repeat 10
 ```
@@ -218,7 +218,7 @@ pnpm eval:browser summarize evals/browser/results/*.json
 | 改动范围 | 必跑检查 |
 | --- | --- |
 | 任意 case、fixture、oracle 或 harness 改动 | `pnpm eval:browser:check` |
-| CLI、daemon、扩展、DSH 插件或浏览器操作改动 | 上述检查、`cargo build -p bsk`、真实浏览器 `smoke --suite core` |
+| CLI、daemon、扩展或浏览器操作改动 | 上述检查、`cargo build -p bsk`、真实浏览器 `smoke --suite core` |
 | DOM 发现、表单交互、时序或等待逻辑改动 | 上述检查，再跑 `smoke --suite matrix --seed 4,7,14` |
 | 修复已有明确复现的 bug | 新增 `regression` case，并在修复版本单独运行该 case |
 

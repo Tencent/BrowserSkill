@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  type CdpDebuggee,
   type CdpDebuggerApi,
   ChromiumCdp,
   DEFAULT_IDLE_DETACH_MS,
@@ -81,7 +80,8 @@ afterEach(() => {
 });
 
 async function softDetachVisualFixture(oopif = false) {
-  const onEvent = fakeChromeEvent<[CdpDebuggee, string, unknown]>();
+  const onEvent =
+    fakeChromeEvent<Parameters<Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0]>>();
   const onDetach = fakeChromeEvent<[chrome.debugger.Debuggee, string]>();
   let attachGeneration = 0;
   let rootState = {
@@ -218,8 +218,9 @@ async function softDetachVisualFixture(oopif = false) {
   const attachmentId = cdp.getAttachmentId(4)!;
   const rootDoc = {
     attachmentId,
-    target: { tabId: 4 },
+    tabId: 4,
     frameId: "top",
+    loaderId: "root-loader-1",
     documentElementBackendNodeId: 1,
   };
   const parentPath: VisualFramePath = { document: rootDoc };
@@ -227,8 +228,9 @@ async function softDetachVisualFixture(oopif = false) {
     ? {
         document: {
           attachmentId,
-          target: { tabId: 4, sessionId: "oopif-1" },
+          tabId: 4,
           frameId: "child",
+          loaderId: "child-loader-1",
           documentElementBackendNodeId: 11,
         },
         parent: { frame: parentPath, ownerBackendNodeId: 2 },
@@ -271,7 +273,7 @@ describe("visual target across idle CDP soft-detach", () => {
       expect(f.cdp.isAttached(4)).toBe(false);
       expect(f.api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 4 });
 
-      // Pointer transaction wrapper also forwards `reattachIfSoftDetached` and `resolveTarget`.
+      // Pointer transaction wrapper preserves full CdpRunner delegation across soft-detach.
       const txDeps = pointerTransactionDeps({
         cdp: f.runner,
         tabsApi: {

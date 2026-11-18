@@ -1,3 +1,4 @@
+import { claimIdempotentContentScript } from "@/content/dom-primitives";
 import { createPageCapture, pageError } from "@/long-screenshot/page";
 import {
   LONG_SCREENSHOT,
@@ -6,11 +7,22 @@ import {
   ScreenshotError,
 } from "@/long-screenshot/types";
 
+const LONG_SCREENSHOT_MOUNTED_SYMBOL = Symbol.for("bsk.long_screenshot_page.mounted");
+
 export default defineContentScript({
+  registration: "runtime",
   matches: ["http://*/*", "https://*/*"],
   runAt: "document_end",
   allFrames: false,
+  noScriptStartedPostMessage: true,
   main(ctx) {
+    const releaseMount = claimIdempotentContentScript(
+      ctx,
+      "long-screenshot-page",
+      LONG_SCREENSHOT_MOUNTED_SYMBOL,
+    );
+    if (!releaseMount) return;
+
     const capture = createPageCapture((id, reason) => {
       void chrome.runtime
         .sendMessage({ type: LONG_SCREENSHOT, action: "cancel", id, reason })
@@ -37,6 +49,7 @@ export default defineContentScript({
     };
     chrome.runtime.onMessage.addListener(listener);
     ctx.onInvalidated(() => {
+      releaseMount();
       capture.dispose();
       chrome.runtime.onMessage.removeListener(listener);
     });

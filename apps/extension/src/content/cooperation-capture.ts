@@ -2,21 +2,32 @@ import { describeFrameOwners } from "@/cooperation/hidden-frames";
 import { playbackProgressMedia } from "@/cooperation/media-progress";
 import {
   COOPERATION_ARM,
+  COOPERATION_ARM_FRAME,
   COOPERATION_DISABLE,
   COOPERATION_MESSAGE,
   COOPERATION_OWNERS,
   COOPERATION_READ,
-  COOPERATION_READY,
   COOPERATION_RESUME,
+  COOPERATION_SUBFRAME_READY,
   type FieldChange,
   type FrameState,
   type HumanActivity,
   type InputExpectation,
   type TextChange,
 } from "@/cooperation/types";
-import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
 import { createRandomUuid } from "@/lib/random-uuid";
-import { sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+import {
+  hasAddedSubframeElement,
+  isExtensionOverlayEvent,
+  isExtensionOverlayNode,
+  isInternalBskAttribute,
+  isInternalBskMutation,
+  isPasswordTypeMutation,
+  isSensitiveFormField,
+  openOrClosedShadowRoot,
+  primaryEventTarget,
+  resolveDeepActiveElement,
+} from "./dom-primitives";
 
 const MAX_CHANGES = 64;
 // CDP's native clock conversion and the DOM clock round independently.
@@ -51,10 +62,14 @@ const isText = (node: Node | undefined): node is Text => node?.nodeType === 3;
 /** Isolated-world collection also covers frames; no page-world control API is exposed. */
 export function attachCooperationCapture() {
   let enabled = false;
+  let listenersAttached = false;
+  let subframeNotifyScheduled = false;
   let lease: string | undefined;
   const retired = new Set<string>();
+  const isTopFrame = window === window.top;
   const state: FrameState = {
     document: createRandomUuid(),
+    ...(isTopFrame ? { url: location.href } : {}),
     revision: 0,
     structure: 0,
     textual: 0,
@@ -94,12 +109,10 @@ export function attachCooperationCapture() {
   let eventTimer: ReturnType<typeof setTimeout> | undefined;
   let inputTimer: ReturnType<typeof setTimeout> | undefined;
   let scrollTimer: ReturnType<typeof setTimeout> | undefined;
-  const overlay = (target: EventTarget | null) =>
-    target instanceof Element && !!target.closest(OVERLAY_HOST_SELECTOR);
-  const formerPasswords = new WeakSet<Node>();
+  const formerPasswords = new WeakSet<Element>();
   const markFormerPasswords = (records: MutationRecord[]) => {
     for (const r of records) {
-      if (r.oldValue?.toLowerCase() === "password") formerPasswords.add(r.target);
+      if (isPasswordTypeMutation(r)) formerPasswords.add(r.target);
     }
   };
   // Passwords, codes, card details and file selections never enter field state.
@@ -110,8 +123,7 @@ export function attachCooperationCapture() {
     }
     return (
       (target instanceof HTMLInputElement && ["file", "hidden"].includes(target.type)) ||
-      formerPasswords.has(target) ||
-      sensitiveAutocomplete(target.getAttribute("autocomplete"))
+      isSensitiveFormField(target, formerPasswords)
     );
   };
   const label = (target: EventTarget | null) => {
@@ -159,7 +171,8 @@ export function attachCooperationCapture() {
   const publish = () => {
     clearTimeout(timer);
     timer = undefined;
-    if (!enabled) return;
+    if (!enabled || !lease) return;
+    if (isTopFrame) state.url = location.href;
     updateInteraction();
     state.fields = [...fields.values()];
     void chrome.runtime
@@ -242,13 +255,9 @@ export function attachCooperationCapture() {
   /** An attribute write the observation cannot see: unchanged, or page-private data no style reads. */
   const invisibleAttribute = (r: MutationRecord) => {
     const name = r.attributeName?.toLowerCase() ?? "";
+    if (isInternalBskAttribute(name)) return true;
     if (r.target instanceof Element && r.target.getAttribute(name) === r.oldValue) return true;
-    if (
-      !name.startsWith("data-") ||
-      name.startsWith("data-bsk") ||
-      OBSERVED_DATA_ATTRIBUTES.has(name)
-    )
-      return false;
+    if (!name.startsWith("data-") || OBSERVED_DATA_ATTRIBUTES.has(name)) return false;
     const facts = styleFacts();
     return facts.readable && !facts.text.includes(name);
   };
@@ -358,6 +367,7 @@ export function attachCooperationCapture() {
     if (++burst > 10) return false;
     for (const root of roots)
       for (const parent of [root, ...root.querySelectorAll("*")]) {
+        if (isExtensionOverlayNode(parent)) continue;
         for (const child of parent.childNodes)
           if (isText(child) && texts.has(cleanText(child.data))) return false;
         if (parent instanceof Element)
@@ -368,12 +378,32 @@ export function attachCooperationCapture() {
       }
     return true;
   };
+  const notifySubframesIfAdded = (records: MutationRecord[]) => {
+    if (!enabled || subframeNotifyScheduled || !hasAddedSubframeElement(records)) return;
+    subframeNotifyScheduled = true;
+    queueMicrotask(() => {
+      subframeNotifyScheduled = false;
+      if (!enabled) return;
+      void chrome.runtime.sendMessage({ kind: COOPERATION_SUBFRAME_READY }).catch(() => {});
+    });
+  };
+  // Page JS cannot see closed roots, but the extension can. Observation also
+  // traverses these roots, so source and focus guards must cover the same DOM.
+  const shadowRoot = (element: Element): ShadowRoot | null => openOrClosedShadowRoot(element);
   const mutations = (records: MutationRecord[]) => {
     markFormerPasswords(records);
-    const seen = records.filter(
-      (r) => !overlay(r.target instanceof Element ? r.target : r.target.parentElement),
-    );
-    if (!enabled || !seen.length) return;
+    if (enabled) {
+      for (const r of records) {
+        if (r.type !== "childList" || isExtensionOverlayNode(r.target)) continue;
+        for (const node of r.addedNodes) {
+          if (node instanceof Element) observeShadowSubtree(node);
+        }
+      }
+    }
+    notifySubframesIfAdded(records);
+    if (!enabled || !lease) return;
+    const seen = records.filter((r) => !isInternalBskMutation(r));
+    if (!seen.length) return;
     state.revision++;
     state.structure++;
     const texts = textChanges(seen);
@@ -388,34 +418,37 @@ export function attachCooperationCapture() {
     schedule();
   };
   const observer = new MutationObserver(mutations);
-  // Page JS cannot see closed roots, but the extension can. Observation also
-  // traverses these roots, so source and focus guards must cover the same DOM.
-  const shadowRoot = (element: Element): ShadowRoot | null =>
-    element.shadowRoot ??
-    (element instanceof HTMLElement ? (chrome.dom?.openOrClosedShadowRoot(element) ?? null) : null);
-  const activeElement = () => {
-    let active = document.activeElement;
-    while (active) {
-      const nested = shadowRoot(active)?.activeElement;
-      if (!nested) break;
-      active = nested;
-    }
-    return active;
+  const observeRoot = (root: Document | ShadowRoot) => {
+    if (roots.has(root)) return;
+    observer.observe(root, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeOldValue: true,
+      characterData: true,
+      characterDataOldValue: true,
+    });
+    roots.add(root);
   };
-  const controls = function* (root: Document | ShadowRoot): Generator<Element> {
-    if (!roots.has(root)) {
-      observer.observe(root, {
-        subtree: true,
-        childList: true,
-        attributes: true,
-        attributeOldValue: true,
-        characterData: true,
-        characterDataOldValue: true,
-      });
-      roots.add(root);
+  const observeShadowSubtree = (target: Document | Element | ShadowRoot) => {
+    if (target.nodeType === Node.DOCUMENT_NODE || target instanceof ShadowRoot) {
+      observeRoot(target as Document | ShadowRoot);
+    } else if (target instanceof Element) {
+      if (isExtensionOverlayNode(target)) return;
+      const nested = shadowRoot(target);
+      if (nested) observeShadowSubtree(nested);
     }
+    for (const element of target.querySelectorAll("*")) {
+      if (isExtensionOverlayNode(element)) continue;
+      const nested = shadowRoot(element);
+      if (nested) observeShadowSubtree(nested);
+    }
+  };
+  const activeElement = () => resolveDeepActiveElement(document, shadowRoot);
+  const controls = function* (root: Document | ShadowRoot): Generator<Element> {
+    observeRoot(root);
     for (const element of root.querySelectorAll("*")) {
-      if (overlay(element)) continue;
+      if (isExtensionOverlayNode(element)) continue;
       if (element.matches("input,textarea,select,[contenteditable=true]")) yield element;
       const nested = shadowRoot(element);
       if (nested) yield* controls(nested);
@@ -423,12 +456,16 @@ export function attachCooperationCapture() {
   };
   let documentUrl = location.href;
   const read = () => {
-    // SPA routes retain the DOM document, but cannot retain its action authority.
-    // This also covers child frames; root CDP route events catch away-and-back.
+    // Child SPA routes rotate `document` so `frameEpoch` invalidates iframe-bound
+    // observations; root SPA routes report `url` so `CooperationController` can
+    // separate out-of-band route changes from in-flight targeted query/hash updates.
     if (documentUrl !== location.href) {
       documentUrl = location.href;
-      state.document = createRandomUuid();
+      if (isTopFrame) state.url = documentUrl;
+      else state.document = createRandomUuid();
       state.revision++;
+    } else if (isTopFrame) {
+      state.url = documentUrl;
     }
     mutations(observer.takeRecords());
     const active = activeElement();
@@ -451,7 +488,7 @@ export function attachCooperationCapture() {
     const mediaByRoot = new Map<Document | ShadowRoot, { id: string }[]>();
     state.fieldsComplete = true;
     for (const target of controls(document)) {
-      if (overlay(target)) continue;
+      if (isExtensionOverlayNode(target)) continue;
       const fullValue =
         target instanceof HTMLInputElement && ["checkbox", "radio"].includes(target.type)
           ? String(target.checked)
@@ -511,30 +548,32 @@ export function attachCooperationCapture() {
     }
     for (const element of fields.keys()) if (!element.isConnected) fields.delete(element);
     const media = [...roots].flatMap((root) =>
-      [...root.querySelectorAll<HTMLMediaElement>("video,audio")].map((element) => {
-        const stream = element.srcObject;
-        return {
-          id: id(element),
-          src: element.getAttribute("src"),
-          currentSrc: element.currentSrc,
-          srcObject: stream ? id(stream) : null,
-          tracks:
-            typeof MediaStream !== "undefined" && stream instanceof MediaStream
-              ? stream
-                  .getTracks()
-                  .map((track) => track.id)
-                  .sort()
-              : [],
-          sources: [...element.children]
-            .filter((child): child is HTMLSourceElement => child instanceof HTMLSourceElement)
-            .map((source) => ({
-              id: id(source),
-              src: source.src,
-              type: source.type,
-              media: source.media,
-            })),
-        };
-      }),
+      [...root.querySelectorAll<HTMLMediaElement>("video,audio")]
+        .filter((element) => !isExtensionOverlayNode(element))
+        .map((element) => {
+          const stream = element.srcObject;
+          return {
+            id: id(element),
+            src: element.getAttribute("src"),
+            currentSrc: element.currentSrc,
+            srcObject: stream ? id(stream) : null,
+            tracks:
+              typeof MediaStream !== "undefined" && stream instanceof MediaStream
+                ? stream
+                    .getTracks()
+                    .map((track) => track.id)
+                    .sort()
+                : [],
+            sources: [...element.children]
+              .filter((child): child is HTMLSourceElement => child instanceof HTMLSourceElement)
+              .map((source) => ({
+                id: id(source),
+                src: source.src,
+                type: source.type,
+                media: source.media,
+              })),
+          };
+        }),
     );
     // currentSrc/srcObject may change without a DOM mutation. Keep the source
     // evidence fresh even when the page's mutation counter did not advance.
@@ -612,8 +651,8 @@ export function attachCooperationCapture() {
       (dragging && ["dragend", "drop"].includes(event.type)) ||
       (pointer && !pointer.released && ["pointerup", "pointercancel"].includes(event.type)) ||
       (event.type === "keyup" && keys.has((event as KeyboardEvent).key));
-    if (!release && event.composedPath().some(overlay)) return;
-    let target = event.composedPath()[0] ?? event.target;
+    if (!release && isExtensionOverlayEvent(event)) return;
+    let target = primaryEventTarget(event);
     // Closed shadow roots retarget editing events to their host. Resolve the
     // same deep focus used by collection and native text attribution.
     if (
@@ -841,17 +880,10 @@ export function attachCooperationCapture() {
     "input",
     "change",
   ];
-  for (const event of events)
-    document.addEventListener(event, onEvent, { capture: true, passive: true });
   // Chromium skips a node's legacy `mousewheel` listeners whenever that node has a
-  // `wheel` listener, even a passive one. Listen only while collecting so pages
-  // without a session keep their mousewheel handlers. Window capture runs before
-  // any document listener, so a page that stops propagation there cannot hide an
-  // Agent wheel from attribution even though this listener is registered late.
-  const listenWheel = (on: boolean) =>
-    on
-      ? window.addEventListener("wheel", onEvent, { capture: true, passive: true })
-      : window.removeEventListener("wheel", onEvent, true);
+  // `wheel` listener, even a passive one. Tier B stays completely inert (zero DOM,
+  // scroll, blur or wheel listeners and zero startup IPC) until Background arms or
+  // reads a controlled frame.
   const onScroll = () => {
     if (!enabled) return;
     const started = !state.scrolling;
@@ -863,7 +895,6 @@ export function attachCooperationCapture() {
     }, 120);
     if (started) publish();
   };
-  document.addEventListener("scroll", onScroll, true);
   const onWindowBlur = () => {
     if (
       !enabled ||
@@ -892,7 +923,25 @@ export function attachCooperationCapture() {
     state.revision++;
     publish();
   };
-  window.addEventListener("blur", onWindowBlur);
+  const setListenersAttached = (active: boolean) => {
+    if (listenersAttached === active) return;
+    listenersAttached = active;
+    if (active) {
+      for (const event of events) {
+        document.addEventListener(event, onEvent, { capture: true, passive: true });
+      }
+      document.addEventListener("scroll", onScroll, true);
+      window.addEventListener("blur", onWindowBlur);
+      window.addEventListener("wheel", onEvent, { capture: true, passive: true });
+    } else {
+      for (const event of events) {
+        document.removeEventListener(event, onEvent, true);
+      }
+      document.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("blur", onWindowBlur);
+      window.removeEventListener("wheel", onEvent, true);
+    }
+  };
   const onMessage = (
     message: { kind?: string; input?: InputExpectation; lease?: string },
     _sender: chrome.runtime.MessageSender,
@@ -904,8 +953,19 @@ export function attachCooperationCapture() {
       reply(describeFrameOwners(document, shadowRoot));
       return false;
     }
+    if (message.kind === COOPERATION_ARM_FRAME) {
+      enabled = true;
+      setListenersAttached(true);
+      observeShadowSubtree(document);
+      reply({ ok: true });
+      return false;
+    }
     if (typeof message.lease !== "string") return false;
-    if (message.kind === COOPERATION_READ) {
+    if (
+      message.kind === COOPERATION_READ ||
+      (message.kind === COOPERATION_ARM && message.input?.type !== "clear") ||
+      (!lease && (message.kind === COOPERATION_ARM || message.kind === COOPERATION_RESUME))
+    ) {
       if (retired.has(message.lease)) {
         reply(undefined);
         return false;
@@ -917,6 +977,8 @@ export function attachCooperationCapture() {
         inputSource = undefined;
       }
       lease = message.lease;
+      enabled = true;
+      setListenersAttached(true);
     } else if (message.kind === COOPERATION_DISABLE) {
       retired.add(message.lease);
       if (lease !== message.lease) {
@@ -928,7 +990,7 @@ export function attachCooperationCapture() {
     }
     if (message.kind === COOPERATION_DISABLE) {
       enabled = false;
-      listenWheel(false);
+      setListenersAttached(false);
       clearTimeout(focusTimer);
       clearTimeout(pointerTimer);
       clearTimeout(eventTimer);
@@ -954,7 +1016,7 @@ export function attachCooperationCapture() {
       reply({ ...state, busy: false, fields: [] });
     } else if (message.kind === COOPERATION_READ) {
       enabled = true;
-      listenWheel(true);
+      setListenersAttached(true);
       reply(read());
     } else if (message.kind === COOPERATION_ARM) {
       if (enabled && message.input?.type === "clear") {
@@ -1011,8 +1073,8 @@ export function attachCooperationCapture() {
     return false;
   };
   chrome.runtime.onMessage.addListener(onMessage);
-  void chrome.runtime.sendMessage({ kind: COOPERATION_READY }).catch(() => {});
   return () => {
+    enabled = false;
     clearTimeout(timer);
     clearTimeout(focusTimer);
     clearTimeout(pointerTimer);
@@ -1020,10 +1082,8 @@ export function attachCooperationCapture() {
     clearTimeout(inputTimer);
     clearTimeout(scrollTimer);
     observer.disconnect();
-    chrome.runtime.onMessage.removeListener(onMessage);
-    window.removeEventListener("blur", onWindowBlur);
-    document.removeEventListener("scroll", onScroll, true);
-    for (const event of events) document.removeEventListener(event, onEvent, true);
-    listenWheel(false);
+    roots.clear();
+    chrome.runtime?.onMessage?.removeListener(onMessage);
+    setListenersAttached(false);
   };
 }

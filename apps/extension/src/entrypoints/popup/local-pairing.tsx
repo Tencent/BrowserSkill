@@ -1,6 +1,7 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { Button } from "@browser-skill/ui";
 import { useState } from "react";
+import { LOCAL_PAIRING_MESSAGE } from "@/lib/local-pairing-bridge";
 import type { LocalAuthStatus } from "@/transport/local-auth";
 import { Switch } from "./switch";
 
@@ -9,7 +10,7 @@ export interface LocalPairingInfo {
   devices: { daemonId: string; deviceId: string; endpoint: string }[];
 }
 export async function localPairingRequest(request: Record<string, unknown>) {
-  const reply = await chrome.runtime.sendMessage({ kind: "bsk-local-pairing", ...request });
+  const reply = await chrome.runtime.sendMessage({ kind: LOCAL_PAIRING_MESSAGE, ...request });
   if (!reply || reply.error)
     throw Object.assign(new Error(reply?.error ?? "pairing_failed"), {
       browserId: reply?.browserId,

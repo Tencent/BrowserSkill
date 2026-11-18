@@ -4,23 +4,13 @@
 //! the `@eN` refs of the current observation. Matching is exact, and anything this
 //! parser cannot read simply does not match, which stops the run instead of guessing.
 //! `tests/fixtures/vom_contract.json` is shared with the renderer's own tests.
-use serde::{Deserialize, Serialize};
+pub use bsk_protocol::system::LoggedTarget as Target;
 
 /// How the renderer replaces the value of a sensitive field.
 pub(crate) const SENSITIVE_MASK: &str = "•••";
 const DRAG_HINTS: [&str; 3] = ["[draggable]", "[drop-target]", "[drag-handle]"];
 /// States the extension appends to a name. They change while the name does not.
 const NAME_STATES: [&str; 2] = [" [has-submenu]", " [expanded]"];
-
-/// A stable description of an element: exact role, name and, when needed, context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Target {
-    pub role: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ctx: Option<String>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Line {
@@ -341,9 +331,21 @@ mod tests {
 
     #[test]
     fn a_menu_is_the_same_control_whether_or_not_it_is_open() {
-        let closed = parse("@vom 1\n  @e1 combobox \"Region [has-submenu]\"");
-        let open = parse("@vom 1\n  @e1 combobox \"Region [expanded]\"");
-        for page in [closed, open] {
+        let closed = parse("@vom 1\n  @e1 combobox \"Region\" [has-submenu]");
+        let open = parse("@vom 1\n  @e1 combobox \"Region\" [expanded]");
+        let custom_closed =
+            parse("@vom 1\n  @e1 combobox \"Region\" [custom-dropdown: click to open]");
+        let custom_open = parse("@vom 1\n  @e1 combobox \"Region\" [custom-dropdown: expanded]");
+        let legacy_closed = parse("@vom 1\n  @e1 combobox \"Region [has-submenu]\"");
+        let legacy_open = parse("@vom 1\n  @e1 combobox \"Region [expanded]\"");
+        for page in [
+            closed,
+            open,
+            custom_closed,
+            custom_open,
+            legacy_closed,
+            legacy_open,
+        ] {
             assert_eq!(
                 page.candidates(&target("combobox", "Region", None)).len(),
                 1

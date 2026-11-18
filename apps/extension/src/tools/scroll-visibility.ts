@@ -1,4 +1,8 @@
-import { cdpTargetKey } from "@/browser-driver/frame-graph";
+import {
+  type FrameNodeHandle,
+  frameProcessBoundary,
+  StaleFrameHandleError,
+} from "@/browser-driver/frame-handles";
 import type { NodeAddress } from "./frame-geometry";
 import {
   clipPolygon,
@@ -9,7 +13,7 @@ import {
   type ViewportRect,
 } from "./geometry";
 import { GeometryContext } from "./geometry/frame-context";
-import { type CdpRunner, sendToCdpTarget } from "./shared";
+import { type CdpRunner, sendToFrameHandle } from "./shared";
 
 // Ask the renderer to apply containing-block clips (including shadow DOM),
 // instead of treating layout quads as visible pixels. Each document is measured
@@ -43,17 +47,17 @@ async function visibleRect(
   address: NodeAddress,
   deadline: number,
 ): Promise<ViewportRect | null> {
-  const resolved = await sendToCdpTarget<{ object?: { objectId?: string } }>(
+  const resolved = await sendToFrameHandle<{ object?: { objectId?: string } }>(
     cdp,
-    address.target,
+    address,
     "DOM.resolveNode",
     { backendNodeId: address.backendNodeId },
   );
   if (!resolved.object?.objectId) throw new Error("scroll-to could not resolve the target element");
-  const reply = await sendToCdpTarget<{
+  const reply = await sendToFrameHandle<{
     result?: { value?: ViewportRect | null };
     exceptionDetails?: { text?: string; exception?: { description?: string } };
-  }>(cdp, address.target, "Runtime.callFunctionOn", {
+  }>(cdp, address, "Runtime.callFunctionOn", {
     objectId: resolved.object.objectId,
     functionDeclaration: VISIBLE_RECT,
     // Bound this read even if a background document stops rendering. Its
@@ -80,7 +84,6 @@ async function visibleRect(
 }
 
 async function projectRect(
-  cdp: CdpRunner,
   context: GeometryContext,
   address: NodeAddress,
   rect: ViewportRect,
@@ -88,22 +91,26 @@ async function projectRect(
   let region: Region = [rectPolygon({ x: rect.x, y: rect.y, w: rect.width, h: rect.height })];
   if (!address.frameId) return region;
   const frame = await context.frame(address.frameId);
-  const resolvedTarget = cdp.resolveTarget ? cdp.resolveTarget(address.target) : address.target;
-  if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(resolvedTarget)) {
-    throw new Error("scroll-to frame no longer belongs to its target");
+  if (!frame) {
+    throw new StaleFrameHandleError(address, `frame ${address.frameId} is no longer attached`);
   }
-  const resolvedAddress =
-    resolvedTarget === address.target ? address : { ...address, target: resolvedTarget };
+  if (address.loaderId && frame.loaderId && frame.loaderId !== address.loaderId) {
+    throw new StaleFrameHandleError(
+      address,
+      `frame ${address.frameId} navigated (${address.loaderId} -> ${frame.loaderId})`,
+    );
+  }
   const parent = frame.parentFrameId ? await context.frame(frame.parentFrameId) : undefined;
-  if (parent && cdpTargetKey(parent.target) === cdpTargetKey(frame.target)) {
+  if (parent && parent.processKey === frame.processKey) {
     // DOM rectangles are document-local. Same-target iframe quads are already
     // target-local, so cross this one boundary before the target projection.
-    const viewport = await context.viewport(frame.target);
+    const process = frameProcessBoundary(frame);
+    const viewport = await context.viewport(process);
     if (frame.ownerBackendNodeId === undefined || !viewport) {
       throw new Error("scroll-to could not resolve the frame viewport");
     }
     const local = await context.snapshotProjection(
-      resolvedAddress,
+      { process, frameId: frame.frameId },
       frame.ownerBackendNodeId,
       [],
       viewport,
@@ -126,7 +133,7 @@ export async function scrollVisibleBounds(
   const context = new GeometryContext(cdp, tabId);
   const rect = await visibleRect(cdp, address, deadline);
   if (!rect) return null;
-  let region = await projectRect(cdp, context, address, rect);
+  let region = await projectRect(context, address, rect);
   if (address.frameId) {
     const ancestry = await context.ancestry(address.frameId);
     if (!ancestry) throw new Error("scroll-to could not resolve the frame ancestry");
@@ -135,15 +142,16 @@ export async function scrollVisibleBounds(
       if (!parent || child.ownerBackendNodeId === undefined) {
         throw new Error("scroll-to could not resolve the frame owner");
       }
-      const owner = {
-        target: parent.target,
+      const owner: FrameNodeHandle = {
+        tabId,
         frameId: parent.frameId,
+        loaderId: parent.loaderId ?? "",
         backendNodeId: child.ownerBackendNodeId,
       };
       // A visible child document can still have a hidden or clipped iframe.
       const ownerRect = await visibleRect(cdp, owner, deadline);
       if (!ownerRect) return null;
-      const clips = await projectRect(cdp, context, owner, ownerRect);
+      const clips = await projectRect(context, owner, ownerRect);
       region = region.flatMap((polygon) => clips.map((clip) => clipPolygon(polygon, clip)));
     }
   }
