@@ -46,8 +46,11 @@ recycled row IDs, button meaning, price, recipient and input values with `expect
 Check all facts needed for a comparison, not just one chosen candidate. Restored
 values can match again; this is a value check, not a promise of unbroken history.
 
-Main document navigation and SPA route changes invalidate old refs and context,
-including away-and-back and hash routes. Child-frame reads use that ref's exact
+Main document navigation and route-path SPA transitions invalidate
+old refs and context (including away-and-back and hash-router paths) without
+marking live document collectors unavailable, whereas same-pathname query or
+fragment updates preserve reusable target-policy DOM contexts (while still
+requiring a fresh strict observation for opaque untargeted actions). Child-frame reads use that ref's exact
 frame/session and current document identity. A changed or unavailable target
 document fails; unrelated unavailable frames need not make a main-document read
 stale. Selectors search the main document; use refs for nested frames and shadow

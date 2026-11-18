@@ -66,8 +66,10 @@ export function attachCooperationCapture() {
   let subframeNotifyScheduled = false;
   let lease: string | undefined;
   const retired = new Set<string>();
+  const isTopFrame = window === window.top;
   const state: FrameState = {
     document: createRandomUuid(),
+    ...(isTopFrame ? { url: location.href } : {}),
     revision: 0,
     structure: 0,
     textual: 0,
@@ -170,6 +172,7 @@ export function attachCooperationCapture() {
     clearTimeout(timer);
     timer = undefined;
     if (!enabled || !lease) return;
+    if (isTopFrame) state.url = location.href;
     updateInteraction();
     state.fields = [...fields.values()];
     void chrome.runtime
@@ -453,12 +456,16 @@ export function attachCooperationCapture() {
   };
   let documentUrl = location.href;
   const read = () => {
-    // SPA routes retain the DOM document, but cannot retain its action authority.
-    // This also covers child frames; root CDP route events catch away-and-back.
+    // Child SPA routes rotate `document` so `frameEpoch` invalidates iframe-bound
+    // observations; root SPA routes report `url` so `CooperationController` can
+    // separate out-of-band route changes from in-flight targeted query/hash updates.
     if (documentUrl !== location.href) {
       documentUrl = location.href;
-      state.document = createRandomUuid();
+      if (isTopFrame) state.url = documentUrl;
+      else state.document = createRandomUuid();
       state.revision++;
+    } else if (isTopFrame) {
+      state.url = documentUrl;
     }
     mutations(observer.takeRecords());
     const active = activeElement();
@@ -954,7 +961,11 @@ export function attachCooperationCapture() {
       return false;
     }
     if (typeof message.lease !== "string") return false;
-    if (message.kind === COOPERATION_READ) {
+    if (
+      message.kind === COOPERATION_READ ||
+      (message.kind === COOPERATION_ARM && message.input?.type !== "clear") ||
+      (!lease && (message.kind === COOPERATION_ARM || message.kind === COOPERATION_RESUME))
+    ) {
       if (retired.has(message.lease)) {
         reply(undefined);
         return false;
@@ -966,6 +977,8 @@ export function attachCooperationCapture() {
         inputSource = undefined;
       }
       lease = message.lease;
+      enabled = true;
+      setListenersAttached(true);
     } else if (message.kind === COOPERATION_DISABLE) {
       retired.add(message.lease);
       if (lease !== message.lease) {

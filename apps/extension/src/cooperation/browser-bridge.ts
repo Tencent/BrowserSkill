@@ -29,6 +29,7 @@ function validFrame(value: unknown): value is FrameState {
   const f = value as FrameState;
   return (
     typeof f.document === "string" &&
+    (f.url === undefined || typeof f.url === "string") &&
     Number.isSafeInteger(f.revision) &&
     Number.isSafeInteger(f.structure) &&
     Number.isSafeInteger(f.human) &&
@@ -181,26 +182,40 @@ export async function collectCooperationFrames(
     }),
   );
   const failed = targets.filter((_frame, i) => results[i].status === "rejected");
-  if (failed.length && !replacementPass && kind !== COOPERATION_DISABLE) {
-    // A document-addressed message can race a child navigation after inventory.
-    // Recollect once only when every failed document is provably retired. Never
-    // hide an active unobservable document, a root replacement or further churn.
+  if (
+    failed.length &&
+    !replacementPass &&
+    kind !== COOPERATION_DISABLE &&
+    !failed.some((old) => old.frameId === 0)
+  ) {
+    // A document-addressed message can race a child navigation after inventory,
+    // including on pages that also carry a hidden unobservable subframe.
+    // Recollect once only when every failed child document is either provably
+    // retired or provably hidden in the current inventory.
     const current = await chrome.webNavigation.getAllFrames({ tabId });
     if (
-      current?.find((frame) => frame.frameId === 0)?.documentId ===
-        frames.find((frame) => frame.frameId === 0)?.documentId &&
-      failed.every(
-        (old) =>
-          old.frameId !== 0 &&
-          !current?.some(
-            (frame) =>
-              frame.documentId === old.documentId &&
-              !frame.errorOccurred &&
-              (!frame.documentLifecycle || frame.documentLifecycle === "active"),
-          ),
-      )
-    )
-      return collectCooperationFrames(tabId, kind, lease, input, repairs, hidden, true);
+      current &&
+      current.find((frame) => frame.frameId === 0)?.documentId ===
+        frames.find((frame) => frame.frameId === 0)?.documentId
+    ) {
+      const stillActive = failed.filter((old) =>
+        current.some(
+          (frame) =>
+            frame.documentId === old.documentId &&
+            !frame.errorOccurred &&
+            (!frame.documentLifecycle || frame.documentLifecycle === "active"),
+        ),
+      );
+      if (stillActive.length < failed.length) {
+        const concealedActive = stillActive.length
+          ? await provenHiddenFrames(tabId, current, stillActive, skipped)
+          : new Set<number>();
+        if (stillActive.every((old) => concealedActive.has(old.frameId))) {
+          for (const old of stillActive) hidden.add(old.documentId);
+          return collectCooperationFrames(tabId, kind, lease, input, repairs, hidden, true);
+        }
+      }
+    }
   }
   // People cannot point at or type into a hidden child document, so only such a
   // document may stay uncollected. A failed main page or displayed frame still fails.
@@ -263,6 +278,7 @@ export function attachCooperation(
     },
   });
   const subframeNeedsInject = new Set<number>();
+  const pendingArms = new Map<number, Set<Promise<void>>>();
   const observeTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const clearObserveTimer = (tabId: number) => {
     const existing = observeTimers.get(tabId);
@@ -281,6 +297,11 @@ export function attachCooperation(
         const shouldInject = subframeNeedsInject.delete(tabId);
         if (!sessions.findControllingSession?.(tabId)) return;
         void (async () => {
+          const arms = pendingArms.get(tabId);
+          if (arms?.size) {
+            await Promise.allSettled([...arms]);
+            if (!sessions.findControllingSession?.(tabId)) return;
+          }
           if (shouldInject) {
             await injectCooperationAllFrames(tabId);
             if (!sessions.findControllingSession?.(tabId)) return;
@@ -297,7 +318,12 @@ export function attachCooperation(
     const target = details.documentId
       ? { documentId: details.documentId }
       : { frameId: details.frameId };
-    void (async () => {
+    let arms = pendingArms.get(details.tabId);
+    if (!arms) {
+      arms = new Set();
+      pendingArms.set(details.tabId, arms);
+    }
+    const armTask = (async () => {
       try {
         const ack = await chrome.tabs.sendMessage(
           details.tabId,
@@ -342,6 +368,12 @@ export function attachCooperation(
         }
       }
     })();
+    arms.add(armTask);
+    void armTask.finally(() => {
+      const tracked = pendingArms.get(details.tabId);
+      tracked?.delete(armTask);
+      if (tracked?.size === 0) pendingArms.delete(details.tabId);
+    });
     scheduleObserveTab(details.tabId);
   };
 
@@ -378,11 +410,13 @@ export function attachCooperation(
   chrome.tabs.onRemoved.addListener((tabId) => {
     clearObserveTimer(tabId);
     subframeNeedsInject.delete(tabId);
+    pendingArms.delete(tabId);
     controller.releaseTab(tabId);
   });
   chrome.tabs.onDetached.addListener((tabId) => {
     clearObserveTimer(tabId);
     subframeNeedsInject.delete(tabId);
+    pendingArms.delete(tabId);
     controller.detachTab(tabId);
   });
   return controller;

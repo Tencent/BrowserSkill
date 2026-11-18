@@ -1677,22 +1677,53 @@ export async function handleFill(
         (clearBefore && params.value === "" && !valueAssigned) ||
         (step1.write === "insert" && params.value !== "");
       const notifyInput = !finalValueAlreadyNotified;
-      const verified = await nodeCdp.send<FillScriptReply<FillVerificationResult>>(
-        target.tabId,
-        "Runtime.callFunctionOn",
-        {
-          objectId,
-          functionDeclaration: FILL_STEP3_FUNCTION,
-          arguments: [
-            { value: notifyInput },
-            { value: step1.expected },
-            { value: step1.isSensitive },
-            { value: FILL_MAX_ACTUAL_VALUE_CHARS },
-          ],
-          awaitPromise: true,
-          returnByValue: true,
-        },
-      );
+      let verified: FillScriptReply<FillVerificationResult>;
+      try {
+        verified = await nodeCdp.send<FillScriptReply<FillVerificationResult>>(
+          target.tabId,
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: FILL_STEP3_FUNCTION,
+            arguments: [
+              { value: notifyInput },
+              { value: step1.expected },
+              { value: step1.isSensitive },
+              { value: FILL_MAX_ACTUAL_VALUE_CHARS },
+            ],
+            awaitPromise: true,
+            returnByValue: true,
+          },
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (
+          finalValueAlreadyNotified &&
+          !deps.signal?.aborted &&
+          (isStaleFrameHandleError(err) ||
+            /Cannot find context|Execution context was destroyed|Inspected target navigated or closed/i.test(
+              msg,
+            ))
+        ) {
+          const chars =
+            !step1.isSensitive && step1.expected.length > FILL_MAX_ACTUAL_VALUE_CHARS
+              ? Array.from(step1.expected)
+              : null;
+          const actualValue = step1.isSensitive
+            ? undefined
+            : chars && chars.length > FILL_MAX_ACTUAL_VALUE_CHARS
+              ? chars.slice(0, FILL_MAX_ACTUAL_VALUE_CHARS).join("")
+              : step1.expected;
+          return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+            tab_id: target.tabId,
+            used_ref: node.usedRef,
+            used_selector: node.usedSelector,
+            value_length: step1.expected.length,
+            ...(actualValue !== undefined ? { actual_value: actualValue } : {}),
+          });
+        }
+        throw err;
+      }
       if (throwIfAborted(deps.signal)) {
         return { code: "cancelled", message: "fill aborted" };
       }
