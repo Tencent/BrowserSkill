@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CdpDebuggerApi } from "../chromium-cdp";
 import {
   type NativeClockSample,
   NativeInputClock,
   NativeInputClockError,
 } from "../native-input-clock";
+import { sampleNativeInputClock } from "../native-input-probe";
 
 function buildBatch(options: {
   offsetMs: number;
@@ -84,5 +86,23 @@ describe("NativeInputClock", () => {
       "Native input clock calibration timed out",
     );
     expect(timedOut).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to uncalibrated wall timestamps when the offscreen probe target is restricted", async () => {
+    const getTargets = vi.fn(async () => []);
+    const headlessApi = { getTargets } as unknown as CdpDebuggerApi;
+    await expect(sampleNativeInputClock(headlessApi)).resolves.toBeNull();
+    expect(getTargets).not.toHaveBeenCalled();
+
+    const restricted = vi.fn(async () => null);
+    const clock = new NativeInputClock(restricted);
+    const prepared = await clock.prepare();
+    expect(restricted).toHaveBeenCalledTimes(1);
+    expect(prepared.nativeTimestamp).toBeCloseTo(prepared.timestamp / 1000, 6);
+    expect(() => prepared.assertValid()).not.toThrow();
+    clock.invalidate();
+    expect(() => prepared.assertValid()).toThrow(
+      "The browser's input clock changed before native dispatch",
+    );
   });
 });
