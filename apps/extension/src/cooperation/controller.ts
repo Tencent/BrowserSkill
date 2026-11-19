@@ -2617,9 +2617,10 @@ export class CooperationController implements ControlAuthority {
       // Business facts, missing nodes and ambiguous selectors fail immediately.
       // Cap the pre-execution readiness poll at `DEFAULT_TARGET_READINESS_TIMEOUT_MS`
       // (and below the caller's transport timeout with a short reply margin) so
-      // permanently hidden/disabled/readonly controls return structured readiness
-      // diagnostics instead of hanging for 30s/2m and losing the race to the
-      // daemon's RPC timeout.
+      // permanently hidden controls return structured readiness diagnostics
+      // instead of hanging for 30s/2m and losing the race to the daemon's RPC
+      // timeout. readonly/disabled fill targets fail immediately on the first
+      // check below.
       const deadline = runEnteredAt + (params.timeout_ms ?? 30_000);
       const transportBudgetMs =
         params.timeout_ms === undefined
@@ -2632,16 +2633,20 @@ export class CooperationController implements ControlAuthority {
           await verifyDecision();
           break;
         } catch (error) {
-          if (
-            !targeted ||
-            !(error instanceof ActionCheckError) ||
-            !["target_hidden", "target_disabled", "target_readonly"].includes(
-              error.rpcError.data?.reason ?? "",
-            )
-          )
-            throw error;
+          const checkError = error instanceof ActionCheckError ? error : undefined;
+          const reason = checkError ? (checkError.rpcError.data?.reason ?? "") : "";
+          // Wait only for readiness the page can still deliver: a target that
+          // may appear in a later render, or a control it enables
+          // asynchronously. fill targets never become writable on their own,
+          // so readonly and disabled fields are business facts: fill fails on
+          // the first check instead of polling to the deadline and
+          // misreporting them as timeouts.
+          const waitableReadiness =
+            reason === "target_hidden" ||
+            (reason === "target_disabled" && req.method !== "tool.fill");
+          if (!targeted || !checkError || !waitableReadiness) throw error;
           if (Date.now() >= readinessDeadline) {
-            checkFailure = { ...error.rpcError, code: "timeout" };
+            checkFailure = { ...checkError.rpcError, code: "timeout" };
             throw new ActionCheckError(checkFailure);
           }
           await new Promise((resolve) =>
