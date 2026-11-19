@@ -50,7 +50,7 @@ class AuditTests(unittest.TestCase):
         self.patch.stop()
         self.tmp.cleanup()
 
-    def init(self, extra=None):
+    def init(self, extra=None, *, root=None, port=4567):
         cases = [
             {"id": "FLOW", "kind": "workflow", "required_commands": ["status"]}
         ] + (extra or [])
@@ -58,12 +58,12 @@ class AuditTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             audit.init(
                 NS(
-                    out=str(self.root),
+                    out=str(root or self.root),
                     bsk=str(self.binary),
                     binary=str(self.binary),
                     browser="synthetic-browser",
                     candidate="synthetic-build",
-                    port=4567,
+                    port=port,
                 )
             )
 
@@ -597,14 +597,106 @@ else:
             )
         )
 
-        # Multi-run aggregation
-        agg = audit.aggregate_multi_run_benchmarks([self.root, self.root])
-        self.assertEqual(agg["runs_count"], 2)
-        self.assertEqual(agg["summary"]["full_pass_runs"], 2)
-        self.assertEqual(agg["summary"]["mean_success_rate"], 1.0)
-        md = audit.render_multi_run_markdown(agg)
-        self.assertIn("PLAN-FLOW", md)
-        self.assertIn("RECIPE-FLOW", md)
+    def test_benchmark_reports_empirical_stability_for_independent_runs(self):
+        roots = [self.root, self.base / "second", self.base / "third"]
+        scenarios = [{"id": "ALWAYS"}, {"id": "NEVER"}]
+        for i, root in enumerate(roots):
+            self.init(scenarios, root=root, port=4567 + i)
+            audit.write(root / "benchmark.json", audit.compute_run_benchmark(root))
+            audit.write(
+                root / "results.json",
+                {
+                    "cases": [
+                        {"id": "FLOW", "status": "passed"},
+                        {"id": "ALWAYS", "status": "passed"},
+                        {"id": "CMD-status", "status": "passed"},
+                    ]
+                },
+            )
+            if i == 1:
+                audit.write(root / "gate.json", {"passed_ids": ["ALWAYS", "CMD-status"]})
+
+        out = self.base / "benchmark-multi.json"
+        markdown = self.base / "benchmark-multi.md"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                audit.benchmark_cmd(NS(run=roots, runs_dir=None, out=out, markdown=markdown)),
+                0,
+            )
+        agg = audit.load(out)
+        self.assertEqual(agg["runs_count"], 3)
+        self.assertEqual(agg["summary"]["mean_success_rate"], 0.5333)
+        self.assertEqual(agg["summary"]["pass_at_k_overall"], 0.6)
+        self.assertEqual(agg["summary"]["pass_all_k_overall"], 0.4)
+        self.assertEqual(agg["summary"]["flaky_ids"], ["FLOW"])
+        cases = {c["id"]: c for c in agg["cases"]}
+        for case_id, passes, pass_all, flaky in [
+            ("FLOW", 2, False, True),
+            ("ALWAYS", 3, True, False),
+            ("NEVER", 0, False, False),
+        ]:
+            with self.subTest(case=case_id):
+                case = cases[case_id]
+                self.assertEqual(case["runs"], 3)
+                self.assertEqual(case["passes"], passes)
+                self.assertEqual(case["pass_at_k"], passes > 0)
+                self.assertEqual(case["pass_all_k"], pass_all)
+                self.assertEqual(case["flaky"], flaky)
+        md = markdown.read_text(encoding="utf-8")
+        self.assertIn("Flaky cases: `FLOW`", md)
+        self.assertIn("| `FLOW` | 3 | 2 | 66.7% | Yes | No | Yes |", md)
+        self.assertIn("| `CMD-status` | 3 | 3 | 100.0% | Yes | Yes | No |", md)
+
+    def test_benchmark_rejects_mixed_candidates_and_plans(self):
+        self.init()
+        second = self.base / "second"
+        self.init(root=second)
+        cfg_path = second / "run.json"
+        cfg = audit.load(cfg_path)
+        for field, value in [
+            ("candidate", "different-build"),
+            ("entry_sha256", "1" * 64),
+            ("binary_sha256", "2" * 64),
+        ]:
+            with self.subTest(field=field):
+                audit.write(cfg_path, {**cfg, field: value})
+                with self.assertRaisesRegex(ValueError, f"second.*{field}"):
+                    audit.aggregate_multi_run_benchmarks([self.root, second])
+
+        different_plan = self.base / "different-plan"
+        self.init([{"id": "NEW-SCENARIO"}], root=different_plan)
+        with self.assertRaisesRegex(ValueError, r"different-plan.*plan_sha256"):
+            audit.aggregate_multi_run_benchmarks([self.root, different_plan])
+
+        audit.write(cfg_path, {**cfg, "entry_sha256": "invalid"})
+        with self.assertRaisesRegex(ValueError, r"second.*invalid fields: entry_sha256"):
+            audit.aggregate_multi_run_benchmarks([self.root, second])
+
+    def test_benchmark_rejects_duplicate_runs_and_modified_plans(self):
+        self.init()
+        with self.assertRaisesRegex(ValueError, r"Duplicate benchmark run"):
+            audit.aggregate_multi_run_benchmarks([self.root, self.root / ".." / "run"])
+
+        second = self.base / "second"
+        self.init(root=second)
+        plan_path = second / "plan.json"
+        plan = audit.load(plan_path)
+        plan["cases"].pop()
+        audit.write(plan_path, plan)
+        with self.assertRaisesRegex(ValueError, r"second.*changed plan\.json"):
+            audit.aggregate_multi_run_benchmarks([self.root, second])
+
+    def test_single_run_benchmark_keeps_plain_report(self):
+        self.init()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                audit.benchmark_cmd(NS(run=[self.root], runs_dir=None, out=None, markdown=None)),
+                0,
+            )
+        bench = audit.load(self.root / "benchmark.json")
+        self.assertNotIn("pass_at_k_overall", bench["summary"])
+        self.assertNotIn("flaky", bench["cases"][0])
+        self.assertNotIn("Case Stability", (self.root / "benchmark.md").read_text(encoding="utf-8"))
 
     def test_adversarial_server_routes_bfcache_cors_and_media_mimes(self):
         root = self.skill / "assets/fixtures"

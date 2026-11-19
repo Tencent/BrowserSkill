@@ -1483,18 +1483,44 @@ def render_benchmark_markdown(bench):
     return "\n".join(lines) + "\n"
 
 
-def aggregate_multi_run_benchmarks(roots):
-    run_benchmarks = []
-    for r in roots:
-        root = Path(r).resolve()
-        b_path = root / "benchmark.json"
-        if b_path.exists():
-            run_benchmarks.append(load(b_path))
+def validate_benchmark_runs(roots):
+    fields = ("candidate", "entry_sha256", "binary_sha256", "plan_sha256")
+    expected = None
+    seen = set()
+    for root in roots:
+        if root in seen:
+            raise ValueError(f"Duplicate benchmark run: {root}; use a fresh run for each trial")
+        seen.add(root)
+        cfg = load(root / "run.json")
+        identity = {field: cfg.get(field) for field in fields}
+        invalid = []
+        for field, value in identity.items():
+            if not isinstance(value, str) or not value:
+                invalid.append(field)
+            elif field.endswith("_sha256") and not re.fullmatch(r"[0-9a-f]{64}", value):
+                invalid.append(field)
+        if invalid:
+            raise ValueError(f"Benchmark run {root} has missing or invalid fields: {', '.join(invalid)}")
+        if digest(root / "plan.json") != identity["plan_sha256"]:
+            raise ValueError(f"Benchmark run {root} has a changed plan.json")
+        if expected is None:
+            expected = identity
         else:
-            run_benchmarks.append(compute_run_benchmark(root))
+            mismatches = [field for field in fields if identity[field] != expected[field]]
+            if mismatches:
+                raise ValueError(
+                    f"Benchmark run {root} differs from {roots[0]}: {', '.join(mismatches)}"
+                )
 
-    if not run_benchmarks:
-        raise ValueError("No benchmark runs supplied")
+
+def aggregate_multi_run_benchmarks(roots):
+    roots = [Path(root).expanduser().resolve() for root in roots]
+    if len(roots) < 2:
+        raise ValueError("Multi-run benchmarks require at least two runs")
+    validate_benchmark_runs(roots)
+    # Recompute from the ledger, preserving the single-run gate's authoritative verdict.
+    run_benchmarks = [compute_run_benchmark(root) for root in roots]
+    k = len(run_benchmarks)
 
     case_Rollup = {}
     mode_Rollup = {}
@@ -1543,6 +1569,9 @@ def aggregate_multi_run_benchmarks(roots):
                 "runs": e["runs"],
                 "passes": e["passes"],
                 "pass_rate": round(e["passes"] / e["runs"], 4) if e["runs"] else 0.0,
+                "pass_at_k": e["passes"] > 0,
+                "pass_all_k": e["passes"] == k,
+                "flaky": 0 < e["passes"] < k,
                 "mean_turns": t_stat["mean"],
                 "mean_actions": a_stat["mean"],
                 "mean_elapsed_ms": lat["mean"],
@@ -1571,17 +1600,29 @@ def aggregate_multi_run_benchmarks(roots):
     run_turns = [rb["summary"]["total_interaction_turns"] for rb in run_benchmarks]
     run_actions = [rb["summary"]["total_actions_executed"] for rb in run_benchmarks]
     run_elapsed = [rb["summary"]["total_command_elapsed_ms"] for rb in run_benchmarks]
+    case_count = len(cases_summary)
 
     return {
         "schema_version": 1,
         "generated_at": now(),
-        "runs_count": len(run_benchmarks),
+        "runs_count": k,
         "candidates": [rb.get("candidate") for rb in run_benchmarks],
         "summary": {
-            "runs_count": len(run_benchmarks),
+            "runs_count": k,
             "full_pass_runs": sum(1 for r in run_rates if r == 1.0),
             "mean_success_rate": round(sum(run_rates) / len(run_rates), 4),
             "mean_workflow_success_rate": round(sum(wf_rates) / len(wf_rates), 4),
+            "pass_at_k_overall": (
+                round(sum(c["pass_at_k"] for c in cases_summary) / case_count, 4)
+                if case_count
+                else 0.0
+            ),
+            "pass_all_k_overall": (
+                round(sum(c["pass_all_k"] for c in cases_summary) / case_count, 4)
+                if case_count
+                else 0.0
+            ),
+            "flaky_ids": [c["id"] for c in cases_summary if c["flaky"]],
             "interaction_turns": stats_summary(run_turns),
             "actions_executed": stats_summary(run_actions),
             "command_elapsed_ms": stats_summary(run_elapsed),
@@ -1604,6 +1645,8 @@ def render_multi_run_markdown(agg):
         f"| 全量 100% 通过轮次数 (`full_pass_runs`) | {s['full_pass_runs']} / {s['runs_count']} |",
         f"| 平均总通过率 (`mean_success_rate`) | **{s['mean_success_rate'] * 100:.2f}%** |",
         f"| 平均工作流通过率 (`mean_workflow_success_rate`) | **{s['mean_workflow_success_rate'] * 100:.2f}%** |",
+        f"| 至少通过一轮 (`pass@k`) | {s['pass_at_k_overall'] * 100:.2f}% |",
+        f"| 每轮都通过 (`pass^k`) | {s['pass_all_k_overall'] * 100:.2f}% |",
         f"| 平均每轮总交互轮次 (`interaction_turns`) | {s['interaction_turns']['mean']:.1f} (P50: {s['interaction_turns']['p50']:.1f}, P95: {s['interaction_turns']['p95']:.1f}) |",
         f"| 平均每轮总动作数 (`actions_executed`) | {s['actions_executed']['mean']:.1f} |",
         f"| 平均每轮累计耗时 (`command_elapsed_ms`) | {s['command_elapsed_ms']['mean']:.1f} ms (P50: {s['command_elapsed_ms']['p50']:.1f}, P95: {s['command_elapsed_ms']['p95']:.1f}) |",
@@ -1631,6 +1674,25 @@ def render_multi_run_markdown(agg):
             continue
         lines.append(
             f"| `{c['id']}` | `{c['page_type']}` | {c['runs']} | {c['pass_rate'] * 100:.1f}% | {c['mean_turns']:.1f} | {c['mean_actions']:.1f} | {c['mean_elapsed_ms']:.1f} | {c['p50_elapsed_ms']:.1f} | {c['p95_elapsed_ms']:.1f} |"
+        )
+    flaky_ids = ", ".join(f"`{cid}`" for cid in s["flaky_ids"])
+    lines.extend(
+        [
+            "",
+            "## 4. 场景稳定性 (Case Stability)",
+            "",
+            f"Flaky cases: {flaky_ids or '—'}",
+            "",
+            "| Case ID | Runs | Passes | `pass_rate` | `pass@k` | `pass^k` | Flaky |",
+            "| --- | ---: | ---: | ---: | --- | --- | --- |",
+        ]
+    )
+    for c in agg["cases"]:
+        pass_at_k = "Yes" if c["pass_at_k"] else "No"
+        pass_all_k = "Yes" if c["pass_all_k"] else "No"
+        flaky = "Yes" if c["flaky"] else "No"
+        lines.append(
+            f"| `{c['id']}` | {c['runs']} | {c['passes']} | {c['pass_rate'] * 100:.1f}% | {pass_at_k} | {pass_all_k} | {flaky} |"
         )
     return "\n".join(lines) + "\n"
 
