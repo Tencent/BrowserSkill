@@ -229,9 +229,8 @@ describe("handleWindowResize", () => {
   it("does not call a rounding-sized but stale viewport a constraint", async () => {
     const sm = await makeManager();
     const f = resizeFixture({ actual: { width: 1101, height: 711 }, frozenViewport: true });
-    expect(
-      await handleWindowResize(sm, { session_id: "aa11", width: 1100, height: 710 }, f.deps),
-    ).toMatchObject({
+    const params = { session_id: "aa11", width: 1100, height: 710 };
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
       code: "cdp_failed",
       data: {
         reason: "window_resize_viewport_unchanged",
@@ -239,6 +238,47 @@ describe("handleWindowResize", () => {
         actual_window: { width: 1101, height: 711 },
       },
     });
+    // Retrying the same request while the outer bounds remain DPI-rounded and the
+    // viewport is still frozen must keep failing instead of reporting false success.
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        reason: "window_resize_viewport_unchanged",
+        effect_state: "none",
+        actual_window: { width: 1101, height: 711 },
+      },
+    });
+    expect(f.windows.update).toHaveBeenCalledOnce();
+    f.state.viewport = { width: 1101, height: 568 };
+    expect(await handleWindowResize(sm, params, f.deps)).toEqual({
+      window_id: 100,
+      width: 1101,
+      height: 711,
+    });
+  });
+
+  it("keeps a failed post-resize read with DPI rounding from becoming false success", async () => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 1101, height: 711 }, frozenViewport: true });
+    const read = f.cdp.send;
+    let calls = 0;
+    f.cdp.send = (async (...args: Parameters<CdpRunner["send"]>) => {
+      if (++calls === 2) throw new Error("renderer unavailable");
+      return read(...args);
+    }) as CdpRunner["send"];
+    const params = { session_id: "aa11", width: 1100, height: 710 };
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      data: { reason: "window_resize_unconfirmed", effect_state: "unknown" },
+    });
+    f.cdp.send = read;
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      data: {
+        reason: "window_resize_viewport_unchanged",
+        effect_state: "none",
+        actual_window: { width: 1101, height: 711 },
+      },
+    });
+    expect(f.windows.update).toHaveBeenCalledOnce();
   });
 
   it("never reports success for a resize that was not committed", async () => {

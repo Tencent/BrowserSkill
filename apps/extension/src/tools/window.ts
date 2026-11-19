@@ -176,8 +176,8 @@ export async function handleWindowResize(
   const previousFailure = unconfirmed.get(ctx)?.get(target.tabId);
   if (
     previousFailure &&
-    sameSize(beforeWindow, requested) &&
-    sameSize(previousFailure.window, beforeWindow) &&
+    withinRounding(beforeWindow, requested) &&
+    withinRounding(previousFailure.window, beforeWindow) &&
     sameSize(previousFailure.viewport, beforeViewport.size)
   )
     return {
