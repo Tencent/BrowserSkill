@@ -271,3 +271,112 @@ it("still refuses tab management when a non-blank tab cannot be observed", async
   expect(invoked).toBe(0);
   expect(result).toMatchObject({ code: "permission_denied" });
 });
+
+it("allows tab_create, tab_select, and tab_close when an agent-created tab is stuck on a settled page_load_failed error page", async () => {
+  const sessions = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 100, initialTabIds: [7] }),
+      remove: async () => {},
+      ensureActiveTab: async () => 7,
+    },
+  });
+  await sessions.start("shared");
+  const tabs: Record<number, chrome.tabs.Tab> = {
+    7: {
+      id: 7,
+      windowId: 100,
+      active: true,
+      url: "http://127.0.0.1:58789/dead.html",
+    } as chrome.tabs.Tab,
+    8: {
+      id: 8,
+      windowId: 100,
+      active: false,
+      url: "https://fixture.test/ok",
+    } as chrome.tabs.Tab,
+  };
+  vi.stubGlobal("chrome", {
+    tabs: {
+      get: async (id: number) => tabs[id],
+      query: async () => Object.values(tabs),
+    },
+  });
+  const readFrames = vi.fn(async (tabId: number): Promise<CooperationFrames> => {
+    if (tabId === 7)
+      throw new FrameCollectionError("page_load_failed", [
+        { frame_id: 0, url: "http://127.0.0.1:58789/dead.html" },
+      ]);
+    return { frames: new Map([[0, structuredClone(frame)]]), gaps: [] };
+  });
+  const cdp: CdpRunner = createStubCdpRunner({
+    send: vi.fn(async () => ({})) as CdpRunner["send"],
+    runBrowserMutation: async <T>(op: () => Promise<T>) => op(),
+  });
+  const controller = new CooperationController({
+    sessions,
+    readFrames: readFrames as never,
+    resumeFrames: vi.fn(async () => {}),
+    changed: vi.fn(),
+    now: () => 10_000,
+  });
+  const signal = new AbortController().signal;
+  await controller.run(
+    { id: "start", method: "tool.session_start", params: { session_id: "shared" } },
+    cdp,
+    signal,
+    async () => ({ agent_window_id: 100 }),
+  );
+  // Transition tab 7 out of initial bootstrap into a settled failed load.
+  await controller.observeTab(7);
+
+  // While a pending navigation is still in flight on tab 7, tab management stays gated.
+  tabs[7]!.pendingUrl = "https://fixture.test/retrying";
+  expect(
+    await controller.run(
+      {
+        id: "create-pending",
+        method: "tool.tab_create",
+        params: { session_id: "shared", url: "https://fixture.test/ok" },
+      },
+      cdp,
+      signal,
+      async () => ({ tab_id: 8 }),
+    ),
+  ).toMatchObject({ code: "permission_denied" });
+  delete tabs[7]!.pendingUrl;
+
+  expect(
+    await controller.run(
+      {
+        id: "create",
+        method: "tool.tab_create",
+        params: { session_id: "shared", url: "https://fixture.test/ok" },
+      },
+      cdp,
+      signal,
+      async () => {
+        sessions.get("shared")!.agentCreatedTabs.add(8);
+        return { tab_id: 8 };
+      },
+    ),
+  ).toEqual({ tab_id: 8 });
+  expect(
+    await controller.run(
+      { id: "select", method: "tool.tab_select", params: { session_id: "shared", tab_id: 8 } },
+      cdp,
+      signal,
+      async () => ({ tab_id: 8 }),
+    ),
+  ).toEqual({ tab_id: 8 });
+  expect(
+    await controller.run(
+      { id: "close", method: "tool.tab_close", params: { session_id: "shared", tab_id: 7 } },
+      cdp,
+      signal,
+      async (runner) => {
+        await runner.runBrowserMutation!(async () => {});
+        return { tab_id: 7 };
+      },
+    ),
+  ).toEqual({ tab_id: 7 });
+});
