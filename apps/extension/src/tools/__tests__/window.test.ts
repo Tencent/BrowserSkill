@@ -183,6 +183,76 @@ describe("handleWindowResize", () => {
     expect(f.wait).toHaveBeenCalledTimes(20);
   });
 
+  it.each([
+    [0, 0],
+    [1, 1],
+    [-1, -1],
+    [2, -2],
+  ])("accepts a committed resize within DPI rounding (%s, %s)", async (dx, dy) => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 1100 + dx, height: 700 + dy } });
+    const result = await handleWindowResize(
+      sm,
+      { session_id: "aa11", width: 1100, height: 700 },
+      f.deps,
+    );
+    expect(result).toEqual({ window_id: 100, width: 1100 + dx, height: 700 + dy });
+    // Bounds that only differ by DIP rounding must not spend the settling budget.
+    expect(f.wait).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [40, 40],
+    [-40, 0],
+    [0, 12],
+  ])("still fails a genuinely constrained resize (%s, %s)", async (dx, dy) => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 1100 + dx, height: 700 + dy } });
+    const result = await handleWindowResize(
+      sm,
+      { session_id: "aa11", width: 1100, height: 700 },
+      f.deps,
+    );
+    expect(result).toMatchObject({
+      code: "protocol_error",
+      message: `Window resize requested 1100x700, but the browser reports ${1100 + dx}x${700 + dy}.`,
+      data: {
+        reason: "window_resize_constrained",
+        effect_state: "committed",
+        requested: { width: 1100, height: 700 },
+        actual_window: { width: 1100 + dx, height: 700 + dy },
+      },
+    });
+    expect(f.wait).toHaveBeenCalledTimes(20);
+  });
+
+  it("does not call a rounding-sized but stale viewport a constraint", async () => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 1101, height: 711 }, frozenViewport: true });
+    expect(
+      await handleWindowResize(sm, { session_id: "aa11", width: 1100, height: 710 }, f.deps),
+    ).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        reason: "window_resize_viewport_unchanged",
+        effect_state: "committed",
+        actual_window: { width: 1101, height: 711 },
+      },
+    });
+  });
+
+  it("never reports success for a resize that was not committed", async () => {
+    const sm = await makeManager();
+    const f = resizeFixture({ throwOnUpdate: true });
+    const result = await handleWindowResize(
+      sm,
+      { session_id: "aa11", width: 1100, height: 700 },
+      f.deps,
+    );
+    expect(result).toMatchObject({ code: "protocol_error", data: { effect_state: "unknown" } });
+    expect(result).not.toHaveProperty("window_id");
+  });
+
   it("reports a viewport that remains fixed despite the window changing", async () => {
     const sm = await makeManager();
     const f = resizeFixture({ frozenViewport: true });

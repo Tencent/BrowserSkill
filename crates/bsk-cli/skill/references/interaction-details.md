@@ -281,7 +281,9 @@ current document; earlier documents and some exception stacks may be unavailable
 To retain messages across navigation, read `console` before reproducing the issue.
 `emulate --device iphone-14` affects one tab; `--off` restores it.
 `window resize` changes outer window dimensions, not an exact viewport size. It
-checks the actual bounds and whether the target tab's viewport follows a change.
+accepts bounds within 2 px of the request on either axis, so fractional display
+scaling (for example Windows 10 at 125%) does not fail a resize the browser did
+commit, and it checks whether the target tab's viewport follows a change.
 If the target tab is inactive, select it within the Agent Window and sync before
 resizing. A fixed emulated viewport may need its own `emulate` adjustment; resize
 does not clear emulation or focus the window. When a resize reports an unconfirmed
