@@ -38,7 +38,7 @@ it("names the click point and the still-covering overlay", async () => {
       reason: "input_not_ready",
       click_point: point,
       overlay_probe: "covered",
-      overlay_bypass: "enabled",
+      overlay_bypass: "requested",
       overlay_passthrough: "attempted",
       effect_state: "none",
     },
@@ -57,7 +57,7 @@ it("distinguishes an unreadable hit test from a still-covering overlay", async (
 
   expect(result).toMatchObject({
     code: "cdp_failed",
-    data: { reason: "input_not_ready", overlay_probe: "unknown", overlay_bypass: "enabled" },
+    data: { reason: "input_not_ready", overlay_probe: "unknown", overlay_bypass: "requested" },
   });
   expect(result).toHaveProperty(
     "message",
@@ -66,19 +66,45 @@ it("distinguishes an unreadable hit test from a still-covering overlay", async (
   expect(d.bypassOverlay).toHaveBeenCalledWith(7, true);
 });
 
-it("distinguishes an expired passthrough lease from an obstruction", async () => {
+it("distinguishes too little passthrough headroom from an obstruction", async () => {
   const cdp = probeCdp(["covered", "covered", "covered"]);
   const d = deps(cdp);
   const result = await withClickOverlay(7, point, d.deps, async () => "clicked", false, 60_000);
 
   expect(result).toMatchObject({
     code: "cdp_failed",
-    data: { reason: "input_not_ready", overlay_passthrough: "attempted" },
+    data: {
+      reason: "input_not_ready",
+      overlay_passthrough: "attempted",
+      recovery: expect.stringContaining("Shorten the gesture"),
+    },
   });
   expect(result).toHaveProperty(
     "message",
-    `Input passthrough expired before the click point (40, 60) could be verified`,
+    `Input passthrough has too little lease left for this gesture at the click point (40, 60)`,
   );
+});
+
+it("does not claim the bypass is enabled when its request fails", async () => {
+  const cdp = probeCdp(["covered", "covered", "covered"]);
+  const bypassOverlay = vi.fn(async () => {
+    throw new Error("overlay host unavailable");
+  });
+  const result = await withClickOverlay(
+    7,
+    point,
+    {
+      cdp,
+      bypassOverlay,
+      sendInputPassthrough: vi.fn(async () => ({})),
+    } as never,
+    async () => "clicked",
+  );
+
+  expect(result).toMatchObject({
+    code: "cdp_failed",
+    data: { reason: "input_not_ready", overlay_bypass: "failed", overlay_probe: "covered" },
+  });
 });
 
 it("keeps an ordinary unobstructed click unchanged", async () => {
