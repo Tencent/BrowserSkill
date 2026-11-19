@@ -58,17 +58,18 @@ const EXTENSION_PAGE_PROTOCOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * A child frame that hosts another extension's page is never part of the
- * observed page. Chrome refuses `tabs.sendMessage` into such a frame with
- * "Cannot access a chrome-extension:// URL of different extension", and only a
- * missing receiver was tolerated here, so one unrelated extension that injects
- * a hidden iframe (the pattern many shopping and translate extensions use) used
- * to fail every collection for the whole tab.
+ * A child frame that hosts another extension's page is not part of the observed
+ * page, and Chrome refuses `tabs.sendMessage` into it with "Cannot access a
+ * chrome-extension:// URL of different extension". Only a missing receiver was
+ * tolerated here, so one unrelated extension injecting an iframe (the pattern
+ * many shopping and translate extensions use) used to fail every collection for
+ * the whole tab.
  *
- * These documents cannot receive human input either, so leaving them out cannot
- * conceal activity. The top document is exempt: a tab that really is an
- * extension page keeps its existing failure path instead of silently
- * collecting nothing.
+ * Such a frame is excluded from collection, but never on the strength of its URL
+ * alone: `requireUnreachableFramesHidden()` first proves it hidden, because a
+ * displayed one can still contain controls and text fields that no collector
+ * watches. The top document is exempt, so a tab that really is an extension page
+ * keeps its existing failure path instead of silently collecting nothing.
  */
 function isChildExtensionPage(frame: chrome.webNavigation.GetAllFrameResultDetails): boolean {
   if (frame.frameId === 0) return false;
@@ -77,6 +78,55 @@ function isChildExtensionPage(frame: chrome.webNavigation.GetAllFrameResultDetai
   } catch {
     return false;
   }
+}
+
+/** Frames owned by another extension, plus every descendant of one. */
+function unreachableExtensionSubtrees(
+  frames: chrome.webNavigation.GetAllFrameResultDetails[],
+): Set<number> {
+  const unreachable = new Set<number>();
+  for (const frame of frames) if (isChildExtensionPage(frame)) unreachable.add(frame.frameId);
+  if (!unreachable.size) return unreachable;
+  // A child of an extension document inherits its origin, so it is unreachable
+  // too even when its own URL (about:blank, srcdoc) looks ordinary.
+  for (let pass = 0; pass <= frames.length; pass++) {
+    let added = false;
+    for (const frame of frames) {
+      if (unreachable.has(frame.frameId) || !unreachable.has(frame.parentFrameId)) continue;
+      unreachable.add(frame.frameId);
+      added = true;
+    }
+    if (!added) return unreachable;
+  }
+  return unreachable;
+}
+
+/**
+ * Leaving a frame out is only safe when nobody can interact with it. Prove the
+ * outermost unreachable frames hidden first: an unreachable but displayed
+ * document would let a fresh sync authorize automation while the user types or
+ * clicks inside it, because no collector reports input from there.
+ *
+ * A displayed one therefore still fails the collection — but it names the frame
+ * instead of forwarding the browser's raw message. Release never blocks on a
+ * document it can never reach.
+ */
+async function requireUnreachableFramesHidden(
+  tabId: number,
+  frames: chrome.webNavigation.GetAllFrameResultDetails[],
+  unreachable: ReadonlySet<number>,
+  skipped: ReadonlySet<number>,
+  kind: string,
+): Promise<void> {
+  if (!unreachable.size || kind === COOPERATION_DISABLE) return;
+  const outermost = frames.filter(
+    (frame) => unreachable.has(frame.frameId) && !unreachable.has(frame.parentFrameId),
+  );
+  if (!outermost.length) return;
+  const proven = await provenHiddenFrames(tabId, frames, outermost, skipped);
+  const displayed = outermost.filter((frame) => !proven.has(frame.frameId));
+  if (displayed.length)
+    throw new FrameCollectionError("frame_unobservable", displayed.map(frameIdentity));
 }
 
 function frameIdentity(frame: chrome.webNavigation.GetAllFrameResultDetails): FrameIdentity {
@@ -220,6 +270,10 @@ export async function collectCooperationFrames(
   for (const documentId of hidden) if (!documents.has(documentId)) hidden.delete(documentId);
   if (!frames?.length) throw new Error("No observable document in this tab");
   const gaps: FrameGap[] = [];
+  // Another extension's document cannot be messaged at all — Chrome rejects it
+  // with "Cannot access a chrome-extension:// URL of different extension" — and
+  // a child inherits that origin, so the whole subtree is unreachable.
+  const unreachable = unreachableExtensionSubtrees(frames);
   const live = frames.filter((frame) => {
     if (frame.errorOccurred) {
       if (frame.frameId === 0)
@@ -231,8 +285,7 @@ export async function collectCooperationFrames(
       gaps.push({ ...frameIdentity(frame), reason: "inactive_document" });
       return false;
     }
-    if (isChildExtensionPage(frame)) return false;
-    return true;
+    return !unreachable.has(frame.frameId);
   });
   // A child that already failed while hidden is not awaited again while its
   // element stays hidden. Release still messages every document.
@@ -244,6 +297,7 @@ export async function collectCooperationFrames(
     ? await provenHiddenFrames(tabId, frames, remembered)
     : new Set<number>();
   for (const frame of remembered) if (!skipped.has(frame.frameId)) hidden.delete(frame.documentId);
+  await requireUnreachableFramesHidden(tabId, frames, unreachable, skipped, kind);
   const targets = live.filter((frame) => !skipped.has(frame.frameId));
   const reads = targets.map((frame) =>
     startFrameRead(tabId, frame, { kind, input, lease }, repairs, replyTimeoutMs, signal),
