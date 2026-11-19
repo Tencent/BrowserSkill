@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { INTERACTION_STORAGE_KEY, InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSessionStart } from "../session";
-import type { CdpRunner, ChromeTabsApi } from "../shared";
+import { type CdpRunner, type ChromeTabsApi, createStubCdpRunner } from "../shared";
 import { handleWindowResize, type WindowResizeDeps } from "../window";
 
 function fakeAgentWindow(ids: number[]) {
@@ -56,12 +56,12 @@ function resizeFixture(
         state.viewport = { width: state.bounds.width, height: state.bounds.height - 143 };
     }),
   };
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: vi.fn(async () => ({
       cssLayoutViewport: { clientWidth: state.viewport.width, clientHeight: state.viewport.height },
       cssVisualViewport: { zoom: opts.zoom ?? 1 },
     })) as CdpRunner["send"],
-  };
+  });
   const wait = vi.fn(async () => {
     state.waits++;
     if (opts.delayViewport && state.waits === 2)
@@ -460,7 +460,10 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", { size: { width: 1280, height: 800 } });
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {
+      size: { width: 1280, height: 800 },
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("creates the window without size when width/height are omitted", async () => {
@@ -471,7 +474,9 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", {});
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("forwards focused: false to the Agent Window", async () => {
@@ -482,7 +487,10 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", { focused: false });
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {
+      focused: false,
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("rejects a lone width without height", async () => {

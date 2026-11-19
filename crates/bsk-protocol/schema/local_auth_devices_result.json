@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "PairedDeviceStatus": {
+      "enum": [
+        "unactivated",
+        "active",
+        "revoked"
+      ],
+      "type": "string"
+    },
+    "PairedDeviceSummary": {
+      "oneOf": [
+        {
+          "properties": {
+            "activated_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "browser_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "device_id": {
+              "type": "string"
+            },
+            "expires_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "gen": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "local",
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/PairedDeviceStatus"
+            }
+          },
+          "required": [
+            "kind",
+            "device_id",
+            "browser_id",
+            "label",
+            "status",
+            "activated_at",
+            "expires_at",
+            "gen"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "browser_id": {
+              "type": "string"
+            },
+            "device_id": {
+              "type": "string"
+            },
+            "expires_at": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "remote",
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "device_id",
+            "browser_id",
+            "label",
+            "expires_at"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "items": {
+    "$ref": "#/definitions/PairedDeviceSummary"
+  },
+  "title": "LocalAuthDevicesResult",
+  "type": "array"
+}

@@ -647,7 +647,7 @@ mod tests {
             browser_name: "chrome".into(),
             browser_version: "131".into(),
             extension_version: "0.1.0-dev.0".into(),
-            extension_protocol_version: "1.0".into(),
+            extension_protocol_version: "2.0".into(),
             label: label.into(),
             sink: BrowserSink { tx },
             pending: Mutex::new(Pending::default()),
@@ -952,6 +952,8 @@ mod tests {
                 id: "late".into(),
                 method: bsk_protocol::Method::ToolSnapshot,
                 params: None,
+                audit_id: None,
+                operation_id: None,
             })
             .expect_err("a replaced socket must not accept a new call");
         match refused {
@@ -987,6 +989,8 @@ mod tests {
                 id: "inflight".into(),
                 method: bsk_protocol::Method::ToolSnapshot,
                 params: None,
+                audit_id: None,
+                operation_id: None,
             })
             .expect("a live socket accepts a call");
         assert!(socket.try_recv().is_ok());
@@ -1002,6 +1006,8 @@ mod tests {
                 id: "late".into(),
                 method: bsk_protocol::Method::ToolSnapshot,
                 params: None,
+                audit_id: None,
+                operation_id: None,
             })
             .expect_err("a closed socket must not accept a new call");
         assert!(matches!(refused, SendError::SinkClosed));

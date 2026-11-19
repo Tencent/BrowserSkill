@@ -6,7 +6,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PendingJavaScriptDialog {
     pub id: String,
     pub tab_id: i64,
@@ -21,14 +21,22 @@ pub struct PendingJavaScriptDialog {
     pub decision_deadline: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DialogStatusParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DialogStatusResult {
+    pub session_id: String,
+    pub dialogs: Vec<PendingJavaScriptDialog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DialogHandleParams {
     pub session_id: String,
     pub dialog_id: String,
@@ -36,12 +44,39 @@ pub struct DialogHandleParams {
     pub text: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DialogHandleResult {
+    pub session_id: String,
+    pub dialog: JavaScriptDialogInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OperationParams {
     pub session_id: String,
     pub operation_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_ms: Option<u32>,
+}
+
+/// Retained or still-running status returned by `tool.operation_await`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OperationAwaitResult {
+    Completed {
+        operation_id: String,
+        method: crate::Method,
+        result: serde_json::Value,
+    },
+    Failed {
+        operation_id: String,
+        method: crate::Method,
+        error: crate::RpcError,
+    },
+    Running {
+        operation_id: String,
+        method: crate::Method,
+    },
 }
 
 /// Native JS dialog kind reported by CDP.

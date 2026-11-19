@@ -30,10 +30,10 @@ function truncate(value: string, max = 80): string {
 }
 
 /** Short, human label an LLM can search for in a snapshot. */
-export function isActionableLabel(name: string): boolean {
+export function isActionableLabel(name: string, max = ACTIONABLE_LABEL_MAX): boolean {
   const trimmed = normalizeWhitespace(name);
   if (!trimmed) return false;
-  if (trimmed.length > ACTIONABLE_LABEL_MAX) return false;
+  if (trimmed.length > max) return false;
   if (/^https?:\/\//i.test(trimmed)) return false;
   return true;
 }
@@ -143,7 +143,10 @@ export function accessibleName(el: Element): string | undefined {
     const value = normalizeWhitespace(el.value);
     if (
       value &&
-      (el instanceof HTMLButtonElement || el.type === "submit" || el.type === "button")
+      (el instanceof HTMLButtonElement ||
+        el.type === "submit" ||
+        el.type === "reset" ||
+        el.type === "button")
     ) {
       return truncate(value);
     }
@@ -152,7 +155,7 @@ export function accessibleName(el: Element): string | undefined {
   return undefined;
 }
 
-const INTERACTIVE_SELECTOR = [
+export const INTERACTIVE_SELECTOR = [
   "a[href]",
   "button",
   "summary",
@@ -356,5 +359,10 @@ export function describeEventTarget(target: EventTarget | null): CaptureTargetDe
   const clickable = resolveClickableElement(target);
   if (!clickable) return null;
   const desc = describeTarget(clickable);
-  return isMeaningfulClickTarget(desc) ? desc : null;
+  if (isMeaningfulClickTarget(desc)) return desc;
+  // The length cap keeps layout text from naming a guessed target. A control's own long
+  // name, such as a headline link or a step-by-step button, still identifies it.
+  return clickable.matches(INTERACTIVE_SELECTOR) && isActionableLabel(desc.name ?? "", Infinity)
+    ? desc
+    : null;
 }

@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_VIDEO_CHROME after building. Uses the production offscreen
+// Opt in with BSK_TEST_CHROME after building. Uses the production offscreen
 // document and encoder worker in an isolated extension and browser profile.
 import { cp, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -66,7 +66,7 @@ globalThis.inspectVideo=async(id)=>{
 };
 `;
 
-describe.skipIf(!process.env.BSK_VIDEO_CHROME)("video encoder browser regression", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("video encoder browser regression", () => {
   it("encodes offscreen, preserves static time and produces a seekable MP4", async () => {
     const extensionName = "Video encoding regression";
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-video-extension-"));
@@ -120,7 +120,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME)("video encoder browser regression
       );
       await withChrome(
         {
-          executable: process.env.BSK_VIDEO_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           extensionPath: directory,
           deviceScale: 1,
           zoom: 1,

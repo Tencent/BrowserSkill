@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LocalAuthMode": {
+      "enum": [
+        "warn",
+        "required",
+        "trust_local"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "local_auth": {
+      "$ref": "#/definitions/LocalAuthMode"
+    }
+  },
+  "required": [
+    "local_auth"
+  ],
+  "title": "LocalAuthSetModeResult",
+  "type": "object"
+}

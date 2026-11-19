@@ -1,0 +1,43 @@
+<!doctype html><meta charset="utf-8"><title>One-second dynamic page</title>
+<style>
+body{font:18px system-ui;margin:24px;line-height:1.5}
+#live-panel{background:#e9f3ff;padding:16px;border:2px solid #257}
+#nested-scroll{width:min(640px,90vw);height:180px;overflow:auto;border:3px solid #357}
+#nested-content{width:1600px;height:900px;background:linear-gradient(135deg,#def,#fc9);position:relative}
+#nested-end{position:absolute;left:1350px;top:750px}
+.section{height:650px;border-top:1px solid #aaa;padding-top:24px}
+</style>
+<h1>每秒变化的页面</h1>
+<section id="live-panel" aria-live="polite" data-tick="0">
+  <span>Tick <output id="tick">0</output></span>
+  <span>时间 <output id="updated-at"></output></span>
+  <span>记录42价格 <output id="price"></output></span>
+</section>
+<p>文字、时间与价格每1000ms更新；测评期间保持运行，不暂停、不冻结。</p>
+<div id="nested-scroll" tabindex="0" aria-label="双向滚动容器">
+  <div id="nested-content">容器左上角<span id="nested-end">容器远端标记</span></div>
+</div>
+<output id="scroll-state"></output>
+<section class="section"><h2>页面段落1</h2></section>
+<section class="section"><h2>页面段落2</h2></section>
+<section class="section"><h2 id="page-end">页面末端标记</h2></section>
+<script>
+const panel=document.querySelector('#live-panel'),box=document.querySelector('#nested-scroll');
+let tick=0;
+function update(){
+  panel.dataset.tick=String(tick);
+  document.querySelector('#tick').textContent=String(tick);
+  document.querySelector('#updated-at').textContent=new Date().toISOString();
+  document.querySelector('#price').textContent=(100+tick%20).toFixed(2);
+}
+update();setInterval(()=>{tick++;update()},1000);
+window.dynamicWheelEvents=[];
+function remember(scope,e){
+  window.dynamicWheelEvents.push({scope,tick,time:Date.now(),deltaX:e.deltaX,deltaY:e.deltaY});
+  if(window.dynamicWheelEvents.length>100)window.dynamicWheelEvents.shift();
+}
+window.addEventListener('wheel',e=>remember('page',e),{passive:true});
+box.addEventListener('wheel',e=>remember('nested',e),{passive:true});
+function showScroll(){document.querySelector('#scroll-state').textContent=JSON.stringify({pageY:scrollY,nestedTop:box.scrollTop,nestedLeft:box.scrollLeft})}
+window.addEventListener('scroll',showScroll,{passive:true});box.addEventListener('scroll',showScroll,{passive:true});showScroll();
+</script>

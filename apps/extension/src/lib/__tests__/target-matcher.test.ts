@@ -156,4 +156,71 @@ describe("matchObservationTarget", () => {
     });
     expect(target.ref).toBe("e2");
   });
+
+  // The page scrolled, or the field changed size while it was typed in, after the observation.
+  const moved = { rect: { x: 10, y: 400, w: 100, h: 30 }, tag: "button" };
+
+  it("matches the only same-tag ref with the target's role and name when no rect matches", () => {
+    const target = matchObservationTarget({
+      observation: observation(
+        [node(41, "root"), node(42, "root", 200)],
+        [
+          { ref: "e1", backendNodeId: 41, role: "button", name: "保存", line: 1 },
+          { ref: "e2", backendNodeId: 42, role: "button", name: "取消", line: 2 },
+        ],
+      ),
+      hint: { geometry: moved },
+      fallback: { tag: "button", role: "button", name: "取消" },
+    });
+    expect(target).toEqual({ ref: "e2", role: "button", name: "取消" });
+  });
+
+  it("stays unmatched when no rect matches and the name is shared or missing", () => {
+    const twoSaves = observation(
+      [node(41, "root"), node(42, "root", 200)],
+      [
+        { ref: "e1", backendNodeId: 41, role: "button", name: "保存", line: 1 },
+        { ref: "e2", backendNodeId: 42, role: "button", name: "保存", line: 2 },
+      ],
+    );
+    expect(
+      matchObservationTarget({
+        observation: twoSaves,
+        hint: { geometry: moved },
+        fallback: { tag: "button", role: "button", name: "保存" },
+      }).unmatched,
+    ).toBe(true);
+
+    const oneButton = observation(
+      [node(41, "root")],
+      [{ ref: "e1", backendNodeId: 41, role: "button", line: 1 }],
+    );
+    expect(
+      matchObservationTarget({
+        observation: oneButton,
+        hint: { geometry: moved },
+        fallback: { tag: "button", role: "button" },
+      }).unmatched,
+    ).toBe(true);
+  });
+
+  it("does not use a name match from another frame or another tag when no rect matches", () => {
+    const refs = [
+      { ref: "e1", backendNodeId: 41, frameId: "child", role: "link", name: "保存", line: 1 },
+    ];
+    expect(
+      matchObservationTarget({
+        observation: observation([node(41, "child")], refs),
+        hint: { geometry: moved },
+        fallback: { tag: "button", role: "link", name: "保存" },
+      }).unmatched,
+    ).toBe(true);
+    expect(
+      matchObservationTarget({
+        observation: observation([node(41, "child")], refs),
+        hint: { frameId: "child", geometry: { ...moved, tag: "a" } },
+        fallback: { tag: "a", role: "link", name: "保存" },
+      }).unmatched,
+    ).toBe(true);
+  });
 });

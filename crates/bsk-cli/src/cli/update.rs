@@ -5,6 +5,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+mod sources;
 pub mod state;
 #[cfg(windows)]
 mod windows;
@@ -21,8 +22,8 @@ use crate::cli::daemon::StartArgs;
 use crate::cli::error::{CliError, Format};
 use crate::daemon::lockfile;
 
-pub const DEFAULT_MANIFEST_URL: &str =
-    "https://github.com/Tencent/BrowserSkill/releases/latest/download/version.json";
+pub use sources::DEFAULT_MANIFEST_URL;
+pub(crate) use sources::recovery_hint as source_recovery_hint;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const ARCHIVE_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 /// A new executable must answer `--version` within this time before any
@@ -61,6 +62,8 @@ pub struct UpdateManifest {
 pub struct ManifestAsset {
     pub url: String,
     pub sha256: Option<String>,
+    /// Same release and checksum, used only by the built-in sources.
+    pub fallback_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,8 +163,16 @@ impl UpdateManifest {
             .into_iter()
             .map(|(platform, asset)| {
                 let asset = match asset {
-                    RawManifestAsset::Url(url) => ManifestAsset { url, sha256: None },
-                    RawManifestAsset::Rich { url, sha256 } => ManifestAsset { url, sha256 },
+                    RawManifestAsset::Url(url) => ManifestAsset {
+                        url,
+                        sha256: None,
+                        fallback_url: None,
+                    },
+                    RawManifestAsset::Rich { url, sha256 } => ManifestAsset {
+                        url,
+                        sha256,
+                        fallback_url: None,
+                    },
                 };
                 (platform, asset)
             })
@@ -235,7 +246,7 @@ pub fn dispatch(args: UpdateArgs, format: Format) -> Result<(), CliError> {
 
 fn run(args: UpdateArgs, format: Format) -> Result<()> {
     let client = update_http_client(ARCHIVE_FETCH_TIMEOUT)?;
-    let manifest = fetch_manifest_with_client(&client, &manifest_url())?;
+    let manifest = sources::fetch_update_manifest()?;
     let platform = current_platform_key()?;
     let current_version = env!("CARGO_PKG_VERSION");
     let Some(candidate) = manifest.update_candidate(current_version, platform)? else {
@@ -583,10 +594,30 @@ pub(crate) fn download_candidate_binary(
             candidate.tag
         )
     })?;
-    let archive = fetch_bytes_with_client(client, &candidate.asset.url)?;
-    verify_sha256(&archive, expected_sha)?;
-    let kind = ArchiveKind::from_url(&candidate.asset.url)?;
-    extract_bsk_binary(&archive, kind)
+    sources::try_sources(
+        "download and verify the bsk update",
+        std::iter::once((
+            if candidate.asset.fallback_url.is_some() {
+                "domestic"
+            } else {
+                "primary"
+            },
+            candidate.asset.url.as_str(),
+        ))
+        .chain(
+            candidate
+                .asset
+                .fallback_url
+                .as_deref()
+                .map(|url| ("GitHub fallback", url)),
+        ),
+        |url| {
+            let archive = fetch_bytes_with_client(client, url)?;
+            verify_sha256(&archive, expected_sha)?;
+            let kind = ArchiveKind::from_url(url)?;
+            extract_bsk_binary(&archive, kind)
+        },
+    )
 }
 
 /// What a daemon may do with a newer version it finds.
@@ -668,10 +699,6 @@ pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<()> {
         bail!("downloaded bsk archive checksum mismatch: expected {expected}, got {actual}");
     }
     Ok(())
-}
-
-fn manifest_url() -> String {
-    std::env::var("BSK_UPDATE_MANIFEST_URL").unwrap_or_else(|_| DEFAULT_MANIFEST_URL.to_string())
 }
 
 /// Whether daemon-side auto-upgrade is enabled. On by default; only
@@ -828,7 +855,7 @@ pub(crate) fn refresh_update_cache(
     cache_path: &Path,
     auto_update: bool,
 ) -> Result<Option<UpdateCandidate>> {
-    let manifest = fetch_manifest(&manifest_url())?;
+    let manifest = sources::fetch_update_manifest()?;
     let platform = current_platform_key()?;
     let candidate = manifest.update_candidate(env!("CARGO_PKG_VERSION"), platform)?;
     write_update_cache(
@@ -2026,6 +2053,7 @@ mod tests {
             asset: ManifestAsset {
                 url: "https://example.test/bsk.tar.gz".to_string(),
                 sha256: Some("abc123".to_string()),
+                fallback_url: None,
             },
         }
     }

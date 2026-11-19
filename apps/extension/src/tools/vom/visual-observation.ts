@@ -6,7 +6,6 @@ import {
   type VomOptions,
   type VomScene,
 } from "@browser-skill/vom";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
 import type { RefInput, RefStore } from "@/session-manager/ref-store";
 import type { ObserveResult, RpcError } from "@/transport/types";
 import type { CdpRunner } from "../shared";
@@ -115,8 +114,16 @@ export interface ObservationOutput {
   render: ReturnType<typeof prepareObservationRender>;
   candidates: readonly VisualCandidate[];
   identities: Map<string, DocumentIdentity>;
+  rootFrameId: string;
   rootIdentity?: DocumentIdentity;
-  frames: Map<string, { target: CdpTarget; parentFrameId?: string }>;
+  frames: Map<
+    string,
+    {
+      loaderId?: string;
+      parentFrameId?: string;
+      documentElementBackendNodeId?: number;
+    }
+  >;
   notices: string[];
   maxTokens?: number;
 }
@@ -150,11 +157,18 @@ export function prepareVisualObservation(
     render: prepareObservationRender(attachVisualEntries(scene, graph, candidates), options),
     candidates,
     identities,
+    rootFrameId,
     rootIdentity: identities.get(rootFrameId),
     frames: new Map(
       [...graph.frames].map(([id, frame]) => [
         id,
-        { target: frame.target, parentFrameId: frame.parentFrameId },
+        {
+          ...(frame.loaderId !== undefined ? { loaderId: frame.loaderId } : {}),
+          ...(frame.parentFrameId ? { parentFrameId: frame.parentFrameId } : {}),
+          ...(frame.handle.documentElementBackendNodeId !== undefined
+            ? { documentElementBackendNodeId: frame.handle.documentElementBackendNodeId }
+            : {}),
+        },
       ]),
     ),
     notices,
@@ -197,6 +211,7 @@ function page(
   budget: number | undefined,
   continued: boolean,
   nextToken: string,
+  allowContinuation = true,
 ): Page | RpcError {
   const max = budget ?? Infinity;
   if (!(max >= 0) || Number.isNaN(max)) return failure("max_tokens must be nonnegative");
@@ -214,7 +229,8 @@ function page(
   if (continued && state.buffer[0]?.context) headers.push(state.buffer[0].context);
   const fixed = [...headers, ...state.output.notices];
   let used = fixed.reduce((n, line) => n + cost(line), 0);
-  if (used > max) return failure("max_tokens is too small for observation headers and notices");
+  if (allowContinuation && used > max)
+    return failure("max_tokens is too small for observation headers and notices");
   const lines = [...headers];
   const refs: RenderedRef[] = [];
   const frameIds = new Set<string>();
@@ -228,11 +244,15 @@ function page(
     }
     const row = state.buffer[emitted];
     if (!row) break;
-    const reserve = state.buffer.length > emitted + 1 || !state.exhausted ? cost(footer) : 0;
+    const reserve =
+      allowContinuation && (state.buffer.length > emitted + 1 || !state.exhausted)
+        ? cost(footer)
+        : 0;
     let text = row.text;
     if (used + cost(text) + reserve > max && row.minimal) text = row.minimal;
     if (used + cost(text) + reserve > max) {
-      if (!emitted) return failure("max_tokens is too small to advance; increase the budget");
+      if (allowContinuation && !emitted)
+        return failure("max_tokens is too small to advance; increase the budget");
       break;
     }
     if (row.ref) refs.push({ ...row.ref, line: lines.length });
@@ -243,17 +263,58 @@ function page(
   }
   lines.push(...state.output.notices);
   const more = state.buffer.length > emitted || !state.exhausted;
-  if (more) lines.push(footer);
+  if (allowContinuation && more) lines.push(footer);
   return { text: lines.join("\n"), refs, more, frameIds, consumed: emitted };
+}
+
+export function renderObservationOutput(
+  output: ObservationOutput,
+  options: { maxTokens?: number } = {},
+): { text: string; refs: RenderedRef[]; truncated: boolean } {
+  const budget = options.maxTokens ?? output.maxTokens;
+  const clampedBudget =
+    budget !== undefined && (!Number.isFinite(budget) || budget < 0)
+      ? Number.isNaN(budget)
+        ? 0
+        : Math.max(0, budget)
+      : budget;
+  const state: Continuation = {
+    stableRefs: false,
+    output,
+    tabId: 0,
+    revision: 0,
+    token: "",
+    exhausted: false,
+    buffer: [],
+  };
+  const rendered = page(state, clampedBudget, false, "", false);
+  if ("code" in rendered) {
+    return {
+      text: [...output.render.headers, ...output.notices].join("\n"),
+      refs: [],
+      truncated: true,
+    };
+  }
+  return {
+    text: rendered.text,
+    refs: rendered.refs,
+    truncated: rendered.more || output.render.truncated(),
+  };
 }
 
 export async function publishObservationPage(
   store: RefStore,
   cdp: CdpRunner,
   tabId: number,
-  input: { output?: ObservationOutput; cursor?: string; maxTokens?: number },
+  input: {
+    output?: ObservationOutput;
+    cursor?: string;
+    maxTokens?: number;
+    allowContinuation?: boolean;
+  },
   signal?: AbortSignal,
 ): Promise<ObserveResult | RpcError> {
+  const allowContinuation = input.allowContinuation ?? true;
   let state: Continuation;
   if (input.output)
     state = {
@@ -282,7 +343,9 @@ export async function publishObservationPage(
   // Retry retains exactly the latest output; it cannot advance the iterator twice.
   const retry = input.cursor && state.last?.input === input.cursor ? state.last : undefined;
   const nextToken = crypto.randomUUID();
-  const rendered = retry ? undefined : page(state, budget, !!input.cursor, nextToken);
+  const rendered = retry
+    ? undefined
+    : page(state, budget, !!input.cursor, nextToken, allowContinuation);
   if (rendered && "code" in rendered) return rendered;
   const identities = new Map<string, DocumentIdentity>(retry?.identities);
   if (state.output.rootIdentity)
@@ -322,15 +385,25 @@ export async function publishObservationPage(
         ref.ref,
         { kind: "visual-region", candidate: state.output.candidates[ref.visualKey] },
       ];
-    const target = ref.frameId ? state.output.frames.get(ref.frameId)?.target : undefined;
+    const resolvedFrameId =
+      ref.frameId || state.output.rootIdentity?.frameId || state.output.rootFrameId;
+    const frameMeta = resolvedFrameId ? state.output.frames.get(resolvedFrameId) : undefined;
+    const frameIdentity = resolvedFrameId
+      ? state.output.identities.get(resolvedFrameId)
+      : state.output.rootIdentity;
+    const loaderId = frameIdentity?.loaderId ?? frameMeta?.loaderId;
+    const documentElementBackendNodeId =
+      frameIdentity?.documentElementBackendNodeId ?? frameMeta?.documentElementBackendNodeId;
     return [
       ref.ref,
       {
         ...(ref.name ? { name: ref.name } : {}),
+        ...(ref.rowAnchor ? { rowAnchor: ref.rowAnchor } : {}),
         backendNodeId: ref.backendNodeId,
         tabId,
-        frameId: ref.frameId,
-        cdpSessionId: target?.sessionId,
+        ...(resolvedFrameId ? { frameId: resolvedFrameId } : {}),
+        ...(loaderId !== undefined ? { loaderId } : {}),
+        ...(documentElementBackendNodeId !== undefined ? { documentElementBackendNodeId } : {}),
       },
     ];
   });
@@ -345,10 +418,11 @@ export async function publishObservationPage(
     ref_count: refs.length,
     tab_id: tabId,
     truncated: rendered!.more || state.output.render.truncated(),
-    ...(rendered!.more ? { next_cursor: state.token } : {}),
+    ...(allowContinuation && rendered!.more ? { next_cursor: state.token } : {}),
   };
-  if (input.cursor) state.last = { input: input.cursor, budget, result, identities };
-  if (!rendered!.more) {
+  if (allowContinuation && input.cursor)
+    state.last = { input: input.cursor, budget, result, identities };
+  if (!allowContinuation || !rendered!.more) {
     // Keep only the latest response/identity proof for transport retry, not the full observation.
     state.output = {
       ...state.output,
@@ -359,7 +433,7 @@ export async function publishObservationPage(
       render: { headers: [], rows: [][Symbol.iterator](), truncated: () => false },
     };
   }
-  if (rendered!.more || input.cursor) continuations.set(store, state);
+  if (allowContinuation && (rendered!.more || input.cursor)) continuations.set(store, state);
   else continuations.delete(store);
   return result;
 }

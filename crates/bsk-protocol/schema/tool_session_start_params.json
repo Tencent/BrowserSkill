@@ -1,10 +1,38 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "SessionStartParams",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
+  "additionalProperties": false,
+  "definitions": {
+    "ControllerInfo": {
+      "description": "Display identity of the agent controlling a session. Never an authorization claim.",
+      "properties": {
+        "color": {
+          "description": "Optional six-digit hex color. Omitted colors are derived from the session ID.",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "project": {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
   "properties": {
     "browser_instance_id": {
       "type": [
@@ -12,8 +40,19 @@
         "null"
       ]
     },
+    "controller": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ControllerInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Caller-supplied display labels, not an authenticated identity."
+    },
     "focused": {
-      "description": "Whether the new Agent Window should take focus. Omitted means the extension's default (`false`).",
+      "description": "Whether the new Agent Window should take focus. Omitted means the\nextension's default (`false`).",
       "type": [
         "boolean",
         "null"
@@ -21,12 +60,12 @@
     },
     "height": {
       "description": "Optional Agent Window outer height in CSS pixels (100..=7680).",
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     },
     "incognito": {
       "description": "Use Chrome's shared incognito browsing session. Omitted means normal.",
@@ -37,12 +76,17 @@
     },
     "width": {
       "description": "Optional Agent Window outer width in CSS pixels (100..=7680).",
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     }
-  }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SessionStartParams",
+  "type": "object"
 }

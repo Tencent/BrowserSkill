@@ -35,13 +35,26 @@ function domAncestors(
   numericId: ReadonlyMap<SemanticNodeId, number>,
 ): number[] {
   const ancestors: number[] = [];
-  const seen = new Set<SemanticNodeId>();
+  let seen: Set<SemanticNodeId> | undefined;
   let current = node.domParentId;
-  while (current && !seen.has(current)) {
-    seen.add(current);
+  let steps = 0;
+  while (current) {
+    if (steps >= 64) {
+      if (!seen) {
+        seen = new Set<SemanticNodeId>();
+        let cursor = node.domParentId;
+        for (let i = 0; i < steps && cursor; i++) {
+          seen.add(cursor);
+          cursor = graph.nodes.get(cursor)?.domParentId;
+        }
+      }
+      if (seen.has(current)) break;
+      seen.add(current);
+    }
     const id = numericId.get(current);
     if (id !== undefined) ancestors.push(id);
     current = graph.nodes.get(current)?.domParentId;
+    steps += 1;
   }
   return ancestors;
 }
@@ -60,6 +73,11 @@ export function projectSemanticGraph(graph: StructuredSemanticGraph): VomScene {
 
   const numericId = new Map<SemanticNodeId, number>();
   orderedNodes.forEach((node, index) => numericId.set(node.id, index + 1));
+  // Flattening presentation-only wrappers must not erase DOM containment.
+  // These IDs are internal ancestry facts; the wrappers stay out of the VOM.
+  for (const id of graph.nodes.keys()) {
+    if (!numericId.has(id)) numericId.set(id, numericId.size + 1);
+  }
   const nodes: VomNode[] = orderedNodes.map((node) => ({
     ...node.vom,
     id: numericId.get(node.id) as number,

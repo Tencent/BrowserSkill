@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_DAEMON_WS_URL } from "../generated/methods";
 import type { ConnectionState, ProtocolFrame } from "../types";
 import { WSTransport } from "../ws-transport";
 
@@ -79,12 +80,12 @@ describe("WSTransport", () => {
 
   it("constructs a WebSocket against the configured URL when connect() is called", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const connectPromise = t.connect();
     expect(FakeSocket.instances.length).toBe(1);
-    expect(lastSocket().url).toBe("ws://127.0.0.1:52800");
+    expect(lastSocket().url).toBe(DEFAULT_DAEMON_WS_URL);
     lastSocket().open();
     await connectPromise;
     expect(t.state).toBe("connected");
@@ -93,7 +94,7 @@ describe("WSTransport", () => {
   it("emits connection state transitions disconnected → connecting → connected", async () => {
     const transitions: ConnectionState[] = [];
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     t.onConnectionStateChange((s) => transitions.push(s));
@@ -136,7 +137,7 @@ describe("WSTransport", () => {
 
   it("serialises outbound frames as JSON when the socket is open", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const p = t.connect();
@@ -146,10 +147,30 @@ describe("WSTransport", () => {
     expect(lastSocket().sent).toEqual([JSON.stringify({ id: "1", method: "system.ping" })]);
   });
 
+  it("replaces lone surrogates so the daemon's strict JSON parser accepts the frame", async () => {
+    const t = new WSTransport({
+      url: DEFAULT_DAEMON_WS_URL,
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    const p = t.connect();
+    lastSocket().open();
+    await p;
+    // "Hi 🚀 there" cut at 4 UTF-16 units keeps only the rocket's high surrogate.
+    const cut = "Hi 🚀 there".slice(0, 4);
+    t.send({ id: "1", result: { text: cut, kept: "🚀", literal: "\\ud83d" } });
+    const [payload] = lastSocket().sent;
+    // serde_json rejects `\udXXX` escapes that are not a surrogate pair.
+    expect(payload).not.toMatch(/(?<!\\)\\u[dD][89a-fA-F]/);
+    expect(JSON.parse(payload)).toEqual({
+      id: "1",
+      result: { text: "Hi �", kept: "🚀", literal: "\\ud83d" },
+    });
+  });
+
   it("invokes onMessage for inbound JSON frames", async () => {
     const handler = vi.fn();
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     t.onMessage(handler);
@@ -162,7 +183,7 @@ describe("WSTransport", () => {
 
   it("disconnect() closes the socket and stops reconnecting", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const p = t.connect();
@@ -178,7 +199,7 @@ describe("WSTransport", () => {
 
   it("backs off exponentially across consecutive failed reconnects (1s, 2s, 4s, …, capped at 5s)", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const states: ConnectionState[] = [];
@@ -213,7 +234,7 @@ describe("WSTransport", () => {
 
   it("resets the backoff counter after a successful (re)connect", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const p = t.connect();
@@ -239,7 +260,7 @@ describe("WSTransport", () => {
 
   it("cancels pending backoff and ignores delayed events from a replaced socket", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const initial = t.connect();
@@ -268,7 +289,7 @@ describe("WSTransport", () => {
   it("ignores malformed inbound messages (non-JSON) without throwing", async () => {
     const handler = vi.fn();
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     t.onMessage(handler);
@@ -287,7 +308,7 @@ describe("WSTransport", () => {
   it("disposes handlers via Disposable returned from onMessage", async () => {
     const handler = vi.fn();
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const disp = t.onMessage(handler);
@@ -304,10 +325,10 @@ describe("WSTransport", () => {
 
   it("setUrl returns false for the same URL and uses the new URL on the next connect", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
-    expect(t.setUrl("ws://127.0.0.1:52800")).toBe(false);
+    expect(t.setUrl(DEFAULT_DAEMON_WS_URL)).toBe(false);
     expect(t.setUrl("ws://127.0.0.1:53200")).toBe(true);
 
     const p = t.connect();
@@ -316,4 +337,60 @@ describe("WSTransport", () => {
     await p;
     expect(t.state).toBe("connected");
   });
+});
+
+it("authenticates before connected, rejects early sends, and closes a second final frame", async () => {
+  let complete!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  const t = new WSTransport({
+    url: DEFAULT_DAEMON_WS_URL,
+    authenticate: () => gate,
+    webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+  });
+  const handler = vi.fn();
+  t.onMessage(handler);
+  const pending = t.connect();
+  lastSocket().open();
+  expect(t.state).toBe("connecting");
+  expect(() => t.send({ id: "early", method: "system.handshake" })).toThrow();
+  lastSocket().receive({ id: "early", result: {} });
+  expect(handler).not.toHaveBeenCalled();
+  complete();
+  await pending;
+  expect(t.state).toBe("connected");
+  lastSocket().receive({
+    type: "local.auth.ready",
+    v: 1,
+    rotation: null,
+    commit: null,
+  } as unknown as ProtocolFrame);
+  expect(handler).not.toHaveBeenCalled();
+  expect(t.state).toBe("disconnected");
+  await t.disconnect();
+});
+it("auth failures back off for 30 seconds and explicit retry resets the delay", async () => {
+  vi.useFakeTimers();
+  const authenticate = vi.fn().mockRejectedValue(new Error("server_unverified"));
+  const t = new WSTransport({
+    url: DEFAULT_DAEMON_WS_URL,
+    authenticate,
+    webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+  });
+  const pending = t.connect();
+  lastSocket().open();
+  await expect(pending).rejects.toThrow("server_unverified");
+  const count = FakeSocket.instances.length;
+  await vi.advanceTimersByTimeAsync(29_999);
+  expect(FakeSocket.instances).toHaveLength(count);
+  await expect(t.connect()).rejects.toThrow("backoff");
+  t.resetAuthenticationBackoff();
+  authenticate.mockResolvedValue(undefined);
+  const retried = t.connect();
+  lastSocket().open();
+  await retried;
+  expect(t.state).toBe("connected");
+  await t.disconnect();
+  vi.useRealTimers();
 });

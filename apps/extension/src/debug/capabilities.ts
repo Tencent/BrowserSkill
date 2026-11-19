@@ -1,32 +1,12 @@
+import { debugActions } from "@/transport/generated/methods";
 import { HISTORY_AGE_MS, HISTORY_BYTES, HISTORY_LIMIT } from "./archive";
 import { JOURNAL_BYTES, JOURNAL_PINS, JOURNAL_REQUESTS } from "./journal";
 
 declare const __BSK_EXT_BUILD__: string;
 declare const __BSK_EXT_VERSION__: string;
-export const DEBUG_ACTIONS = [
-  "performance",
-  "aggregate",
-  "duplicates",
-  "start",
-  "stop",
-  "status",
-  "requests",
-  "request",
-  "operations",
-  "operation",
-  "console",
-  "pages",
-  "export",
-  "rules",
-  "rule_add",
-  "rule_enable",
-  "rule_disable",
-  "rule_remove",
-  "replay",
-  "capabilities",
-  "pin",
-  "unpin",
-] as const;
+export const DEBUG_ACTIONS = debugActions
+  .filter((action) => action.owner === "extension")
+  .map((action) => action.action);
 export const DEBUG_FIELDS = [
   "resource_type",
   "frame_id",

@@ -1041,6 +1041,117 @@ describe("renderVom single-layer page", () => {
     expect(out.text).toContain('@e2 button "View" [ctx: Project Beta]');
   });
 
+  it.each([
+    false,
+    true,
+  ])("uses DOM card text even after both CTAs in AX order (reversed=%s)", (reversed) => {
+    const cards = [
+      node({
+        id: 2,
+        parentId: 1,
+        tag: "button",
+        role: "button",
+        name: "Continue",
+        contextScopeId: "root",
+        domParentId: 100,
+        domAncestorIds: [100, 1],
+      }),
+      node({
+        id: 3,
+        parentId: 1,
+        tag: "button",
+        role: "button",
+        name: "Continue",
+        contextScopeId: "root",
+        domParentId: 101,
+        domAncestorIds: [101, 1],
+      }),
+      node({
+        id: 4,
+        parentId: 1,
+        role: "StaticText",
+        name: "Candidate A",
+        contextScopeId: "root",
+        domParentId: 100,
+        domAncestorIds: [100, 1],
+      }),
+      node({
+        id: 5,
+        parentId: 1,
+        role: "StaticText",
+        name: "Candidate B",
+        contextScopeId: "root",
+        domParentId: 101,
+        domAncestorIds: [101, 1],
+      }),
+    ];
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", contextScopeId: "root" }),
+        node({
+          id: 6,
+          parentId: 1,
+          role: "StaticText",
+          name: "Record 99",
+          contextScopeId: "root",
+          domParentId: 1,
+          domAncestorIds: [1],
+        }),
+        ...(reversed ? cards.reverse() : cards),
+      ]),
+    );
+    // References remain attached to the concrete card, independent of output order.
+    expect(out.text).not.toContain("[ctx: Record 99]");
+    expect(out.refs.map((ref) => ref.ctx).sort()).toEqual(["Candidate A", "Candidate B"]);
+  });
+
+  it("does not infer duplicate-action context from other cards or frame scopes", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", contextScopeId: "root" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "StaticText",
+          name: "Other record",
+          contextScopeId: "root",
+          domParentId: 100,
+          domAncestorIds: [100, 1],
+        }),
+        node({
+          id: 3,
+          parentId: 1,
+          tag: "button",
+          role: "button",
+          name: "Continue",
+          contextScopeId: "root",
+          domParentId: 101,
+          domAncestorIds: [101, 1],
+        }),
+        node({
+          id: 4,
+          parentId: 1,
+          tag: "button",
+          role: "button",
+          name: "Continue",
+          contextScopeId: "root",
+          domParentId: 102,
+          domAncestorIds: [102, 1],
+        }),
+        node({
+          id: 5,
+          parentId: 1,
+          role: "StaticText",
+          name: "Other frame",
+          contextScopeId: "child",
+          domParentId: 101,
+          domAncestorIds: [101, 1],
+        }),
+      ]),
+    );
+    expect(out.refs.map((ref) => ref.ctx)).toEqual([undefined, undefined]);
+  });
+
   it("does not add low-value root context to duplicated brand links", () => {
     const out = renderVom(
       scene([
@@ -1531,5 +1642,1007 @@ describe("selection evidence", () => {
     );
     expect(out.refs).toHaveLength(0);
     expect(out.text).not.toContain("[selected");
+  });
+
+  describe("Wave 1 Affordance-Typed VOM v2 & CJK-safe compaction", () => {
+    it("binds preceding static sibling captions to bare inputs as [field: ...] without duplicating consumed captions", () => {
+      const out = renderVom(
+        scene([
+          node({
+            id: 1,
+            role: "form",
+            name: "准入表单",
+            rect: { x: 0, y: 0, w: 600, h: 300 },
+          }),
+          node({
+            id: 2,
+            parentId: 1,
+            role: "statictext",
+            name: "企业全称",
+            rect: { x: 10, y: 10, w: 120, h: 24 },
+          }),
+          node({
+            id: 3,
+            parentId: 1,
+            backendNodeId: 103,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 140, y: 10, w: 240, h: 24 },
+          }),
+          node({
+            id: 4,
+            parentId: 1,
+            role: "statictext",
+            name: "未关联的独立说明文字必须保留",
+            rect: { x: 10, y: 50, w: 280, h: 24 },
+          }),
+          node({
+            id: 5,
+            parentId: 1,
+            backendNodeId: 105,
+            tag: "input",
+            role: "searchbox",
+            nearbyText: "邻近回退标签",
+            inputState: "empty",
+            rect: { x: 10, y: 90, w: 240, h: 24 },
+          }),
+        ]),
+      );
+      expect(out.text).toContain('@e1 textbox [field: "企业全称"] [empty]');
+      expect(out.text.match(/企业全称/g)).toHaveLength(1);
+      expect(out.text).toContain("未关联的独立说明文字必须保留");
+      // Preceding unclaimed sibling id=4 is bound to id=5; test nearbyText fallback on an isolated input too:
+      const isolated = renderVom(
+        scene([
+          node({
+            id: 10,
+            backendNodeId: 110,
+            tag: "input",
+            role: "spinbutton",
+            nearbyText: "重试次数上限",
+            inputState: "empty",
+            rect: { x: 10, y: 10, w: 120, h: 24 },
+          }),
+        ]),
+      );
+      expect(isolated.text).toContain('@e1 spinbutton [field: "重试次数上限"]');
+    });
+
+    it("folds exact parent-child statictext echoes while preserving CJK prefix/substring child text", () => {
+      const out = renderVom(
+        scene([
+          node({
+            id: 1,
+            role: "region",
+            name: "星云数据看板",
+            rect: { x: 0, y: 0, w: 600, h: 200 },
+          }),
+          node({
+            id: 2,
+            parentId: 1,
+            role: "statictext",
+            name: "星云数据看板",
+            rect: { x: 10, y: 10, w: 200, h: 24 },
+          }),
+          node({
+            id: 3,
+            parentId: 1,
+            role: "statictext",
+            name: "星云数据看板筛选器",
+            rect: { x: 10, y: 40, w: 260, h: 24 },
+          }),
+        ]),
+      );
+      expect(out.text).toContain('region "星云数据看板"');
+      expect(out.text).toContain("星云数据看板筛选器");
+      const lines = out.text.split("\n");
+      expect(lines.filter((line) => line.trim() === 'text "星云数据看板"')).toHaveLength(0);
+    });
+
+    it("inlines up to 10 native <select> options with selected marker and suppresses them when sensitive or redacted", () => {
+      const options = Array.from({ length: 10 }, (_, idx) => ({
+        value: idx === 1 ? "华南大区" : `r_${idx + 1}`,
+        label: idx === 1 ? "华南大区" : `大区${idx + 1}`,
+        ...(idx === 0 ? { selected: true } : {}),
+      }));
+      const normal = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 201,
+            tag: "select",
+            role: "combobox",
+            name: "经营大区",
+            value: "r_1",
+            selectOptions: options,
+            selectOptionsTruncated: true,
+            rect: { x: 10, y: 10, w: 180, h: 28 },
+          }),
+        ]),
+      );
+      expect(normal.text).toContain(
+        '[options: r_1="大区1"* | "华南大区" | r_3="大区3" | r_4="大区4" | r_5="大区5" | r_6="大区6" | r_7="大区7" | r_8="大区8" | r_9="大区9" | r_10="大区10" | …]',
+      );
+      expect(normal.text).not.toContain("[custom-dropdown:");
+
+      const redacted = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 201,
+            tag: "select",
+            role: "combobox",
+            name: "经营大区",
+            value: "r_1",
+            selectOptions: options,
+            rect: { x: 10, y: 10, w: 180, h: 28 },
+          }),
+        ]),
+        { redactValues: true },
+      );
+      expect(redacted.text).not.toContain("[options:");
+
+      const sensitiveSelect = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 202,
+            tag: "select",
+            role: "combobox",
+            name: "安全密保问题",
+            sensitive: true,
+            selectOptions: options,
+            rect: { x: 10, y: 10, w: 180, h: 28 },
+          }),
+        ]),
+      );
+      expect(sensitiveSelect.text).not.toContain("[options:");
+    });
+
+    it("annotates non-editable non-<select> ARIA comboboxes with [custom-dropdown: ...] while skipping editable search/autocomplete inputs", () => {
+      const out = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 301,
+            tag: "div",
+            role: "combobox",
+            name: "结算账期方案",
+            attrs: { "aria-expanded": "false" },
+            rect: { x: 10, y: 10, w: 180, h: 28 },
+          }),
+          node({
+            id: 2,
+            backendNodeId: 302,
+            tag: "div",
+            role: "combobox",
+            name: "开票类型",
+            attrs: { "aria-expanded": "true" },
+            rect: { x: 10, y: 50, w: 180, h: 28 },
+          }),
+          // YouTube-style editable search input with role="combobox"
+          node({
+            id: 3,
+            backendNodeId: 303,
+            tag: "input",
+            role: "combobox",
+            name: "Search",
+            attrs: { type: "text", name: "search_query" },
+            rect: { x: 10, y: 90, w: 240, h: 28 },
+          }),
+          // Non-input combobox with aria-autocomplete="list"
+          node({
+            id: 4,
+            backendNodeId: 304,
+            tag: "div",
+            role: "combobox",
+            name: "命令面板",
+            attrs: { "aria-autocomplete": "list" },
+            rect: { x: 10, y: 130, w: 240, h: 28 },
+          }),
+          // Element Plus readonly <input role="combobox"> select trigger
+          node({
+            id: 5,
+            backendNodeId: 305,
+            tag: "input",
+            role: "combobox",
+            name: "币种",
+            attrs: { type: "text", readonly: "" },
+            rect: { x: 10, y: 170, w: 160, h: 28 },
+          }),
+        ]),
+      );
+      expect(out.text).toContain('@e1 combobox "结算账期方案" [custom-dropdown: click to open]');
+      expect(out.text).toContain('@e2 combobox "开票类型" [custom-dropdown: expanded]');
+      expect(out.text).toContain('@e3 combobox "Search"');
+      expect(out.text).not.toContain('@e3 combobox "Search" [custom-dropdown:');
+      expect(out.text).not.toContain('@e4 combobox "命令面板" [custom-dropdown:');
+      expect(out.text).toContain('@e5 combobox "币种" [custom-dropdown: click to open]');
+    });
+
+    it("does not misbind inline units ([input] 'kg' [input2]) or validation errors ([input] '邮箱格式不正确' [input2]) as [field: ...], and caps overlong option labels", () => {
+      const unitAndErrorForm = renderVom(
+        scene([
+          node({ id: 1, role: "form", rect: { x: 0, y: 0, w: 600, h: 200 } }),
+          node({
+            id: 2,
+            parentId: 1,
+            backendNodeId: 502,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 10, y: 10, w: 80, h: 28 },
+          }),
+          node({
+            id: 3,
+            parentId: 1,
+            role: "statictext",
+            name: "kg",
+            rect: { x: 96, y: 14, w: 24, h: 20 },
+          }),
+          node({
+            id: 4,
+            parentId: 1,
+            backendNodeId: 504,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 130, y: 10, w: 80, h: 28 },
+          }),
+          node({
+            id: 5,
+            parentId: 1,
+            backendNodeId: 505,
+            tag: "input",
+            role: "textbox",
+            name: "联系邮箱",
+            inputState: "filled",
+            value: "bad@",
+            rect: { x: 10, y: 50, w: 200, h: 28 },
+          }),
+          node({
+            id: 6,
+            parentId: 1,
+            role: "statictext",
+            name: "邮箱格式不正确",
+            rect: { x: 220, y: 54, w: 120, h: 20 },
+          }),
+          node({
+            id: 7,
+            parentId: 1,
+            backendNodeId: 507,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 10, y: 95, w: 200, h: 28 },
+          }),
+          node({
+            id: 8,
+            parentId: 1,
+            backendNodeId: 508,
+            tag: "select",
+            role: "combobox",
+            name: "条款",
+            selectOptions: [{ value: "clause_1", label: "甲".repeat(70), selected: true }],
+            rect: { x: 10, y: 140, w: 260, h: 28 },
+          }),
+        ]),
+      );
+      expect(unitAndErrorForm.text).not.toContain('[field: "kg"]');
+      expect(unitAndErrorForm.text).toContain("kg");
+      expect(unitAndErrorForm.text).not.toContain('[field: "邮箱格式不正确"]');
+      expect(unitAndErrorForm.text).toContain("邮箱格式不正确");
+      expect(unitAndErrorForm.text).toContain(`[options: clause_1="${"甲".repeat(48)}…"*]`);
+    });
+
+    it("keeps 1-2 row tables and interactive rows expanded, and folds >= 3 consecutive pure read-only rows", () => {
+      const shortTable = renderVom(
+        scene([
+          node({ id: 1, role: "table", rect: { x: 0, y: 0, w: 400, h: 100 } }),
+          node({ id: 2, parentId: 1, role: "row", rect: { x: 0, y: 0, w: 400, h: 30 } }),
+          node({
+            id: 3,
+            parentId: 2,
+            role: "columnheader",
+            name: "键",
+            rect: { x: 0, y: 0, w: 200, h: 30 },
+          }),
+          node({
+            id: 4,
+            parentId: 2,
+            role: "columnheader",
+            name: "值",
+            rect: { x: 200, y: 0, w: 200, h: 30 },
+          }),
+          node({ id: 5, parentId: 1, role: "row", rect: { x: 0, y: 30, w: 400, h: 30 } }),
+          node({
+            id: 6,
+            parentId: 5,
+            role: "cell",
+            name: "状态",
+            rect: { x: 0, y: 30, w: 200, h: 30 },
+          }),
+          node({
+            id: 7,
+            parentId: 5,
+            role: "cell",
+            name: "正常",
+            rect: { x: 200, y: 30, w: 200, h: 30 },
+          }),
+        ]),
+      );
+      expect(shortTable.text).toContain('columnheader "键"');
+      expect(shortTable.text).not.toContain('row "键 | 值"');
+
+      const longMixedTable = renderVom(
+        scene([
+          node({ id: 1, role: "table", rect: { x: 0, y: 0, w: 500, h: 200 } }),
+          node({ id: 2, parentId: 1, role: "rowgroup", rect: { x: 0, y: 0, w: 500, h: 40 } }),
+          node({ id: 3, parentId: 2, role: "row", rect: { x: 0, y: 0, w: 500, h: 40 } }),
+          node({
+            id: 4,
+            parentId: 3,
+            role: "columnheader",
+            name: "编号",
+            rect: { x: 0, y: 0, w: 200, h: 40 },
+          }),
+          node({
+            id: 5,
+            parentId: 3,
+            role: "columnheader",
+            name: "等级",
+            rect: { x: 200, y: 0, w: 300, h: 40 },
+          }),
+          node({ id: 6, parentId: 1, role: "rowgroup", rect: { x: 0, y: 40, w: 500, h: 160 } }),
+          node({ id: 7, parentId: 6, role: "row", rect: { x: 0, y: 40, w: 500, h: 40 } }),
+          node({
+            id: 8,
+            parentId: 7,
+            role: "cell",
+            name: "CHK-01",
+            rect: { x: 0, y: 40, w: 200, h: 40 },
+          }),
+          node({
+            id: 9,
+            parentId: 7,
+            role: "cell",
+            name: "常规",
+            rect: { x: 200, y: 40, w: 300, h: 40 },
+          }),
+          node({ id: 10, parentId: 6, role: "row", rect: { x: 0, y: 80, w: 500, h: 40 } }),
+          node({
+            id: 11,
+            parentId: 10,
+            role: "cell",
+            name: "CHK-02",
+            rect: { x: 0, y: 80, w: 200, h: 40 },
+          }),
+          node({
+            id: 12,
+            parentId: 10,
+            role: "cell",
+            name: "提示",
+            rect: { x: 200, y: 80, w: 300, h: 40 },
+          }),
+          node({ id: 13, parentId: 6, role: "row", rect: { x: 0, y: 120, w: 500, h: 40 } }),
+          node({
+            id: 14,
+            parentId: 13,
+            role: "cell",
+            name: "CHK-03",
+            rect: { x: 0, y: 120, w: 200, h: 40 },
+          }),
+          node({ id: 15, parentId: 13, role: "cell", rect: { x: 200, y: 120, w: 300, h: 40 } }),
+          node({
+            id: 16,
+            parentId: 15,
+            backendNodeId: 416,
+            tag: "button",
+            role: "button",
+            name: "复核",
+            rowAnchor: "CHK-03",
+            rect: { x: 210, y: 125, w: 80, h: 28 },
+          }),
+        ]),
+      );
+      expect(longMixedTable.text).toContain('row "编号 | 等级"');
+      expect(longMixedTable.text).toContain('row "CHK-01 | 常规"');
+      expect(longMixedTable.text).toContain('row "CHK-02 | 提示"');
+      expect(longMixedTable.text).toContain('@e1 button "复核"');
+      expect(longMixedTable.refs[0]).toMatchObject({
+        ref: "e1",
+        backendNodeId: 416,
+        rowAnchor: "CHK-03",
+      });
+    });
+
+    it("folds >= 3 pure read-only rows when rowgroups carry descendant-derived names while preserving explicit aria-labels", () => {
+      const chromeAxTable = renderVom(
+        scene([
+          node({ id: 1, parentId: null, role: "RootWebArea", name: "Page" }),
+          node({
+            id: 2,
+            parentId: 1,
+            tag: "table",
+            role: "table",
+            name: "检查项编号 审计等级 CHK-101 常规 CHK-102 提示",
+            rect: { x: 0, y: 0, w: 500, h: 120 },
+          }),
+          node({
+            id: 3,
+            parentId: 2,
+            tag: "thead",
+            role: "rowgroup",
+            name: "检查项编号 审计等级",
+            rect: { x: 0, y: 0, w: 500, h: 40 },
+          }),
+          node({ id: 4, parentId: 3, role: "row", rect: { x: 0, y: 0, w: 500, h: 40 } }),
+          node({
+            id: 5,
+            parentId: 4,
+            role: "columnheader",
+            name: "检查项编号",
+            rect: { x: 0, y: 0, w: 200, h: 40 },
+          }),
+          node({
+            id: 6,
+            parentId: 4,
+            role: "columnheader",
+            name: "审计等级",
+            rect: { x: 200, y: 0, w: 300, h: 40 },
+          }),
+          node({
+            id: 7,
+            parentId: 2,
+            tag: "tbody",
+            role: "rowgroup",
+            name: "CHK-101 常规 CHK-102 提示",
+            rect: { x: 0, y: 40, w: 500, h: 80 },
+          }),
+          node({ id: 8, parentId: 7, role: "row", rect: { x: 0, y: 40, w: 500, h: 40 } }),
+          node({
+            id: 9,
+            parentId: 8,
+            role: "cell",
+            name: "CHK-101",
+            rect: { x: 0, y: 40, w: 200, h: 40 },
+          }),
+          node({
+            id: 10,
+            parentId: 8,
+            role: "cell",
+            name: "常规",
+            rect: { x: 200, y: 40, w: 300, h: 40 },
+          }),
+          node({ id: 11, parentId: 7, role: "row", rect: { x: 0, y: 80, w: 500, h: 40 } }),
+          node({
+            id: 12,
+            parentId: 11,
+            role: "cell",
+            name: "CHK-102",
+            rect: { x: 0, y: 80, w: 200, h: 40 },
+          }),
+          node({
+            id: 13,
+            parentId: 11,
+            role: "cell",
+            name: "提示",
+            rect: { x: 200, y: 80, w: 300, h: 40 },
+          }),
+        ]),
+      );
+      expect(chromeAxTable.text).toContain("    table\n");
+      expect(chromeAxTable.text).not.toContain("rowgroup");
+      expect(chromeAxTable.text).toContain('      row "检查项编号 | 审计等级"');
+      expect(chromeAxTable.text).toContain('      row "CHK-101 | 常规"');
+      expect(chromeAxTable.text).toContain('      row "CHK-102 | 提示"');
+    });
+
+    it("emits independent @eN rows for expanded nested menuitem descendants while keeping collapsed menus and native <select> folded", () => {
+      const collapsedNodes = [
+        node({ id: 1, parentId: null, tag: "ul", role: "menubar" }),
+        node({
+          id: 2,
+          parentId: 1,
+          backendNodeId: 102,
+          tag: "li",
+          role: "menuitem",
+          name: "Overview",
+        }),
+        node({
+          id: 3,
+          parentId: 1,
+          backendNodeId: 103,
+          tag: "li",
+          role: "menuitem",
+          name: "Workspace",
+        }),
+        node({ id: 4, parentId: null, tag: "ul", role: "menu" }),
+        node({
+          id: 5,
+          parentId: 4,
+          backendNodeId: 105,
+          tag: "li",
+          role: "menuitem",
+          name: "Members",
+          cursor: "pointer",
+        }),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 106,
+          tag: "li",
+          role: "menuitem",
+          name: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 60,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          text: "Advanced ▸",
+          clickable: true,
+          cursor: "pointer",
+        }),
+        node({
+          id: 7,
+          parentId: 60,
+          tag: "span",
+          role: "generic",
+          text: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 8,
+          parentId: 60,
+          tag: "i",
+          role: "img",
+          name: "chevron-right",
+          cursor: "pointer",
+        }),
+      ];
+      const collapsed = renderVom(scene(collapsedNodes));
+      expect(collapsed.refs.map((r) => [r.ref, r.name])).toEqual([
+        ["e1", "Overview"],
+        ["e2", "Workspace"],
+        ["e3", "Members"],
+        ["e4", "Advanced"],
+      ]);
+      expect(collapsed.text).not.toContain("Audit export");
+      expect(collapsed.text).not.toContain("Report history");
+      expect(collapsed.text).not.toContain("chevron-right");
+
+      const expandedScene = scene([
+        ...collapsedNodes.slice(0, 5),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 106,
+          tag: "li",
+          role: "menuitem",
+          name: "Advanced Audit export Report history",
+          cursor: "pointer",
+        }),
+        node({
+          id: 60,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          text: "Advanced ▸",
+          clickable: true,
+          cursor: "pointer",
+        }),
+        node({
+          id: 7,
+          parentId: 60,
+          tag: "span",
+          role: "generic",
+          text: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 8,
+          parentId: 60,
+          tag: "i",
+          role: "img",
+          name: "chevron-right",
+          cursor: "pointer",
+        }),
+        node({
+          id: 9,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          position: "absolute",
+          cursor: "pointer",
+        }),
+        node({ id: 10, parentId: 9, tag: "ul", role: "none", cursor: "pointer" }),
+        node({
+          id: 11,
+          parentId: 10,
+          backendNodeId: 111,
+          tag: "li",
+          role: "menuitem",
+          name: "Audit export",
+          cursor: "pointer",
+        }),
+        node({
+          id: 12,
+          parentId: 11,
+          tag: "span",
+          role: "generic",
+          text: "Audit export",
+          cursor: "pointer",
+        }),
+        node({
+          id: 13,
+          parentId: 10,
+          backendNodeId: 113,
+          tag: "li",
+          role: "menuitem",
+          name: "Report history CSV archive",
+          cursor: "pointer",
+        }),
+        node({
+          id: 14,
+          parentId: 13,
+          tag: "span",
+          role: "generic",
+          text: "Report history",
+          cursor: "pointer",
+        }),
+        node({
+          id: 15,
+          parentId: 13,
+          backendNodeId: 115,
+          tag: "li",
+          role: "menuitem",
+          name: "CSV archive",
+          cursor: "pointer",
+        }),
+      ]);
+
+      const full = renderVom(expandedScene);
+      expect(full.text.split("\n")).toEqual([
+        "@vom 1",
+        "@view 1280x720",
+        "@layers 1 focus=L1",
+        "L1 page",
+        '  @e1 menuitem "Overview"',
+        '  @e2 menuitem "Workspace"',
+        '  @e3 menuitem "Members"',
+        '  @e4 menuitem "Advanced Audit export Report history"',
+        '    @e5 menuitem "Audit export"',
+        '    @e6 menuitem "Report history CSV archive"',
+        '      @e7 menuitem "CSV archive"',
+      ]);
+      expect(coreRefs(full.refs)).toEqual([
+        { ref: "e1", backendNodeId: 102 },
+        { ref: "e2", backendNodeId: 103 },
+        { ref: "e3", backendNodeId: 105 },
+        { ref: "e4", backendNodeId: 106 },
+        { ref: "e5", backendNodeId: 111 },
+        { ref: "e6", backendNodeId: 113 },
+        { ref: "e7", backendNodeId: 115 },
+      ]);
+
+      const prepared = prepareObservationRender(expandedScene);
+      const obsRows = Array.from({ [Symbol.iterator]: () => prepared.rows });
+      expect([...prepared.headers, ...obsRows.map((row) => row.text)].join("\n")).toBe(full.text);
+      expect(obsRows.filter((row) => row.ref).map((row) => [row.ref!.ref, row.ref!.name])).toEqual([
+        ["e1", "Overview"],
+        ["e2", "Workspace"],
+        ["e3", "Members"],
+        ["e4", "Advanced Audit export Report history"],
+        ["e5", "Audit export"],
+        ["e6", "Report history CSV archive"],
+        ["e7", "CSV archive"],
+      ]);
+
+      // Isomorphic siblings: custom ARIA combobox / named button keep nested interactive refs,
+      // whereas native single-select <select> keeps options folded inline without child @eN rows.
+      const siblings = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 201,
+            tag: "div",
+            role: "combobox",
+            name: "Filter status",
+            attrs: { "aria-expanded": "true" },
+          }),
+          node({ id: 2, parentId: 1, tag: "span", role: "StaticText", name: "Filter status" }),
+          node({ id: 3, parentId: 1, tag: "div", role: "listbox", referenceable: false }),
+          node({
+            id: 4,
+            parentId: 3,
+            backendNodeId: 204,
+            tag: "div",
+            role: "option",
+            name: "Active",
+          }),
+          node({
+            id: 40,
+            parentId: 4,
+            tag: "i",
+            role: "img",
+            name: "check-badge",
+          }),
+          node({
+            id: 41,
+            parentId: 4,
+            tag: "span",
+            role: "StaticText",
+            name: "Default filter",
+          }),
+          node({
+            id: 5,
+            parentId: 3,
+            backendNodeId: 205,
+            tag: "div",
+            role: "option",
+            name: "Archived",
+          }),
+          node({
+            id: 6,
+            backendNodeId: 206,
+            tag: "select",
+            role: "combobox",
+            name: "Region",
+            value: "cn",
+          }),
+          node({
+            id: 7,
+            parentId: 6,
+            backendNodeId: 207,
+            tag: "option",
+            role: "option",
+            name: "China",
+            attrs: { value: "cn", selected: "" },
+          }),
+          node({
+            id: 8,
+            parentId: 6,
+            backendNodeId: 208,
+            tag: "option",
+            role: "option",
+            name: "US",
+            attrs: { value: "us" },
+          }),
+          node({ id: 9, backendNodeId: 209, tag: "div", role: "button", name: "Order #88 Remove" }),
+          node({ id: 10, parentId: 9, tag: "span", role: "StaticText", name: "Order #88" }),
+          node({
+            id: 11,
+            parentId: 9,
+            backendNodeId: 211,
+            tag: "button",
+            role: "button",
+            name: "Remove",
+          }),
+          // React 18 root event-delegated custom dropdown: clickable is false on items,
+          // trigger has cursor: pointer + inline skin, popup crosses position: absolute.
+          node({
+            id: 12,
+            backendNodeId: 212,
+            tag: "div",
+            role: "combobox",
+            name: "报表类型",
+            cursor: "pointer",
+            attrs: { "aria-expanded": "true" },
+          }),
+          node({
+            id: 13,
+            parentId: 12,
+            tag: "span",
+            role: "generic",
+            text: "全部报表",
+            cursor: "pointer",
+          }),
+          node({
+            id: 14,
+            parentId: 12,
+            tag: "div",
+            role: "generic",
+            position: "absolute",
+            cursor: "default",
+          }),
+          node({
+            id: 15,
+            parentId: 14,
+            backendNodeId: 215,
+            tag: "div",
+            role: "generic",
+            text: "导出报表",
+            cursor: "pointer",
+          }),
+          node({
+            id: 16,
+            parentId: 14,
+            backendNodeId: 216,
+            tag: "div",
+            role: "generic",
+            text: "历史记录",
+            cursor: "pointer",
+          }),
+        ]),
+      );
+      expect(siblings.text.split("\n")).toEqual([
+        "@vom 1",
+        "@view 1280x720",
+        "@layers 1 focus=L1",
+        "L1 page",
+        '  @e1 combobox "Filter status" [custom-dropdown: expanded]',
+        '    @e2 option "Active"',
+        '    @e3 option "Archived"',
+        '  @e4 combobox "Region" ="cn" [options: cn="China"* | us="US"]',
+        '  @e5 button "Order #88 Remove"',
+        '    @e6 button "Remove"',
+        '  @e7 combobox "报表类型" [custom-dropdown: expanded]',
+        '    @e8 button "导出报表"',
+        '    @e9 button "历史记录"',
+      ]);
+
+      // Deeply nested cursor: pointer wrappers under a semantic control stay O(N).
+      const deepCount = 10_000;
+      const deepNodes = [
+        node({
+          id: 1,
+          backendNodeId: 301,
+          tag: "div",
+          role: "combobox",
+          name: "Deep picker",
+          cursor: "pointer",
+          attrs: { "aria-expanded": "true" },
+        }),
+      ];
+      for (let i = 0; i < deepCount; i += 1) {
+        deepNodes.push(
+          node({
+            id: i + 2,
+            parentId: i + 1,
+            tag: "div",
+            role: "generic",
+            cursor: "pointer",
+            ...(i === 0 ? { position: "absolute" } : {}),
+          }),
+        );
+      }
+      deepNodes.push(
+        node({
+          id: deepCount + 2,
+          parentId: deepCount + 1,
+          backendNodeId: 399,
+          tag: "div",
+          role: "generic",
+          text: "Deep delegated option",
+          cursor: "pointer",
+        }),
+      );
+      const t0 = performance.now();
+      const deepOut = renderVom(scene(deepNodes));
+      expect(performance.now() - t0).toBeLessThan(1_000);
+      expect(coreRefs(deepOut.refs)).toEqual([
+        { ref: "e1", backendNodeId: 301 },
+        { ref: "e2", backendNodeId: 399 },
+      ]);
+    });
+
+    it("budgets the L2 occlusion footer line in renderDoubleLayer, preserves generic Chinese headings, and renders popup tags without duplication", () => {
+      // 1. Two-layer modal scene: maxTokens budget includes the `L2 page — occluded by L1` footer.
+      const modalNodes: VomNode[] = [
+        node({ id: 1, tag: "main", role: "main", rect: { x: 0, y: 0, w: 1280, h: 720 } }),
+        ...Array.from({ length: 12 }, (_, idx) =>
+          node({
+            id: 10 + idx,
+            parentId: 1,
+            backendNodeId: 100 + idx,
+            tag: "button",
+            role: "button",
+            name: `Background action item ${idx + 1}`,
+            rect: { x: 10, y: idx * 40, w: 200, h: 32 },
+          }),
+        ),
+        node({
+          id: 50,
+          tag: "div",
+          role: "dialog",
+          name: "Confirm action",
+          modal: true,
+          position: "fixed",
+          paintOrder: 10,
+          rect: { x: 200, y: 100, w: 600, h: 400 },
+        }),
+        ...Array.from({ length: 8 }, (_, idx) =>
+          node({
+            id: 60 + idx,
+            parentId: 50,
+            backendNodeId: 200 + idx,
+            tag: "button",
+            role: "button",
+            name: `Modal option button ${idx + 1} with detailed description`,
+            paintOrder: 10,
+            rect: { x: 220, y: 120 + idx * 36, w: 300, h: 30 },
+          }),
+        ),
+      ];
+      for (const budget of [45, 65, 90, 120]) {
+        const out = renderVom(scene(modalNodes), { maxTokens: budget });
+        // Estimate matches render.ts estimateVomTokens (~chars / 3.5 per line); ensure L2 footer never pushes output unboundedly past budget.
+        const bodyLines = out.text.split("\n").filter((line) => !line.startsWith("[truncated:"));
+        const approxTokens = bodyLines.reduce(
+          (sum, line) => sum + Math.max(1, Math.ceil((line.length + 1) / 3.5)),
+          0,
+        );
+        expect(approxTokens).toBeLessThanOrEqual(budget);
+      }
+
+      // 2. Generic Chinese headings ("欢迎", "联系方式") are preserved as section context rather than suppressed by benchmark filters.
+      const headingScene = scene([
+        node({ id: 1, tag: "section", role: "region" }),
+        node({ id: 2, parentId: 1, tag: "h2", role: "heading", name: "欢迎" }),
+        node({
+          id: 3,
+          parentId: 1,
+          backendNodeId: 11,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+        node({ id: 4, tag: "section", role: "region" }),
+        node({ id: 5, parentId: 4, tag: "h2", role: "heading", name: "联系方式" }),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 12,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+      ]);
+      const headingOut = renderVom(headingScene);
+      expect(headingOut.text).toContain("[ctx: 欢迎]");
+      expect(headingOut.text).toContain("[ctx: 联系方式]");
+
+      // 3. Popup state tags: custom combobox gets `[custom-dropdown: expanded]` without `[expanded]` inside quotes;
+      //    popup buttons/menuitems emit post-quote `[expanded]` / `[has-submenu]`.
+      const popupOut = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 21,
+            tag: "div",
+            role: "combobox",
+            name: "Filter",
+            expanded: true,
+            hasPopup: "listbox",
+            attrs: { "aria-expanded": "true", "aria-haspopup": "listbox" },
+          }),
+          node({
+            id: 2,
+            backendNodeId: 22,
+            tag: "button",
+            role: "button",
+            name: "Products",
+            expanded: true,
+            hasPopup: "menu",
+          }),
+          node({
+            id: 3,
+            backendNodeId: 23,
+            tag: "div",
+            role: "menuitem",
+            name: "Export",
+            expanded: false,
+            hasPopup: "menu",
+          }),
+        ]),
+      );
+      expect(popupOut.text).toContain('@e1 combobox "Filter" [custom-dropdown: expanded]');
+      expect(popupOut.text).not.toContain('"Filter [expanded]"');
+      expect(popupOut.text).toContain('@e2 button "Products" [expanded]');
+      expect(popupOut.text).toContain('@e3 menuitem "Export" [has-submenu]');
+    });
   });
 });

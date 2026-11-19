@@ -5,7 +5,7 @@
 // no CDP intent on the clicked target, so a navigation target that the clicked
 // tab opens after mouse press supplies the intent URL instead.
 
-import type { CdpTarget } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
 import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
 import { transferError } from "./errors";
 import { type CdpRunner, isRpcError } from "./shared";
@@ -64,7 +64,7 @@ export const chromeNavigationTargetsApi: NavigationTargetsApi = {
 
 export interface DownloadCaptureOptions {
   cdp: CdpRunner;
-  target: CdpTarget;
+  handle: FrameDocumentHandle;
   expectedFrameId?: string;
   downloads: DownloadsApi;
   navigationTargets?: NavigationTargetsApi;
@@ -108,10 +108,6 @@ function isInBrowserRelativeDir(filename: string, browserRelativeDir: string): b
   const parent = filename.split(/[\\/]/).slice(0, -1);
   const expected = browserRelativeDir.split("/");
   return parent.slice(-expected.length).join("/") === browserRelativeDir;
-}
-
-function sameTarget(source: { tabId?: number; sessionId?: string }, target: CdpTarget): boolean {
-  return source.tabId === target.tabId && source.sessionId === target.sessionId;
 }
 
 function matchesIntent(item: chrome.downloads.DownloadItem, intent: DownloadIntent): boolean {
@@ -329,13 +325,13 @@ export async function captureBrowserDownload(
   const navigationTargetListener = (
     details: chrome.webNavigation.WebNavigationSourceCallbackDetails,
   ) => {
-    if (settled || !dispatched || details.sourceTabId !== options.target.tabId) return;
+    if (settled || !dispatched || details.sourceTabId !== options.handle.tabId) return;
     popupUrls.add(details.url);
     reconcile();
   };
-  const cdpSubscription = options.cdp.onEvent?.((source, method, raw) => {
-    if (settled || method !== "Page.downloadWillBegin" || !sameTarget(source, options.target))
-      return;
+  const cdpSubscription = options.cdp.onEvent(options.handle.tabId, (source, method, raw) => {
+    if (settled || method !== "Page.downloadWillBegin") return;
+    if (!options.cdp.isEventFromFrame(source, options.handle)) return;
     if (capturedId !== undefined && options.inputSignal?.aborted) return;
     const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
     if (typeof event.url !== "string" || typeof event.suggestedFilename !== "string") return;
@@ -354,34 +350,33 @@ export async function captureBrowserDownload(
     };
     reconcile();
   });
-  if (!cdpSubscription) {
-    return captureError("CDP download intent subscription unavailable", "none", "arm");
-  }
-
-  options.downloads.onDeterminingFilename.addListener(determiningListener);
-  options.downloads.onCreated.addListener(createdListener);
-  options.downloads.onChanged.addListener(changedListener);
-  options.navigationTargets?.onCreatedNavigationTarget.addListener(navigationTargetListener);
-  options.signal?.addEventListener("abort", onAbort, { once: true });
-  options.inputSignal?.addEventListener("abort", onInputAbort, { once: true });
-  operationTimer = setTimeout(
-    () => fail(new Error("download did not complete before timeout")),
-    options.timeoutMs,
-  );
-  sizePoll = setInterval(() => {
-    if (capturedId === undefined || settled || options.maxByteSize === undefined) return;
-    void options.downloads
-      .search({ id: capturedId })
-      .then(([item]) => {
-        if (!item || settled) return;
-        if (item.bytesReceived > (options.maxByteSize as number)) {
-          fail(new Error(`download exceeds transfer limit ${options.maxByteSize}`));
-        }
-      })
-      .catch((err) => fail(err instanceof Error ? err : new Error(String(err))));
-  }, SIZE_POLL_MS);
+  let releaseTabAttachment: (() => void) | undefined;
 
   try {
+    releaseTabAttachment = options.cdp.retainTabAttachment(options.handle.tabId);
+    options.downloads.onDeterminingFilename.addListener(determiningListener);
+    options.downloads.onCreated.addListener(createdListener);
+    options.downloads.onChanged.addListener(changedListener);
+    options.navigationTargets?.onCreatedNavigationTarget.addListener(navigationTargetListener);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    options.inputSignal?.addEventListener("abort", onInputAbort, { once: true });
+    operationTimer = setTimeout(
+      () => fail(new Error("download did not complete before timeout")),
+      options.timeoutMs,
+    );
+    sizePoll = setInterval(() => {
+      if (capturedId === undefined || settled || options.maxByteSize === undefined) return;
+      void options.downloads
+        .search({ id: capturedId })
+        .then(([item]) => {
+          if (!item || settled) return;
+          if (item.bytesReceived > (options.maxByteSize as number)) {
+            fail(new Error(`download exceeds transfer limit ${options.maxByteSize}`));
+          }
+        })
+        .catch((err) => fail(err instanceof Error ? err : new Error(String(err))));
+    }, SIZE_POLL_MS);
+
     if (options.signal?.aborted || options.inputSignal?.aborted)
       throw new DOMException("aborted", "AbortError");
     // A failed completion can stop a pending trigger, while successful file
@@ -480,6 +475,8 @@ export async function captureBrowserDownload(
       }
     } catch {
       if (failureResult?.data) failureResult.data.cleanup_state = "failed";
+    } finally {
+      releaseTabAttachment?.();
     }
   }
 }

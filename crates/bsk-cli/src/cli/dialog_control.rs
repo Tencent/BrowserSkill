@@ -2,7 +2,7 @@
 
 use super::{
     business_rpc,
-    ensure_daemon::ensure_daemon,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
 };
 use bsk_protocol::Method;
@@ -31,7 +31,9 @@ pub enum DialogSub {
 #[derive(Debug, Clone, Args)]
 pub struct DialogStatusArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
 }
@@ -40,7 +42,9 @@ pub struct DialogStatusArgs {
 pub struct DialogAcceptArgs {
     pub dialog_id: String,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub text: Option<String>,
 }
@@ -49,7 +53,9 @@ pub struct DialogAcceptArgs {
 pub struct DialogDismissArgs {
     pub dialog_id: String,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -70,7 +76,9 @@ pub enum OperationSub {
 pub struct OperationAwaitArgs {
     pub operation_id: String,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long, default_value_t = 10000, value_parser = clap::value_parser!(u32).range(0..=60000))]
     pub wait_ms: u32,
     /// Save a completed download's retained bytes without repeating its browser action.
@@ -84,16 +92,19 @@ pub struct OperationAwaitArgs {
 pub struct OperationCancelArgs {
     pub operation_id: String,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 fn invoke(
+    ctx: &business_rpc::ClientContext,
     method: Method,
-    params: impl serde::Serialize + Send + 'static,
+    params: impl serde::Serialize,
     timeout: Duration,
 ) -> Result<(), CliError> {
     let info = ensure_daemon()?;
-    let value: Value = business_rpc::call(info.sock_path, "dialog", method, Some(params), timeout)?;
+    let value: Value = ctx.call(info.sock_path, "dialog", method, Some(params), timeout)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&value).map_err(anyhow::Error::from)?
@@ -101,29 +112,36 @@ fn invoke(
     Ok(())
 }
 
-pub fn dispatch_dialog(cmd: DialogCmd, _format: Format) -> Result<(), CliError> {
+pub fn dispatch_dialog(
+    cmd: DialogCmd,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     match cmd.sub {
         DialogSub::Status(p) => invoke(
+            &ctx.with_scope(p.scope.as_deref()),
             Method::ToolDialogStatus,
             DialogStatusParams {
-                session_id: p.session,
+                session_id: p.session.unwrap_or_default(),
                 tab_id: p.tab_id,
             },
             Duration::from_secs(10),
         ),
         DialogSub::Accept(p) => invoke(
+            &ctx.with_scope(p.scope.as_deref()),
             Method::ToolDialogAccept,
             DialogHandleParams {
-                session_id: p.session,
+                session_id: p.session.unwrap_or_default(),
                 dialog_id: p.dialog_id,
                 text: p.text,
             },
             Duration::from_secs(10),
         ),
         DialogSub::Dismiss(p) => invoke(
+            &ctx.with_scope(p.scope.as_deref()),
             Method::ToolDialogDismiss,
             DialogHandleParams {
-                session_id: p.session,
+                session_id: p.session.unwrap_or_default(),
                 dialog_id: p.dialog_id,
                 text: None,
             },
@@ -132,21 +150,27 @@ pub fn dispatch_dialog(cmd: DialogCmd, _format: Format) -> Result<(), CliError> 
     }
 }
 
-pub fn dispatch_operation(cmd: OperationCmd, _format: Format) -> Result<(), CliError> {
-    let (method, params, output) = match cmd.sub {
+pub fn dispatch_operation(
+    cmd: OperationCmd,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
+    let (op_ctx, method, params, output) = match cmd.sub {
         OperationSub::Await(p) => (
+            ctx.with_scope(p.scope.as_deref()),
             Method::ToolOperationAwait,
             OperationParams {
-                session_id: p.session,
+                session_id: p.session.unwrap_or_default(),
                 operation_id: p.operation_id,
                 wait_ms: Some(p.wait_ms),
             },
             p.out.map(|path| (path, p.overwrite)),
         ),
         OperationSub::Cancel(p) => (
+            ctx.with_scope(p.scope.as_deref()),
             Method::ToolOperationCancel,
             OperationParams {
-                session_id: p.session,
+                session_id: p.session.unwrap_or_default(),
                 operation_id: p.operation_id,
                 wait_ms: None,
             },
@@ -155,7 +179,7 @@ pub fn dispatch_operation(cmd: OperationCmd, _format: Format) -> Result<(), CliE
     };
     let timeout = Duration::from_millis(params.wait_ms.unwrap_or(0) as u64 + 10000);
     let info = ensure_daemon()?;
-    let mut value: Value = business_rpc::call(
+    let mut value: Value = op_ctx.call(
         info.sock_path.clone(),
         "operation",
         method,
@@ -174,7 +198,13 @@ pub fn dispatch_operation(cmd: OperationCmd, _format: Format) -> Result<(), CliE
                     "completed download has no retained transfer id"
                 ))
             })?;
-            super::download::write_transfer(&info.sock_path, id, &out, overwrite)?;
+            super::download::write_transfer(
+                &info.sock_path,
+                &op_ctx.without_action_metadata(),
+                id,
+                &out,
+                overwrite,
+            )?;
             // Keep the retained transfer available for repeated retrieval or another
             // output path. Session teardown and the transfer TTL own its cleanup.
             value["result"]["path"] = serde_json::json!(out.to_string_lossy());

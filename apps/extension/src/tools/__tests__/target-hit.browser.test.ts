@@ -1,20 +1,25 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; the fixture owns its browser, profile and server.
+// Opt in with BSK_TEST_CHROME; the fixture owns its browser, profile and server.
 import { createServer } from "node:http";
 import { expect, it } from "vitest";
-import type { CdpFrameGraph, CdpFrameTreeNode } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentGraph,
+  toFrameDocumentHandle,
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import { SessionManager } from "@/session-manager/manager";
 import { handleClick } from "../interaction";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
   params?: object,
   sessionId?: string,
 ) => Promise<T>;
+type TreeNode = { frame: { id: string; url?: string }; childFrames?: TreeNode[] };
 
-it.skipIf(!process.env.BSK_CLICK_CHROME)(
+it.skipIf(!process.env.BSK_TEST_CHROME)(
   "keeps selector hits inside their document and clicks frame refs through checked ancestors",
   async () => {
     const server = createServer((request, response) => {
@@ -46,7 +51,7 @@ it.skipIf(!process.env.BSK_CLICK_CHROME)(
         ).href
       );
       await withChrome(
-        { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+        { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
         async (send: Send) => {
           const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
             url: `http://127.0.0.1:${port}/`,
@@ -91,47 +96,61 @@ it.skipIf(!process.env.BSK_CLICK_CHROME)(
             { targetId: crossTarget!.targetId, flatten: true },
           );
           await expect.poll(() => evaluate("typeof clicks", crossSession)).toBe("number");
-          const { frameTree } = await local<{ frameTree: CdpFrameTreeNode }>("Page.getFrameTree");
-          const root = { tabId: 4 };
-          const graph: CdpFrameGraph = {
+          const { frameTree } = await local<{ frameTree: TreeNode }>("Page.getFrameTree");
+          const graph: FrameDocumentGraph = {
             rootFrameId: frameTree.frame.id,
-            frames: [{ frameId: frameTree.frame.id, target: root }],
+            frames: [
+              {
+                handle: toFrameDocumentHandle(4, { frameId: frameTree.frame.id, loaderId: "" }),
+                frameId: frameTree.frame.id,
+                loaderId: "",
+                processKey: "root",
+                isOutOfProcess: false,
+              },
+            ],
           };
           const sameFrame = frameTree.childFrames!.find(
             (child) => child.frame.url === `http://127.0.0.1:${port}/child`,
           )!;
-          const { frameTree: crossTree } = await send<{ frameTree: CdpFrameTreeNode }>(
+          const { frameTree: crossTree } = await send<{ frameTree: TreeNode }>(
             "Page.getFrameTree",
             {},
             crossSession,
           );
+          const childSessions = new Map<string, string>();
           for (const [frameId, childSession] of [
             [sameFrame.frame.id, undefined],
             [crossTree.frame.id, crossSession],
           ] as const) {
             const owner = await local<{ backendNodeId: number }>("DOM.getFrameOwner", { frameId });
+            if (childSession) childSessions.set(frameId, childSession);
             graph.frames.push({
+              handle: toFrameDocumentHandle(4, { frameId, loaderId: "" }),
               frameId,
+              loaderId: "",
               parentFrameId: graph.rootFrameId,
               ownerBackendNodeId: owner.backendNodeId,
-              target: { tabId: 4, ...(childSession ? { sessionId: childSession } : {}) },
+              processKey: childSession ? `oopif:${frameId}` : "root",
+              isOutOfProcess: Boolean(childSession),
             });
           }
           let presses = 0;
-          const dispatch: CdpRunner["sendToTarget"] = async (target, method, params) => {
+          const dispatch: CdpRunner["sendToFrame"] = async (handle, method, params) => {
             if (
               method === "Input.dispatchMouseEvent" &&
               (params as { type?: string }).type === "mousePressed"
             )
               presses++;
-            return send(method, params, target.sessionId ?? sessionId) as never;
+            const targetSession = handle.frameId ? childSessions.get(handle.frameId) : undefined;
+            return send(method, params, targetSession ?? sessionId) as never;
           };
-          const cdp: CdpRunner = {
-            send: (tab, method, params) => dispatch({ tabId: tab }, method, params),
-            sendToTarget: dispatch,
-            getFrameGraph: async () => graph,
+          const cdp: CdpRunner = createStubCdpRunner({
+            send: (tab, method, params) => dispatch(toRootFrameHandle(tab), method, params),
+            sendToFrame: dispatch,
+            hasOwnFrameTarget: (_tab, frameId) => childSessions.has(frameId),
+            getFrameDocuments: async () => graph,
             getAttachmentId: () => sessionId,
-          };
+          });
           cdp.verifyPointerTarget = pointerTargetValidator(cdp);
           const manager = new SessionManager({
             agentWindow: {
@@ -192,7 +211,6 @@ it.skipIf(!process.env.BSK_CLICK_CHROME)(
             ctx.refStore.set(ref, node.backendNodeId, {
               tabId: 4,
               frameId,
-              ...(childSession ? { cdpSessionId: childSession } : {}),
             });
             expect(await click({ ref })).toMatchObject({ used_ref: ref });
             const before = presses;

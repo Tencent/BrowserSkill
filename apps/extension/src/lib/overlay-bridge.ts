@@ -14,9 +14,12 @@
  *      and conversation context are preserved.
  */
 
+import { type ControllerInfo, isControllerInfo } from "./controller-info";
+
 export const OVERLAY_MSG_WHO_AM_I = "overlay.who_am_i";
 export const OVERLAY_MSG_READY = "overlay.ready";
 export const OVERLAY_MSG_INTERRUPT = "overlay.interrupt";
+export const OVERLAY_MSG_SET_MINIMIZED = "overlay.set_minimized";
 
 /**
  * WXT shadow-host element name (`createShadowRootUi({ name })`) and the marker
@@ -79,7 +82,9 @@ export interface OverlayVersion {
 }
 
 export interface OverlayAgentStateMessage extends OverlayVersion {
+  controller?: ControllerInfo;
   cooperation?: import("@/cooperation/types").CooperationView;
+  minimized?: boolean;
   type: typeof OVERLAY_AGENT_STATE;
   sessionId: string | null;
   mode: OverlayMode;
@@ -92,6 +97,12 @@ export interface OverlayInterruptRequest {
 
 export interface OverlayInterruptResponse {
   ok: boolean;
+}
+
+export interface OverlaySetMinimizedRequest {
+  kind: typeof OVERLAY_MSG_SET_MINIMIZED;
+  sessionId: string;
+  minimized: boolean;
 }
 
 /** Background → content: temporarily disable overlay click blocker for CDP clicks. */
@@ -167,9 +178,13 @@ export function isOverlayAgentStateMessage(message: unknown): message is Overlay
     mode?: unknown;
     epoch?: unknown;
     generation?: unknown;
+    controller?: unknown;
+    minimized?: unknown;
   };
   return (
     candidate.type === OVERLAY_AGENT_STATE &&
+    (candidate.controller === undefined || isControllerInfo(candidate.controller)) &&
+    (candidate.minimized === undefined || typeof candidate.minimized === "boolean") &&
     (typeof candidate.sessionId === "string" || candidate.sessionId === null) &&
     (candidate.mode === "control" ||
       candidate.mode === "interrupting" ||
@@ -179,4 +194,8 @@ export function isOverlayAgentStateMessage(message: unknown): message is Overlay
   );
 }
 
-export type OverlayMessage = OverlayWhoAmIRequest | OverlayReadyRequest | OverlayInterruptRequest;
+export type OverlayMessage =
+  | OverlayWhoAmIRequest
+  | OverlayReadyRequest
+  | OverlayInterruptRequest
+  | OverlaySetMinimizedRequest;

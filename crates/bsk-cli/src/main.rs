@@ -15,13 +15,18 @@ fn main() -> ExitCode {
 
     // The daemon installs its own subscriber (with the rolling file
     // appender); CLI tracing would race with it and silently win, so
-    // only init the CLI-side stderr subscriber for client commands.
-    if !matches!(cli.command, Command::Daemon(_)) {
+    // only init the CLI-side stderr subscriber for client commands, including
+    // daemon maintenance. Start/restart own the daemon's logging setup.
+    if !matches!(
+        cli.command,
+        Command::Daemon(cli::daemon::DaemonCmd::Start(_) | cli::daemon::DaemonCmd::Restart(_))
+    ) {
         init_cli_tracing(&cli.flags);
     }
     cli::update::print_update_hint_from_cache(&cli.flags, &cli.command);
 
-    let format = if cli.flags.json {
+    // Even startup/shutdown errors must not corrupt MCP's JSON-RPC stdout.
+    let format = if cli.flags.json && !matches!(cli.command, Command::Mcp(_)) {
         Format::Json
     } else {
         Format::Human
@@ -34,12 +39,19 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
-    cli::business_rpc::set_context(cli.flags.context.clone());
-    cli::business_rpc::set_dependencies(cli.flags.depends_on.clone());
-    cli::business_rpc::set_action_evidence(cli.flags.observation.clone(), cli.flags.expect.clone());
+    cli::validate_command_evidence(&cli.command, &cli.flags)?;
+    let base_ctx = cli::business_rpc::ClientContext::from_cli_flags(&cli.flags);
+    // Plans and recipes attach evidence step by step, so it never goes on every request.
+    let step_ctx = base_ctx.without_action_metadata();
     match cli.command {
-        Command::Cooperate(args) => cli::cooperate::dispatch(args, format),
-        Command::Step(args) => cli::step::dispatch(args, format),
+        Command::Open(args) => cli::lifecycle::dispatch_open(args, &base_ctx, format),
+        Command::Sync(args) => cli::lifecycle::dispatch_sync(args, &base_ctx, format),
+        Command::Close(args) => cli::lifecycle::dispatch_close(args, &base_ctx, format),
+        Command::Ledger(cmd) => cli::ledger::dispatch(cmd, &base_ctx, format),
+        Command::Cooperate(args) => cli::cooperate::dispatch(args, &base_ctx, format),
+        Command::Step(args) => cli::step::dispatch(args, &base_ctx, format),
+        Command::Plan(args) => cli::plan::dispatch(args, &cli.flags, &step_ctx, format),
+        Command::Recipe(cmd) => cli::recipe::dispatch(cmd, &cli.flags, &step_ctx, format),
         Command::View(args) => cli::observation_view::dispatch(args, format),
         Command::Daemon(cmd) => cli::daemon::dispatch(cmd).map_err(CliError::Local),
         Command::Status => {
@@ -77,44 +89,56 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
             lines: cmd.lines,
         })
         .map_err(CliError::Local),
-        Command::Session(cmd) => cli::session::dispatch(cmd, format),
+        Command::Mcp(args) => cli::mcp::dispatch(args),
+        Command::Session(cmd) => cli::session::dispatch(cmd, &base_ctx, format),
         Command::Browsers => cli::browsers::dispatch(format),
-        Command::Tab(cmd) => cli::tab::dispatch(cmd, format),
-        Command::Window(cmd) => cli::window::dispatch(cmd, format),
-        Command::Emulate(args) => cli::emulate::dispatch(args, format),
-        Command::Screenshot(args) => cli::screenshot::dispatch(args, format),
-        Command::Snapshot(args) => cli::snapshot::dispatch(args, format),
-        Command::Observe(args) => cli::observe::dispatch(args, format),
-        Command::Console(args) => cli::console::dispatch(args, format),
-        Command::Debug(args) => cli::debug::dispatch(*args, format),
-        Command::Network(args) => cli::network::dispatch(args, format),
-        Command::GetHtml(args) => cli::get_html::dispatch(args, format),
-        Command::Extract(args) => cli::extract::dispatch(args, format),
-        Command::Navigate(args) => cli::navigate::dispatch_navigate_command(args, format),
-        Command::NavigateBack(args) => cli::navigate::dispatch_navigate_back(args, format),
-        Command::NavigateForward(args) => cli::navigate::dispatch_navigate_forward(args, format),
-        Command::Reload(args) => cli::navigate::dispatch_reload(args, format),
-        Command::Click(args) => cli::interaction::dispatch_click(args, format),
-        Command::Hover(args) => cli::interaction::dispatch_hover(args, format),
-        Command::Drag(args) => cli::drag::dispatch(args, format),
-        Command::Wheel(args) => cli::wheel::dispatch(args, format),
-        Command::ScrollTo(args) => cli::scroll::dispatch(args, format),
-        Command::Focus(args) => cli::interaction::dispatch_focus(args, format),
-        Command::Blur(args) => cli::interaction::dispatch_blur(args, format),
-        Command::Fill(args) => cli::interaction::dispatch_fill(args, format),
-        Command::Press(args) => cli::interaction::dispatch_press(args, format),
-        Command::Select(args) => cli::interaction::dispatch_select(args, format),
-        Command::Upload(args) => cli::upload::dispatch(args, format),
-        Command::Download(args) => cli::download::dispatch(args, format),
-        Command::Evaluate(args) => cli::evaluate::dispatch(args, format),
-        Command::WaitForNavigation(args) => cli::waits::dispatch_wait_for_navigation(args, format),
-        Command::WaitForElement(args) => cli::waits::dispatch_wait_for_element(args, format),
-        Command::WaitMs(args) => cli::waits::dispatch_wait_ms(args, format),
-        Command::RequestHelp(args) => cli::human_loop::dispatch(args, format),
-        Command::Record(cmd) => cli::record::dispatch(cmd, format),
-        Command::Dialog(cmd) => cli::dialog_control::dispatch_dialog(cmd, format),
-        Command::Operation(cmd) => cli::dialog_control::dispatch_operation(cmd, format),
-        Command::Video(cmd) => cli::video::dispatch(cmd, format),
+        Command::Tab(cmd) => cli::tab::dispatch(cmd, &base_ctx, format),
+        Command::Window(cmd) => cli::window::dispatch(cmd, &base_ctx, format),
+        Command::Emulate(args) => cli::emulate::dispatch(args, &base_ctx, format),
+        Command::Screenshot(args) => cli::screenshot::dispatch(args, &base_ctx, format),
+        Command::Snapshot(args) => cli::snapshot::dispatch(args, &base_ctx, format),
+        Command::Observe(args) => cli::observe::dispatch(args, &base_ctx, format),
+        Command::Console(args) => cli::console::dispatch(args, &base_ctx, format),
+        Command::Debug(args) => cli::debug::dispatch(*args, &base_ctx, format),
+        Command::Network(args) => cli::network::dispatch(args, &base_ctx, format),
+        Command::GetHtml(args) => cli::get_html::dispatch(args, &base_ctx, format),
+        Command::Read(args) => cli::read::dispatch(args, &base_ctx, format),
+        Command::Extract(args) => cli::extract::dispatch(args, &base_ctx, format),
+        Command::Navigate(args) => {
+            cli::navigate::dispatch_navigate_command(args, &base_ctx, format)
+        }
+        Command::NavigateBack(args) => {
+            cli::navigate::dispatch_navigate_back(args, &base_ctx, format)
+        }
+        Command::NavigateForward(args) => {
+            cli::navigate::dispatch_navigate_forward(args, &base_ctx, format)
+        }
+        Command::Reload(args) => cli::navigate::dispatch_reload(args, &base_ctx, format),
+        Command::Click(args) => cli::interaction::dispatch_click(args, &base_ctx, format),
+        Command::Hover(args) => cli::interaction::dispatch_hover(args, &base_ctx, format),
+        Command::Drag(args) => cli::drag::dispatch(args, &base_ctx, format),
+        Command::Wheel(args) => cli::wheel::dispatch(args, &base_ctx, format),
+        Command::ScrollTo(args) => cli::scroll::dispatch(args, &base_ctx, format),
+        Command::Focus(args) => cli::interaction::dispatch_focus(args, &base_ctx, format),
+        Command::Blur(args) => cli::interaction::dispatch_blur(args, &base_ctx, format),
+        Command::Fill(args) => cli::interaction::dispatch_fill(args, &base_ctx, format),
+        Command::Press(args) => cli::interaction::dispatch_press(args, &base_ctx, format),
+        Command::Select(args) => cli::interaction::dispatch_select(args, &base_ctx, format),
+        Command::Upload(args) => cli::upload::dispatch(args, &base_ctx, format),
+        Command::Download(args) => cli::download::dispatch(args, &base_ctx, format),
+        Command::Evaluate(args) => cli::evaluate::dispatch(args, &base_ctx, format),
+        Command::WaitForNavigation(args) => {
+            cli::waits::dispatch_wait_for_navigation(args, &base_ctx, format)
+        }
+        Command::WaitForElement(args) => {
+            cli::waits::dispatch_wait_for_element(args, &base_ctx, format)
+        }
+        Command::WaitMs(args) => cli::waits::dispatch_wait_ms(args, &base_ctx, format),
+        Command::RequestHelp(args) => cli::human_loop::dispatch(args, &base_ctx, format),
+        Command::Record(cmd) => cli::record::dispatch(cmd, &base_ctx, format),
+        Command::Dialog(cmd) => cli::dialog_control::dispatch_dialog(cmd, &base_ctx, format),
+        Command::Operation(cmd) => cli::dialog_control::dispatch_operation(cmd, &base_ctx, format),
+        Command::Video(cmd) => cli::video::dispatch(cmd, &base_ctx, format),
     }
 }
 

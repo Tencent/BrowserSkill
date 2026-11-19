@@ -4,10 +4,12 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { guardedRunner } from "@/cooperation/action-guard";
 import { collectCooperationFrames } from "@/cooperation/browser-bridge";
 import { CooperationController } from "@/cooperation/controller";
 import { COOPERATION_ARM, COOPERATION_READ, type FrameState } from "@/cooperation/types";
 import { SessionManager } from "@/session-manager/manager";
+import { createStubCdpRunner } from "@/tools/shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -15,7 +17,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 
-describe.skipIf(!process.env.BSK_COOP_CHROME)("frame interaction coverage", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("frame interaction coverage", () => {
   it("collects HTTP frames, skips load failures and repairs old tabs while preserving human control", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-http-cooperation-"));
     const brokenFrame = await readFile(
@@ -26,14 +28,24 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("frame interaction coverage", () =
     );
     const server = createServer((request, response) => {
       response.setHeader("Content-Type", "text/html");
+      if (request.url === "/enter") {
+        response.end(`<!doctype html><form onsubmit="event.preventDefault(); window.submits++">
+          <input aria-label="Search"><button>Submit</button></form><script>
+          window.submits=0;window.keys=[];for(const type of ['keydown','keypress','keyup'])
+          addEventListener(type,e=>keys.push([type,e.isTrusted]));</script>`);
+        return;
+      }
       response.end(
         request.url === "/broken"
           ? brokenFrame
           : request.url === "/late-frame"
             ? '<!doctype html><iframe src="/delayed"></iframe>'
-            : request.url === "/frame" || request.url === "/delayed"
-              ? '<!doctype html><input aria-label="Frame" value="child">'
-              : '<!doctype html><input aria-label="Page" value="top"><iframe src="/frame"></iframe>',
+            : request.url === "/wheel"
+              ? // A legacy handler, as Bilibili uses for volume (#550).
+                '<!doctype html><div style="height:400px"></div><script>window.counts={mousewheel:0};document.addEventListener("mousewheel",()=>counts.mousewheel++)</script>'
+              : request.url === "/frame" || request.url === "/delayed"
+                ? '<!doctype html><input aria-label="Frame" value="child">'
+                : '<!doctype html><input aria-label="Page" value="top"><iframe src="/frame"></iframe>',
       );
     });
     try {
@@ -92,7 +104,7 @@ globalThis.httpCooperationReady = true;`,
       );
       await withChrome(
         {
-          executable: process.env.BSK_COOP_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           extensionPath: directory,
           extensionViaCdp: true,
           deviceScale: 1,
@@ -270,6 +282,73 @@ globalThis.httpCooperationReady = true;`,
               await send("Target.detachFromTarget", { sessionId: human });
             }
           };
+          // Atomic Enter text must remain agent-attributed in the shipped
+          // collector, including Chromium's derived keypress/click/submit.
+          const enter = await createTab("/enter");
+          await collectCooperationFrames(enter.id, COOPERATION_READ, "enter");
+          const { targetInfos: enterTargets } = await send<{
+            targetInfos: { targetId: string; url: string }[];
+          }>("Target.getTargets");
+          const enterTarget = enterTargets.find(
+            (target) => target.url === `http://127.0.0.1:${port}/enter`,
+          )!;
+          const { sessionId: enterSession } = await send<{ sessionId: string }>(
+            "Target.attachToTarget",
+            { targetId: enterTarget.targetId, flatten: true },
+          );
+          const enterSend = <T>(method: string, params?: object) =>
+            send<T>(method, params, enterSession);
+          await enterSend("Page.bringToFront");
+          await enterSend("Runtime.evaluate", {
+            expression: "document.querySelector('input').focus()",
+          });
+          const guarded = guardedRunner(
+            createStubCdpRunner({
+              send: <T>(_tabId: number, method: string, params?: object) =>
+                enterSend<T>(method, params),
+            }),
+            {
+              prepare: async (input) => {
+                if (input)
+                  await collectCooperationFrames(enter.id, COOPERATION_ARM, "enter", input);
+              },
+            },
+          );
+          const keydown = {
+            type: "keyDown",
+            key: "Enter",
+            code: "Enter",
+            windowsVirtualKeyCode: 13,
+            text: "\r",
+          };
+          const keyup = { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 };
+          await guarded.send(enter.id, "Input.dispatchKeyEvent", keydown);
+          await guarded.send(enter.id, "Input.dispatchKeyEvent", keyup);
+          const agentEnter = await collectCooperationFrames(enter.id, COOPERATION_READ, "enter");
+          expect(agentEnter.frames.get(0)).toMatchObject({
+            human: 0,
+            lastInput: 0,
+            editing: false,
+          });
+          const keyResult = await enterSend<{ result: { value: unknown } }>("Runtime.evaluate", {
+            expression: "({submits,keys})",
+            returnByValue: true,
+          });
+          expect(keyResult.result.value).toEqual({
+            submits: 1,
+            keys: [
+              ["keydown", true],
+              ["keypress", true],
+              ["keyup", true],
+            ],
+          });
+          await enterSend("Input.dispatchKeyEvent", keydown);
+          await enterSend("Input.dispatchKeyEvent", keyup);
+          const humanEnter = await collectCooperationFrames(enter.id, COOPERATION_READ, "enter");
+          expect(humanEnter.frames.get(0)!.human).toBeGreaterThan(0);
+          await send("Target.detachFromTarget", { sessionId: enterSession });
+          await evaluate(`chrome.tabs.remove(${enter.id})`);
+
           const broken = await createTab("/broken");
           const browserFrames = await getAllFrames({ tabId: broken.id });
           const failed = browserFrames.find((frame) => frame.frameId !== 0)!;
@@ -297,14 +376,15 @@ globalThis.httpCooperationReady = true;`,
           const repaired = await collectCooperationFrames(delayed.id, COOPERATION_READ, "late");
           expect(executeScript).toHaveBeenCalledOnce();
           const repairedDocument = repaired.frames.get(child.frameId)!.document;
-          // Let the delayed declared script run after the repair. WXT must
-          // dispose the previous collector rather than leave both listening.
+          // Let the delayed declared script run after the repair. The idempotent
+          // mount guard must preserve the active collector rather than wipe its
+          // document/lease or leave two collectors listening.
           await evaluate(
             `chrome.scripting.executeScript({target:{tabId:${delayed.id},documentIds:[${JSON.stringify(child.documentId)}]},func:()=>globalThis.fixtureStartCapture()})`,
           );
           const declared = await collectCooperationFrames(delayed.id, COOPERATION_READ, "late");
           const declaredDocument = declared.frames.get(child.frameId)!.document;
-          expect(declaredDocument).not.toBe(repairedDocument);
+          expect(declaredDocument).toBe(repairedDocument);
           await evaluate("globalThis.frameUpdates = []");
           await clickFrame("/late-frame");
           const afterInput = await collectCooperationFrames(delayed.id, COOPERATION_READ, "late");
@@ -323,6 +403,55 @@ globalThis.httpCooperationReady = true;`,
           expect(executeScript).toHaveBeenCalledOnce();
           await evaluate(`chrome.tabs.remove(${delayed.id})`);
           executeScript.mockClear();
+
+          // Chromium skips a node's `mousewheel` listeners when that node has a
+          // `wheel` listener. Wheel capture must keep page handlers running (#550).
+          // Passive wheel events reach page script after the input is acknowledged.
+          const wheel = async (route: string, counts: Record<string, number>) => {
+            const { targetInfos } = await send<{
+              targetInfos: { targetId: string; url: string }[];
+            }>("Target.getTargets");
+            const target = targetInfos.find(
+              (target) => target.url === `http://127.0.0.1:${port}${route}`,
+            )!;
+            const { sessionId: human } = await send<{ sessionId: string }>(
+              "Target.attachToTarget",
+              { targetId: target.targetId, flatten: true },
+            );
+            try {
+              await send("Page.bringToFront", {}, human);
+              await send(
+                "Input.dispatchMouseEvent",
+                { type: "mouseWheel", x: 100, y: 100, deltaX: 0, deltaY: -120 },
+                human,
+              );
+              await expect
+                .poll(
+                  async () =>
+                    (
+                      await send<{ result: { value: Record<string, number> } }>(
+                        "Runtime.evaluate",
+                        { expression: "window.counts", returnByValue: true },
+                        human,
+                      )
+                    ).result.value,
+                  { timeout: 3000 },
+                )
+                .toEqual(counts);
+            } finally {
+              await send("Target.detachFromTarget", { sessionId: human });
+            }
+          };
+          const legacy = await createTab("/wheel");
+          await wheel("/wheel", { mousewheel: 1 });
+          await collectCooperationFrames(legacy.id, COOPERATION_READ, "wheel");
+          await wheel("/wheel", { mousewheel: 2 });
+          // Browsing never transfers control.
+          expect(
+            (await collectCooperationFrames(legacy.id, COOPERATION_READ, "wheel")).frames.get(0),
+          ).toMatchObject({ human: 0 });
+          await evaluate(`chrome.tabs.remove(${legacy.id})`);
+          expect(executeScript).not.toHaveBeenCalled();
 
           const oldTab = await createTab("/");
           const beforeReload = await getAllFrames({ tabId: oldTab.id });

@@ -1,11 +1,10 @@
-# One action and a reusable observation
+# One action, several decided actions, and a reusable observation
 
 Use `step` when one action is already decided from current evidence. It invokes
-that action exactly once, optionally waits for a known main-document selector to
-be visible, then synchronizes. It uses the session's negotiated guard policy;
-target policy requires compatible protocol 1.x peers at version 1.8 or later. With a current CLI
-and an older extension, pass `--policy strict` on every step for its post-action sync. Choose
-strict with an explicit sync before the action; a post-sync failure does not undo a completed action.
+that action exactly once, optionally waits for a known CSS selector to
+be visible, then synchronizes. It uses the session's negotiated guard policy under
+protocol 2.0 (`target` by default, or `strict` when the session selected
+`--policy strict` on its initial sync); a post-sync failure does not undo a completed action.
 
 ```sh
 bsk step --session SID --context CURRENT --action click \
@@ -45,6 +44,45 @@ A saved step contains its action result even if a later wait/sync fails. Output
 paths are checked before action; a publish failure is reported alongside the
 action result, never as evidence that the action did not occur.
 
+## Several decided actions
+
+Under target policy, send supported actions already decided from one sync, such as
+a form's fields or a report's filters, together with `plan` when they can share one
+context. `plan` runs them in order and then synchronizes, so one model turn replaces
+one turn per action. Use separate calls in the cases below.
+
+```sh
+bsk plan --session SID --context CURRENT --until-visible '#summary' --steps '[
+  {"action":"fill","ref":"e3","value":"Ada"},
+  {"action":"select","ref":"e4","values":["ZJ"]},
+  {"action":"wait-for-element","selector":"#city option[value=HZ]","state":"attached"},
+  {"action":"select","ref":"e5","values":["HZ"],"expect":[{"target":"@e4","field":"value","equals":"ZJ"}]},
+  {"action":"click","ref":"e6"}
+]'
+```
+
+A step is `action` plus the fields `step --params` takes for it, and optional `expect`.
+Actions are click, fill, select, press, hover, scroll-to, wheel and drag, plus
+`wait-for-element` (`ref` or `selector`, `state`, `timeout_ms`) for a condition later steps
+need. A plan holds up to 20 steps; split longer sequences into batches and inspect
+each batch's returned state before continuing. Every step passes the same control,
+target and `expect` checks as its own command, immediately before its input.
+
+- Include only what is already decided. A step that depends on what an earlier step
+  reveals, or on a page that an earlier step replaces, belongs in the next call.
+- The first step that does not complete stops the plan, nothing is retried, and completed
+  steps stay done: a plan is not a transaction. Read `completed`, `stopped` (with its
+  `effect_state`) and `not_run`, then replan from `post`, which is omitted after a stop
+  request, a native dialog, a timeout or a lost connection. Never repeat a step whose
+  `effect_state` is `unknown`, or that reported `dialog_pending`.
+- Send an irreversible action such as submit or pay in its own call after reading the
+  state, unless `expect` on that step protects the facts it depends on.
+- Only the first step may be untargeted, and it needs `--observation`. Before another
+  untargeted action, sync and inspect the page again. Navigation, scripts and actions
+  not supported by `plan` (such as focus and blur) run in separate calls.
+- Under strict policy, use one action followed by sync; do not batch inputs into a
+  plan, because each context authorizes only one action.
+
 ## View existing evidence locally
 
 Save the complete reply before display folding. The optional `--match-text` on
@@ -63,8 +101,9 @@ all literal matching line numbers (including duplicates), the shown line range,
 local omissions and original truncation. It returns `source_context_id`, never
 an actionable `context_id`. A no-match is not proof of absence from the live page.
 A cache cannot recover content missing from the original capture. Prefer an
-uncapped capture for large pages, then local views; raising a later sync's token
-budget does not force an unchanged page to be recaptured.
+uncapped capture for large pages, then local views (`view` accepts saved `step`,
+`cooperate sync`, or `bsk sync --json` files); changing `--max-tokens` on a later
+sync invalidates cached VOM reuse and triggers `baseline_reason: "token_budget_changed"`.
 
 To carry a saved baseline through an unchanged sync:
 
@@ -77,8 +116,26 @@ bsk cooperate sync --session SID --baseline /absolute/new-step.json \
 the same session and tab, complete activity history, `kind:unchanged` and no field
 changes. The CLI adds the existing VOM to that reply and marks its original capture
 context with `observation_origin.kind:reused`. The newly issued context still comes
-only from the live sync. Mismatches, deltas, filtered files and missing history do
-not reuse the cached text; inspect the returned state. A new baseline always wins.
+only from the live sync. Mismatches, field deltas, filtered files and missing history
+do not reuse the cached text; inspect the returned state. A new baseline always wins.
+
+Under target policy a sync may also answer `kind:delta` with `observation_patch.lines`
+when the only page activity since the predecessor replaced visible text in place.
+`changes` then lists each `kind:text` replacement with its `previous_value`, `value`
+and the 1-based VOM `lines` it touched, and `previous_observation_id` names the exact
+version the patch applies to. With `--baseline` pointing at that version the CLI applies
+the patch, saves the merged observation through `--save-full`
+(`observation_origin.kind:merged`, `cache_reuse.reason:exact_text_delta_predecessor`)
+and leaves the page text out of stdout (`cache_reuse.observation:saved`); read it with
+`view`. Chain the next sync from the newly saved file. Without the exact predecessor
+nothing is merged: apply the line patch yourself or sync again for a baseline.
+
+Anything the extension cannot express as such a patch returns a fresh `baseline` with
+a `baseline_reason`, for example `structure_changed`, `refs_replaced`, `frame_replaced`,
+`focus_changed`, `human_activity`, `text_log_gap`, `text_outside_observation`,
+`text_ambiguous`, `token_budget_changed` or `token_budget_shift`. Pass the same
+`--max-tokens` on `step` and `plan` as well as `sync` across calls you want patched.
+Pages with child frames, and text inside controls, headings, labels, form fields, table rows or list items, always take the baseline path.
 
 For readonly date pickers, click to open the picker instead of filling it. If VOM
 exposes only a containing control, inspect that observed ref with `get-html --ref`

@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>对抗靶场 · HTML5 原生 Video & Audio 多轨非线性演播室</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 13.5px/1.5 system-ui, -apple-system, sans-serif;
+    background: #0b1120;
+    color: #e2e8f0;
+  }
+  header.studio-bar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: #020617;
+    border-bottom: 1px solid #1e293b;
+    padding: 10px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .chip {
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #cbd5e1;
+  }
+  .studio-grid {
+    max-width: 1640px;
+    margin: 0 auto;
+    padding: 16px 20px 84px;
+    display: grid;
+    grid-template-columns: 1.25fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 1160px) {
+    .studio-grid { grid-template-columns: 1fr; }
+  }
+  .deck {
+    background: #111827;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .deck.full { grid-column: 1 / -1; }
+  .deck h2 {
+    margin: 0 0 12px;
+    font-size: 15.5px;
+    color: #f8fafc;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  video {
+    width: 100%;
+    max-width: 680px;
+    display: block;
+    background: #000;
+    border-radius: 8px;
+    border: 1px solid #475569;
+  }
+  audio {
+    width: 100%;
+    margin: 8px 0 12px;
+  }
+  .caption-banner {
+    margin-top: 8px;
+    padding: 7px 12px;
+    border-radius: 6px;
+    background: #1e293b;
+    border-left: 4px solid #38bdf8;
+    color: #f0f9ff;
+    font-weight: 600;
+  }
+  .transport-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-top: 10px;
+  }
+  button, select, input[type="range"] {
+    font: inherit;
+  }
+  .sbtn {
+    padding: 6px 11px;
+    border-radius: 6px;
+    border: 1px solid #475569;
+    background: #1e293b;
+    color: #f8fafc;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .sbtn.primary {
+    background: #0284c7;
+    border-color: #38bdf8;
+  }
+  .sbtn[aria-pressed="true"] {
+    background: #059669;
+    border-color: #34d399;
+  }
+  select {
+    padding: 6px 9px;
+    border-radius: 6px;
+    border: 1px solid #475569;
+    background: #0f172a;
+    color: #f8fafc;
+  }
+  .telemetry-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .stat-cell {
+    padding: 7px 9px;
+    border-radius: 6px;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    font-size: 12px;
+  }
+  .stat-cell strong {
+    display: block;
+    font-size: 13.5px;
+    color: #38bdf8;
+  }
+  .playlist {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .ep-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: 7px;
+    background: #0f172a;
+    border: 1px solid #334155;
+  }
+  .ep-card[data-active="true"] {
+    border-color: #38bdf8;
+    background: #0c4a6e;
+  }
+  .cue-scroll {
+    max-height: 250px;
+    overflow: auto;
+    border: 1px solid #334155;
+    border-radius: 8px;
+  }
+  table.cue-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  table.cue-table th, table.cue-table td {
+    border: 1px solid #1e293b;
+    padding: 6px 8px;
+    text-align: left;
+  }
+  table.cue-table thead th {
+    background: #020617;
+    position: sticky;
+    top: 0;
+  }
+  .mixer-rack {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .mixer-strip {
+    padding: 8px;
+    border-radius: 6px;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    text-align: center;
+    font-size: 11.5px;
+  }
+  output {
+    display: block;
+    margin-top: 10px;
+    padding: 8px 10px;
+    background: #020617;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    color: #a7f3d0;
+    white-space: pre-wrap;
+  }
+  .corner-cta {
+    position: fixed;
+    bottom: 18px;
+    z-index: 40;
+  }
+  #studio-corner-left { left: 20px; }
+  #studio-corner-right { right: 20px; }
+</style>
+</head>
+<body>
+<header class="studio-bar" role="banner">
+  <div>
+    <strong>HTML5 原生 Video + Audio 双引擎演播与审片靶场</strong>
+    <span style="margin-left:10px;color:#94a3b8;font-size:12px">Native UA Controls + TextTracks + PCM Audio + Canvas Sampler</span>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center">
+    <span class="chip" id="media-dom-nodes-chip">DOM 节点计算中</span>
+    <span class="chip" id="media-event-seq-chip">媒体事件计数: 0</span>
+  </div>
+</header>
+
+<main class="studio-grid">
+  <!-- LEFT DECK: Native HTML5 <video> + Captions + Canvas Frame Grabber -->
+  <section class="deck" aria-labelledby="video-deck-title">
+    <h2 id="video-deck-title">
+      <span>一、HTML5 原生 &lt;video controls&gt; 审片台（含双语字幕轨与帧像素采样）</span>
+      <span class="chip" id="video-badge-status">idle</span>
+    </h2>
+
+    <video
+      id="studio-video"
+      src="/canvas-demo.mp4"
+      width="640"
+      height="360"
+      controls
+      preload="auto"
+      crossorigin="anonymous"
+    >
+      <track id="track-zh" kind="captions" srclang="zh" label="简体中文" src="/captions-zh.vtt" default>
+      <track id="track-en" kind="captions" srclang="en" label="English" src="/captions-en.vtt">
+    </video>
+
+    <div class="caption-banner" id="active-caption-banner" data-lang="zh">
+      字幕轨就绪（zh）：等待播放或跳转时间轴触发 WebVTT Cue
+    </div>
+
+    <div class="transport-row" role="group" aria-label="视频演播控制栏">
+      <button type="button" class="sbtn primary" id="btn-video-toggle">播放 / 暂停视频</button>
+      <button type="button" class="sbtn" id="btn-video-chap-1" data-seek="0.2">第1章 (0.2s)</button>
+      <button type="button" class="sbtn" id="btn-video-chap-2" data-seek="1.8">第2章 (1.8s)</button>
+      <button type="button" class="sbtn" id="btn-video-chap-3" data-seek="3.5">第3章 (3.5s)</button>
+      <button type="button" class="sbtn" id="btn-video-step-fwd">快进 +0.8s</button>
+      <button type="button" class="sbtn" id="btn-video-mute" aria-pressed="false">视频静音切换</button>
+      <button type="button" class="sbtn" id="btn-video-loop" aria-pressed="false">循环播放切换</button>
+    </div>
+
+    <div class="transport-row">
+      <label for="video-rate-select">视频倍速</label>
+      <select id="video-rate-select">
+        <option value="0.5">0.5x 慢放逐帧</option>
+        <option value="1" selected>1.0x 标准原速</option>
+        <option value="1.5">1.5x 高效审片</option>
+        <option value="2">2.0x 极速巡检</option>
+      </select>
+
+      <label for="video-caption-select">字幕轨道</label>
+      <select id="video-caption-select">
+        <option value="zh" selected>简体中文 (zh)</option>
+        <option value="en">English (en)</option>
+        <option value="off">关闭字幕 (off)</option>
+      </select>
+
+      <label for="video-volume-range">视频音量 (<span id="video-vol-text">85%</span>)</label>
+      <input id="video-volume-range" type="range" min="0" max="100" step="5" value="85" aria-label="视频音量滑块">
+    </div>
+
+    <div
+      id="video-state-panel"
+      class="telemetry-grid"
+      data-paused="true"
+      data-muted="false"
+      data-loop="false"
+      data-rate="1"
+      data-volume="0.85"
+      data-time="0.00"
+      data-seek-count="0"
+      data-caption-lang="zh"
+    >
+      <div class="stat-cell">播放状态<strong id="v-stat-paused">paused</strong></div>
+      <div class="stat-cell">当前时间 / 总长<strong id="v-stat-time">0.00 / 0.00s</strong></div>
+      <div class="stat-cell">倍速 / 音量<strong id="v-stat-rate-vol">1.0x · 85%</strong></div>
+      <div class="stat-cell">Seek 计数 / Ready<strong id="v-stat-seek">0 · rs=0</strong></div>
+    </div>
+
+    <div style="margin-top:12px;display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:center">
+      <div>
+        <button type="button" class="sbtn" id="btn-grab-video-frame" style="margin-bottom:6px;display:block">抓取当前视频帧至 Canvas</button>
+        <canvas id="video-frame-canvas" width="240" height="135" style="border:1px solid #475569;border-radius:6px;background:#000" aria-label="视频帧采样画布"></canvas>
+      </div>
+      <output id="frame-pixel-proof">frameGrabbed=false</output>
+    </div>
+  </section>
+
+  <!-- RIGHT DECK: Native HTML5 <audio> + Multi-Episode Podcast Playlist + Mixer -->
+  <section class="deck" aria-labelledby="audio-deck-title">
+    <h2 id="audio-deck-title">
+      <span>二、HTML5 原生 &lt;audio controls&gt; 播客与多频段声学审听台</span>
+      <span class="chip" id="current-episode-chip">EP-01</span>
+    </h2>
+
+    <div id="current-episode-title" style="font-weight:700;color:#38bdf8">
+      当前音轨：EP-01 · 440Hz/554Hz/659Hz 三段基准和弦声学测试流
+    </div>
+
+    <audio id="studio-audio" src="/arena-audio.wav?ep=EP-01" controls preload="auto"></audio>
+
+    <div class="transport-row" role="group" aria-label="音频播客控制栏">
+      <button type="button" class="sbtn primary" id="btn-audio-toggle">播放 / 暂停音频</button>
+      <button type="button" class="sbtn" id="btn-audio-cue-a" data-seek="0.15">频段A (0.15s)</button>
+      <button type="button" class="sbtn" id="btn-audio-cue-b" data-seek="0.95">频段B (0.95s)</button>
+      <button type="button" class="sbtn" id="btn-audio-cue-c" data-seek="1.75">频段C (1.75s)</button>
+      <button type="button" class="sbtn" id="btn-audio-forward">快进 +0.7s</button>
+      <button type="button" class="sbtn" id="btn-audio-rewind">倒退 -0.5s</button>
+      <button type="button" class="sbtn" id="btn-audio-mute" aria-pressed="false">音频静音切换</button>
+      <button type="button" class="sbtn" id="btn-audio-loop" aria-pressed="false">音频循环切换</button>
+    </div>
+
+    <div class="transport-row">
+      <label for="audio-rate-select">音频倍速</label>
+      <select id="audio-rate-select">
+        <option value="0.75">0.75x 精细听辨</option>
+        <option value="1" selected>1.0x 原速</option>
+        <option value="1.25">1.25x 通勤倍速</option>
+        <option value="1.5">1.5x 快速审听</option>
+        <option value="2">2.0x 双倍速</option>
+      </select>
+
+      <label for="audio-volume-range">音频增益 (<span id="audio-vol-text">80%</span>)</label>
+      <input id="audio-volume-range" type="range" min="0" max="100" step="5" value="80" aria-label="音频音量滑块">
+    </div>
+
+    <div
+      id="audio-state-panel"
+      class="telemetry-grid"
+      data-episode="EP-01"
+      data-paused="true"
+      data-muted="false"
+      data-loop="false"
+      data-rate="1"
+      data-volume="0.80"
+      data-time="0.00"
+      data-seek-count="0"
+    >
+      <div class="stat-cell">音频状态<strong id="a-stat-paused">paused</strong></div>
+      <div class="stat-cell">位置 / 时长<strong id="a-stat-time">0.00 / 2.40s</strong></div>
+      <div class="stat-cell">倍速 / 音量<strong id="a-stat-rate-vol">1.0x · 80%</strong></div>
+      <div class="stat-cell">Seek 计数 / 剧集<strong id="a-stat-seek">0 · EP-01</strong></div>
+    </div>
+
+    <h3 style="margin:14px 0 6px;font-size:13.5px">多集播客声源列表（支持 Extract List 与切歌重载）</h3>
+    <div class="playlist" id="audio-playlist" role="list">
+      <article class="ep-card" role="listitem" data-ep="EP-01" data-active="true">
+        <div>
+          <strong><a href="#EP-01" class="ep-link" data-ep="EP-01">EP-01 · 440Hz/554Hz/659Hz 三段基准和弦声学测试流</a></strong>
+          <div style="font-size:12px;color:#94a3b8">时长 02.4s · 采样率 8kHz PCM · 讲者: 声学实验室</div>
+        </div>
+        <button type="button" class="sbtn btn-switch-ep" data-ep="EP-01" data-title="EP-01 · 440Hz/554Hz/659Hz 三段基准和弦声学测试流">当前声源</button>
+      </article>
+      <article class="ep-card" role="listitem" data-ep="EP-02" data-active="false">
+        <div>
+          <strong><a href="#EP-02" class="ep-link" data-ep="EP-02">EP-02 · WebAudio 与原生媒体管线低延迟同步实录</a></strong>
+          <div style="font-size:12px;color:#94a3b8">时长 02.4s · 采样率 8kHz PCM · 讲者: 架构组</div>
+        </div>
+        <button type="button" class="sbtn btn-switch-ep" data-ep="EP-02" data-title="EP-02 · WebAudio 与原生媒体管线低延迟同步实录">切换播放</button>
+      </article>
+      <article class="ep-card" role="listitem" data-ep="EP-03" data-active="false">
+        <div>
+          <strong><a href="#EP-03" class="ep-link" data-ep="EP-03">EP-03 · 跨标签页后台媒体节流与无障碍焦点保持</a></strong>
+          <div style="font-size:12px;color:#94a3b8">时长 02.4s · 采样率 8kHz PCM · 讲者: 浏览器内核组</div>
+        </div>
+        <button type="button" class="sbtn btn-switch-ep" data-ep="EP-03" data-title="EP-03 · 跨标签页后台媒体节流与无障碍焦点保持">切换播放</button>
+      </article>
+      <article class="ep-card" role="listitem" data-ep="EP-04" data-active="false">
+        <div>
+          <strong><a href="#EP-04" class="ep-link" data-ep="EP-04">EP-04 · 字幕轨 WebVTT 实时校对与多语种无损导出</a></strong>
+          <div style="font-size:12px;color:#94a3b8">时长 02.4s · 采样率 8kHz PCM · 讲者: 本地化团队</div>
+        </div>
+        <button type="button" class="sbtn btn-switch-ep" data-ep="EP-04" data-title="EP-04 · 字幕轨 WebVTT 实时校对与多语种无损导出">切换播放</button>
+      </article>
+    </div>
+
+    <div class="mixer-rack" id="studio-mixer-rack" aria-label="16路调音台电平矩阵"></div>
+  </section>
+
+  <!-- BOTTOM FULL DECK: 48-Row Timecode Cue Matrix + Unified Media Event Bus -->
+  <section class="deck full" aria-labelledby="cue-matrix-heading">
+    <h2 id="cue-matrix-heading">
+      <span>三、48 帧审片时间码打点台账与统一原生媒体事件流</span>
+      <span class="chip">支持 Extract Table / Wheel / Zero-JS Read</span>
+    </h2>
+    <div class="cue-scroll" id="cue-scroll-container">
+      <table class="cue-table" id="transcript-cue-table">
+        <caption>非线性审片时间轴场记表（48 条打点记录）</caption>
+        <thead>
+          <tr>
+            <th>打点ID</th>
+            <th>起始时间码</th>
+            <th>轨道类型</th>
+            <th>审片批注内容</th>
+            <th>响度 LUFS</th>
+            <th>校对状态</th>
+          </tr>
+        </thead>
+        <tbody id="transcript-cue-tbody"></tbody>
+      </table>
+    </div>
+    <output id="media-telemetry-log">waiting-media-interaction</output>
+  </section>
+</main>
+
+<button type="button" class="sbtn corner-cta" id="studio-corner-left">左下角标记入点 (Mark In)</button>
+<button type="button" class="sbtn corner-cta" id="studio-corner-right">右下角标记出点 (Mark Out)</button>
+
+<script>
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  let eventSeq = 0;
+  const recentEvents = [];
+
+  const emit = (type, data = {}) => {
+    eventSeq += 1;
+    $('#media-event-seq-chip').textContent = `媒体事件计数: ${eventSeq}`;
+    const entry = { seq: eventSeq, type, ...data };
+    recentEvents.push(entry);
+    if (recentEvents.length > 8) recentEvents.shift();
+    $('#media-telemetry-log').textContent = JSON.stringify(recentEvents, null, 2);
+    fetch('/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, page: 'arena-media-studio', ...data })
+    }).catch(() => {});
+  };
+
+  const video = $('#studio-video');
+  const audio = $('#studio-audio');
+  video.volume = 0.85;
+  audio.volume = 0.80;
+
+  let videoSeekCount = 0;
+  let audioSeekCount = 0;
+  let activeEpisode = 'EP-01';
+
+  // Populate 16-strip mixer & 48-row timecode cue table (>=1,600 DOM elements)
+  $('#studio-mixer-rack').innerHTML = Array.from({ length: 16 }, (_, i) => {
+    const db = (-18 + (i * 3) % 16).toFixed(1);
+    const pan = i % 2 === 0 ? 'L15' : 'R15';
+    return `<div class="mixer-strip" data-ch="CH-${i + 1}"><div><strong>CH-${String(i + 1).padStart(2, '0')}</strong> <small><span>${pan}</span></small></div><div><span>${db} dB</span> <code><span>PK</span></code></div><div><em>ONLINE</em> <b><span>48k</span></b></div></div>`;
+  }).join('');
+
+  $('#transcript-cue-tbody').innerHTML = Array.from({ length: 48 }, (_, i) => {
+    const tc = `00:00:${String(Math.floor(i / 2)).padStart(2, '0')}.${(i % 2) * 500 === 0 ? '000' : '500'}`;
+    const kind = i % 3 === 0 ? 'VIDEO+VTT' : i % 3 === 1 ? 'AUDIO-PCM' : 'MARKER';
+    const note = `第 ${i + 1} 号审片时间轴锚点 · 多轨声画帧同步核对正常`;
+    const lufs = (-16.5 + (i % 7) * 0.4).toFixed(1);
+    const st = i % 5 === 0 ? 'NEEDS_REVIEW' : 'APPROVED';
+    return `<tr data-cue-idx="${i + 1}"><td><code>CUE-${String(i + 1).padStart(3, '0')}</code> <small><span>#${i + 1}</span></small></td><td><span>${tc}</span> <small><code>SMPTE</code> <i><span>24fps</span></i></small></td><td><span>${kind}</span> <small><em>BUS</em></small></td><td><span>${note}</span> <small><span>QC</span></small></td><td><strong>${lufs}</strong> <small><span>LUFS</span> <i><span>EBU</span></i></small></td><td><em>${st}</em> <b><span>OK</span></b></td></tr>`;
+  }).join('');
+
+  // Sync video state panel
+  function syncVideoPanel(trigger) {
+    const vp = $('#video-state-panel');
+    const dur = Number.isFinite(video.duration) ? video.duration : 0;
+    vp.dataset.paused = String(video.paused);
+    vp.dataset.muted = String(video.muted);
+    vp.dataset.loop = String(video.loop);
+    vp.dataset.rate = String(video.playbackRate);
+    vp.dataset.volume = video.volume.toFixed(2);
+    vp.dataset.time = video.currentTime.toFixed(2);
+    vp.dataset.readyState = String(video.readyState);
+    vp.dataset.seekCount = String(videoSeekCount);
+
+    $('#v-stat-paused').textContent = video.paused ? 'paused' : 'playing';
+    $('#v-stat-time').textContent = `${video.currentTime.toFixed(2)} / ${dur.toFixed(2)}s`;
+    $('#v-stat-rate-vol').textContent = `${video.playbackRate.toFixed(1)}x · ${Math.round(video.volume * 100)}%${video.muted ? ' (muted)' : ''}`;
+    $('#v-stat-seek').textContent = `${videoSeekCount} · rs=${video.readyState}`;
+    $('#video-badge-status').textContent = `${video.paused ? 'PAUSED' : 'PLAYING'} @ ${video.currentTime.toFixed(2)}s`;
+    $('#btn-video-mute').setAttribute('aria-pressed', String(video.muted));
+    $('#btn-video-loop').setAttribute('aria-pressed', String(video.loop));
+
+    if (trigger && trigger !== 'timeupdate') {
+      emit(`video-${trigger}`, {
+        currentTime: Number(video.currentTime.toFixed(3)),
+        duration: Number(dur.toFixed(3)),
+        paused: video.paused,
+        muted: video.muted,
+        loop: video.loop,
+        playbackRate: video.playbackRate,
+        volume: Number(video.volume.toFixed(2)),
+        readyState: video.readyState,
+        seekCount: videoSeekCount
+      });
+    }
+  }
+
+  // Sync audio state panel
+  function syncAudioPanel(trigger) {
+    const ap = $('#audio-state-panel');
+    const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+    ap.dataset.episode = activeEpisode;
+    ap.dataset.paused = String(audio.paused);
+    ap.dataset.muted = String(audio.muted);
+    ap.dataset.loop = String(audio.loop);
+    ap.dataset.rate = String(audio.playbackRate);
+    ap.dataset.volume = audio.volume.toFixed(2);
+    ap.dataset.time = audio.currentTime.toFixed(2);
+    ap.dataset.readyState = String(audio.readyState);
+    ap.dataset.seekCount = String(audioSeekCount);
+
+    $('#a-stat-paused').textContent = audio.paused ? 'paused' : 'playing';
+    $('#a-stat-time').textContent = `${audio.currentTime.toFixed(2)} / ${dur.toFixed(2)}s`;
+    $('#a-stat-rate-vol').textContent = `${audio.playbackRate.toFixed(2)}x · ${Math.round(audio.volume * 100)}%${audio.muted ? ' (muted)' : ''}`;
+    $('#a-stat-seek').textContent = `${audioSeekCount} · ${activeEpisode}`;
+    $('#btn-audio-mute').setAttribute('aria-pressed', String(audio.muted));
+    $('#btn-audio-loop').setAttribute('aria-pressed', String(audio.loop));
+
+    if (trigger && trigger !== 'timeupdate') {
+      emit(`audio-${trigger}`, {
+        episode: activeEpisode,
+        currentTime: Number(audio.currentTime.toFixed(3)),
+        duration: Number(dur.toFixed(3)),
+        paused: audio.paused,
+        muted: audio.muted,
+        loop: audio.loop,
+        playbackRate: audio.playbackRate,
+        volume: Number(audio.volume.toFixed(2)),
+        readyState: audio.readyState,
+        seekCount: audioSeekCount
+      });
+    }
+  }
+
+  ['loadedmetadata', 'loadeddata', 'play', 'pause', 'ratechange', 'volumechange', 'ended', 'timeupdate'].forEach(ev => {
+    video.addEventListener(ev, () => syncVideoPanel(ev));
+    audio.addEventListener(ev, () => syncAudioPanel(ev));
+  });
+  video.addEventListener('seeked', () => { videoSeekCount += 1; syncVideoPanel('seeked'); });
+  audio.addEventListener('seeked', () => { audioSeekCount += 1; syncAudioPanel('seeked'); });
+
+  // WebVTT Caption Track binding (keep inactive language track in 'hidden' so cues stay loaded)
+  function applyCaptionMode(lang) {
+    const tracks = Array.from(video.textTracks || []);
+    tracks.forEach(t => {
+      if (lang === 'off') {
+        t.mode = 'disabled';
+      } else {
+        t.mode = t.language === lang ? 'showing' : 'hidden';
+      }
+    });
+    $('#video-state-panel').dataset.captionLang = lang;
+    $('#active-caption-banner').dataset.lang = lang;
+    if (lang === 'off') {
+      $('#active-caption-banner').textContent = '字幕已关闭 (off)';
+    } else {
+      const activeTrack = tracks.find(t => t.language === lang);
+      const cueText = activeTrack?.activeCues?.[0]?.text || `字幕轨已切换至 (${lang})`;
+      $('#active-caption-banner').textContent = cueText;
+    }
+    emit('video-caption-switched', { lang });
+  }
+
+  Array.from(video.textTracks || []).forEach(t => {
+    t.addEventListener('cuechange', () => {
+      if (t.mode === 'showing' && t.activeCues && t.activeCues.length > 0) {
+        $('#active-caption-banner').textContent = t.activeCues[0].text;
+      }
+    });
+  });
+
+  // Video deck button wiring
+  $('#btn-video-toggle').addEventListener('click', () => {
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  });
+  ['btn-video-chap-1', 'btn-video-chap-2', 'btn-video-chap-3'].forEach(id => {
+    $('#' + id).addEventListener('click', (e) => {
+      video.currentTime = Number(e.currentTarget.dataset.seek);
+    });
+  });
+  $('#btn-video-step-fwd').addEventListener('click', () => {
+    const cap = Number.isFinite(video.duration) ? Math.max(0, video.duration - 0.1) : 10;
+    video.currentTime = Math.min(cap, video.currentTime + 0.8);
+  });
+  $('#btn-video-mute').addEventListener('click', () => { video.muted = !video.muted; });
+  $('#btn-video-loop').addEventListener('click', () => { video.loop = !video.loop; syncVideoPanel('loopchange'); });
+  $('#video-rate-select').addEventListener('change', (e) => { video.playbackRate = Number(e.target.value); });
+  $('#video-caption-select').addEventListener('change', (e) => applyCaptionMode(e.target.value));
+  $('#video-volume-range').addEventListener('input', (e) => {
+    const pct = Number(e.target.value);
+    $('#video-vol-text').textContent = `${pct}%`;
+    video.volume = pct / 100;
+  });
+
+  // Canvas frame grabber
+  $('#btn-grab-video-frame').addEventListener('click', () => {
+    const canvas = $('#video-frame-canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let nonBlackPixels = 0;
+    let lumaSum = 0;
+    for (let i = 0; i < data.length; i += 16) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+      lumaSum += luma;
+      if (r + g + b > 15) nonBlackPixels += 1;
+    }
+    const sampled = data.length / 16;
+    const proof = {
+      frameGrabbed: true,
+      videoTime: Number(video.currentTime.toFixed(2)),
+      videoWidth: video.videoWidth,
+      videoHeight: video.videoHeight,
+      nonBlackRatio: Number((nonBlackPixels / sampled).toFixed(3)),
+      meanLuma: Number((lumaSum / sampled).toFixed(2))
+    };
+    $('#frame-pixel-proof').textContent = JSON.stringify(proof, null, 2);
+    emit('video-frame-grabbed', proof);
+  });
+
+  // Audio deck button wiring
+  $('#btn-audio-toggle').addEventListener('click', () => {
+    if (audio.paused) audio.play().catch(() => {});
+    else audio.pause();
+  });
+  ['btn-audio-cue-a', 'btn-audio-cue-b', 'btn-audio-cue-c'].forEach(id => {
+    $('#' + id).addEventListener('click', (e) => {
+      audio.currentTime = Number(e.currentTarget.dataset.seek);
+    });
+  });
+  $('#btn-audio-forward').addEventListener('click', () => {
+    const cap = Number.isFinite(audio.duration) ? Math.max(0, audio.duration - 0.05) : 2.35;
+    audio.currentTime = Math.min(cap, audio.currentTime + 0.7);
+  });
+  $('#btn-audio-rewind').addEventListener('click', () => {
+    audio.currentTime = Math.max(0, audio.currentTime - 0.5);
+  });
+  $('#btn-audio-mute').addEventListener('click', () => { audio.muted = !audio.muted; });
+  $('#btn-audio-loop').addEventListener('click', () => { audio.loop = !audio.loop; syncAudioPanel('loopchange'); });
+  $('#audio-rate-select').addEventListener('change', (e) => { audio.playbackRate = Number(e.target.value); });
+  $('#audio-volume-range').addEventListener('input', (e) => {
+    const pct = Number(e.target.value);
+    $('#audio-vol-text').textContent = `${pct}%`;
+    audio.volume = pct / 100;
+  });
+
+  $$('.btn-switch-ep').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeEpisode = btn.dataset.ep;
+      const title = btn.dataset.title;
+      $('#current-episode-chip').textContent = activeEpisode;
+      $('#current-episode-title').textContent = `当前音轨：${title}`;
+      $$('.ep-card').forEach(card => {
+        const isCurrent = card.dataset.ep === activeEpisode;
+        card.dataset.active = String(isCurrent);
+        const b = card.querySelector('.btn-switch-ep');
+        if (b) b.textContent = isCurrent ? '当前声源' : '切换播放';
+      });
+      audio.src = `/arena-audio.wav?ep=${encodeURIComponent(activeEpisode)}`;
+      audio.load();
+      emit('audio-episode-switched', { episode: activeEpisode, title });
+    });
+  });
+
+  // Corner overlay markers
+  $('#studio-corner-left').addEventListener('click', () => {
+    emit('studio-mark-in', { videoTime: Number(video.currentTime.toFixed(2)), audioTime: Number(audio.currentTime.toFixed(2)) });
+  });
+  $('#studio-corner-right').addEventListener('click', () => {
+    emit('studio-mark-out', { videoTime: Number(video.currentTime.toFixed(2)), audioTime: Number(audio.currentTime.toFixed(2)) });
+  });
+
+  applyCaptionMode('zh');
+  syncVideoPanel(null);
+  syncAudioPanel(null);
+  $('#media-dom-nodes-chip').textContent = `DOM 节点: ${document.getElementsByTagName('*').length}`;
+})();
+</script>
+</body>
+</html>

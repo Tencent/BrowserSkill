@@ -17,7 +17,7 @@
 Use `bsk drag <source-ref-or-selector> --to <target-ref-or-selector> --session <id>`,
 or replace `--to` with `--dx <pixels> --dy <pixels>` for sliders, resize handles,
 and panning. Prefer refs from the latest VOM observation. Selectors must match
-exactly one element in the main document; frame/shadow targets require refs.
+exactly one element across the main document and child frames; shadow targets require refs.
 
 `--hold 500ms` waits after pressing, before moving; `--duration 800ms` controls
 travel pacing. Both are bounded at 5s each. `--button` and `--modifiers` work as
@@ -52,7 +52,7 @@ Use page instructions, observed behavior or known handlers to identify the mode.
 Do not automatically retry a failed held drag as two clicks.
 
 For a known click–move–click control with both endpoints identified, use one
-bounded action (daemon and extension protocol 1.7 or newer):
+bounded action (requires matching protocol 2.0 peers):
 
 ```sh
 bsk drag @e3 --to @e8 --mode click-move-click --session <id> --context ID
@@ -123,9 +123,10 @@ Rich-text framework state and undo behavior require application-specific checks.
 absent or not visible; `detached` requires absence. Both include initial absence.
 `visible` does not imply enabled, unobstructed or application-ready. Choose an
 actual post-action readiness signal; an absent or hidden mask may not have started
-loading yet. Selectors check only the first match in the main document: scope a
-mask selector to its component, for example `#orders-panel .el-loading-mask`.
-Use fresh refs for frame/shadow-root targets. Unknown/invalidated/cross-tab refs
+loading yet. Selectors check the first match in the main document, then child
+frames in frame order: scope a mask selector to its component, for example
+`#orders-panel .el-loading-mask`. Use fresh refs for shadow-root targets.
+Unknown/invalidated/cross-tab refs
 and CDP failures remain errors for every state. Full-document navigation invalidates
 old refs: use `wait-for-navigation`, then `observe`. A removed out-of-process iframe
 can invalidate its CDP session; to wait for the frame's removal, target the parent
@@ -225,24 +226,36 @@ refresh business facts; sync after intervention/navigation and observe changes r
 For an action followed by a transient synchronization refusal, use
 `bsk cooperate sync --settle --session <id>`. It performs at most three read-only
 sync attempts, each retry preceded by `cooperate wait` (default 1s per wait;
-`--timeout-ms` overrides it). It retries only `cooperation_sync_required` with
-`effect_state: none`. Unknown effects, cancellation, user stop and other errors
-are returned without retries. A wait reporting `state.mode: unavailable` uses the
-remaining sync attempts, allowing navigation or slow frames to finish. If all
-three attempts fail, the last sync error is returned with a non-zero exit code;
-the CLI does not invent a frame failure or suggest reloading a loading page. Human control
-or a stopped wait still returns `settle.outcome: not_ready` and no action context;
-continue the cooperation hand-back workflow unless the user stopped the task.
-An explicit human hold takes priority over unavailable coverage in the returned state.
-Inspect `settle`, ownership and context, not just exit code. This does not prove
-application readiness: use an observed loading-complete signal where available.
-Never replay the preceding click, drag or submission because sync was refused.
+`--timeout-ms` bounds the total settle budget). It retries only `cooperation_sync_required` (and
+mid-observation document replacements) with `effect_state: none`. Unknown
+effects, cancellation, user stop and other errors are returned without retries.
+On heavy pages whose main thread briefly stalls past the default 3s frame budget,
+pass `--timeout-ms` (up to `25000`) to `bsk sync`, `cooperate sync` or
+`cooperate enable` to extend the per-frame reply deadline while still retiring
+silent hidden child frames after 3s. A wait reporting `state.mode: unavailable`
+uses the remaining sync attempts, allowing navigation or slow frames to finish.
+If all three attempts fail, the last sync error is returned with a non-zero exit
+code; the CLI does not invent a frame failure or suggest reloading a loading page.
+Human control or a stopped wait still returns `settle.outcome: not_ready` and no
+action context; continue the cooperation hand-back workflow unless the user
+stopped the task. An explicit human hold takes priority over unavailable coverage
+in the returned state. Inspect `settle`, ownership and context, not just exit code.
+This does not prove application readiness: use an observed loading-complete signal
+where available. Never replay the preceding click, drag or submission because sync
+was refused.
 
 `frame_unobservable` means an active document still lacks interaction coverage
 after one targeted collector repair. Reload once; if it persists, use read-only
 commands such as `get-html` or `snapshot`. `page_load_failed` means the main page
 failed to load: check its URL and network, then reload. Neither reason is retried
-by `--settle`. Failed child frames and inactive documents are listed in
+by `--settle`. A frame that does not answer in time may only be busy, so its
+refusal stays `cooperation_sync_required` and names it in `data.frames` (tab
+operations add `tab_id`). If the same frame keeps failing, use `navigate`,
+`reload`, `navigate-back` or `navigate-forward` to leave the stuck page, use
+read-only commands, or stop the session; stopping also returns borrowed tabs.
+Failed child frames, inactive documents and child frames that cannot be collected
+while hidden (`hidden_frame`: not displayed, no area, invisible, offscreen
+`position: fixed`, or `pointer-events: none`, and unfocused) are listed in
 `frame_gaps` without blocking sync; other active frames must remain observable.
 Frame diagnostic URLs retain only HTTP(S) origins and paths. Other URLs show
 only their protocol, and malformed URLs show `[unavailable]`.
@@ -287,6 +300,8 @@ resizing. A fixed emulated viewport may need its own `emulate` adjustment; resiz
 does not clear emulation or focus the window. When a resize reports an unconfirmed
 result, inspect its actual dimensions and sync before deciding what to do next.
 `evaluate` is a last resort: inspect JSON `.ok`, since a script exception can have
-CLI exit code 0. Never evaluate secrets. `record start` captures user actions;
+CLI exit code 0. Never evaluate secrets. On a page that keeps changing, state what
+the script relies on with `--expect` rather than retrying; `--unverified` skips the
+page check entirely and comes last ([scripts](cooperation.md#scripts)). `record start` captures user actions;
 read its help first and never record banking, SSO or password-manager pages.
 Use `bsk --help` to find navigation/history, tab, wait and window commands.

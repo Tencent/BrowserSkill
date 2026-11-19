@@ -13,6 +13,37 @@ describe("ControlOverlay fallback", () => {
     vi.unstubAllGlobals();
   });
 
+  it("renders the agent, project and session as text and names the control action", () => {
+    const props = { visible: true, interrupting: false, automationBypass: false, onInterrupt() {} };
+    const { getByText, getByRole, rerender, container } = render(
+      <ControlOverlay
+        {...props}
+        sessionId="aaaa"
+        controller={{ name: "Codex", project: "<b>Search</b>", color: "#2563eb" }}
+        state={{ mode: "ready", editing: false, revision: 1 }}
+      />,
+    );
+    expect(getByText("Codex")).toBeTruthy();
+    expect(getByText("<b>Search</b>")).toBeTruthy();
+    expect(getByText("aaaa")).toBeTruthy();
+    expect(getByRole("button", { name: "暂停 Codex" })).toBeTruthy();
+    expect(container.querySelector(".bsk-controller-details b")).toBeNull();
+    rerender(
+      <ControlOverlay
+        {...props}
+        sessionId="aaab"
+        controller={{ name: "Claude" }}
+        state={{ mode: "held", editing: false, revision: 2 }}
+      />,
+    );
+    expect(getByRole("button", { name: "交给 Claude" })).toBeTruthy();
+    expect(container.textContent).not.toContain("Codex");
+    expect(container.textContent).not.toContain("Search");
+    rerender(<ControlOverlay {...props} sessionId="legacy" />);
+    expect(getByText("BrowserSkill")).toBeTruthy();
+    expect(getByText("legacy")).toBeTruthy();
+  });
+
   it("keeps page blocker none under automationBypass but Interrupt stays clickable", () => {
     const { container, getByRole, queryByRole } = render(
       <ControlOverlay

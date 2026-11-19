@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { rootEventSource, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import {
   INPUT_PASSTHROUGH,
   INPUT_PASSTHROUGH_TTL_MS,
   type InputPassthroughMessage,
 } from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { withInputReady } from "../input-readiness";
 import {
   handleBlur,
@@ -67,14 +68,14 @@ function makeFakeCdp(
     return h(params);
   };
   const send = vi.fn(sendImpl);
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as unknown as <T = unknown>(
       tabId: number,
       method: string,
       params?: object,
     ) => Promise<T>,
     trackSessionTab: vi.fn(),
-  };
+  });
   const tabsApi = {
     get: vi.fn(
       async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -241,7 +242,7 @@ describe("handleClick", () => {
     ctx.refStore.set("e3", 1234, {
       tabId: 4,
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
     });
     const fake = makeFakeCdp({
       "Input.dispatchMouseEvent": () => ({}),
@@ -250,21 +251,33 @@ describe("handleClick", () => {
         model: { content: [204, 306, 604, 306, 604, 506, 204, 506] },
       }),
     });
-    fake.cdp.getFrameGraph = vi.fn(async () => ({
+    fake.cdp.getFrameDocuments = vi.fn(async () => ({
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
         {
+          handle: toFrameDocumentHandle(4, { frameId: "main", loaderId: "main-loader" }),
+          frameId: "main",
+          loaderId: "main-loader",
+          processKey: "root",
+          isOutOfProcess: false,
+        },
+        {
+          handle: toFrameDocumentHandle(4, { frameId: "child-frame", loaderId: "child-loader" }),
           frameId: "child-frame",
           parentFrameId: "main",
           ownerBackendNodeId: 99,
-          target: { tabId: 4, sessionId: "child-session" },
+          loaderId: "child-loader",
+          processKey: "oopif:child-frame",
+          isOutOfProcess: true,
         },
       ],
     }));
-    const targetCalls: Array<{ sessionId?: string; method: string }> = [];
-    fake.cdp.sendToTarget = vi.fn(async (target, method) => {
-      targetCalls.push({ sessionId: target.sessionId, method });
+    const targetCalls: Array<{ frameId?: string; method: string }> = [];
+    fake.cdp.sendToFrame = vi.fn(async (handle, method, params) => {
+      if (handle.frameId !== "child-frame") {
+        return fake.cdp.send(handle.tabId, method, params);
+      }
+      targetCalls.push({ frameId: handle.frameId, method });
       if (method === "Accessibility.getPartialAXTree") return { nodes: [] };
       if (method === "DOM.scrollIntoViewIfNeeded") return {};
       if (method === "DOM.getContentQuads") {
@@ -275,7 +288,7 @@ describe("handleClick", () => {
         return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
       }
       throw new Error(`unexpected child CDP call ${method}`);
-    }) as CdpRunner["sendToTarget"];
+    }) as CdpRunner["sendToFrame"];
 
     const res = await handleClick(
       sm,
@@ -287,11 +300,11 @@ describe("handleClick", () => {
     // The iframe content box starts at (204, 306) after its border and is scaled 2x.
     expect(res).toMatchObject({ x: 324, y: 386 });
     expect(targetCalls).toEqual([
-      { sessionId: "child-session", method: "DOM.scrollIntoViewIfNeeded" },
-      { sessionId: "child-session", method: "DOM.getBoxModel" },
-      { sessionId: "child-session", method: "DOM.getContentQuads" },
-      { sessionId: "child-session", method: "Page.getLayoutMetrics" },
-      { sessionId: "child-session", method: "Runtime.evaluate" },
+      { frameId: "child-frame", method: "DOM.scrollIntoViewIfNeeded" },
+      { frameId: "child-frame", method: "DOM.getBoxModel" },
+      { frameId: "child-frame", method: "DOM.getContentQuads" },
+      { frameId: "child-frame", method: "Page.getLayoutMetrics" },
+      { frameId: "child-frame", method: "Runtime.evaluate" },
     ]);
     expect(fake.sent.filter((call) => call.method === "Input.dispatchMouseEvent")).toHaveLength(3);
   });
@@ -1231,6 +1244,387 @@ describe("click input readiness", () => {
     });
     expect(f.mouseCommands()).toHaveLength(0);
   });
+
+  it("enables focus emulation before unselecting a shared Linux tab, releases tab-creation barrier before clicking, and keeps failed temporary tabs off default routing", async () => {
+    const { waitForTabCreation } = await import("@/session-manager/tab-creation");
+    const { resolveTargetTab } = await import("../shared");
+    const events: string[] = [];
+    let activeTabId = 4;
+    let tempAlive = false;
+    let failCleanup = false;
+    const tabsState = () => [
+      {
+        id: 4,
+        windowId: 100,
+        active: activeTabId === 4,
+        url: "https://app.test/",
+        lastAccessed: 10,
+      },
+      ...(tempAlive
+        ? [
+            {
+              id: 99,
+              windowId: 100,
+              active: activeTabId === 99,
+              url: "about:blank",
+              lastAccessed: 20,
+            },
+          ]
+        : []),
+    ];
+    const prevChrome = globalThis.chrome;
+    vi.stubGlobal("chrome", {
+      runtime: { getPlatformInfo: vi.fn(async () => ({ os: "linux" })) },
+      windows: { get: vi.fn(async () => ({ id: 100, focused: false })) },
+      tabs: {
+        get: vi.fn(async (id: number) => {
+          const found = tabsState().find((t) => t.id === id);
+          if (!found) throw new Error("no tab");
+          return found;
+        }),
+        query: vi.fn(async (q: chrome.tabs.QueryInfo) =>
+          tabsState().filter((t) => (q.active === undefined ? true : t.active === q.active)),
+        ),
+        create: vi.fn(async () => {
+          events.push("tabs.create:99");
+          tempAlive = true;
+          return { id: 99, windowId: 100, active: false, url: "about:blank" };
+        }),
+        update: vi.fn(async (id: number, props: chrome.tabs.UpdateProperties) => {
+          if (failCleanup && id === 4) throw new Error("restore active failed");
+          events.push(`tabs.update:${id}:${props.active}`);
+          if (props.active) activeTabId = id;
+          return { id, windowId: 100, active: Boolean(props.active) };
+        }),
+        remove: vi.fn(async (id: number) => {
+          if (failCleanup) throw new Error("remove temp failed");
+          events.push(`tabs.remove:${id}`);
+          if (id === 99) tempAlive = false;
+        }),
+      },
+    });
+    try {
+      let focusEmulated = false;
+      const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+      const ctx = await manager.start("linux-shared");
+      // Make tab 4 the sole controlled tab so a temporary blank tab must be created.
+      ctx.agentCreatedTabs.clear();
+      ctx.agentCreatedTabs.add(4);
+      ctx.refStore.set("e1", 1234, { tabId: 4 });
+      let barrierResolvedDuringClick = false;
+      const fake = makeFakeCdp(
+        {
+          "DOM.scrollIntoViewIfNeeded": () => ({}),
+          "DOM.getContentQuads": () => ({ quads: [[0, 0, 40, 0, 40, 20, 0, 20]] }),
+          "Emulation.setFocusEmulationEnabled": (params: unknown) => {
+            const enabled = Boolean((params as { enabled?: boolean }).enabled);
+            focusEmulated = enabled;
+            events.push(`focus:${enabled}`);
+            return {};
+          },
+          "Input.dispatchMouseEvent": (params: unknown) => {
+            const type = String((params as { type?: string }).type);
+            if (type === "mousePressed") {
+              events.push(
+                `mousePressed:active=${activeTabId}:claimed=${ctx.agentCreatedTabs.has(99)}`,
+              );
+              void waitForTabCreation(ctx).then(() => {
+                barrierResolvedDuringClick = true;
+              });
+            }
+            return {};
+          },
+        },
+        () => (activeTabId === 4 || focusEmulated ? "visible" : "hidden"),
+      );
+
+      expect(
+        await handleClick(
+          manager,
+          { session_id: "linux-shared", ref: "e1" },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      await Promise.resolve();
+      expect(barrierResolvedDuringClick).toBe(true);
+      // Focus emulation enabled BEFORE unselecting tab 4 (no premature blur on shared tab),
+      // mousePressed ran while tab 99 was active and claimed, then tab 4 restored & tab 99 removed.
+      expect(events).toEqual([
+        "focus:true",
+        "tabs.create:99",
+        "tabs.update:99:true",
+        "mousePressed:active=99:claimed=true",
+        "tabs.update:4:true",
+        "tabs.remove:99",
+        "focus:false",
+      ]);
+      expect(ctx.agentCreatedTabs.has(99)).toBe(false);
+
+      // Now simulate cleanup failure on both update(4) and remove(99):
+      // temporary tab 99 stays claimed (never leaked to user windows) and never becomes default target.
+      events.length = 0;
+      failCleanup = true;
+      const cleanupFailed = await handleClick(
+        manager,
+        { session_id: "linux-shared", ref: "e1" },
+        { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+      );
+      expect(cleanupFailed).toMatchObject({
+        code: "cdp_failed",
+        data: { reason: "input_cleanup_failed", effect_state: "unknown" },
+      });
+      expect(ctx.agentCreatedTabs.has(99)).toBe(true);
+      const resolvedDefault = await resolveTargetTab(
+        manager,
+        ctx,
+        undefined,
+        globalThis.chrome.tabs,
+      );
+      expect(resolvedDefault).toMatchObject({ tabId: 4 });
+    } finally {
+      vi.stubGlobal("chrome", prevChrome);
+    }
+  });
+
+  it("unselects a leased Linux tab before sampling visibility so a lost focus override triggers restoreLeasedInput, and covers drag/upload/download", async () => {
+    const { handleDrag } = await import("../drag");
+    const { handleUpload } = await import("../upload");
+    const { handleDownload } = await import("../download");
+    let activeTabId = 4;
+    let leaseOverrideIntact = false;
+    const unselectedDuringPress: string[] = [];
+    const tabsState = () => [
+      { id: 1, windowId: 100, active: activeTabId === 1, url: "about:blank" },
+      { id: 4, windowId: 100, active: activeTabId === 4, url: "https://app.test/" },
+    ];
+    const prevChrome = globalThis.chrome;
+    vi.stubGlobal("chrome", {
+      runtime: { getPlatformInfo: vi.fn(async () => ({ os: "linux" })) },
+      windows: { get: vi.fn(async () => ({ id: 100, focused: false })) },
+      tabs: {
+        get: vi.fn(async (id: number) => tabsState().find((t) => t.id === id)!),
+        query: vi.fn(async (q: chrome.tabs.QueryInfo) =>
+          tabsState().filter((t) => (q.active === undefined ? true : t.active === q.active)),
+        ),
+        update: vi.fn(async (id: number, props: chrome.tabs.UpdateProperties) => {
+          if (props.active) activeTabId = id;
+          return { id, windowId: 100, active: Boolean(props.active) };
+        }),
+        create: vi.fn(),
+        remove: vi.fn(),
+      },
+    });
+    try {
+      const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+      const ctx = await manager.start("linux-leased");
+      ctx.agentCreatedTabs.add(1);
+      ctx.agentCreatedTabs.add(4);
+      ctx.refStore.set("e1", 1234, { tabId: 4 });
+      ctx.refStore.set("e2", 5678, { tabId: 4 });
+
+      let currentTool = "click";
+      const fake = makeFakeCdp(
+        {
+          "Page.enable": () => ({}),
+          "Page.getFrameTree": () => ({ frameTree: { frame: { id: "main" } } }),
+          "DOM.enable": () => ({}),
+          "Page.setInterceptFileChooserDialog": () => ({}),
+          "DOM.scrollIntoViewIfNeeded": () => ({}),
+          "DOM.describeNode": () => ({
+            node: {
+              nodeId: 10,
+              backendNodeId: 1234,
+              nodeName: "INPUT",
+              attributes: ["type", "file"],
+            },
+          }),
+          "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
+          "DOM.getNodeForLocation": () => ({ backendNodeId: 1234, frameId: "main" }),
+          "Runtime.callFunctionOn": () => ({ result: { value: true } }),
+          "Runtime.releaseObjectGroup": () => ({}),
+          "DOM.setFileInputFiles": () => ({}),
+          "DOM.getContentQuads": () => ({ quads: [[0, 0, 40, 0, 40, 20, 0, 20]] }),
+          "DOM.getBoxModel": () => ({ model: { content: [0, 0, 40, 0, 40, 20, 0, 20] } }),
+          "Input.dispatchMouseEvent": (params: unknown) => {
+            if ((params as { type?: string }).type === "mousePressed") {
+              unselectedDuringPress.push(`${currentTool}:${activeTabId}`);
+              if (currentTool === "upload") {
+                cdpListener?.(rootEventSource(4), "Page.fileChooserOpened", {
+                  mode: "selectSingle",
+                  backendNodeId: 1234,
+                });
+              }
+              if (currentTool === "download") {
+                queueMicrotask(() => {
+                  const completedItem = {
+                    id: 77,
+                    state: "complete",
+                    filename: "/tmp/bsk-dl/report.csv",
+                    url: "https://app.test/report.csv",
+                    finalUrl: "https://app.test/report.csv",
+                    mime: "text/csv",
+                    danger: "safe",
+                    bytesReceived: 4,
+                    totalBytes: 4,
+                    fileSize: 4,
+                    exists: true,
+                    incognito: false,
+                    paused: false,
+                    canResume: false,
+                    startTime: new Date().toISOString(),
+                  } as chrome.downloads.DownloadItem;
+                  cdpListener?.(rootEventSource(4), "Page.downloadWillBegin", {
+                    url: "https://app.test/report.csv",
+                    suggestedFilename: "report.csv",
+                  });
+                  determiningFilename?.(completedItem, () => {});
+                  downloadCreated?.(completedItem);
+                });
+              }
+            }
+            return {};
+          },
+        },
+        // Active tab in unfocused X11 window reports "visible" even when override was lost,
+        // and only turns "hidden" once unselected to tab 1!
+        () => (activeTabId === 4 || leaseOverrideIntact ? "visible" : "hidden"),
+      );
+      let cdpListener: Parameters<CdpRunner["onEvent"]>[1] | undefined;
+      fake.cdp.onEvent = (_tabId, fn) => {
+        cdpListener = fn;
+        return { dispose: () => {} };
+      };
+      fake.cdp.ownsBackgroundExecution = vi.fn(() => true);
+      fake.cdp.restoreBackgroundExecution = vi.fn(async () => {
+        leaseOverrideIntact = true;
+      });
+
+      // 1. Click: unselects tab 4 -> sees "hidden" -> calls restoreBackgroundExecution -> clicks -> restores tab 4.
+      expect(
+        await handleClick(
+          manager,
+          { session_id: "linux-leased", ref: "e1" },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      expect(fake.cdp.restoreBackgroundExecution).toHaveBeenCalledOnce();
+      expect(activeTabId).toBe(4);
+
+      // 2. Drag: also passes preserveWindowFocus: true -> unselects tab 4 before mousePressed.
+      currentTool = "drag";
+      expect(
+        await handleDrag(
+          manager,
+          {
+            session_id: "linux-leased",
+            source: { ref: "e1" },
+            delta: { x: 20, y: 0 },
+            duration_ms: 16,
+          },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      expect(activeTabId).toBe(4);
+
+      // 3. Upload (input mode): passes preserveWindowFocus: true -> unselects tab 4 before mousePressed.
+      currentTool = "upload";
+      expect(
+        await handleUpload(
+          manager,
+          {
+            session_id: "linux-leased",
+            ref: "e1",
+            mode: "input",
+            files: [{ transfer_id: "tx-1", staged_path: "/tmp/a.txt", name: "a.txt" }],
+          },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      expect(activeTabId).toBe(4);
+
+      // 4. Download: passes preserveWindowFocus: true -> unselects tab 4 before mousePressed.
+      currentTool = "download";
+      let downloadCreated: ((item: chrome.downloads.DownloadItem) => void) | undefined;
+      let determiningFilename:
+        | ((
+            item: chrome.downloads.DownloadItem,
+            suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
+          ) => void | true)
+        | undefined;
+      const noop = { addListener: () => {}, removeListener: () => {} };
+      expect(
+        await handleDownload(
+          manager,
+          { session_id: "linux-leased", ref: "e1", browser_relative_dir: "bsk-dl" },
+          {
+            cdp: fake.cdp,
+            tabsApi: globalThis.chrome.tabs,
+            navigationTargets: {
+              onCreatedNavigationTarget: noop,
+            },
+            downloads: {
+              onCreated: {
+                addListener: (fn) => {
+                  downloadCreated = fn;
+                },
+                removeListener: () => {},
+              },
+              onChanged: noop,
+              onDeterminingFilename: {
+                addListener: (fn) => {
+                  determiningFilename = fn;
+                },
+                removeListener: () => {},
+              },
+              search: async () => [
+                {
+                  id: 77,
+                  state: "complete",
+                  filename: "/tmp/bsk-dl/report.csv",
+                  url: "https://app.test/report.csv",
+                  finalUrl: "https://app.test/report.csv",
+                  mime: "text/csv",
+                  danger: "safe",
+                  bytesReceived: 4,
+                  totalBytes: 4,
+                  fileSize: 4,
+                  exists: true,
+                } as chrome.downloads.DownloadItem,
+              ],
+              cancel: async () => {},
+              removeFile: async () => {},
+            },
+          },
+        ),
+      ).not.toHaveProperty("code");
+      expect(activeTabId).toBe(4);
+
+      expect(unselectedDuringPress).toEqual(["click:1", "drag:1", "upload:1", "download:1"]);
+
+      // 5. If selecting the reused home tab (1) fails transiently, home is not left poisoned in temporaryInputTabs.
+      vi.mocked(globalThis.chrome.tabs.update).mockRejectedValueOnce(
+        new Error("select home failed"),
+      );
+      expect(
+        await handleClick(
+          manager,
+          { session_id: "linux-leased", ref: "e1" },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).toMatchObject({ code: "cdp_failed", data: { effect_state: "none" } });
+      expect(ctx.temporaryInputTabs?.has(1) ?? false).toBe(false);
+      expect(
+        await handleClick(
+          manager,
+          { session_id: "linux-leased", ref: "e1" },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      expect(globalThis.chrome.tabs.create).not.toHaveBeenCalled();
+    } finally {
+      vi.stubGlobal("chrome", prevChrome);
+    }
+  });
 });
 
 describe("handleHover", () => {
@@ -1312,32 +1706,44 @@ describe("handleFocus and handleBlur", () => {
     ctx.refStore.set("e3", 1234, {
       tabId: 4,
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
     });
     const fake = makeFakeCdp({
       "DOM.scrollIntoViewIfNeeded": () => ({}),
     });
-    fake.cdp.getFrameGraph = vi.fn(async () => ({
+    fake.cdp.getFrameDocuments = vi.fn(async () => ({
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
         {
+          handle: toFrameDocumentHandle(4, { frameId: "main", loaderId: "main-loader" }),
+          frameId: "main",
+          loaderId: "main-loader",
+          processKey: "root",
+          isOutOfProcess: false,
+        },
+        {
+          handle: toFrameDocumentHandle(4, { frameId: "child-frame", loaderId: "child-loader" }),
           frameId: "child-frame",
           parentFrameId: "main",
           ownerBackendNodeId: 99,
-          target: { tabId: 4, sessionId: "child-session" },
+          loaderId: "child-loader",
+          processKey: "oopif:child-frame",
+          isOutOfProcess: true,
         },
       ],
     }));
-    const targetCalls: Array<{ sessionId?: string; method: string }> = [];
-    fake.cdp.sendToTarget = vi.fn(async (target, method) => {
-      targetCalls.push({ sessionId: target.sessionId, method });
+    const targetCalls: Array<{ frameId?: string; method: string }> = [];
+    fake.cdp.sendToFrame = vi.fn(async (handle, method, params) => {
+      if (handle.frameId !== "child-frame") {
+        return fake.cdp.send(handle.tabId, method, params);
+      }
+      targetCalls.push({ frameId: handle.frameId, method });
       if (method === "DOM.scrollIntoViewIfNeeded") return {};
       if (method === "DOM.focus" || method === "Runtime.releaseObject") return {};
       if (method === "DOM.resolveNode") return { object: { objectId: "focus-target" } };
       if (method === "Runtime.callFunctionOn") return { result: { value: true } };
       throw new Error(`unexpected child CDP call ${method}`);
-    }) as CdpRunner["sendToTarget"];
+    }) as CdpRunner["sendToFrame"];
 
     const res = await handleFocus(
       sm,
@@ -1348,11 +1754,11 @@ describe("handleFocus and handleBlur", () => {
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res.focused).toBe(true);
     expect(targetCalls).toEqual([
-      { sessionId: "child-session", method: "DOM.scrollIntoViewIfNeeded" },
-      { sessionId: "child-session", method: "DOM.resolveNode" },
-      { sessionId: "child-session", method: "DOM.focus" },
-      { sessionId: "child-session", method: "Runtime.callFunctionOn" },
-      { sessionId: "child-session", method: "Runtime.releaseObject" },
+      { frameId: "child-frame", method: "DOM.scrollIntoViewIfNeeded" },
+      { frameId: "child-frame", method: "DOM.resolveNode" },
+      { frameId: "child-frame", method: "DOM.focus" },
+      { frameId: "child-frame", method: "Runtime.callFunctionOn" },
+      { frameId: "child-frame", method: "Runtime.releaseObject" },
     ]);
   });
 
@@ -1435,13 +1841,44 @@ describe("handleFocus and handleBlur", () => {
 function successfulFillScript(params: unknown) {
   const script = params as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
   const args = script.arguments ?? [];
+  if (script.functionDeclaration.startsWith("async function(value, clearBefore")) {
+    const expected = String(args[0]?.value ?? "");
+    const clearBefore = Boolean(args[1]?.value ?? true);
+    return {
+      result: {
+        value: {
+          before: "",
+          expected,
+          write: "insert",
+          native: true,
+          supportsSelection: true,
+          isSensitive: false,
+          focused: true,
+          hasFocus: true,
+          cleared: clearBefore,
+          readyForInsert: true,
+        },
+      },
+    };
+  }
+  if (script.functionDeclaration.startsWith("async function(notifyInput, expected")) {
+    const expected = String(args[1]?.value ?? "");
+    return {
+      result: {
+        value: {
+          connected: true,
+          matches: true,
+          valueLength: expected.length,
+          sensitive: false,
+          actualValue: expected,
+          formatted: false,
+        },
+      },
+    };
+  }
   return {
     result: {
-      value: script.functionDeclaration.startsWith("function(value, clearBefore")
-        ? { before: "", expected: args[0].value, write: "insert" }
-        : script.functionDeclaration.startsWith("function(expected)")
-          ? { connected: true, matches: true, valueLength: String(args[0].value).length }
-          : "ready",
+      value: "ready",
     },
   };
 }
@@ -1465,9 +1902,17 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 100, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 100, nodeName: "BUTTON", attributes: [] },
+      "DOM.resolveNode": () => ({ object: { objectId: "obj-btn" } }),
+      "Runtime.callFunctionOn": () => ({
+        result: {
+          value: {
+            reason: "target_not_fillable",
+            error:
+              "fill requires an enabled text input, textarea, date/time control, or contenteditable editing host",
+          },
+        },
       }),
+      "Runtime.releaseObject": () => ({}),
     });
     const res = await handleFill(
       sm,
@@ -1476,7 +1921,7 @@ describe("handleFill", () => {
     );
     expect(res).toMatchObject({
       code: "invalid_params",
-      message: /not fillable/i,
+      message: /text input|not fillable/i,
       data: { reason: "target_not_fillable" },
     });
   });
@@ -1486,11 +1931,6 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 555, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 555, nodeName: "INPUT", attributes: ["type", "text"] },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
       "Runtime.callFunctionOn": successfulFillScript,
       "Runtime.releaseObject": () => ({}),
@@ -1507,9 +1947,9 @@ describe("handleFill", () => {
     expect(res.used_ref).toBe("e1");
     const insert = fake.sent.find((c) => c.method === "Input.insertText");
     expect(insert?.params).toEqual({ text: "hello" });
-    // Foreground replacement needs no extra caret-positioning round trip.
+    // Optimistic 3-step fast path runs Step 1 prepare + Step 3 verify (2 script calls).
     const callFns = fake.sent.filter((c) => c.method === "Runtime.callFunctionOn");
-    expect(callFns).toHaveLength(5);
+    expect(callFns).toHaveLength(2);
   });
 
   it("passes clear_before=false to preparation and verifies the result", async () => {
@@ -1517,20 +1957,14 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 1, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 1, nodeName: "TEXTAREA", attributes: [] },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-2" } }),
       "Runtime.callFunctionOn": (p) => {
         const script = p as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
-        if (script.functionDeclaration.startsWith("function(value, clearBefore")) {
+        if (script.functionDeclaration.startsWith("async function(value, clearBefore")) {
           expect(script.arguments?.[1].value).toBe(false);
         }
         return successfulFillScript(p);
       },
-      "Input.dispatchKeyEvent": () => ({}),
       "Runtime.releaseObject": () => ({}),
       "Input.insertText": () => ({}),
     });
@@ -1548,15 +1982,6 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 7, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: {
-          backendNodeId: 7,
-          nodeName: "DIV",
-          attributes: ["contenteditable", "true"],
-        },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-3" } }),
       "Runtime.callFunctionOn": successfulFillScript,
       "Runtime.releaseObject": () => ({}),
@@ -1576,16 +2001,12 @@ describe("handleFill", () => {
     ctx.refStore.set("e1", 555, { tabId: 4 });
     const abort = new AbortController();
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 555, nodeName: "INPUT", attributes: ["type", "text"] },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
       "Runtime.callFunctionOn": () => {
         abort.abort();
         return { result: { type: "undefined" } };
       },
+      "Runtime.releaseObject": () => ({}),
       "Input.insertText": () => ({}),
     });
 
@@ -1602,12 +2023,9 @@ describe("handleFill", () => {
   it("stops before focus when abort fires after fill scroll", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
-    ctx.refStore.set("e1", 555, { tabId: 4 });
+    ctx.refStore.set("e1", 555, { tabId: 4, frameId: "subframe-1" });
     const abort = new AbortController();
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 555, nodeName: "INPUT", attributes: ["type", "text"] },
-      }),
       "DOM.scrollIntoViewIfNeeded": () => {
         abort.abort();
         return {};
@@ -1616,6 +2034,27 @@ describe("handleFill", () => {
       "DOM.resolveNode": () => ({ object: { objectId: "fill-target" } }),
       "Runtime.callFunctionOn": successfulFillScript,
       "Runtime.releaseObject": () => ({}),
+    });
+    fake.cdp.getFrameDocuments = async () => ({
+      rootFrameId: "root",
+      frames: [
+        {
+          handle: toFrameDocumentHandle(4, { frameId: "root", loaderId: "" }),
+          frameId: "root",
+          loaderId: "",
+          processKey: "root",
+          isOutOfProcess: false,
+        },
+        {
+          handle: toFrameDocumentHandle(4, { frameId: "subframe-1", loaderId: "" }),
+          frameId: "subframe-1",
+          loaderId: "",
+          parentFrameId: "root",
+          ownerBackendNodeId: 900,
+          processKey: "root",
+          isOutOfProcess: false,
+        },
+      ],
     });
 
     const res = await handleFill(
@@ -1626,6 +2065,7 @@ describe("handleFill", () => {
 
     expect(res).toMatchObject({ code: "cancelled" });
     expect(fake.sent.some((c) => c.method === "DOM.focus")).toBe(false);
+    expect(fake.sent.some((c) => c.method === "DOM.resolveNode")).toBe(false);
   });
 });
 
@@ -1696,6 +2136,30 @@ describe("resolveKeyDescriptor", () => {
     expect(resolveKeyDescriptor("arrowdown")).toMatchObject({ code: "ArrowDown" });
     expect(resolveKeyDescriptor("space")).toMatchObject({ key: " ", code: "Space" });
   });
+  // A code-less descriptor makes Chromium report `code: ""`/`keyCode: 0`,
+  // so `Ctrl+/` never reaches a handler that keys off `event.code`.
+  it("maps common punctuation to its physical code and virtual key code", () => {
+    expect(resolveKeyDescriptor("/")).toEqual({
+      key: "/",
+      code: "Slash",
+      text: "/",
+      windowsVirtualKeyCode: 191,
+    });
+    expect(resolveKeyDescriptor("-")).toMatchObject({ code: "Minus", windowsVirtualKeyCode: 189 });
+    expect(resolveKeyDescriptor("=")).toMatchObject({ code: "Equal", windowsVirtualKeyCode: 187 });
+    expect(resolveKeyDescriptor(";")).toMatchObject({
+      code: "Semicolon",
+      windowsVirtualKeyCode: 186,
+    });
+    // Shifted glyphs live on the same physical key.
+    expect(resolveKeyDescriptor("?")).toEqual({
+      key: "?",
+      code: "Slash",
+      text: "?",
+      windowsVirtualKeyCode: 191,
+    });
+    expect(resolveKeyDescriptor(":")).toMatchObject({ code: "Semicolon" });
+  });
 });
 
 // PressResult also has a `code` field (the CDP keyboard code), so
@@ -1747,6 +2211,27 @@ describe("handlePress", () => {
     ]);
     expect(calls[0].params).not.toHaveProperty("text");
     expect(calls[1].params).toMatchObject({ text: "a" });
+  });
+
+  it("dispatches Enter keydown and text atomically before releasing the key", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const result = await handlePress(sm, { session_id: "aa11", key: "Enter" }, fake);
+    expectPressOk(result);
+    expect(
+      fake.sent.filter((c) => c.method === "Input.dispatchKeyEvent").map((c) => c.params),
+    ).toEqual([
+      {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        modifiers: 0,
+        text: "\r",
+      },
+      { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, modifiers: 0 },
+    ]);
   });
 
   it("handles compound expressions and folds modifiers", async () => {
@@ -1830,6 +2315,31 @@ describe("handlePress", () => {
     expect(keyDown?.params).toMatchObject({ key: "A", code: "KeyA", modifiers: 2 });
   });
 
+  it("dispatches Ctrl+/ with a Slash code and key code", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Ctrl+/" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expectPressOk(res);
+    expect(res).toMatchObject({ key: "/", code: "Slash", modifiers: ["ctrl"] });
+    const keyDown = fake.sent.find(
+      (call) =>
+        call.method === "Input.dispatchKeyEvent" &&
+        (call.params as { type?: string }).type === "rawKeyDown",
+    );
+    expect(keyDown?.params).toMatchObject({
+      key: "/",
+      code: "Slash",
+      windowsVirtualKeyCode: 191,
+      modifiers: 2,
+    });
+    expect(keyDown?.params).not.toHaveProperty("text");
+  });
+
   it("focuses an optional target before dispatch", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
@@ -1866,7 +2376,7 @@ describe("handlePress", () => {
         return {};
       },
       "Input.dispatchKeyEvent": (params) => {
-        if ((params as { type: string }).type === "rawKeyDown") {
+        if ((params as { type: string }).type === "keyDown") {
           if (step === "key") throw new Error("key acknowledgement lost");
           if (step === "cancel") abort.abort();
         }
@@ -2100,10 +2610,15 @@ describe("handleSelect", () => {
     expect(res.multiple).toBe(true);
     expect(res.selected_values).toEqual(["us", "ca"]);
     expect(res.selected_labels).toEqual(["United States", "Canada"]);
-    const callFn = fake.sent.find((c) => c.method === "Runtime.callFunctionOn");
-    expect(callFn?.params).toMatchObject({
-      arguments: [{ value: ["us", "ca"] }],
-    });
+    // Validation (commit=false) runs before scrolling and focusing; the write follows.
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Runtime.callFunctionOn")
+        .map((c) => (c.params as { arguments: unknown }).arguments),
+    ).toEqual([
+      [{ value: ["us", "ca"] }, { value: false }],
+      [{ value: ["us", "ca"] }, { value: true }],
+    ]);
   });
 
   it("sets a single value on a single-select <select>", async () => {
@@ -2146,7 +2661,83 @@ describe("handleSelect", () => {
     );
     expect(res).toMatchObject({
       code: "invalid_params",
-      data: { reason: "option_not_found" },
+      // Matching runs before any option changes, so the select was not written.
+      data: { reason: "option_not_found", effect_state: "none", phase: "precondition" },
+    });
+  });
+
+  it("rejects a missing option before scrolling or focusing the select", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp(
+      selectHandlers({ ok: false, reason: "option_not_found", missing: "zz" }),
+    );
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["zz"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      data: { reason: "option_not_found", effect_state: "none", phase: "precondition" },
+    });
+    // Focusing can blur another field and run its handlers, so a pre-write
+    // rejection must come before any scroll or focus.
+    expect(fake.sent.map((c) => c.method)).not.toContain("DOM.focus");
+    expect(fake.sent.map((c) => c.method)).not.toContain("DOM.scrollIntoViewIfNeeded");
+  });
+
+  it("keeps an unknown effect when the select becomes disabled after focus", async () => {
+    const select = document.createElement("select");
+    select.innerHTML = '<option value="us">US</option><option value="ca">Canada</option>';
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true }),
+      "DOM.focus": () => {
+        select.disabled = true;
+        return {};
+      },
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["ca"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({ code: "invalid_params", data: { reason: "target_disabled" } });
+    expect((res as { data?: { effect_state?: string } }).data?.effect_state).toBeUndefined();
+    expect(select.value).toBe("us");
+  });
+
+  it("reports a disabled select as a pre-write failure", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp(selectHandlers({ ok: false, reason: "target_disabled" }));
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["us"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      code: "invalid_params",
+      data: { effect_state: "none", phase: "precondition" },
     });
   });
 
@@ -2305,7 +2896,117 @@ describe("handleSelect", () => {
       { cdp: fake.cdp, tabsApi: fake.tabsApi, signal: abort.signal },
     );
     expect(res).toMatchObject({ code: "cancelled" });
-    expect(fake.sent.some((c) => c.method === "Runtime.callFunctionOn")).toBe(false);
+    // Only the read-only validation ran; the option write did not.
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Runtime.callFunctionOn")
+        .map((c) => (c.params as { arguments: Array<{ value: unknown }> }).arguments[1]),
+    ).toEqual([{ value: false }]);
+  });
+
+  it("selects by unique visible label (exact and case-insensitive), rejects ambiguous labels, and lists available options", async () => {
+    const select = document.createElement("select");
+    select.innerHTML = [
+      '<option value="east">华东大区</option>',
+      '<option value="south">South Region</option>',
+      '<option value="dup_a">同名项</option>',
+      '<option value="dup_b">同名项</option>',
+    ].join("");
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true, multiple: false }),
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+
+    const byExactCjkLabel = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["华东大区"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(byExactCjkLabel).toMatchObject({
+      selected_values: ["east"],
+      selected_labels: ["华东大区"],
+    });
+
+    const byCaseInsensitiveLabel = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["south region"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(byCaseInsensitiveLabel).toMatchObject({
+      selected_values: ["south"],
+      selected_labels: ["South Region"],
+    });
+
+    const ambiguous = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["同名项"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(ambiguous).toMatchObject({
+      code: "invalid_params",
+      data: {
+        reason: "option_ambiguous",
+        effect_state: "none",
+        ambiguous: "同名项",
+        count: 2,
+      },
+    });
+
+    const missing = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["不存在的大区"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(missing).toMatchObject({
+      code: "invalid_params",
+      data: {
+        reason: "option_not_found",
+        effect_state: "none",
+        missing: "不存在的大区",
+        available: ['east="华东大区"', 'south="South Region"', 'dup_a="同名项"', 'dup_b="同名项"'],
+      },
+    });
+  });
+
+  it("returns actionable click-to-expand guidance when target_not_select hits a custom dropdown", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e7", 100, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.describeNode": () => ({
+        node: { backendNodeId: 100, nodeName: "DIV", attributes: ["role", "combobox"] },
+      }),
+    });
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e7", values: ["月结45天"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      code: "invalid_params",
+      message: expect.stringContaining("Click @e7"),
+      data: {
+        reason: "target_not_select",
+        recovery: expect.stringContaining("Click @e7"),
+      },
+    });
   });
 });
 
@@ -2346,7 +3047,7 @@ it.each([
   if (kind === "click")
     expect(order).toEqual(["prepare", "mouseMoved", "arm", "mousePressed", "arm", "mouseReleased"]);
   else {
-    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("rawKeyDown"));
+    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("keyDown"));
     expect(order.at(-2)).toBe("arm");
     expect(order.at(-1)).toBe("keyUp");
   }

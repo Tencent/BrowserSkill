@@ -7,7 +7,7 @@ use clap::Subcommand;
 use crate::daemon;
 
 /// Default WebSocket port the daemon listens on.
-pub const DEFAULT_WS_PORT: u16 = 52800;
+pub const DEFAULT_WS_PORT: u16 = bsk_protocol::DEFAULT_DAEMON_PORT;
 /// Default daemon idle timeout (10 minutes per design §3.2).
 pub const DEFAULT_DAEMON_IDLE: Duration = Duration::from_secs(10 * 60);
 /// Default session idle timeout (5 minutes per design §5).
@@ -24,19 +24,44 @@ pub enum DaemonCmd {
     /// Stop then start the daemon.
     Restart(StartArgs),
 
-    /// Generate a one-use remote browser pairing link.
-    Pair,
+    /// Generate a local pairing link (or a remote link in server mode).
+    Pair {
+        /// Replace this local browser/device after successful activation.
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_device_id)]
+        replace: Option<String>,
+    },
 
-    /// List paired remote browsers (no credentials are displayed).
+    /// List local and remote devices (no credentials are displayed).
     Devices,
 
     /// Revoke a device grant, or all grants and outstanding pairing links.
     Revoke {
-        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        #[arg(
+            required_unless_present = "all",
+            conflicts_with = "all",
+            allow_hyphen_values = true,
+            value_parser = parse_device_id
+        )]
         device_id: Option<String>,
         #[arg(long)]
         all: bool,
     },
+    /// Rotate a local device key on its next connection.
+    Rotate {
+        #[arg(allow_hyphen_values = true, value_parser = parse_device_id)]
+        device_id: String,
+    },
+    /// Explicitly allow or stop allowing unverified local connections.
+    TrustLocal {
+        #[arg(value_enum)]
+        setting: TrustSetting,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum TrustSetting {
+    On,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -182,37 +207,132 @@ pub fn dispatch(cmd: DaemonCmd) -> anyhow::Result<()> {
             daemon::start::run_stop().map_err(|e| e.context("restart failed during stop phase"))?;
             daemon::start::run_start(args)
         }
-        DaemonCmd::Pair => {
-            println!("{}", authorization_store()?.pair()?);
+        DaemonCmd::Pair { replace } => {
+            super::ensure_daemon::ensure_daemon()?;
+            let value = maintain(
+                bsk_protocol::Method::LocalAuthPair,
+                serde_json::json!({"replace":replace}),
+            )?;
+            println!(
+                "{}",
+                value["link"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid pairing reply"))?
+            );
             Ok(())
         }
         DaemonCmd::Devices => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&authorization_store()?.devices()?)?
+                serde_json::to_string_pretty(&maintain(
+                    bsk_protocol::Method::LocalAuthDevices,
+                    serde_json::json!({})
+                )?)?
             );
             Ok(())
         }
         DaemonCmd::Revoke { device_id, all } => {
-            let store = authorization_store()?;
-            if all {
-                store.revoke_all()?;
-            } else {
-                anyhow::ensure!(
-                    store.revoke(device_id.as_deref().unwrap_or_default())?,
-                    "device grant not found"
-                );
-            }
+            maintain(
+                bsk_protocol::Method::LocalAuthRevoke,
+                serde_json::json!({"device_id":device_id,"all":all}),
+            )?;
             println!("Authorization revoked");
+            Ok(())
+        }
+        DaemonCmd::Rotate { device_id } => {
+            maintain(
+                bsk_protocol::Method::LocalAuthRotate,
+                serde_json::json!({"device_id":device_id}),
+            )?;
+            println!("Key rotation scheduled for the next connection");
+            Ok(())
+        }
+        DaemonCmd::TrustLocal { setting } => {
+            use daemon::local_auth::LocalAuthMode;
+            let mode = match setting {
+                TrustSetting::On => LocalAuthMode::TrustLocal,
+                TrustSetting::Off => LocalAuthMode::Required,
+            };
+            maintain(
+                bsk_protocol::Method::LocalAuthSetMode,
+                serde_json::json!({"mode":mode}),
+            )?;
+            match setting {
+                TrustSetting::On => println!(
+                    "Warning: unverified local connections are allowed. Enable skipping in the extension separately."
+                ),
+                TrustSetting::Off => println!("Local pairing verification is required"),
+            }
             Ok(())
         }
     }
 }
 
-fn authorization_store() -> anyhow::Result<daemon::remote::authorization::AuthorizationStore> {
-    Ok(daemon::remote::authorization::AuthorizationStore::at_home(
-        &daemon::paths::ensure_bsk_home()?,
-    ))
+fn maintain(
+    method: bsk_protocol::Method,
+    params: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let home = daemon::paths::ensure_bsk_home()?;
+    match daemon::lockfile::acquire() {
+        Ok(lock) => {
+            let local = daemon::local_auth::LocalAuth::open(&lock)?;
+            daemon::local_auth::maintenance::execute(
+                &local,
+                &home,
+                DEFAULT_WS_PORT,
+                false,
+                method,
+                params,
+            )
+        }
+        Err(error) if error.is::<daemon::lockfile::AlreadyLocked>() => {
+            // Once another process owns the lifecycle lock, never touch files
+            // offline, even if IPC is not ready yet or the request fails.
+            tracing::debug!("daemon maintenance waiting for IPC after lifecycle lock contention");
+            let running = daemon::probe::wait_for_ready(Duration::from_secs(10))?;
+            let path = running.info.sock_path.clone();
+            let legacy_possible = running.status.local_auth.is_none();
+            drop(running);
+            let reply = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(async {
+                    let mut client = crate::ipc_client::Client::connect_path(path).await?;
+                    // Older decoders reply with id 0 when they cannot deserialize
+                    // the new method. This connection carries just one request.
+                    client
+                        .call_with_id("0".into(), method.clone(), &params, Duration::from_secs(10))
+                        .await
+                })?;
+            match reply {
+                Ok(value) => Ok(value),
+                Err(error)
+                    if legacy_possible
+                        && error.code == bsk_protocol::ErrorCode::ProtocolError
+                        && error
+                            .message
+                            .starts_with("invalid frame: unknown variant `local_auth.") =>
+                {
+                    daemon::local_auth::maintenance::execute_legacy_remote(&home, method, params)
+                }
+                Err(error) => Err(anyhow::anyhow!(
+                    "{}; if the daemon is older, run `bsk update` and restart it",
+                    error.message
+                )),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_device_id(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("device ID must not be empty".into());
+    }
+    if value.starts_with('-') && bsk_protocol::local_auth::Bytes::<16>::decode(value).is_err() {
+        return Err(format!("unexpected flag or invalid device ID '{value}'"));
+    }
+    Ok(value.to_owned())
 }
 
 #[cfg(test)]
@@ -263,7 +383,7 @@ mod tests {
         }
         args = StartArgs {
             mode: DaemonMode::Server,
-            public_url: Some("ws://127.0.0.1:52800/extension".into()),
+            public_url: Some(format!("{}/extension", bsk_protocol::DEFAULT_DAEMON_WS_URL)),
             ..Default::default()
         };
         args.renew_after = Some(Duration::from_secs(90 * 86400));

@@ -33,9 +33,18 @@ export async function handleDialog(
   }
   const p = params as DialogHandleParams;
   if (typeof p.dialog_id !== "string" || p.dialog_id.length === 0)
-    return { code: "invalid_params", message: "dialog_id is required; get it from dialog status" };
+    return {
+      code: "invalid_params",
+      message: "dialog_id is required; get it from dialog status",
+      data: { effect_state: "none", phase: "precondition" },
+    };
   const dialog = pending.find((dialog) => dialog.id === p.dialog_id);
-  if (!dialog) return { code: "not_found", message: "Dialog is not pending in this session" };
+  if (!dialog)
+    return {
+      code: "not_found",
+      message: "Dialog is not pending in this session",
+      data: { effect_state: "none", phase: "precondition" },
+    };
   const accept = method === "tool.dialog_accept";
   if (
     p.text !== undefined &&
@@ -44,7 +53,9 @@ export async function handleDialog(
     return {
       code: "invalid_params",
       message: "text is only valid for prompt acceptance and must be at most 4096 characters",
+      data: { effect_state: "none", phase: "precondition" },
     };
+  let resolveStarted = false;
   try {
     // Status and rejection remain available for cleanup. Affirmative decisions
     // require control, but cannot refresh a renderer blocked by this modal.
@@ -57,7 +68,25 @@ export async function handleDialog(
       { tabId: dialog.tab_id, windowId: tab.windowId },
       "dialog",
     );
-    if (denied) return denied;
+    if (denied)
+      return {
+        ...denied,
+        data: { ...denied.data, effect_state: "none", phase: "precondition" },
+      };
+    if (options.signal?.aborted) {
+      return {
+        code: "cancelled",
+        message: "Dialog operation cancelled before dispatch",
+        data: {
+          reason: "cancelled_before_dispatch",
+          dispatched: false,
+          effect_state: "none",
+          phase: "precondition",
+          tab_id: dialog.tab_id,
+        },
+      };
+    }
+    resolveStarted = true;
     const handled = await cdp.resolveDialog(dialog.id, accept, p.text, {
       signal: options.signal,
       onDispatch: check,
@@ -65,6 +94,19 @@ export async function handleDialog(
     return { session_id: ctx.sessionId, dialog: handled };
   } catch (error) {
     if (error instanceof ControlAuthorityError) return error.rpcError;
-    return { code: "cdp_failed", message: error instanceof Error ? error.message : String(error) };
+    const effect = resolveStarted ? "unknown" : "none";
+    const phase = resolveStarted ? "execution" : "precondition";
+    if (options.signal?.aborted) {
+      return {
+        code: "cancelled",
+        message: "Dialog operation cancelled",
+        data: { effect_state: effect, phase, tab_id: dialog.tab_id },
+      };
+    }
+    return {
+      code: "cdp_failed",
+      message: error instanceof Error ? error.message : String(error),
+      data: { effect_state: effect, phase, tab_id: dialog.tab_id },
+    };
   }
 }

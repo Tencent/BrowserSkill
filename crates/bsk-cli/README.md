@@ -11,6 +11,12 @@ export PATH="${BSK_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
 
 Documentation: [../../README.md](../../README.md) · [../../docs/architecture.md](../../docs/architecture.md)
 
+## MCP server
+
+Run `bsk mcp` as a stdio MCP server, or configure a supported client alongside
+the skill with `bsk install-skill --harness codex --mcp` (also `claude-code`
+and `cursor`). See [MCP setup and workflow](../../docs/mcp.md).
+
 ## Flags and errors
 
 `--json`, `--quiet`, and `--verbose` are global flags and may appear before or

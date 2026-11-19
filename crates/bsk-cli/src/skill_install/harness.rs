@@ -19,9 +19,12 @@ pub enum HarnessId {
     OpenclawInternal,
     Codebuddy,
     Workbuddy,
+    Qoder,
+    QoderCn,
     PiAgent,
     Hermes,
     KimiCode,
+    Dsh,
 }
 
 impl HarnessId {
@@ -35,9 +38,12 @@ impl HarnessId {
         HarnessId::OpenclawInternal,
         HarnessId::Codebuddy,
         HarnessId::Workbuddy,
+        HarnessId::Qoder,
+        HarnessId::QoderCn,
         HarnessId::PiAgent,
         HarnessId::Hermes,
         HarnessId::KimiCode,
+        HarnessId::Dsh,
     ];
 
     pub fn index(self) -> usize {
@@ -55,9 +61,12 @@ impl HarnessId {
             HarnessId::OpenclawInternal => "openclaw-internal",
             HarnessId::Codebuddy => "codebuddy",
             HarnessId::Workbuddy => "workbuddy",
+            HarnessId::Qoder => "qoder",
+            HarnessId::QoderCn => "qoder-cn",
             HarnessId::PiAgent => "pi",
             HarnessId::Hermes => "hermes",
             HarnessId::KimiCode => "kimi-code",
+            HarnessId::Dsh => "dsh",
         }
     }
 
@@ -72,9 +81,12 @@ impl HarnessId {
             HarnessId::OpenclawInternal => "OpenClaw (internal)",
             HarnessId::Codebuddy => "CodeBuddy",
             HarnessId::Workbuddy => "WorkBuddy",
+            HarnessId::Qoder => "Qoder",
+            HarnessId::QoderCn => "Qoder CN",
             HarnessId::PiAgent => "Pi",
             HarnessId::Hermes => "Hermes Agent",
             HarnessId::KimiCode => "Kimi Code",
+            HarnessId::Dsh => "DeepSeek Harness",
         }
     }
 
@@ -89,12 +101,15 @@ impl HarnessId {
             HarnessId::OpenclawInternal => home.join(".openclaw-internal").join("skills"),
             HarnessId::Codebuddy => home.join(".codebuddy").join("skills"),
             HarnessId::Workbuddy => home.join(".workbuddy").join("skills"),
+            HarnessId::Qoder => home.join(".qoder").join("skills"),
+            HarnessId::QoderCn => home.join(".qoder-cn").join("skills"),
             HarnessId::PiAgent => home.join(".pi").join("agent").join("skills"),
             HarnessId::Hermes => hermes_home_for_user_home(home).join("skills"),
             // Kimi Code CLI 用户级 skills 目录：`$KIMI_CODE_HOME/skills`，
             // 默认 ~/.kimi-code/skills，见
             // https://github.com/MoonshotAI/kimi-code/blob/main/docs/en/customization/skills.md
             HarnessId::KimiCode => kimi_code_home_for_user_home(home).join("skills"),
+            HarnessId::Dsh => dsh_home_for_user_home(home).join("skills"),
         }
     }
 
@@ -203,6 +218,26 @@ impl HarnessId {
                     push("`workbuddy` on PATH");
                 }
             }
+            HarnessId::Qoder => {
+                if home.join(".qoder").is_dir() {
+                    push("~/.qoder");
+                }
+                for cmd in ["qoder", "qodercli"] {
+                    if command_exists(cmd) {
+                        signals.push(format!("`{cmd}` on PATH"));
+                    }
+                }
+            }
+            HarnessId::QoderCn => {
+                if home.join(".qoder-cn").is_dir() {
+                    push("~/.qoder-cn");
+                }
+                for cmd in ["qodercn", "qoderclicn"] {
+                    if command_exists(cmd) {
+                        signals.push(format!("`{cmd}` on PATH"));
+                    }
+                }
+            }
             HarnessId::PiAgent => {
                 if home.join(".pi").join("agent").is_dir() {
                     push("~/.pi/agent");
@@ -238,6 +273,23 @@ impl HarnessId {
                 }
                 if command_exists("kimi") {
                     push("`kimi` on PATH");
+                }
+            }
+            HarnessId::Dsh => {
+                let dsh_home = dsh_home_for_user_home(home);
+                if dsh_home.is_dir() {
+                    let label = if std::env::var("DSH_HOME")
+                        .ok()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        format!("$DSH_HOME ({})", dsh_home.display())
+                    } else {
+                        "~/.dsh".to_string()
+                    };
+                    push(&label);
+                }
+                if command_exists("dsh") {
+                    push("`dsh` on PATH");
                 }
             }
         }
@@ -288,9 +340,12 @@ pub fn parse_harness_id(raw: &str) -> Result<HarnessId> {
         }
         "codebuddy" | "code-body" | "codebody" | "code-buddy" => Ok(HarnessId::Codebuddy),
         "workbuddy" | "work-buddy" => Ok(HarnessId::Workbuddy),
+        "qoder" | "qoder-cli" | "qodercli" => Ok(HarnessId::Qoder),
+        "qoder-cn" | "qoder_cn" | "qodercn" | "qoderclicn" => Ok(HarnessId::QoderCn),
         "pi" | "pi-agent" | "pi_agent" | "piagent" => Ok(HarnessId::PiAgent),
         "hermes" | "hermes-agent" | "hermes_agent" | "hermesagent" => Ok(HarnessId::Hermes),
         "kimi-code" | "kimi" | "kimicode" | "kimi-cli" | "kimi_cli" => Ok(HarnessId::KimiCode),
+        "dsh" | "deepseek-harness" | "deepseek_harness" | "deepseekharness" => Ok(HarnessId::Dsh),
         other => bail!(
             "unknown harness '{other}'; expected one of: {}",
             HarnessId::ALL
@@ -316,6 +371,27 @@ fn kimi_code_home_for_user_home(home: &Path) -> PathBuf {
         }
     }
     home.join(".kimi-code")
+}
+
+/// DeepSeek Harness (`dsh`) data root: `$DSH_HOME` when set and non-empty
+/// (expanding leading `~`, `~/`, or `~\`), otherwise `~/.dsh`.
+fn dsh_home_for_user_home(home: &Path) -> PathBuf {
+    if let Ok(override_home) = std::env::var("DSH_HOME") {
+        let trimmed = override_home.trim();
+        if !trimmed.is_empty() {
+            if trimmed == "~" {
+                return home.to_path_buf();
+            }
+            if let Some(rest) = trimmed
+                .strip_prefix("~/")
+                .or_else(|| trimmed.strip_prefix("~\\"))
+            {
+                return home.join(rest);
+            }
+            return PathBuf::from(trimmed);
+        }
+    }
+    home.join(".dsh")
 }
 
 /// Mirrors [`get_hermes_home()`](https://github.com/NousResearch/hermes-agent/blob/main/hermes_constants.py):
@@ -420,6 +496,7 @@ mod tests {
             .env("BSK_HARNESS_TEST_HOME", root.path())
             .env_remove("HERMES_HOME")
             .env_remove("KIMI_CODE_HOME")
+            .env_remove("DSH_HOME")
             .env_remove("LOCALAPPDATA");
         configure(&mut command, root.path());
         let output = command.output().unwrap();
@@ -443,6 +520,10 @@ mod tests {
     #[test]
     fn parse_aliases() {
         assert_eq!(parse_harness_id("codebody").unwrap(), HarnessId::Codebuddy);
+        assert_eq!(parse_harness_id("qoder").unwrap(), HarnessId::Qoder);
+        assert_eq!(parse_harness_id("qodercli").unwrap(), HarnessId::Qoder);
+        assert_eq!(parse_harness_id("qoder-cn").unwrap(), HarnessId::QoderCn);
+        assert_eq!(parse_harness_id("qoderclicn").unwrap(), HarnessId::QoderCn);
         assert_eq!(
             parse_harness_id("claude-internal").unwrap(),
             HarnessId::ClaudeCodeInternal
@@ -452,6 +533,11 @@ mod tests {
         assert_eq!(parse_harness_id("kimi").unwrap(), HarnessId::KimiCode);
         assert_eq!(parse_harness_id("kimi-code").unwrap(), HarnessId::KimiCode);
         assert_eq!(parse_harness_id("kimi-cli").unwrap(), HarnessId::KimiCode);
+        assert_eq!(parse_harness_id("dsh").unwrap(), HarnessId::Dsh);
+        assert_eq!(
+            parse_harness_id("deepseek-harness").unwrap(),
+            HarnessId::Dsh
+        );
     }
 
     #[test]
@@ -503,6 +589,14 @@ mod tests {
             PathBuf::from("/home/user/.workbuddy/skills")
         );
         assert_eq!(
+            HarnessId::Qoder.skills_dir_for_home(home),
+            PathBuf::from("/home/user/.qoder/skills")
+        );
+        assert_eq!(
+            HarnessId::QoderCn.skills_dir_for_home(home),
+            PathBuf::from("/home/user/.qoder-cn/skills")
+        );
+        assert_eq!(
             HarnessId::PiAgent.skills_dir_for_home(home),
             PathBuf::from("/home/user/.pi/agent/skills")
         );
@@ -514,6 +608,31 @@ mod tests {
             HarnessId::KimiCode.skills_dir_for_home(home),
             PathBuf::from("/home/user/.kimi-code/skills")
         );
+        assert_eq!(
+            HarnessId::Dsh.skills_dir_for_home(home),
+            PathBuf::from("/home/user/.dsh/skills")
+        );
+    }
+
+    #[test]
+    fn detects_dsh_from_home_layout_and_honors_dsh_home_env() {
+        if !in_harness_environment(
+            "detects_dsh_from_home_layout_and_honors_dsh_home_env",
+            |command, _home| {
+                command.env("DSH_HOME", "~/custom-dsh");
+            },
+        ) {
+            return;
+        }
+        let home = PathBuf::from(std::env::var_os("BSK_HARNESS_TEST_HOME").unwrap());
+        let custom = home.join("custom-dsh");
+        std::fs::create_dir_all(&custom).unwrap();
+        let report = HarnessId::Dsh.report_for_home(&home);
+        assert!(report.detected);
+        assert_eq!(report.skills_dir, custom.join("skills"));
+        assert_eq!(HarnessId::Dsh.cli_name(), "dsh");
+        assert_eq!(HarnessId::Dsh.display_name(), "DeepSeek Harness");
+        assert!(report.detection_detail.unwrap().contains("$DSH_HOME"));
     }
 
     #[test]
@@ -556,6 +675,30 @@ mod tests {
         let report = HarnessId::Workbuddy.report_for_home(home);
         assert!(report.detected);
         assert_eq!(report.skills_dir, home.join(".workbuddy").join("skills"));
+    }
+
+    #[test]
+    fn detects_qoder_from_home_layout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".qoder")).unwrap();
+        let report = HarnessId::Qoder.report_for_home(home);
+        assert!(report.detected);
+        assert_eq!(report.skills_dir, home.join(".qoder").join("skills"));
+        assert_eq!(HarnessId::Qoder.cli_name(), "qoder");
+        assert_eq!(HarnessId::Qoder.display_name(), "Qoder");
+    }
+
+    #[test]
+    fn detects_qoder_cn_from_home_layout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".qoder-cn")).unwrap();
+        let report = HarnessId::QoderCn.report_for_home(home);
+        assert!(report.detected);
+        assert_eq!(report.skills_dir, home.join(".qoder-cn").join("skills"));
+        assert_eq!(HarnessId::QoderCn.cli_name(), "qoder-cn");
+        assert_eq!(HarnessId::QoderCn.display_name(), "Qoder CN");
     }
 
     #[test]

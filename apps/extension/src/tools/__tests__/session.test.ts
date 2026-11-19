@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentWindowCreateOptions } from "@/session-manager/agent-window";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { SessionManager } from "@/session-manager/manager";
+import * as humanLoop from "../human-loop";
 import * as recording from "../record";
-import { handleSessionStop } from "../session";
+import { handleSessionStart, handleSessionStop } from "../session";
 import type { ChromeTabsApi } from "../shared";
 import { type AgentOverlayResetApi, type ChromeWindowsApi, type TabMutationApi } from "../tabs";
 
@@ -35,6 +36,81 @@ function fakeAgentWindow(ids: number[]) {
   const ensureActiveTab = vi.fn(async () => 0);
   return { create, remove, ensureActiveTab };
 }
+
+describe("controller session identity", () => {
+  it("accepts nullable optional protocol fields", async () => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100, 200]) });
+    expect(
+      await handleSessionStart(manager, { session_id: "null", controller: null }),
+    ).not.toHaveProperty("code");
+    expect(manager.get("null")?.controller).toBeUndefined();
+    expect(
+      await handleSessionStart(manager, {
+        session_id: "info",
+        controller: { name: "Codex", project: null, color: null },
+      }),
+    ).not.toHaveProperty("code");
+    expect(manager.get("info")?.controller?.color).toMatch(/^#[0-9a-f]{6}$/);
+  });
+  it("allocates distinct stable colors to six concurrent starts", async () => {
+    const manager = new SessionManager({
+      agentWindow: fakeAgentWindow([100, 200, 300, 400, 500, 600]),
+    });
+    const ids = ["aaaa", "aaag", "aaam", "aaas", "aaay", "aabf"];
+    await Promise.all(
+      ids.map((session_id) =>
+        handleSessionStart(manager, {
+          session_id,
+          controller: { name: "Codex", project: session_id },
+        }),
+      ),
+    );
+    const colors = ids.map((id) => manager.get(id)?.controller?.color);
+    expect(new Set(colors).size).toBe(6);
+    manager.release(ids[0]);
+    expect(ids.slice(1).map((id) => manager.get(id)?.controller?.color)).toEqual(colors.slice(1));
+  });
+  it("keeps independent identities and removes them with their sessions", async () => {
+    const windows = fakeAgentWindow([100, 200, 300]);
+    const manager = new SessionManager({ agentWindow: windows });
+    const first = { name: "Codex", project: "Search", color: "#2563eb" };
+    const second = { name: "Claude", project: "Payments" };
+    for (const [session_id, controller] of [
+      ["aaaa", first],
+      ["aaab", second],
+    ] as const) {
+      expect(await handleSessionStart(manager, { session_id, controller })).not.toHaveProperty(
+        "code",
+      );
+    }
+    expect(manager.get("aaaa")?.controller).toEqual(first);
+    expect(manager.get("aaab")?.controller).toMatchObject(second);
+    // Do not leak display-only fields into chrome.windows.create options.
+    expect(windows.create.mock.calls[0][1]).not.toHaveProperty("controller");
+    first.name = "Changed by caller";
+    expect(manager.get("aaaa")?.controller?.name).toBe("Codex");
+    manager.release("aaaa");
+    expect(manager.get("aaaa")).toBeNull();
+    expect(manager.get("aaab")?.controller).toMatchObject(second);
+    await handleSessionStart(manager, { session_id: "aaaa" });
+    expect(manager.get("aaaa")?.controller).toBeUndefined();
+  });
+
+  it.each([
+    {},
+    { name: "" },
+    { name: "Codex", color: "red" },
+  ])("rejects invalid controller before window creation: %j", async (controller) => {
+    const windows = fakeAgentWindow([100]);
+    const manager = new SessionManager({ agentWindow: windows });
+    const result = await handleSessionStart(manager, {
+      session_id: "aaaa",
+      controller,
+    } as Parameters<typeof handleSessionStart>[1]);
+    expect(result).toMatchObject({ code: "invalid_params" });
+    expect(windows.create).not.toHaveBeenCalled();
+  });
+});
 
 interface FakeState {
   tabs: Map<number, chrome.tabs.Tab>;
@@ -104,6 +180,7 @@ describe("handleSessionStop with auto-return", () => {
     const failures = new Set([7]);
     const { tabs, windows } = makeApis(state, { moveThrowsFor: failures });
     const clear = vi.spyOn(recording, "clearRecordingForSession").mockImplementation(() => {});
+    const clearHelp = vi.spyOn(humanLoop, "clearHelpForSession").mockImplementation(() => {});
     try {
       const result = await handleSessionStop(
         sm,
@@ -113,18 +190,23 @@ describe("handleSessionStop with auto-return", () => {
       expect(result).toHaveProperty("return_failures");
       expect(sm.has("aa11")).toBe(true);
       expect(clear).toHaveBeenCalledTimes(remote ? 1 : 0);
+      expect(clearHelp).toHaveBeenCalledTimes(remote ? 1 : 0);
       failures.clear();
       clear.mockClear();
+      clearHelp.mockClear();
       const move = tabs.move;
       tabs.move = vi.fn(async (id, options) => {
         expect(clear).toHaveBeenCalledTimes(remote ? 1 : 0);
+        expect(clearHelp).toHaveBeenCalledTimes(remote ? 1 : 0);
         return move(id, options);
       });
       await handleSessionStop(sm, { session_id: "aa11" }, { tabManagement: { tabs, windows } });
       expect(clear).toHaveBeenCalledTimes(1);
+      expect(clearHelp).toHaveBeenCalledTimes(1);
       expect(sm.has("aa11")).toBe(false);
     } finally {
       clear.mockRestore();
+      clearHelp.mockRestore();
     }
   });
   it("leaves the session untouched when cancellation arrived before teardown", async () => {

@@ -1,12 +1,16 @@
+import { SENSITIVE_READ_INPUT_SELECTOR } from "@/lib/dom-predicates";
 import type { SessionContext } from "@/session-manager/manager";
+import { isMissingNode } from "@/tools/errors";
 import { FOCUS_CHECK } from "@/tools/focus-state";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import {
   type CdpRunner,
   isRpcError,
   type ResolvedTargetTab,
-  sendToCdpTarget,
+  sendToFrameHandle,
+  withObjectGroup,
 } from "@/tools/shared";
+import { buildInPageRowAnchorSnippet } from "@/tools/vom/row-anchor-spec";
 import type { RpcError, RpcErrorReason } from "@/transport/types";
 
 export interface ActionExpectation {
@@ -78,20 +82,24 @@ export function parseExpectations(value: unknown): ActionExpectation[] | RpcErro
 }
 
 /** Fixed read-only probes; page text and supplied expected values are never code. */
-const SAMPLE_TARGET = `function(field, attribute) {
+const SAMPLE_TARGET = `function(field, attribute, needRowAnchor) {
   if (!this.isConnected) return { connected: false };
   if (field === 'exists') return { connected: true, value: true };
   if (field === 'text') return { connected: true, value: this.textContent };
-  const sensitive = this.matches('input[type="password"],input[type="file"],input[type="hidden"]');
+  const sensitiveSelector = ${JSON.stringify(SENSITIVE_READ_INPUT_SELECTOR)};
+  const sensitive = this.matches(sensitiveSelector);
   if (field === 'attribute') return { connected: true, value: this.getAttribute(attribute), redacted: sensitive && attribute.toLowerCase() === 'value' };
   if (field) return { connected: true, value: this[field] ?? null, redacted: sensitive && field === 'value' };
   const style = getComputedStyle(this);
+  let rowAnchor = null;
+  if (needRowAnchor) ${buildInPageRowAnchorSnippet()}
   return {
     connected: true,
     visible: (this.getClientRects().length > 0 || style.display === 'contents') && style.visibility !== 'hidden' && style.visibility !== 'collapse',
     disabled: this.matches(':disabled') || this.getAttribute('aria-disabled') === 'true' || !!this.closest('[inert]'),
     readOnly: this.readOnly === true,
-    focused: (${FOCUS_CHECK}).call(this)
+    focused: (${FOCUS_CHECK}).call(this),
+    ...(needRowAnchor ? { rowAnchor } : {})
   };
 }`;
 
@@ -103,6 +111,7 @@ interface Sample {
   readOnly?: boolean;
   focused?: boolean;
   redacted?: boolean;
+  rowAnchor?: string | null;
 }
 
 async function sample(
@@ -110,43 +119,48 @@ async function sample(
   target: ResolvedActionTarget,
   check?: ActionExpectation,
 ): Promise<Sample | RpcError> {
-  const objectGroup = `action-check-${crypto.randomUUID()}`;
   const send = <T>(method: string, params: object) =>
-    sendToCdpTarget<T>(cdp, target.cdpTarget, method, params);
-  try {
-    const resolved = await send<{ object?: { objectId?: string } }>("DOM.resolveNode", {
-      backendNodeId: target.backendNodeId,
-      objectGroup,
-    });
-    if (!resolved.object?.objectId) return { connected: false };
-    const reply = await send<{ result?: { value?: Sample }; exceptionDetails?: unknown }>(
-      "Runtime.callFunctionOn",
-      {
-        objectId: resolved.object.objectId,
-        functionDeclaration: SAMPLE_TARGET,
-        arguments: [{ value: check?.field ?? null }, { value: check?.attribute ?? null }],
-        returnByValue: true,
-      },
-    );
-    if (reply.exceptionDetails || !reply.result?.value)
+    sendToFrameHandle<T>(cdp, target.handle, method, params);
+  return withObjectGroup(cdp, target.handle, "action-check", async (objectGroup) => {
+    try {
+      const resolved = await send<{ object?: { objectId?: string } }>("DOM.resolveNode", {
+        backendNodeId: target.backendNodeId,
+        objectGroup,
+      });
+      if (!resolved.object?.objectId) return { connected: false };
+      const reply = await send<{ result?: { value?: Sample }; exceptionDetails?: unknown }>(
+        "Runtime.callFunctionOn",
+        {
+          objectId: resolved.object.objectId,
+          functionDeclaration: SAMPLE_TARGET,
+          arguments: [
+            { value: check?.field ?? null },
+            { value: check?.attribute ?? null },
+            { value: !check && Boolean(target.usedRef && target.rowAnchor) },
+          ],
+          returnByValue: true,
+        },
+      );
+      if (reply.exceptionDetails || !reply.result?.value)
+        return actionError(
+          "target_unavailable",
+          "Could not inspect the action target",
+          "target",
+          "Inspect the target again before deciding on another action.",
+        );
+      return reply.result.value;
+    } catch (error) {
+      // CDP can collect an already removed node before it can be sampled. This is
+      // the same detached identity, not an unavailable browser or a new target.
+      if (isMissingNode(error)) return { connected: false };
       return actionError(
         "target_unavailable",
-        "Could not inspect the action target",
+        error instanceof Error ? error.message : String(error),
         "target",
-        "Inspect the target again before deciding on another action.",
+        "Inspect the target again; the document or node may have been replaced.",
       );
-    return reply.result.value;
-  } catch (error) {
-    return actionError(
-      "target_unavailable",
-      error instanceof Error ? error.message : String(error),
-      "target",
-      "Inspect the target again; the document or node may have been replaced.",
-    );
-  } finally {
-    // Navigation may already have released the execution context.
-    await send("Runtime.releaseObjectGroup", { objectGroup }).catch(() => {});
-  }
+    }
+  });
 }
 
 export async function checkActionTarget(
@@ -157,6 +171,26 @@ export async function checkActionTarget(
 ): Promise<RpcError | undefined> {
   const facts = await sample(cdp, target);
   if (isRpcError(facts)) return facts;
+  if (
+    facts.connected &&
+    target.usedRef &&
+    target.rowAnchor &&
+    facts.rowAnchor !== target.rowAnchor
+  ) {
+    return actionError(
+      "virtual_row_recycled",
+      `Target @${target.usedRef} belonged to row "${target.rowAnchor}", but its DOM slot now renders "${facts.rowAnchor ?? "(empty)"}"`,
+      "target",
+      "Run cooperate sync (or observe) to refresh refs for the updated rows before retrying.",
+      {
+        target: `@${target.usedRef}`,
+        expected_row: target.rowAnchor,
+        actual_row: facts.rowAnchor ?? null,
+        backend_node_id: target.backendNodeId,
+        ...(target.frameId ? { frame_id: target.frameId } : {}),
+      },
+    );
+  }
   const reason = !facts.connected
     ? "target_detached"
     : !facts.visible && !["tool.upload", "tool.blur"].includes(method)
@@ -182,7 +216,11 @@ export async function checkActionTarget(
       messages[reason],
       "target",
       "Inspect or wait for this target to become actionable. A new control context is not required unless control or the document changed.",
-      { target: target.usedRef ? `@${target.usedRef}` : target.usedSelector },
+      {
+        target: target.usedRef ? `@${target.usedRef}` : target.usedSelector,
+        backend_node_id: target.backendNodeId,
+        ...(target.frameId ? { frame_id: target.frameId } : {}),
+      },
     );
 }
 

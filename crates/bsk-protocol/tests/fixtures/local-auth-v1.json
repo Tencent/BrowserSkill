@@ -1,0 +1,21 @@
+{
+  "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "daemon_id": "AAECAwQFBgcICQoLDA0ODw",
+  "device_id": "EBESExQVFhcYGRobHB0eHw",
+  "gen": 0,
+  "instance_id": "a1b2c3d4",
+  "origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "client_nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "server_nonce": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
+  "txn": "YGFiY2RlZmdoaWprbG1ubw",
+  "transcript": "AAAAEWJzay1sb2NhbC1hdXRoLXYxAAAAEAABAgMEBQYHCAkKCwwNDg8AAAAQEBESExQVFhcYGRobHB0eHwAAAAQAAAAAAAAACGExYjJjM2Q0AAAAM2Nocm9tZS1leHRlbnNpb246Ly9hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQAAACAgISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-PwAAACBAQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eXw",
+  "server": "3kYnJZkBJNxjMV9W8xHy6a6Y4BXfMVvmpOJNNA-Fduc",
+  "client": "7Yb1YDdWz8NLZLxGgjR6jhQXQm-LnTd7WJl_dS4S_fc",
+  "candidate": "bktCCmdc7MYtPJuC6SqH5CxZK3HymCtg365sQuyI_bw",
+  "confirm": "uHzjJtpS8eNBG5Dc6s1xDCB5x-wQv2US1D5AkwjGnLY",
+  "committed": "m3i9eT_M1bN4pUaS8Fqo0amjiTNfGSNER61C9mZzy3I",
+  "recovery_client_nonce": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8",
+  "recovery_server_nonce": "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8",
+  "recovery_transcript": "AAAAEWJzay1sb2NhbC1hdXRoLXYxAAAAEAABAgMEBQYHCAkKCwwNDg8AAAAQEBESExQVFhcYGRobHB0eHwAAAAQAAAABAAAACGExYjJjM2Q0AAAAM2Nocm9tZS1leHRlbnNpb246Ly9hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQAAACCAgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2enwAAACCgoaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2-vw",
+  "commit_proof": "UHRwHwjqBrBciRFE90GLUCEauQWDYxiWCzEhDyA7o9o"
+}

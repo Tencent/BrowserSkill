@@ -9,8 +9,8 @@ Build and run from the repository root, using a cooperative CLI build:
 
 ```sh
 BSK_DAEMON_WS_URL=ws://127.0.0.1:52931 pnpm --filter @browser-skill/extension build
-BSK_COOP_CLI=/path/to/bsk \
-BSK_COOP_CHROME=/path/to/chromium \
+BSK_TEST_CLI=/path/to/bsk \
+BSK_TEST_CHROME=/path/to/chromium \
 node evals/browser/cases/regression/cooperation-video/run.mjs
 ```
 

@@ -17,7 +17,7 @@ use bsk_protocol::{ErrorCode, Method};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{self, CliError, Format, RenderExtras};
 use crate::daemon::browsers::EXTENSION_CONNECT_WAIT;
 
@@ -52,6 +52,15 @@ pub enum SessionSub {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionStartArgs {
+    /// Agent name displayed in the browser control overlay (1..=80 characters).
+    #[arg(long)]
+    pub agent_name: Option<String>,
+    /// Project label displayed alongside the agent (1..=120 characters).
+    #[arg(long, requires = "agent_name")]
+    pub project: Option<String>,
+    /// Controller marker color as #RRGGBB (default: stable per-session color).
+    #[arg(long, requires = "agent_name")]
+    pub controller_color: Option<String>,
     /// Deprecated compatibility flag. Automation settings in the extension take precedence.
     #[arg(long)]
     pub unattended: bool,
@@ -87,10 +96,14 @@ pub struct SessionStartArgs {
     /// Bring the new Agent Window to the foreground.
     #[arg(long)]
     pub focus: bool,
+
+    /// Optional caller scope name to bind this session to.
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 /// Parse a `--width` / `--height` Agent Window dimension (CSS pixels).
-fn window_size(s: &str) -> Result<u32, String> {
+pub(crate) fn window_size(s: &str) -> Result<u32, String> {
     let value: u32 = s
         .parse()
         .map_err(|_| format!("invalid window dimension {s:?}: expected a positive integer"))?;
@@ -127,6 +140,8 @@ pub struct SessionRequestArgs {
 
 #[derive(Debug, Serialize)]
 struct StartParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    controller: Option<bsk_protocol::tools::ControllerInfo>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incognito: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,7 +198,11 @@ struct ListReply {
     sessions: Vec<SessionStatusEntry>,
 }
 
-pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    cmd: SessionCmd,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     match cmd.sub {
         SessionSub::Start(args) => {
@@ -192,10 +211,10 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
             if args.request_id.is_none() {
                 run_skill_sync_for_session_start(format);
             }
-            run_start(info.sock_path, args, format)
+            run_start(info.sock_path, ctx, args, format)
         }
-        SessionSub::Stop(args) => run_stop(info.sock_path, args, format),
-        SessionSub::List => run_list(info.sock_path, format),
+        SessionSub::Stop(args) => run_stop(info.sock_path, ctx, args, format),
+        SessionSub::List => run_list(info.sock_path, ctx, format),
         SessionSub::Request(args) => {
             let action = if args.prepare {
                 "prepare"
@@ -208,6 +227,7 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
             };
             let reply: serde_json::Value = call(
                 info.sock_path,
+                ctx,
                 Method::SessionRequest,
                 Some(serde_json::json!({"request_id": args.request_id, "action": action})),
                 Duration::from_secs(40),
@@ -221,7 +241,13 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
     }
 }
 
-fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<(), CliError> {
+fn run_start(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: SessionStartArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     if args.unattended {
         crate::cli::interaction_policy::warn_legacy_override("--unattended");
     }
@@ -246,9 +272,17 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
             }
         });
     }
-    let result = start_session(
+    let result = start_session_with_context(
         sock,
+        &op_ctx,
         SessionStartOptions {
+            controller: args
+                .agent_name
+                .map(|name| bsk_protocol::tools::ControllerInfo {
+                    name,
+                    project: args.project,
+                    color: args.controller_color,
+                }),
             incognito: args.incognito,
             name: args.name,
             request_id: args.request_id,
@@ -256,6 +290,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
             width: args.width,
             height: args.height,
             focused: Some(args.focus),
+            bind_scope: true,
         },
     );
     waited.store(true, Ordering::SeqCst);
@@ -287,6 +322,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 /// (background window, browser-chosen size).
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
+    pub controller: Option<bsk_protocol::tools::ControllerInfo>,
     pub incognito: bool,
     pub request_id: Option<String>,
     pub name: Option<String>,
@@ -294,42 +330,83 @@ pub struct SessionStartOptions {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub focused: Option<bool>,
+    pub bind_scope: bool,
 }
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
-    if opts.incognito {
-        crate::cli::protocol::require_daemon_support(
-            &sock,
-            "session start --incognito",
-            bsk_protocol::tools::INCOGNITO_SESSION_PROTOCOL,
-            bsk_protocol::tools::supports_incognito_sessions,
-        )?;
-    }
-    call(
+    start_session_with_context(
         sock,
-        if opts.request_id.is_some() {
-            Method::SessionStartTracked
-        } else {
-            Method::SessionStart
-        },
-        Some(StartParams {
-            incognito: opts.incognito,
-            request_id: opts.request_id,
-            task_name: opts.name,
-            browser_instance_id: opts.browser,
-            width: opts.width,
-            height: opts.height,
-            focused: Some(opts.focused.unwrap_or(false)),
-        }),
+        &crate::cli::business_rpc::ClientContext::default(),
+        opts,
+    )
+}
+
+/// Start a session and open the Agent Window under the caller's request context.
+pub fn start_session_with_context(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    opts: SessionStartOptions,
+) -> Result<StartReply, CliError> {
+    if let Some(controller) = &opts.controller {
+        controller
+            .validate()
+            .map_err(|err| CliError::Local(anyhow::anyhow!(err)))?;
+    }
+    let method = if opts.request_id.is_some() {
+        Method::SessionStartTracked
+    } else {
+        Method::SessionStart
+    };
+    let payload = StartParams {
+        controller: opts.controller,
+        incognito: opts.incognito,
+        request_id: opts.request_id,
+        task_name: opts.name,
+        browser_instance_id: opts.browser,
+        width: opts.width,
+        height: opts.height,
+        focused: Some(opts.focused.unwrap_or(false)),
+    };
+    let caller_scope = ctx.resolved_caller_scope();
+    let meta = if opts.bind_scope && crate::daemon::scopes::is_isolated_scope(&caller_scope) {
+        crate::ipc_client::IpcRequestMeta {
+            caller_scope: Some(caller_scope),
+            bind_scope: true,
+            ..Default::default()
+        }
+    } else {
+        crate::ipc_client::IpcRequestMeta::default()
+    };
+    ctx.call_envelope::<StartParams, StartReply>(
+        sock,
+        "session",
+        method,
+        Some(payload),
+        meta,
         SESSION_START_IPC_TIMEOUT,
     )
+    .map(|(reply, _)| reply)
 }
 
 /// Stop a single session by id.
 pub fn stop_session(sock: PathBuf, session_id: &str) -> Result<StopReply, CliError> {
+    stop_session_with_context(
+        sock,
+        &crate::cli::business_rpc::ClientContext::default(),
+        session_id,
+    )
+}
+
+/// Stop a single session by id under the caller's request context.
+pub fn stop_session_with_context(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    session_id: &str,
+) -> Result<StopReply, CliError> {
     call(
         sock,
+        ctx,
         Method::SessionStop,
         Some(StopParams {
             session_id: Some(session_id.to_string()),
@@ -337,6 +414,32 @@ pub fn stop_session(sock: PathBuf, session_id: &str) -> Result<StopReply, CliErr
         }),
         SESSION_STOP_IPC_TIMEOUT,
     )
+}
+
+pub(super) fn stop_record_session_with_context(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    session_id: &str,
+) -> Result<(), CliError> {
+    let reply: StopReply = call(
+        sock,
+        ctx,
+        Method::SessionStop,
+        Some(serde_json::json!({ "session_id": session_id, "recording": true })),
+        SESSION_STOP_IPC_TIMEOUT,
+    )?;
+    if let Some(failure) = reply.failed.into_iter().next() {
+        return Err(CliError::Rpc {
+            code: failure.code,
+            message: failure.message,
+            data: Some(serde_json::json!({
+                "session_id": session_id,
+                "return_failures": reply.return_failures,
+            })),
+            source: None,
+        });
+    }
+    Ok(())
 }
 
 /// Render a `session.start` failure (review I3).
@@ -355,7 +458,7 @@ pub fn stop_session(sock: PathBuf, session_id: &str) -> Result<StopReply, CliErr
 /// ambiguous-label) via the [`RenderExtras`] hook. In `--json` mode
 /// the structured payload still rides inside `error.data` so script
 /// consumers can read it without parsing prose.
-fn handle_start_error(err: CliError, format: Format) -> CliError {
+pub(crate) fn handle_start_error(err: CliError, format: Format) -> CliError {
     if matches!(format, Format::Json) {
         return err;
     }
@@ -509,7 +612,12 @@ fn write_browser_table(
     Ok(())
 }
 
-fn run_stop(sock: PathBuf, args: SessionStopArgs, format: Format) -> Result<(), CliError> {
+fn run_stop(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: SessionStopArgs,
+    format: Format,
+) -> Result<(), CliError> {
     if !args.all && args.session_id.is_none() {
         return Err(CliError::Local(anyhow::anyhow!(
             "session stop requires SESSION_ID or --all"
@@ -517,6 +625,7 @@ fn run_stop(sock: PathBuf, args: SessionStopArgs, format: Format) -> Result<(), 
     }
     let reply: StopReply = call(
         sock,
+        ctx,
         Method::SessionStop,
         Some(StopParams {
             session_id: args.session_id,
@@ -572,8 +681,13 @@ fn run_stop(sock: PathBuf, args: SessionStopArgs, format: Format) -> Result<(), 
     Ok(())
 }
 
-fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
-    let reply: ListReply = call::<(), _>(sock, Method::SessionList, None, Duration::from_secs(5))?;
+fn run_list(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let reply: ListReply =
+        call::<(), _>(sock, ctx, Method::SessionList, None, Duration::from_secs(5))?;
     match format {
         Format::Json => {
             println!(
@@ -587,7 +701,7 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                 println!("(no active sessions)");
                 return Ok(());
             }
-            let headers = ("SESSION", "BROWSER", "AGENT WINDOW");
+            let headers = ("SESSION", "BROWSER", "AGENT WINDOW", "CONTROLLER / PROJECT");
             let session_w = reply
                 .sessions
                 .iter()
@@ -603,8 +717,8 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                 .unwrap_or(0)
                 .max(headers.1.len());
             println!(
-                "{:<session_w$}  {:<browser_w$}  {}",
-                headers.0, headers.1, headers.2,
+                "{:<session_w$}  {:<browser_w$}  {}  {}",
+                headers.0, headers.1, headers.2, headers.3,
             );
             for s in &reply.sessions {
                 let window = s
@@ -612,8 +726,19 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                     .map(|w| w.to_string())
                     .unwrap_or_else(|| "-".into());
                 println!(
-                    "{:<session_w$}  {:<browser_w$}  {}",
-                    s.session_id, s.browser_instance_id, window,
+                    "{:<session_w$}  {:<browser_w$}  {}  {}",
+                    s.session_id,
+                    s.browser_instance_id,
+                    window,
+                    s.controller.as_ref().map_or_else(
+                        || "-".into(),
+                        |c| {
+                            c.project.as_ref().map_or_else(
+                                || c.name.clone(),
+                                |project| format!("{} / {project}", c.name),
+                            )
+                        }
+                    ),
                 );
             }
         }
@@ -623,6 +748,7 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
 
 fn call<P, R>(
     sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
     method: Method,
     params: Option<P>,
     timeout: Duration,
@@ -631,7 +757,7 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(sock, "session", method, params, timeout)
+    ctx.call::<P, R>(sock, "session", method, params, timeout)
 }
 
 /// Best-effort: bring installed agent skills up to date with the
@@ -673,6 +799,41 @@ mod start_params_tests {
     use super::*;
 
     #[test]
+    fn controller_flags_require_an_agent_name() {
+        use clap::Parser;
+        for flags in [
+            vec!["--project", "Search"],
+            vec!["--controller-color", "#2563eb"],
+        ] {
+            assert!(
+                crate::cli::Cli::try_parse_from([vec!["bsk", "session", "start"], flags].concat())
+                    .is_err()
+            );
+        }
+        let cli = crate::cli::Cli::try_parse_from([
+            "bsk",
+            "session",
+            "start",
+            "--agent-name",
+            "Codex",
+            "--project",
+            "Search",
+            "--controller-color",
+            "#2563eb",
+        ])
+        .unwrap();
+        let crate::cli::Command::Session(SessionCmd {
+            sub: SessionSub::Start(args),
+        }) = cli.command
+        else {
+            panic!("expected start")
+        };
+        assert_eq!(args.agent_name.as_deref(), Some("Codex"));
+        assert_eq!(args.project.as_deref(), Some("Search"));
+        assert_eq!(args.controller_color.as_deref(), Some("#2563eb"));
+    }
+
+    #[test]
     fn incognito_flag_is_opt_in() {
         use clap::Parser;
         for (flags, expected) in [
@@ -694,6 +855,7 @@ mod start_params_tests {
     fn start_params_send_task_name_without_policy_overrides() {
         for task_name in [None, Some("Check settings".to_string())] {
             let params = StartParams {
+                controller: None,
                 incognito: false,
                 request_id: None,
                 task_name: task_name.clone(),

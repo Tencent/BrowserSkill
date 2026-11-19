@@ -1,7 +1,7 @@
 # Browser capability evaluation corpus
 
-This directory is a deterministic, local browser evaluation environment for BrowserSkill, DSH,
-and other command-line agents. Cases, fixture pages, direct `bsk` workflows, and assertions are
+This directory is a deterministic, local browser evaluation environment for BrowserSkill
+and command-line or MCP agents. Cases, fixture pages, direct `bsk` workflows, and assertions are
 data-driven and discovered automatically. Adding a case does not require editing a central switch.
 
 [中文说明](README.zh-CN.md)
@@ -46,6 +46,56 @@ and screenshots are written to the ignored `evals/browser/results/` directory.
 
 `pnpm run eval:browser -- coverage` is also supported. The CLI intentionally accepts pnpm's leading
 `--` separator.
+
+## Optional Agent-driven PR self-check
+
+For substantial changes to browser interactions, observations, control policy, or CLI/extension
+communication, we recommend [BrowserSkill release test](skills/browserskill-release-test/SKILL.md)
+before opening a PR. This is optional: not running it, or encountering an environment blocker,
+does not prevent opening or merging a PR. Keep running the existing checks appropriate to your change.
+
+Give an Agent with repository and browser access this instruction; no skill installation is required:
+
+```text
+Read evals/browser/skills/browserskill-release-test/SKILL.md in this checkout.
+Run the optional end-to-end self-check against my current branch HEAD using Bsk.
+Build the CLI and test extension from the same candidate source, record each operation,
+and report the tested scope, failures, and blockers without claiming untested cases passed.
+```
+
+The skill includes 112 workflow/edge/adversarial-arena/regression cases and discovers additional
+command coverage cases (including `bsk plan`, `bsk recipe`, and `bsk read`) from the candidate CLI.
+It exercises synthetic HTML — including 21 focused `ARENA-*` cases on high-density fixtures (linked
+3-form joint filing, nested Open/Closed Shadow DOM and same/cross-origin nested iframes, native
+`<video>`/`<audio>` with WebVTT tracks and canvas frame sampling, SPA hydration, real `bfcache`,
+keyed and slot-pooled 5,000-row virtual grids, `oklch()`/gradient text vs hidden-text canaries,
+and cross-channel sensitive-field redaction), plan/recipe drift labs, a local video portal, and a
+developer forum hub — and eight public sites (OceanEngine, Taobao, Bilibili video site, V2EX forum
+site, MDN, GitHub, Books to Scrape, and Hacker News), including active carousels and per-second
+updates with `evaluate`/`read`/`wheel`, while recording benchmark metrics (success rate,
+interaction turns, actions-per-turn compression ratio, and P50/P95 latency). Full browser execution
+is a separate Agent-guided workflow (not part of the `core` suite or `pnpm eval:browser`); the
+audit harness, fixture server routes (`Range`, `bfcache`, gated/streamed downloads, HEAD safety),
+scenario schema (including that every `required_argv` flag exists on its CLI command), and the
+fixture SHA-256 manifest are verified in CI (`test_release_audit.py`).
+
+The Python helpers need Python 3.9+ and only the standard library. Full execution also needs
+a real Chromium browser, the candidate Bsk CLI and matching extension, and human participation
+for cooperation/recording cases. Choose runtime paths, browser selectors, and free ports locally.
+For PR checks, pin the current branch HEAD; use a specified main/release commit for release checks.
+Record dirty changes explicitly rather than attributing them to a clean commit.
+
+Write run artifacts under the ignored `evals/browser/results/<unique-run>/` directory. In the PR,
+optionally summarize the candidate SHA, coverage, failures/blockers, and relevant sanitized evidence.
+If you request only a subset, label it partial coverage. A full pass still requires all planned
+cases and discovered commands to pass; that result is evidence, not a mandatory PR approval gate.
+Never commit raw browsing logs, login screenshots, production HTML, credentials, or local builds.
+
+The helper's own tests do not open a browser:
+
+```sh
+python3 evals/browser/skills/browserskill-release-test/scripts/test_release_audit.py
+```
 
 ## Suites and selection
 
@@ -197,7 +247,7 @@ passed directly to the executable without a shell.
 ```sh
 pnpm eval:browser run-agent \
   --config evals/browser/agents.local.json \
-  --agent dsh-local \
+  --agent codex-local \
   --suite core \
   --repeat 3
 ```
@@ -205,13 +255,13 @@ pnpm eval:browser run-agent \
 An adapter may define `command`, `args`, `cwd`, `env`, `timeoutMs`, `variant`, free-form `metadata`,
 and optional `metrics.errorPattern` / `metrics.toolCallPattern` regular expressions.
 
-To compare 28 granular tools with domain tools, create two isolated adapter entries and run both
+To compare CLI and MCP tool configurations, create two isolated adapter entries and run both
 against the same selected cases and seeds:
 
 ```sh
 pnpm eval:browser run-agent \
   --config evals/browser/agents.local.json \
-  --agent dsh-granular,dsh-domain \
+  --agent codex-cli,codex-mcp \
   --suite core \
   --repeat 10
 ```
@@ -245,7 +295,7 @@ Use these lanes as commit and PR gates:
 | Change | Required checks |
 | --- | --- |
 | Any case, fixture, oracle, or harness change | `pnpm eval:browser:check` |
-| CLI, daemon, extension, DSH plugin, or browser-operation change | The check above, `cargo build -p bsk`, then real-browser `smoke --suite core` |
+| CLI, daemon, extension, or browser-operation change | The check above, `cargo build -p bsk`, then real-browser `smoke --suite core` |
 | DOM discovery, form interaction, timing, or waiting change | The checks above, then `smoke --suite matrix --seed 4,7,14` |
 | A bug fix with a known reproduction | Add a `regression` case and run that case on the fixed build |
 

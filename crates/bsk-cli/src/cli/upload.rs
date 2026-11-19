@@ -14,7 +14,7 @@ use bsk_protocol::tools::{
 };
 use clap::{Args, ValueEnum};
 
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::parse_timeout_ms;
@@ -37,7 +37,7 @@ impl From<UploadModeArg> for UploadMode {
 
 #[derive(Debug, Clone, Args)]
 pub struct UploadArgs {
-    /// Snapshot ref (`@e3`) or CSS selector for the chooser trigger / drop target.
+    /// Observed ref (`@e3`) of the visible upload button/trigger (preferred), CSS selector/ref for `input[type=file]` (including hidden/iframe inputs), or drop target.
     pub target: Option<String>,
     #[arg(long = "ref")]
     pub ref_: Option<String>,
@@ -50,25 +50,43 @@ pub struct UploadArgs {
     #[arg(long, value_enum, default_value_t)]
     pub mode: UploadModeArg,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
     #[arg(long, default_value = "2m", value_parser = parse_timeout_ms)]
     pub timeout: u32,
 }
 
-pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: UploadArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     if args.files.len() > crate::daemon::file_transfer::MAX_UPLOAD_FILES {
-        return Err(CliError::Local(anyhow::anyhow!(
+        return Err(CliError::invalid_params(anyhow::anyhow!(
             "upload accepts at most {} files",
             crate::daemon::file_transfer::MAX_UPLOAD_FILES
         )));
     }
+    let (ref_, selector) =
+        split_target(args.target, args.ref_, args.selector).map_err(|error| match error {
+            CliError::Local(error) => CliError::invalid_params(error),
+            error => error,
+        })?;
+    let sources = args
+        .files
+        .iter()
+        .map(|path| UploadSource::open(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
+    let aux_ctx = op_ctx.without_action_metadata();
+    let session = args.session.unwrap_or_default();
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let mut staged = Vec::new();
-    for path in &args.files {
-        if let Err(err) = stage_file(&info.sock_path, &args.session, path, &mut staged) {
+    for source in sources {
+        if let Err(err) = stage_file(&info.sock_path, &aux_ctx, &session, source, &mut staged) {
             let _ = crate::cli::business_rpc::release_transfers(
                 &info.sock_path,
                 staged.iter().map(|(id, _)| id.as_str()),
@@ -77,7 +95,7 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
         }
     }
     let params = UploadParams {
-        session_id: args.session,
+        session_id: session,
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -91,8 +109,12 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
             .collect(),
         mode: args.mode.into(),
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
-    let result = crate::cli::business_rpc::call::<_, UploadResult>(
+    let result = op_ctx.call::<_, UploadResult>(
         info.sock_path.clone(),
         "upload",
         Method::ToolUpload,
@@ -126,39 +148,68 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
-fn stage_file(
+pub(crate) struct UploadSource {
+    file: File,
+    name: String,
+    byte_size: u64,
+}
+
+impl UploadSource {
+    /// Open every source before starting the daemon or staging any transfer.
+    pub(crate) fn open(path: &Path) -> Result<Self, CliError> {
+        let file_error = |error| {
+            CliError::file_validation(
+                error,
+                "check --file: provide an existing readable regular file",
+            )
+        };
+        let file = File::open(path)
+            .with_context(|| format!("open upload file {}", path.display()))
+            .map_err(file_error)?;
+        let meta = file
+            .metadata()
+            .with_context(|| format!("read upload file metadata {}", path.display()))
+            .map_err(file_error)?;
+        if !meta.is_file() {
+            return Err(file_error(anyhow::anyhow!(
+                "upload source is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| file_error(anyhow::anyhow!("upload file has no valid basename")))?
+            .to_string();
+        Ok(Self {
+            file,
+            name,
+            byte_size: meta.len(),
+        })
+    }
+}
+
+pub(crate) fn stage_file(
     sock: &Path,
+    ctx: &crate::cli::business_rpc::ClientContext,
     session: &str,
-    path: &PathBuf,
+    source: UploadSource,
     staged: &mut Vec<(String, String)>,
 ) -> Result<(), CliError> {
-    let mut file = File::open(path)
-        .with_context(|| format!("open upload file {}", path.display()))
-        .map_err(CliError::Local)?;
-    let meta = file
-        .metadata()
-        .with_context(|| format!("read upload file metadata {}", path.display()))
-        .map_err(CliError::Local)?;
-    if !meta.is_file() {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "upload source is not a regular file: {}",
-            path.display()
-        )));
-    }
-    let name = path
-        .file_name()
-        .and_then(|v| v.to_str())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| CliError::Local(anyhow::anyhow!("upload file has no valid basename")))?
-        .to_string();
-    let begin: TransferBeginResult = crate::cli::business_rpc::call(
+    let UploadSource {
+        mut file,
+        name,
+        byte_size,
+    } = source;
+    let begin: TransferBeginResult = ctx.call(
         sock.to_path_buf(),
         "transfer-begin",
         Method::TransferBegin,
         Some(TransferBeginParams {
             session_id: session.to_string(),
             name: name.clone(),
-            byte_size: meta.len(),
+            byte_size,
         }),
         Duration::from_secs(10),
     )?;
@@ -172,7 +223,7 @@ fn stage_file(
         if n == 0 {
             break;
         }
-        let reply: TransferChunkResult = crate::cli::business_rpc::call(
+        let reply: TransferChunkResult = ctx.call(
             sock.to_path_buf(),
             "transfer-chunk",
             Method::TransferChunk,
@@ -185,7 +236,7 @@ fn stage_file(
         )?;
         offset = reply.next_offset;
     }
-    let _: TransferReadyResult = crate::cli::business_rpc::call(
+    let _: TransferReadyResult = ctx.call(
         sock.to_path_buf(),
         "transfer-finish",
         Method::TransferFinish,

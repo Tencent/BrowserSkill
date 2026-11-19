@@ -7,12 +7,14 @@ import {
 import {
   isRecordFrameStartMessage,
   RECORD_FRAME_PORT,
-  RECORD_FRAME_QUERY,
-  RECORD_FRAME_START,
   type RecordFramePortMessage,
-  type RecordFrameQueryResponse,
   type RecordFrameStartMessage,
 } from "@/lib/recording/frame-bridge";
+import {
+  hasAddedSubframeElement,
+  isExtensionOverlayNode,
+  openOrClosedShadowRoot,
+} from "../dom-primitives";
 import { type RecordCaptureController, startRecordCapture } from "../record-capture";
 import { RecordStepDelivery } from "../record-step-delivery";
 
@@ -23,6 +25,7 @@ interface ActiveFrameRecording {
   delivery: RecordStepDelivery;
   capture: RecordCaptureController;
   marker: RecordingDocumentMarker;
+  subframeObserver: MutationObserver;
 }
 
 const RECORD_FRAME_REGISTER_TIMEOUT_MS = 5_000;
@@ -54,6 +57,7 @@ export class RecordFrameAgent {
   cancel(requestId: string): void {
     const active = this.#active;
     if (!active || active.requestId !== requestId) return;
+    active.subframeObserver.disconnect();
     active.capture.dispose();
     active.marker.restore();
     active.port.disconnect();
@@ -95,6 +99,54 @@ export class RecordFrameAgent {
       },
       { captureNavigation: window.top === window },
     );
+    let subframeNotifyScheduled = false;
+    const observedSubframeRoots = new WeakSet<Node>();
+    const observeSubframesIn = (target: Node) => {
+      if (isExtensionOverlayNode(target)) return;
+      if (
+        target.nodeType === Node.DOCUMENT_NODE ||
+        target instanceof ShadowRoot ||
+        target === root
+      ) {
+        if (!observedSubframeRoots.has(target)) {
+          observedSubframeRoots.add(target);
+          subframeObserver.observe(target, { childList: true, subtree: true });
+        }
+      }
+      if (target instanceof Element) {
+        const nested = openOrClosedShadowRoot(target);
+        if (nested) observeSubframesIn(nested);
+      }
+      if ("querySelectorAll" in target) {
+        for (const el of (target as ParentNode).querySelectorAll("*")) {
+          if (isExtensionOverlayNode(el)) continue;
+          const nested = openOrClosedShadowRoot(el);
+          if (nested) observeSubframesIn(nested);
+        }
+      }
+    };
+    const subframeObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type !== "childList" || isExtensionOverlayNode(record.target)) continue;
+        for (const node of record.addedNodes) observeSubframesIn(node);
+      }
+      if (subframeNotifyScheduled || !hasAddedSubframeElement(records)) return;
+      subframeNotifyScheduled = true;
+      queueMicrotask(() => {
+        subframeNotifyScheduled = false;
+        if (this.#active !== active) return;
+        try {
+          active.port.postMessage({
+            type: "subframe_added",
+            requestId: active.requestId,
+            producerId: active.producerId,
+          } satisfies RecordFramePortMessage);
+        } catch {
+          // Disconnected ports are cleaned up by `onDisconnect`.
+        }
+      });
+    });
+    observeSubframesIn(root);
     const active: ActiveFrameRecording = {
       requestId: message.requestId,
       producerId,
@@ -102,6 +154,7 @@ export class RecordFrameAgent {
       delivery,
       capture,
       marker,
+      subframeObserver,
     };
     this.#active = active;
     port.onMessage.addListener((raw: unknown) => {
@@ -114,6 +167,7 @@ export class RecordFrameAgent {
     });
     port.onDisconnect.addListener(() => {
       if (this.#active !== active) return;
+      active.subframeObserver.disconnect();
       active.capture.dispose();
       active.marker.restore();
       this.#active = null;
@@ -123,6 +177,7 @@ export class RecordFrameAgent {
 
   async #stop(active: ActiveFrameRecording, commandId: string | undefined): Promise<void> {
     if (!commandId || this.#active !== active) return;
+    active.subframeObserver.disconnect();
     active.capture.dispose();
     const succeeded = await active.delivery.flush();
     try {
@@ -192,17 +247,6 @@ export function attachRecordFrameAgent(): () => void {
     return true;
   };
   chrome.runtime.onMessage.addListener(onMessage);
-  void chrome.runtime
-    .sendMessage({ type: RECORD_FRAME_QUERY })
-    .then((response: RecordFrameQueryResponse | undefined) => {
-      if (!response?.active || !response.requestId || response.startedAtMs === undefined) return;
-      return agent.start({
-        type: RECORD_FRAME_START,
-        requestId: response.requestId,
-        startedAtMs: response.startedAtMs,
-      });
-    })
-    .catch(() => {});
   return () => {
     chrome.runtime.onMessage.removeListener(onMessage);
     agent.dispose();

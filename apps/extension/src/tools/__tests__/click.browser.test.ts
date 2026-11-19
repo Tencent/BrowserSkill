@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; each test owns its browser, profile and HTTP server.
+// Opt in with BSK_TEST_CHROME; each test owns its browser, profile and HTTP server.
 
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -8,7 +8,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { ControlOverlay } from "@/content/ControlOverlay";
 import {
   INPUT_PASSTHROUGH,
@@ -19,7 +19,7 @@ import { SessionManager } from "@/session-manager/manager";
 import { prepareBackgroundExecution } from "../background-execution";
 import { handleClick, handlePress } from "../interaction";
 import { handleObserve } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { handleWheel } from "../wheel";
 
 type Send = <T = Record<string, unknown>>(
@@ -34,9 +34,9 @@ interface CdpEvent {
   params?: object;
 }
 
-type CdpEventListener = (source: CdpDebuggee, method: string, params: unknown) => void;
+type CdpEventListener = Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0];
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser click readiness", () => {
   it("delivers hidden native input, preserves disabled semantics and restores visibility", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html");
@@ -56,7 +56,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
       let onEvent: ((event: CdpEvent) => void) | undefined;
       await withChrome(
         {
-          executable: process.env.BSK_CLICK_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1.5,
           zoom: 1,
           // A standalone CI job starts Chrome cold, before frontend work warms the runner.
@@ -122,13 +122,13 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
               hidden ? "hidden" : "visible",
             );
             const commands: { method: string; params?: object }[] = [];
-            const cdp: CdpRunner = {
+            const cdp: CdpRunner = createStubCdpRunner({
               send: async (_tabId, method, params) => {
                 commands.push({ method, params });
                 return (await send(method, params, target.sessionId)) as never;
               },
               getAttachmentId: () => target.sessionId,
-            };
+            });
             const tab = { id: 4, windowId: 100, active: !hidden } as chrome.tabs.Tab;
             const tabsApi = { get: async () => tab, query: async () => [tab] };
             let action: { ref?: string; selector?: string } = {
@@ -414,7 +414,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
     const language = i18n.language;
     try {
       await withChrome(
-        { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+        { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
         async (send: Send) => {
           const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
             url: "about:blank",
@@ -529,7 +529,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
       ),
     );
     await withChrome(
-      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1, startupTimeout: 30_000 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1, startupTimeout: 30_000 },
       async (send: Send) => {
         const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
           url: "about:blank",
@@ -578,21 +578,21 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
         const tab = { id: 4, windowId: 100, active: true } as chrome.tabs.Tab;
         const tabsApi = { get: async () => tab, query: async () => [tab] };
         const mouse: string[] = [];
-        const cdp: CdpRunner = {
+        const cdp: CdpRunner = createStubCdpRunner({
           send: async (_tabId, method, params) => {
             if (method === "Input.dispatchMouseEvent") {
               mouse.push((params as { type: string }).type);
               expect(await evaluate("getComputedStyle(overlay).display")).toBe("block");
               expect(
                 await evaluate(
-                  "getComputedStyle(overlayRoot.querySelector('[data-slot=control-overlay-card]')).opacity",
+                  "getComputedStyle(overlayRoot.querySelector('[role=toolbar]')).opacity",
                 ),
               ).toBe("1");
               expect(await evaluate("overlay.hasAttribute('data-bsk-capture-hidden')")).toBe(false);
             }
             return (await local(method, params)) as never;
           },
-        };
+        });
         const phases: string[] = [];
         const sendInputPassthrough: InputPassthroughSendToTab = async (_tabId, message) => {
           phases.push(message.phase);
@@ -601,21 +601,25 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           );
         };
         const bypassOverlay = async (_tabId: number, enabled: boolean) => {
-          await evaluate(`window.bypassCount += ${enabled ? 1 : -1};
+          await evaluate(`(() => { window.bypassCount += ${enabled ? 1 : -1};
             overlay.toggleAttribute('data-bsk-overlay-blocking',bypassCount===0);
-            overlayRoot.querySelector('[data-slot="control-overlay-blocker"]').style.pointerEvents=bypassCount>0?'none':'auto';`);
+            const blocker=overlayRoot.querySelector('[data-slot="control-overlay-blocker"]'); if(blocker) blocker.style.pointerEvents=bypassCount>0?'none':'auto'; })()`);
         };
         // A retained hover bypass leaves the card interactive even though the host is transparent.
-        for (const automationBypass of [false, true]) {
+        for (const mode of ["blocking", "bypass", "cooperation"] as const) {
+          const automationBypass = mode === "bypass";
+          const cardSlot = mode === "cooperation" ? "cooperation-toolbar" : "control-overlay-card";
           const markup = renderToStaticMarkup(
             createElement(ControlOverlay, {
               visible: true,
               interrupting: false,
               automationBypass,
+              state:
+                mode === "cooperation" ? { mode: "ready", revision: 1, editing: false } : undefined,
               onInterrupt: () => {},
             }),
           );
-          await evaluate(`window.bypassCount=${automationBypass ? 1 : 0}; overlay.toggleAttribute('data-bsk-overlay-blocking', ${!automationBypass});
+          await evaluate(`window.bypassCount=${automationBypass ? 1 : 0}; overlay.toggleAttribute('data-bsk-overlay-blocking', ${mode === "blocking"});
             overlayRoot.innerHTML = ${JSON.stringify(`<style>${css}</style>`)} + ${JSON.stringify(markup)};
             overlayRoot.querySelector('[data-slot="control-overlay-stop-all"]').addEventListener('click',()=>stops++);`);
           await evaluate(
@@ -630,10 +634,10 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           expect(clear).not.toHaveProperty("code");
           expect(phases).toEqual([]);
           expect(await evaluate("bypassCount")).toBe(automationBypass ? 1 : 0);
-          for (const slot of ["control-overlay-card", "control-overlay-stop-all"]) {
+          for (const slot of [cardSlot, "control-overlay-stop-all"]) {
             const point = await evaluate<{ x: number; y: number }>(`(() => {
               const r=overlayRoot.querySelector('[data-slot="${slot}"]').getBoundingClientRect();
-              const x=${slot === "control-overlay-card" ? "r.x+25" : "r.x+r.width/2"}, y=r.y+r.height/2;
+              const x=${slot === cardSlot ? "r.x+25" : "r.x+r.width/2"}, y=r.y+r.height/2;
               Object.assign(document.querySelector('#target').style,{left:(x-40)+'px',top:(y-15)+'px'});
               clicks=[]; stops=0; return {x,y};
             })()`);

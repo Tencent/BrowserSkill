@@ -42,8 +42,8 @@ normalize the tag against the same resources, so a stored `ko` also selects
    waiting for the user to complete a step.
 4. In profile instructions, preserve `{{command}}`, `{{toolCall}}` and the literal
    `--browser / browser`. Keep the requirements to use this profile for every new
-   session, use the tool call instead of a separate CLI command in DeepSeek
-   Harness, and stop and ask the user to reconnect if the instance is unavailable.
+   session, use the tool call instead of a separate CLI command when using MCP,
+   and stop and ask the user to reconnect if the instance is unavailable.
 
 Run from the repository root:
 

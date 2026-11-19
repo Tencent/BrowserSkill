@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CLIENT_ID,
   detectBrowserMeta,
   EXTENSION_VERSION,
   HandshakeRejectedError,
@@ -67,8 +68,8 @@ function deferredFakeTransport(): { transport: Transport; emit: (frame: Protocol
 
 describe("performHandshake", () => {
   it("advertises the protocol compatibility boundary", () => {
-    expect(PROTOCOL_VERSION).toBe("1.8");
-    expect(MIN_COMPATIBLE_PROTOCOL).toBe("1.6");
+    expect(PROTOCOL_VERSION).toBe("2.0");
+    expect(MIN_COMPATIBLE_PROTOCOL).toBe("2.0");
   });
 
   it("sends system.handshake with identity and both compat fields", async () => {
@@ -80,9 +81,9 @@ describe("performHandshake", () => {
         result: {
           server: "browser-skill-daemon",
           version: "0.1.0",
-          protocol_version: "1.1",
+          protocol_version: "2.1",
           min_compatible_peer: "0.0.0",
-          min_compatible_protocol: "1.0",
+          min_compatible_protocol: "2.0",
         },
       };
     });
@@ -97,7 +98,7 @@ describe("performHandshake", () => {
       id: "hs-test",
       method: "system.handshake",
       params: {
-        client: "browser-skill-extension",
+        client: CLIENT_ID,
         version: EXTENSION_VERSION,
         protocol_version: PROTOCOL_VERSION,
         instance_id: "abcdef01-2345-4678-89ab-cdef01234567",
@@ -108,35 +109,15 @@ describe("performHandshake", () => {
       },
     });
     expect(outcome.result.min_compatible_peer).toBe("0.0.0");
-    expect(outcome.result.min_compatible_protocol).toBe("1.0");
-  });
-
-  it("accepts legacy daemon reply with only min_compatible_peer", async () => {
-    const transport = fakeTransport((req) => ({
-      id: (req as { id: string }).id,
-      result: {
-        server: "browser-skill-daemon",
-        version: "0.1.0",
-        protocol_version: "1.0",
-        min_compatible_peer: "0.1.0",
-      },
-    }));
-    const outcome = await performHandshake(transport, {
-      instanceId: "x",
-      browser: { name: "chrome", version: "131" },
-      label: "",
-      rpcId: "hs-legacy",
-    });
-    expect(outcome.result.protocol_version).toBe("1.0");
-    expect(outcome.result.min_compatible_protocol).toBeUndefined();
+    expect(outcome.result.min_compatible_protocol).toBe("2.0");
   });
 
   it("accepts daemon reply without legacy min_compatible_peer", async () => {
     const response = {
       server: "browser-skill-daemon",
       version: "0.1.0",
-      protocol_version: "1.1",
-      min_compatible_protocol: "1.1",
+      protocol_version: "2.0",
+      min_compatible_protocol: "2.0",
     } satisfies HandshakeResult;
     const transport = fakeTransport((req) => ({
       id: (req as { id: string }).id,
@@ -151,7 +132,7 @@ describe("performHandshake", () => {
     });
 
     expect(outcome.result.min_compatible_peer).toBeUndefined();
-    expect(outcome.result.min_compatible_protocol).toBe("1.1");
+    expect(outcome.result.min_compatible_protocol).toBe("2.0");
   });
 
   it("rejects when the daemon responds with an error", async () => {
@@ -174,10 +155,10 @@ describe("performHandshake", () => {
     const abort = new AbortController();
     const rejection = {
       code: "version_too_old" as const,
-      message: "local protocol 1.3 is below peer min_compatible_protocol 1.6",
+      message: "local protocol 1.9 is below peer min_compatible_protocol 2.0",
       data: {
         daemon_version: "0.3.3",
-        daemon_protocol_version: "1.3",
+        daemon_protocol_version: "1.9",
         min_compatible_protocol: "1.0",
       },
     };
@@ -217,15 +198,15 @@ describe("performHandshake", () => {
       rpcId: "hs-target",
     });
 
-    emit({ event: "browser.event", payload: { ignored: true } });
+    emit({ event: "browser.connected", payload: {} });
     emit({
       id: "hs-other",
       result: {
         server: "browser-skill-daemon",
         version: "0.1.0",
-        protocol_version: "1.1",
+        protocol_version: "2.0",
         min_compatible_peer: "0.0.0",
-        min_compatible_protocol: "1.1",
+        min_compatible_protocol: "2.0",
       },
     });
     emit({
@@ -233,14 +214,14 @@ describe("performHandshake", () => {
       result: {
         server: "browser-skill-daemon",
         version: "0.1.0",
-        protocol_version: "1.1",
+        protocol_version: "2.0",
         min_compatible_peer: "0.0.0",
-        min_compatible_protocol: "1.1",
+        min_compatible_protocol: "2.0",
       },
     });
 
     await expect(pending).resolves.toMatchObject({
-      result: { server: "browser-skill-daemon", protocol_version: "1.1" },
+      result: { server: "browser-skill-daemon", protocol_version: "2.0" },
     });
   });
 

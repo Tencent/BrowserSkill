@@ -118,54 +118,72 @@ function orderedNodes(graph: ResolvedSemanticGraph): ResolvedSemanticNode[] {
     );
 }
 
+interface RecoveredNodeSet {
+  provisional: VomNode[];
+  recovered: VomNode[];
+  byId: Map<SemanticNodeId, VomNode>;
+  initialParents: Array<SemanticNodeId | undefined>;
+}
+
 function recoveredNodes(
   graph: ResolvedSemanticGraph,
   nodes: ResolvedSemanticNode[],
-): Map<SemanticNodeId, VomNode> {
-  const numericId = new Map(nodes.map((node, index) => [node.id, index + 1]));
-  const semanticId = new Map([...numericId].map(([id, numeric]) => [numeric, id]));
-  const provisional = nodes.map((node) => ({
-    ...node.vom,
-    id: numericId.get(node.id) as number,
-    parentId: (() => {
-      const parent = initialParentId(graph, node);
-      return parent ? (numericId.get(parent) ?? null) : null;
-    })(),
-    ...(node.backendNodeId !== undefined ? { backendNodeId: node.backendNodeId } : {}),
-    frameId: node.frameId,
-    contextScopeId: graph.frames.get(node.frameId)?.contextScopeId ?? node.frameId,
-    referenceable: node.referenceable,
-  }));
-  return new Map(
-    applyVomInteractionRecovery(provisional).flatMap((node) => {
-      const id = semanticId.get(node.id);
-      return id ? [[id, node] as const] : [];
-    }),
-  );
+): RecoveredNodeSet {
+  const numericId = new Map<SemanticNodeId, number>();
+  for (let i = 0; i < nodes.length; i++) {
+    numericId.set(nodes[i].id, i + 1);
+  }
+  const initialParents = new Array<SemanticNodeId | undefined>(nodes.length);
+  const provisional = new Array<VomNode>(nodes.length);
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    const parent = initialParentId(graph, node);
+    initialParents[i] = parent;
+    provisional[i] = {
+      ...node.vom,
+      id: i + 1,
+      parentId: parent ? (numericId.get(parent) ?? null) : null,
+      ...(node.backendNodeId !== undefined ? { backendNodeId: node.backendNodeId } : {}),
+      frameId: node.frameId,
+      contextScopeId: graph.frames.get(node.frameId)?.contextScopeId ?? node.frameId,
+      referenceable: node.referenceable,
+    };
+  }
+  const recovered = applyVomInteractionRecovery(provisional);
+  const byId = new Map<SemanticNodeId, VomNode>();
+  for (let i = 0; i < nodes.length; i++) {
+    byId.set(nodes[i].id, recovered[i]);
+  }
+  return { provisional, recovered, byId, initialParents };
 }
 
 function redundantSourceNodes(
-  graph: ResolvedSemanticGraph,
   nodes: ResolvedSemanticNode[],
-  recovered: ReadonlyMap<SemanticNodeId, VomNode>,
+  recoveredList: readonly VomNode[],
+  initialParents: readonly (SemanticNodeId | undefined)[],
 ): Set<SemanticNodeId> {
   const byKey = new Map<string, ResolvedSemanticNode[]>();
-  for (const node of nodes) {
-    const output = recovered.get(node.id) as VomNode;
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    const output = recoveredList[i];
     const name = output.name?.trim().toLowerCase() ?? "";
-    if (!name || !isVomReferenceNode({ ...output, referenceable: true })) continue;
-    const key = `${node.frameId}\u0000${initialParentId(graph, node) ?? ""}\u0000${output.role?.toLowerCase() ?? ""}\u0000${name}\u0000${output.sensitive === true}`;
-    const matches = byKey.get(key) ?? [];
+    if (!name) continue;
+    const refCheck = output.referenceable ? output : { ...output, referenceable: true };
+    if (!isVomReferenceNode(refCheck)) continue;
+    const key = `${node.frameId}\u0000${initialParents[i] ?? ""}\u0000${output.role?.toLowerCase() ?? ""}\u0000${name}\u0000${output.sensitive === true}`;
+    let matches = byKey.get(key);
+    if (!matches) {
+      matches = [];
+      byKey.set(key, matches);
+    }
     matches.push(node);
-    byKey.set(key, matches);
   }
   const redundant = new Set<SemanticNodeId>();
   for (const matches of byKey.values()) {
-    const axOnly = matches.filter((node) => node.ax && !node.dom);
-    const domOnly = matches.filter((node) => node.dom && !node.ax);
-    if (matches.length === 2 && axOnly.length === 1 && domOnly.length === 1) {
-      redundant.add(domOnly[0].id);
-    }
+    if (matches.length !== 2) continue;
+    const [a, b] = matches;
+    if (a.ax && !a.dom && b.dom && !b.ax) redundant.add(b.id);
+    else if (b.ax && !b.dom && a.dom && !a.ax) redundant.add(a.id);
   }
   return redundant;
 }
@@ -330,6 +348,7 @@ function leafCandidates(
   candidates: ReadonlySet<SemanticNodeId>,
   domChildren: ReadonlyMap<SemanticNodeId, SemanticNodeId[]>,
 ): Set<SemanticNodeId> {
+  if (candidates.size === 0) return new Set();
   const parentById = new Map(
     nodes.flatMap((node) => (node.domParentId ? ([[node.id, node.domParentId]] as const) : [])),
   );
@@ -357,7 +376,10 @@ function nearestKept(
   kept: ReadonlySet<SemanticNodeId>,
   memo: Map<SemanticNodeId, SemanticNodeId | undefined>,
 ): SemanticNodeId | undefined {
-  let currentId = startId;
+  if (!startId) return undefined;
+  if (kept.has(startId)) return startId;
+  if (memo.has(startId)) return memo.get(startId);
+  let currentId: SemanticNodeId | undefined = startId;
   const path: SemanticNodeId[] = [];
   const seen = new Set<SemanticNodeId>();
   let result: SemanticNodeId | undefined;
@@ -421,25 +443,24 @@ function recoveredVom(node: VomNode, inferredGroup: boolean): ResolvedSemanticNo
 
 export function normalizeSemanticStructure(graph: ResolvedSemanticGraph): StructuredSemanticGraph {
   const nodes = orderedNodes(graph);
-  const recovered = recoveredNodes(graph, nodes);
-  const redundant = redundantSourceNodes(graph, nodes, recovered);
+  const {
+    provisional: provisionalList,
+    recovered: recoveredList,
+    byId: recovered,
+    initialParents,
+  } = recoveredNodes(graph, nodes);
+  const redundant = redundantSourceNodes(nodes, recoveredList, initialParents);
   const frameOwnerIds = new Set(
     [...graph.frames.values()].flatMap((frame) => frame.ownerNodeId ?? []),
   );
   const domChildren = buildChildren(nodes, "domParentId");
   const blockedFallbacks = blockedDomFallbacks(nodes, domChildren);
   const decisions = new Map<SemanticNodeId, StructureDecision>();
-  for (const node of nodes) {
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
     decisions.set(
       node.id,
-      baseDecision(
-        graph,
-        node,
-        recovered.get(node.id) as VomNode,
-        frameOwnerIds,
-        redundant,
-        blockedFallbacks,
-      ),
+      baseDecision(graph, node, recoveredList[i], frameOwnerIds, redundant, blockedFallbacks),
     );
   }
 
@@ -451,23 +472,25 @@ export function normalizeSemanticStructure(graph: ResolvedSemanticGraph): Struct
     });
   }
 
-  const kept = new Set(
-    nodes
-      .filter((node) => {
-        const kind = decisions.get(node.id)?.kind;
-        return kind === "keep" || kind === "inferred-group";
-      })
-      .map((node) => node.id),
-  );
+  const kept = new Set<SemanticNodeId>();
+  for (const node of nodes) {
+    const kind = decisions.get(node.id)?.kind;
+    if (kind === "keep" || kind === "inferred-group") kept.add(node.id);
+  }
   const axParentMemo = new Map<SemanticNodeId, SemanticNodeId | undefined>();
   const domParentMemo = new Map<SemanticNodeId, SemanticNodeId | undefined>();
   const structuredNodes = new Map<SemanticNodeId, StructuredSemanticNode>();
-  for (const node of nodes) {
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
     const structure = decisions.get(node.id) as StructureDecision;
     const inferredGroup = structure.kind === "inferred-group";
+    const vom =
+      !inferredGroup && recoveredList[i] === provisionalList[i]
+        ? node.vom
+        : recoveredVom(recoveredList[i], inferredGroup);
     structuredNodes.set(node.id, {
       ...node,
-      vom: recoveredVom(recovered.get(node.id) as VomNode, inferredGroup),
+      vom,
       structure,
       ...(kept.has(node.id)
         ? {

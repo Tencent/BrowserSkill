@@ -2,6 +2,7 @@ import {
   type CaptureTargetDescriptor,
   describeEventTarget,
   describeTarget,
+  INTERACTIVE_SELECTOR,
   resolveClickableElement,
   resolveHoverElement,
 } from "@/lib/describe-target";
@@ -14,6 +15,14 @@ import {
 } from "@/lib/hover-trigger-policy";
 import type { RecordStepPayload } from "@/lib/record-bridge";
 import { shouldRecordPress } from "@/lib/recording/draft-policy";
+import { RECORD_PASSWORD_ATTRIBUTE } from "@/lib/sensitive-autocomplete";
+import {
+  isExtensionOverlayEvent,
+  isInternalBskMutation,
+  isPasswordTypeMutation,
+  isSensitiveFormField,
+  primaryEventTarget,
+} from "./dom-primitives";
 import {
   closestHoverSurfaceCandidate,
   collectHoverSurfaceStates,
@@ -58,32 +67,6 @@ const HOVER_REPLACE_SCORE_MARGIN = 50;
 const HOVER_CANDIDATE_LIMIT = 24;
 const HOVER_TRIGGER_LABEL_MAX = 48;
 
-function eventTarget(event: Event): EventTarget | null {
-  return event.composedPath()[0] ?? event.target;
-}
-
-function isOverlayTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Node)) return false;
-  const root = document.documentElement;
-  let node: Node | null = target;
-  while (node && node !== root) {
-    if (node instanceof Element && node.hasAttribute("data-bsk-overlay")) {
-      return true;
-    }
-    const rootNode: Node | Document | ShadowRoot = node.getRootNode();
-    if (rootNode instanceof ShadowRoot) {
-      const host: Element = rootNode.host;
-      if (host.hasAttribute("data-bsk-overlay")) {
-        return true;
-      }
-      node = host;
-    } else {
-      node = node.parentNode;
-    }
-  }
-  return false;
-}
-
 function isTextFillable(el: Element): el is FillableElement {
   if (el instanceof HTMLElement && (el.isContentEditable || el.contentEditable === "true")) {
     return true;
@@ -91,19 +74,40 @@ function isTextFillable(el: Element): el is FillableElement {
   if (el instanceof HTMLTextAreaElement) return true;
   if (!(el instanceof HTMLInputElement)) return false;
   const type = el.type.toLowerCase();
-  return type !== "checkbox" && type !== "radio" && type !== "file" && type !== "button";
+  return !["checkbox", "radio", "file", "button", "submit", "reset", "image", "hidden"].includes(
+    type,
+  );
 }
 
 function fillableFromTarget(target: EventTarget | null): FillableElement | null {
   if (!(target instanceof Element)) return null;
   if (isTextFillable(target)) return target;
   const el = target.closest('input,textarea,[contenteditable]:not([contenteditable="false"])');
-  if (el && isTextFillable(el)) return el;
-  return null;
+  if (!el || !isTextFillable(el) || isControlInNonEditableRegion(target, el)) return null;
+  return el;
+}
+
+/**
+ * Buttons and links inside a contenteditable="false" region of an editor, such
+ * as attachment or embed actions, are page actions rather than editor text.
+ */
+function isControlInNonEditableRegion(target: Element, editor: Element): boolean {
+  const region = target.closest('[contenteditable="false"]');
+  if (!region || !editor.contains(region)) return false;
+  const control = resolveClickableElement(target);
+  return control !== null && region.contains(control);
 }
 
 /** Clicks on search chrome that only focus the nearby input should not become steps. */
 function nearbyFillableFromSearchChrome(target: Element): FillableElement | null {
+  // Form actions remain clicks, even when they contain an icon beside a search field.
+  if (
+    target.closest(
+      'button,input[type="button"],input[type="submit"],input[type="reset"],input[type="image"]',
+    )
+  ) {
+    return null;
+  }
   const container = target.closest(
     '[id*="chat-input"], [id*="search"], [class*="search"], form, [role="search"]',
   );
@@ -112,14 +116,18 @@ function nearbyFillableFromSearchChrome(target: Element): FillableElement | null
     'textarea, input[type="search"], input[name="q"], #chat-textarea',
   );
   if (
-    fillable instanceof HTMLElement &&
-    isTextFillable(fillable) &&
-    fillable !== target &&
-    !fillable.contains(target)
+    !(fillable instanceof HTMLElement) ||
+    !isTextFillable(fillable) ||
+    fillable === target ||
+    fillable.contains(target)
   ) {
-    return fillable;
+    return null;
   }
-  return null;
+  // Results, filters and actions that share the search form are page actions; only
+  // the field's own wrapper (e.g. a role="combobox" box) counts as focus chrome.
+  const control = target.closest(INTERACTIVE_SELECTOR);
+  if (control && !control.contains(fillable)) return null;
+  return fillable;
 }
 
 function captureGeometry(el: Element): RecordStepPayload["geometry"] {
@@ -134,9 +142,7 @@ function geometryForEventTarget(
   target: EventTarget | null,
 ): RecordStepPayload["geometry"] | undefined {
   if (!(target instanceof Element)) return undefined;
-  const clickable = target.closest(
-    'a,button,input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[contenteditable="true"]',
-  );
+  const clickable = resolveClickableElement(target);
   return captureGeometry(clickable ?? target);
 }
 
@@ -376,24 +382,28 @@ export function startRecordCapture(
   let hoverSurfaceStates = hoverSurfaceStateMap(collectHoverSurfaceStates());
   const hoverSurfaceNodes = new Map<Element, HoverSurfaceNode>();
   let generatedControlClick: Element | null = null;
-  let navigationActionPending = false;
-  let navigationActionVersion = 0;
   const committedValues = new WeakMap<FillableElement, string>();
-
-  const markNavigationAction = () => {
-    navigationActionPending = true;
-    const version = ++navigationActionVersion;
-    setTimeout(() => {
-      if (navigationActionVersion === version) {
-        navigationActionPending = false;
+  // A "show password" toggle switches type=password to text; keep masking those fields.
+  const formerPasswords = new Set<Element>();
+  const markFormerPasswords = (records: MutationRecord[]) => {
+    for (const record of records) {
+      if (isPasswordTypeMutation(record)) {
+        formerPasswords.add(record.target);
+        record.target.setAttribute(RECORD_PASSWORD_ATTRIBUTE, "");
       }
-    }, 0);
+    }
   };
+  const typeObserver = new MutationObserver(markFormerPasswords);
+  typeObserver.observe(document, {
+    subtree: true,
+    attributeFilter: ["type"],
+    attributeOldValue: true,
+  });
 
   const emitFill = (session: FillSession) => {
     if (session.lastValue === session.baselineValue) return;
-    const isPassword =
-      session.element instanceof HTMLInputElement && session.element.type === "password";
+    markFormerPasswords(typeObserver.takeRecords());
+    const isPassword = isSensitiveFormField(session.element, formerPasswords);
     const value = isPassword ? "***" : session.lastValue;
     emitStep({
       op: "fill",
@@ -432,14 +442,13 @@ export function startRecordCapture(
     };
   };
 
-  const emitNavigateIfChanged = (causedByAction?: boolean) => {
+  const emitNavigateIfChanged = () => {
     if (location.href === lastUrl) return;
     commitFillSession();
     lastUrl = location.href;
     emitStep({
       op: "navigate",
       url: location.href,
-      ...(causedByAction !== undefined ? { navigation_caused_by_action: causedByAction } : {}),
     });
   };
 
@@ -663,13 +672,13 @@ export function startRecordCapture(
 
   const emitClick = (event: MouseEvent) => {
     // Only record clicks an LLM can re-identify (named interactive controls).
-    const target = describeEventTarget(eventTarget(event));
+    const rawTarget = primaryEventTarget(event);
+    const target = describeEventTarget(rawTarget);
     if (!target) return;
-    markNavigationAction();
     emitStep({
       op: "click",
       target,
-      geometry: geometryForEventTarget(eventTarget(event)),
+      geometry: geometryForEventTarget(rawTarget),
       expects_navigation: true,
     });
   };
@@ -694,8 +703,8 @@ export function startRecordCapture(
   };
 
   const onMouseOver = (event: MouseEvent) => {
-    const target = eventTarget(event);
-    if (isOverlayTarget(target)) return;
+    if (isExtensionOverlayEvent(event)) return;
+    const target = primaryEventTarget(event);
     const now = Date.now();
     if (pendingHover && target instanceof Element && pendingHover.element.contains(target)) {
       if (now - pendingHover.recordedAt <= HOVER_BEFORE_CLICK_MAX_MS) return;
@@ -723,9 +732,8 @@ export function startRecordCapture(
   };
 
   const onClick = (event: MouseEvent) => {
-    if (event.button !== 0) return;
-    const target = eventTarget(event);
-    if (isOverlayTarget(target)) return;
+    if (event.button !== 0 || isExtensionOverlayEvent(event)) return;
+    const target = primaryEventTarget(event);
     if (event.detail === 0 && generatedControlClick !== null && target === generatedControlClick) {
       generatedControlClick = null;
       return;
@@ -766,7 +774,6 @@ export function startRecordCapture(
     }
 
     if (isInputCompletionClick(target, fillSession)) {
-      markNavigationAction();
       const sessionElement = fillSession!.element;
       scheduleInputCompletionCommit(
         sessionElement,
@@ -784,12 +791,14 @@ export function startRecordCapture(
   };
 
   const onFocusIn = (event: FocusEvent) => {
-    const target = fillableFromTarget(eventTarget(event));
+    if (isExtensionOverlayEvent(event)) return;
+    const target = fillableFromTarget(primaryEventTarget(event));
     if (target) ensureFillSession(target);
   };
 
   const onFocusOut = (event: FocusEvent) => {
-    const target = fillableFromTarget(eventTarget(event));
+    if (isExtensionOverlayEvent(event)) return;
+    const target = fillableFromTarget(primaryEventTarget(event));
     if (!target) return;
     if (!fillSession || fillSession.element !== target) return;
     syncFillSessionValue(target);
@@ -797,51 +806,67 @@ export function startRecordCapture(
   };
 
   const onInput = (event: Event) => {
-    const target = fillableFromTarget(eventTarget(event));
+    if (isExtensionOverlayEvent(event)) return;
+    const rawTarget = primaryEventTarget(event);
+    // A native <select> in a shadow root fires a non-composed `change` that
+    // never reaches the document; its composed `input` does.
+    if (rawTarget instanceof HTMLSelectElement && rawTarget.getRootNode() instanceof ShadowRoot) {
+      recordSelect(rawTarget);
+      return;
+    }
+    const target = fillableFromTarget(rawTarget);
     if (!target) return;
     if (composing) return;
     ensureFillSession(target);
     syncFillSessionValue(target);
   };
 
-  const onCompositionStart = () => {
+  const onCompositionStart = (event: CompositionEvent) => {
+    if (isExtensionOverlayEvent(event)) return;
     composing = true;
   };
 
   const onCompositionEnd = (event: CompositionEvent) => {
+    if (isExtensionOverlayEvent(event)) return;
     composing = false;
-    const target = fillableFromTarget(eventTarget(event));
+    const target = fillableFromTarget(primaryEventTarget(event));
     if (target) {
       ensureFillSession(target);
       syncFillSessionValue(target);
     }
   };
 
-  const onChange = (event: Event) => {
+  const recordSelect = (target: HTMLSelectElement) => {
     commitFillSession();
-    const target = eventTarget(event);
+    emitHoverCandidateBeforeAction(target);
+    const values = Array.from(target.selectedOptions).map((opt) => opt.value);
+    const labels = Array.from(target.selectedOptions).map((opt) =>
+      (opt.label || opt.textContent || opt.value).trim(),
+    );
+    const desc = describeTarget(target);
+    emitStep({
+      op: "select",
+      target: desc,
+      geometry: captureGeometry(target),
+      values,
+      labels,
+      expects_navigation: true,
+    });
+  };
+
+  const onChange = (event: Event) => {
+    if (isExtensionOverlayEvent(event)) return;
+    const target = primaryEventTarget(event);
     if (target instanceof HTMLSelectElement) {
-      emitHoverCandidateBeforeAction(target);
-      const values = Array.from(target.selectedOptions).map((opt) => opt.value);
-      const labels = Array.from(target.selectedOptions).map((opt) =>
-        (opt.label || opt.textContent || opt.value).trim(),
-      );
-      const desc = describeTarget(target);
-      markNavigationAction();
-      emitStep({
-        op: "select",
-        target: desc,
-        geometry: captureGeometry(target),
-        values,
-        labels,
-        expects_navigation: true,
-      });
+      recordSelect(target);
+    } else {
+      commitFillSession();
     }
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
-    if (isOverlayTarget(eventTarget(event))) return;
-    const target = eventTarget(event);
+    if (isExtensionOverlayEvent(event)) return;
+    const target = primaryEventTarget(event);
     const fillable = fillableFromTarget(target);
     if (fillable) {
       ensureFillSession(fillable);
@@ -856,7 +881,6 @@ export function startRecordCapture(
     if (!shouldRecordPress(event.key, modifiers)) {
       return;
     }
-    markNavigationAction();
     if (event.key === "Enter" || event.key === " ") {
       const submitTarget =
         event.key === "Enter" && fillable
@@ -898,7 +922,10 @@ export function startRecordCapture(
 
   const captureNavigation = options.captureNavigation ?? true;
   const urlObserver = captureNavigation
-    ? new MutationObserver(() => emitNavigateIfChanged())
+    ? new MutationObserver((records) => {
+        if (records.every(isInternalBskMutation)) return;
+        emitNavigateIfChanged();
+      })
     : null;
   urlObserver?.observe(document, { subtree: true, childList: true });
   const onUrlEvent = () => emitNavigateIfChanged();
@@ -910,19 +937,6 @@ export function startRecordCapture(
     window.addEventListener("popstate", onUrlEvent);
   }
   window.addEventListener("pagehide", onPageHide);
-
-  const originalPushState = history.pushState;
-  const originalReplaceState = history.replaceState;
-  if (captureNavigation) {
-    history.pushState = function (...args: Parameters<History["pushState"]>) {
-      originalPushState.apply(this, args);
-      emitNavigateIfChanged(navigationActionPending ? true : undefined);
-    };
-    history.replaceState = function (...args: Parameters<History["replaceState"]>) {
-      originalReplaceState.apply(this, args);
-      emitNavigateIfChanged(navigationActionPending ? true : undefined);
-    };
-  }
 
   return {
     dispose() {
@@ -937,15 +951,14 @@ export function startRecordCapture(
       document.removeEventListener("change", onChange, true);
       document.removeEventListener("keydown", onKeyDown, true);
       urlObserver?.disconnect();
+      typeObserver.disconnect();
+      for (const element of formerPasswords) element.removeAttribute(RECORD_PASSWORD_ATTRIBUTE);
+      formerPasswords.clear();
       if (captureNavigation) {
         window.removeEventListener("hashchange", onUrlEvent);
         window.removeEventListener("popstate", onUrlEvent);
       }
       window.removeEventListener("pagehide", onPageHide);
-      if (captureNavigation) {
-        history.pushState = originalPushState;
-        history.replaceState = originalReplaceState;
-      }
     },
   };
 }

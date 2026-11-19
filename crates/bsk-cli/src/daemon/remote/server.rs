@@ -328,13 +328,14 @@ async fn handle(
             serde_json::json!({"error": "not_found"}),
         ));
     }
-    if !one_header(&request, "origin").is_some_and(|origin| origin_allowed(origin, false)) {
+    if !one_header(&request, "origin").is_some_and(origin_allowed) {
         return Ok(denied());
     }
     let Some(protocol) = one_header(&request, "sec-websocket-protocol").map(str::to_owned) else {
         return Ok(denied());
     };
-    let Some(credential) = protocol.strip_prefix("bsk-auth.") else {
+    let Some(credential) = protocol.strip_prefix(bsk_protocol::REMOTE_AUTH_SUBPROTOCOL_PREFIX)
+    else {
         return Ok(denied());
     };
     let store = gateway.store.clone();
@@ -419,7 +420,13 @@ async fn handle(
         // The native dispatcher supplies session isolation and cancellation.
         // The authenticated device, rather than a self-reported instance ID,
         // supplies the browser identity used by that dispatcher.
-        let _ = drive_connection(gateway.state.clone(), ws, Some(authorization)).await;
+        let _ = drive_connection(
+            gateway.state.clone(),
+            ws,
+            crate::daemon::peer_authorization::PeerAuthorization::Remote(authorization),
+            None,
+        )
+        .await;
     });
     Ok(upgrade_response.map(|_| Full::new(Bytes::new())))
 }

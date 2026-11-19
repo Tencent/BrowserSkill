@@ -13,6 +13,12 @@ export interface Viewport {
 
 export type LayerKind = "page" | "modal" | "mask";
 
+export interface VomSelectOption {
+  value: string;
+  label: string;
+  selected?: boolean;
+}
+
 /**
  * CDP-free data slice consumed by packages/vom.
  * The extension joins AX semantics and DOMSnapshot geometry by backendNodeId
@@ -44,6 +50,9 @@ export interface VomNode {
   href?: string; // hostname of external link target; omitted for same-origin links
   text?: string;
   nearbyText?: string;
+  selectOptions?: VomSelectOption[];
+  selectOptionsTruncated?: boolean;
+  rowAnchor?: string;
 
   tag: string;
   rect: Rect | null;
@@ -60,6 +69,10 @@ export interface VomNode {
   domAncestorIds?: number[];
 
   modal?: boolean;
+  /** Accessibility/ARIA popup trigger state (`aria-haspopup` / AX `hasPopup`). */
+  hasPopup?: boolean;
+  /** Accessibility/ARIA expansion state (`aria-expanded` / AX `expanded`). */
+  expanded?: boolean;
   sensitive?: boolean;
   disabled?: boolean;
   inert?: boolean;
@@ -131,8 +144,22 @@ export interface RenderedRef extends VomRef {
   role?: string;
   name?: string;
   ctx?: string;
+  rowAnchor?: string;
   /** Zero-based line index in `VomResult.text`. */
   line: number;
+}
+
+export interface VomLineMetadata {
+  indent: number;
+  kind: "header" | "layer" | "context" | "active-scope" | "notice" | "node";
+  ref?: string;
+  role?: string;
+  /** JSON-escaped inner text of the line's primary quoted name, if present. */
+  escapedName?: string;
+  /** True when the line is strictly `role "name"` without `@eN` or trailing annotations. */
+  plainNamedNode: boolean;
+  /** True when the renderer may cut the line's primary label without appending `…`. */
+  silentlyTruncatesLabel: boolean;
 }
 
 export interface VomResult {

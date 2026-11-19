@@ -7,6 +7,7 @@ export async function runGenericScenarios({
   scope,
   humanClick,
   humanPointer,
+  humanType,
   evaluate,
   sync,
   wait,
@@ -43,6 +44,7 @@ export async function runGenericScenarios({
 
   context = await sync();
   await humanClick("#shadow >>> input");
+  await humanType("manual shadow note");
   assert.equal(
     (await bsk(["cooperate", "wait", ...scope, "--timeout-ms", "900"])).ready,
     false,

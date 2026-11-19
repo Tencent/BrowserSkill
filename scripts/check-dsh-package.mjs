@@ -1,26 +1,30 @@
-// Run after the plugin build. Inspect an actual npm archive, then load its runtime
-// from an unrelated directory with a fake runner (no browser/daemon side effects).
+// Run after building `@wxg-prc-cpg/browser-skill-dsh-plugin`.
+// Packs the actual npm tarball, unpacks it outside the repository, verifies
+// every bundled skill/installer asset byte-for-byte against the canonical repo
+// sources, and exercises the packed plugin inside a real Cordis + SkillRegistry runtime.
 import assert from "node:assert/strict";
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import {
-  DSH_BROWSER_TOOLS,
-  validateSkillDirectory,
-} from "../packages/dsh-plugin-browserskill/scripts/validate-skill.mjs";
+import { validateSkillDirectory } from "./lib/validate-skill.mjs";
 
-const pkg = fileURLToPath(new URL("../packages/dsh-plugin-browserskill/", import.meta.url));
-const temp = mkdtempSync(join(tmpdir(), "bsk-package-"));
-const cwd = process.cwd();
-const disposers = [];
+const repoRoot = fileURLToPath(new URL("../", import.meta.url));
+const pkgDir = join(repoRoot, "packages", "dsh-plugin-browserskill");
+const pkgRequire = createRequire(join(pkgDir, "package.json"));
+const canonicalSkillDir = join(repoRoot, "crates", "bsk-cli", "skill");
+const temp = mkdtempSync(join(tmpdir(), "bsk-dsh-package-"));
+const originalCwd = process.cwd();
+
+let skillFiber;
+let pluginFiber;
+
 try {
-  const [archive] = JSON.parse(
-    // The shell launches npm.cmd on Windows. Pass paths through npm's config
-    // environment so spaces and shell metacharacters remain literal path bytes.
+  const packResult = JSON.parse(
     execSync("npm pack --ignore-scripts --json", {
-      cwd: pkg,
+      cwd: pkgDir,
       encoding: "utf8",
       env: {
         ...Object.fromEntries(
@@ -33,64 +37,89 @@ try {
       },
     }),
   );
+  const [archive] = Array.isArray(packResult) ? packResult : Object.values(packResult);
+  assert(typeof archive?.filename === "string", "npm pack did not return an archive");
+
   execFileSync("tar", ["-xzf", join(temp, archive.filename), "-C", temp]);
   const unpacked = join(temp, "package");
-  const options = { maxEntryBytes: 4_500, browserTools: DSH_BROWSER_TOOLS };
-  const original = validateSkillDirectory(join(pkg, "skill"), options);
+
+  const options = { maxEntryBytes: 2_000 };
+  const canonical = validateSkillDirectory(canonicalSkillDir, options);
   const packed = validateSkillDirectory(join(unpacked, "skill"), options);
-  assert.deepEqual(packed.files, original.files, "npm must ship every skill resource unchanged");
-  // Supply the installed peer dependencies, while executing the actual packed JS.
-  symlinkSync(join(pkg, "node_modules"), join(unpacked, "node_modules"), "junction");
-  process.chdir(temp);
-  const { apply } = await import(pathToFileURL(join(unpacked, "lib/index.mjs")).href);
-  let skill;
-  const ctx = {
-    tools: { register: () => () => {} },
-    get: (name) =>
-      name === "skills"
-        ? {
-            register: (value) => {
-              skill = value;
-              return () => {};
-            },
-          }
-        : undefined,
-    inject: () => {},
-    effect: (factory) => disposers.push(factory()),
-  };
-  apply(
-    ctx,
-    { observationEnabled: false, lazyTools: false },
-    {
-      runnerFactory: () => ({
-        run: async () => ({ code: 0, stdout: "{}", stderr: "", timedOut: false, aborted: false }),
-        killAll() {},
-        killFor: () => 0,
-      }),
-      startJournal: { records: new Map(), save() {}, release() {} },
-    },
+  assert.deepEqual(
+    packed.files,
+    canonical.files,
+    "npm tarball must ship every canonical crates/bsk-cli/skill resource unchanged",
   );
+
+  for (const rootAsset of ["install.sh", "install.ps1", "AGENT_INSTALL.md", "LICENSE"]) {
+    assert.deepEqual(
+      readFileSync(join(unpacked, rootAsset)),
+      readFileSync(join(repoRoot, rootAsset)),
+      `npm tarball must ship ${rootAsset} unchanged`,
+    );
+  }
+  assert.deepEqual(
+    readFileSync(join(unpacked, "cordis.patch.yml")),
+    readFileSync(join(pkgDir, "cordis.patch.yml")),
+    "npm tarball must ship cordis.patch.yml unchanged",
+  );
+
+  symlinkSync(join(pkgDir, "node_modules"), join(unpacked, "node_modules"), "junction");
+  process.chdir(temp);
+
+  const { Context } = await import(pathToFileURL(pkgRequire.resolve("@deepseek-ai/cordis")).href);
+  const { SkillRegistry } = await import(
+    pathToFileURL(pkgRequire.resolve("@deepseek-ai/dsh-skill")).href
+  );
+  const packedPlugin = await import(pathToFileURL(join(unpacked, "lib/index.mjs")).href);
+
+  const root = new Context();
+  skillFiber = root.plugin(SkillRegistry);
+  pluginFiber = root.plugin(packedPlugin);
+  await skillFiber;
+  await pluginFiber;
+
+  const skill = await skillFiber.ctx.skills.get("browser-skill");
+  assert(skill, "packed plugin must register browser-skill in SkillRegistry");
   assert.equal(skill.name, packed.name);
   assert.equal(skill.description, packed.description);
-  assert.equal(skill.content, packed.content, "embedded body must match the authored entry point");
+  assert(
+    skill.content.endsWith(packed.content),
+    "registered body must end with canonical SKILL.md body",
+  );
   assert.equal(skill.resourceBase.kind, "directory");
   assert.equal(
-    fileURLToPath(pathToFileURL(skill.resourceBase.path)).replace(/[\\/]$/, ""),
+    realpathSync(skill.resourceBase.path),
     realpathSync(join(unpacked, "skill")),
+    "resourceBase must resolve inside unpacked npm package, never repository source",
   );
-  for (const [path, content] of packed.files) {
-    assert.equal(readFileSync(join(skill.resourceBase.path, path), "utf8"), content);
-    if (path.startsWith("references/"))
+
+  for (const [relPath, content] of packed.files) {
+    assert.equal(readFileSync(join(skill.resourceBase.path, relPath), "utf8"), content);
+    if (relPath.startsWith("references/")) {
       assert(!skill.content.includes(content.trim()), "references must stay deferred");
+    }
   }
+
+  const probe = spawnSync(process.execPath, [join(unpacked, "bin/install-bsk.mjs"), "--check"], {
+    cwd: temp,
+    encoding: "utf8",
+  });
+  assert(
+    probe.status === 0 || probe.status === 1,
+    `bundled install-bsk.mjs --check failed unexpectedly: ${probe.stderr}`,
+  );
+
   console.log(
-    `npm bundle verified: ${packed.files.size} skill files; runtime resources resolve outside the repository`,
+    `npm bundle verified: ${packed.files.size} canonical skill files + installer assets resolved outside repository`,
   );
 } finally {
   try {
-    await Promise.all(disposers.map((dispose) => dispose()));
+    if (pluginFiber) await pluginFiber.dispose();
+    if (skillFiber) await skillFiber.dispose();
   } finally {
-    process.chdir(cwd);
+    process.chdir(originalCwd);
     rmSync(temp, { recursive: true, force: true });
   }
 }

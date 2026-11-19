@@ -1,7 +1,15 @@
+import { type ControllerInfo, controllerColor } from "@/lib/controller-info";
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
+import {
+  defaultOrphanAgentWindowLedger,
+  type OrphanAgentWindowLedger,
+  type OrphanWindowReapDeps,
+  type OrphanWindowReapReport,
+} from "./orphan-window-ledger";
 import { RefStore } from "./ref-store";
 
 export interface SessionContext {
+  controller?: ControllerInfo;
   /** Incognito sessions cannot borrow user tabs. Absent means a normal window. */
   incognito?: boolean;
   /** Remote connections retain dedicated windows, with explicit page ownership. */
@@ -22,6 +30,8 @@ export interface SessionContext {
   observedTabs?: Set<number>;
   /** Unclassified arrivals and failed external moves must not become implicit tool targets. */
   pendingRoutingTabs?: Set<number>;
+  /** Temporary deselection tabs used to preserve Linux window focus during native pointer input. */
+  temporaryInputTabs?: Set<number>;
   createdAtMs: number;
 }
 
@@ -34,10 +44,30 @@ export function isAgentControlledTab(ctx: SessionContext, tabId: number): boolea
   );
 }
 
+export interface BorrowedTabGroupMetadata {
+  title?: string;
+  color?: chrome.tabGroups.ColorEnum;
+  collapsed?: boolean;
+}
+
 export interface BorrowedTab {
   tabId: number;
   originalWindowId: number;
   originalIndex: number;
+  /** Left-hand neighbor tab ID in the original window at borrow time. */
+  leftNeighborTabId?: number;
+  /** Right-hand neighbor tab ID in the original window at borrow time. */
+  rightNeighborTabId?: number;
+  /** Ordered left-hand neighbor tab IDs (closest to farthest) in the original window. */
+  leftNeighborTabIds?: number[];
+  /** Ordered right-hand neighbor tab IDs (closest to farthest) in the original window. */
+  rightNeighborTabIds?: number[];
+  /** Original Chrome Tab Group ID (>= 0 when grouped). */
+  originalGroupId?: number;
+  /** Snapshot of the original Tab Group's properties for recreating single-tab groups. */
+  originalGroup?: BorrowedTabGroupMetadata;
+  /** Whether the tab was pinned in the original window before borrowing. */
+  originalPinned?: boolean;
 }
 
 export interface BorrowReservation {
@@ -48,11 +78,13 @@ export interface BorrowReservation {
 export interface SessionManagerOptions {
   remote?: () => boolean;
   agentWindow?: AgentWindowApi;
+  orphanLedger?: OrphanAgentWindowLedger;
   now?: () => number;
 }
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
+  controller?: ControllerInfo;
   /** Use Chrome's shared incognito browsing session. */
   incognito?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
@@ -105,19 +137,74 @@ function throwIfSessionStartAborted(signal: AbortSignal | undefined): void {
  * Designed to be unit-testable: chrome.* is injected via `AgentWindowApi`
  * so vitest never touches a real `chrome.windows` object.
  */
+function createLedgerBackedTabSet(onMutated: (tabs: ReadonlySet<number>) => void): Set<number> {
+  const set = new Set<number>();
+  Object.defineProperties(set, {
+    add: {
+      configurable: true,
+      writable: true,
+      enumerable: false,
+      value(tabId: number) {
+        const had = Set.prototype.has.call(set, tabId);
+        Set.prototype.add.call(set, tabId);
+        if (!had) onMutated(set);
+        return set;
+      },
+    },
+    delete: {
+      configurable: true,
+      writable: true,
+      enumerable: false,
+      value(tabId: number) {
+        const deleted = Set.prototype.delete.call(set, tabId);
+        if (deleted) onMutated(set);
+        return deleted;
+      },
+    },
+    clear: {
+      configurable: true,
+      writable: true,
+      enumerable: false,
+      value() {
+        if (set.size === 0) return;
+        Set.prototype.clear.call(set);
+        onMutated(set);
+      },
+    },
+  });
+  return set;
+}
+
 export class SessionManager {
   private readonly remote: () => boolean;
   private readonly sessions = new Map<string, SessionContext>();
   private readonly windowIndex = new Map<number, string>();
+  private readonly activeAgentWindowIds = new Set<number>();
   private readonly borrowReservations = new Map<number, string>();
   private readonly expectedWindowClosures = new WeakSet<SessionContext>();
+  private readonly detachLedgerWatchers = new WeakMap<SessionContext, () => void>();
   private readonly agentWindow: AgentWindowApi;
+  private readonly orphanLedger: OrphanAgentWindowLedger;
   private readonly now: () => number;
 
   constructor(options: SessionManagerOptions = {}) {
     this.remote = options.remote ?? (() => false);
     this.agentWindow = options.agentWindow ?? chromeAgentWindowApi;
+    this.orphanLedger = options.orphanLedger ?? defaultOrphanAgentWindowLedger;
     this.now = options.now ?? Date.now;
+  }
+
+  isTrackedAgentWindow(windowId: number): boolean {
+    return this.windowIndex.has(windowId) || this.activeAgentWindowIds.has(windowId);
+  }
+
+  reapOrphanAgentWindows(
+    deps: Omit<OrphanWindowReapDeps, "isActiveAgentWindow"> = {},
+  ): Promise<OrphanWindowReapReport> {
+    return this.orphanLedger.reapOrphans({
+      ...deps,
+      isActiveAgentWindow: (windowId) => this.isTrackedAgentWindow(windowId),
+    });
   }
 
   has(sessionId: string): boolean {
@@ -156,6 +243,13 @@ export class SessionManager {
     for (const ctx of this.sessions.values()) ctx.refStore.invalidateTab(tabId);
   }
 
+  invalidateTabChildFrames(tabId: number, staleFrameIds: ReadonlySet<string>): void {
+    for (const ctx of this.sessions.values()) {
+      const ownsTab = isAgentControlledTab(ctx, tabId) || Boolean(ctx.observedTabs?.has(tabId));
+      ctx.refStore.invalidateChildFrames(tabId, staleFrameIds, ownsTab);
+    }
+  }
+
   /**
    * Forget a tab Chrome has removed, including any uncommitted borrow.
    * Whole-window closures keep committed borrows until the window-removed
@@ -167,6 +261,7 @@ export class SessionManager {
     for (const ctx of this.sessions.values()) {
       ctx.agentCreatedTabs.delete(tabId);
       ctx.observedTabs?.delete(tabId);
+      ctx.temporaryInputTabs?.delete(tabId);
       if (!isWindowClosing) ctx.borrowedTabs.delete(tabId);
     }
   }
@@ -260,12 +355,23 @@ export class SessionManager {
     throwIfSessionStartAborted(opts.signal);
 
     let windowId: number | null = null;
-    const agentCreatedTabs = new Set<number>();
+    let ledgerSyncEnabled = false;
+    const syncLedger = (tabs: ReadonlySet<number>) => {
+      if (!ledgerSyncEnabled || windowId === null) return;
+      void this.orphanLedger.upsertWindow(windowId, tabs);
+    };
+    const agentCreatedTabs = createLedgerBackedTabSet(syncLedger);
     try {
-      const { signal: _signal, ...createOptions } = opts;
-      const created = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
+      const { signal: _signal, controller: _controller, ...createOptions } = opts;
+      const created = await this.agentWindow.create(AGENT_WINDOW_HOME, {
+        ...createOptions,
+        excludeWindowIds: this.activeAgentWindowIds,
+      });
       windowId = created.windowId;
+      this.activeAgentWindowIds.add(windowId);
       for (const tabId of created.initialTabIds) agentCreatedTabs.add(tabId);
+      ledgerSyncEnabled = true;
+      void this.orphanLedger.upsertWindow(windowId, agentCreatedTabs);
       if (opts.incognito && !created.incognito) {
         throw new Error(
           "The browser did not create an incognito Agent Window; session start refused.",
@@ -281,6 +387,7 @@ export class SessionManager {
       throwIfSessionStartAborted(opts.signal);
 
       const ctx: SessionContext = {
+        controller: this.controllerFor(sessionId, opts.controller),
         incognito: created.incognito ?? false,
         ...(this.remote() ? { remote: true } : {}),
         sessionId,
@@ -293,17 +400,29 @@ export class SessionManager {
         agentCreatedTabs,
         createdAtMs: this.now(),
       };
+      this.detachLedgerWatchers.set(ctx, () => {
+        ledgerSyncEnabled = false;
+      });
       this.sessions.set(sessionId, ctx);
       this.windowIndex.set(windowId, sessionId);
+      if (this.orphanLedger.isAvailable()) {
+        await this.orphanLedger.upsertWindow(windowId, agentCreatedTabs);
+      }
       return ctx;
     } catch (startupError) {
       if (windowId !== null) {
         try {
           await this.agentWindow.remove(windowId);
+          ledgerSyncEnabled = false;
+          this.activeAgentWindowIds.delete(windowId);
+          if (this.orphanLedger.isAvailable()) {
+            await this.orphanLedger.removeWindow(windowId);
+          }
         } catch (cleanupError) {
           // The daemon may retry stop after a failed startup rollback. Retain
           // the exact window handle until closure is confirmed.
           const pending: SessionContext = {
+            controller: this.controllerFor(sessionId, opts.controller),
             incognito: opts.incognito ?? false,
             ...(this.remote() ? { remote: true } : {}),
             sessionId,
@@ -313,6 +432,9 @@ export class SessionManager {
             agentCreatedTabs,
             createdAtMs: this.now(),
           };
+          this.detachLedgerWatchers.set(pending, () => {
+            ledgerSyncEnabled = false;
+          });
           this.sessions.set(sessionId, pending);
           this.windowIndex.set(windowId, sessionId);
           throw new SessionStartCleanupError(windowId, startupError, cleanupError);
@@ -320,6 +442,21 @@ export class SessionManager {
       }
       throw startupError;
     }
+  }
+
+  private controllerFor(
+    sessionId: string,
+    controller?: ControllerInfo,
+  ): ControllerInfo | undefined {
+    if (!controller) return undefined;
+    return {
+      ...controller,
+      color: controllerColor(
+        sessionId,
+        controller,
+        Array.from(this.sessions.values(), (ctx) => ctx.controller?.color),
+      ),
+    };
   }
 
   /**
@@ -339,6 +476,9 @@ export class SessionManager {
       await this.agentWindow.remove(ctx.agentWindowId);
     }
     if (this.sessions.get(sessionId) === ctx) this.release(sessionId);
+    if (this.orphanLedger.isAvailable()) {
+      await this.orphanLedger.removeWindow(ctx.agentWindowId);
+    }
     return ctx;
   }
 
@@ -346,11 +486,14 @@ export class SessionManager {
   release(sessionId: string): SessionContext | null {
     const ctx = this.sessions.get(sessionId);
     if (!ctx) return null;
+    this.detachLedgerWatchers.get(ctx)?.();
     this.sessions.delete(sessionId);
     this.windowIndex.delete(ctx.agentWindowId);
+    this.activeAgentWindowIds.delete(ctx.agentWindowId);
     for (const [tabId, owner] of this.borrowReservations) {
       if (owner === sessionId) this.borrowReservations.delete(tabId);
     }
+    void this.orphanLedger.removeWindow(ctx.agentWindowId);
     return ctx;
   }
 

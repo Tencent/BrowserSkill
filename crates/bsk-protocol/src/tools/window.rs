@@ -3,15 +3,43 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::ActionExpectation;
+
 // ----- window_resize -----
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WindowResizeParams {
     pub session_id: String,
+    /// Optional target tab bound by cooperation before resizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
     /// New Agent Window outer width in CSS pixels (100..=7680).
     pub width: u32,
     /// New Agent Window outer height in CSS pixels (100..=7680).
     pub height: u32,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

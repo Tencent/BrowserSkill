@@ -1,36 +1,38 @@
 //! Daemon-wide shared state: config, browser registry, session registry.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use bsk_protocol::tools::SessionStopResult;
 use tokio::task::JoinHandle;
 
-use super::abort::AbortRegistry;
+use super::abort::{AbortRegistry, AbortToken};
 use super::browsers::{BrowserId, BrowserRegistry};
 use super::file_transfer::TransferRegistry;
-use super::inflight::ToolInflightRegistry;
-use super::ipc::IpcHandle;
+use super::inflight::{CancelReason, ToolInflightRegistry};
+use super::ipc::{IpcHandle, RecordSessionStop};
 use super::queue::ToolQueueRegistry;
 use super::session_interrupt::SessionInterruptRegistry;
-use super::sessions::SessionRegistry;
+use super::sessions::{SessionId, SessionRegistry, StopSessionError, send_session_stop};
 use super::start::DaemonConfig;
 use super::ws::WsHandle;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL_VERSION: &str = "1.8";
-/// Base wire compatibility. New interaction semantics are checked per operation.
-pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
-/// Legacy app-semver floor used only when `HandshakeResult.min_compatible_peer`
-/// is emitted for old extensions. New code ignores this on read.
-pub const LEGACY_MIN_COMPATIBLE_PEER: &str = "0.0.0";
+pub use bsk_protocol::catalog::{MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION};
 pub const SERVER_NAME: &str = "browser-skill-daemon";
 
 #[derive(Debug)]
 pub struct DaemonState {
     pub audit: Arc<super::audit::AuditStore>,
     pub config: DaemonConfig,
+    pub local_auth: Arc<super::local_auth::LocalAuth>,
+    last_unpaired_attempt:
+        std::sync::Mutex<Option<(std::time::Instant, bsk_protocol::system::UnpairedAttempt)>>,
     pub browsers: Arc<BrowserRegistry>,
     pub sessions: Arc<SessionRegistry>,
+    pub(super) record_session_stops: Mutex<HashMap<SessionId, RecordSessionStop>>,
     pub session_requests: super::session_requests::SessionRequests,
     /// Per-session serial dispatch queues for `tool.*` RPCs (M6.5,
     /// design §5). Populated by `start_session`, drained by
@@ -58,13 +60,125 @@ pub struct DaemonState {
     /// Operation-scoped local file staging. The extension only sees paths
     /// minted here; agent-facing RPCs use opaque transfer ids.
     pub transfers: Arc<TransferRegistry>,
+    /// What each live session did, for recipe drafts. Metadata only, in memory.
+    pub run_logs: super::run_log::RunLogs,
+    /// Caller-scoped implicit session bindings, short `cN`/`oN` tokens, and `last_vom`.
+    pub scopes: super::scopes::ImplicitScopeRegistry,
+    /// `<3ms` write-ahead intent ledger guarding against blind replay (`RM-03`).
+    pub intent_wal: super::intent_wal::IntentWal,
 }
 
 impl DaemonState {
-    /// Forget every session owned by `browser_id`: drop its queue and
-    /// interrupt state, release its transfers, clear its dialog
-    /// operations, and tombstone why the ids ended so later dispatches
-    /// answer "browser disconnected" instead of a bare not-found.
+    /// Single authoritative session teardown entry point across the daemon.
+    ///
+    /// Reconciles all 12 session-associated state tables (`sessions`,
+    /// `record_session_stops`, `session_requests`, `tool_queues`,
+    /// `abort_registry`, `tool_inflight`, `dialog_operations`,
+    /// `session_interrupts`, `transfers`, `run_logs`, `scopes`, and
+    /// `intent_wal`) and returns `true` when `session_id` was live in
+    /// [`SessionRegistry`] at teardown time.
+    fn teardown_session_in_memory(
+        &self,
+        session_id: &SessionId,
+        reason: &'static str,
+    ) -> (bool, Vec<std::path::PathBuf>, u64) {
+        let (cancel_reason, include_dialog_retained) =
+            if reason == bsk_protocol::RpcErrorReason::UserMovedTab.as_str() {
+                (CancelReason::UserMovedTab, true)
+            } else if reason == bsk_protocol::RpcErrorReason::SessionStopped.as_str() {
+                (CancelReason::SessionEnded(reason), false)
+            } else {
+                (CancelReason::SessionEnded(reason), true)
+            };
+        let snapshots = self.tool_inflight.cancel_session_filtered(
+            session_id,
+            cancel_reason,
+            include_dialog_retained,
+        );
+        for snap in snapshots {
+            if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
+                && let Err(err) =
+                    super::cancel_forward::forward_cancel_to_browser(self, &browser_id, &ws_rpc_id)
+                && reason != bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str()
+            {
+                tracing::warn!(
+                    %browser_id,
+                    %ws_rpc_id,
+                    %err,
+                    "failed to forward session cancellation to extension"
+                );
+            }
+        }
+        let removed = self.sessions.teardown(session_id, reason);
+        self.record_session_stops
+            .lock()
+            .unwrap()
+            .retain(|id, stop| id != session_id || stop.result.borrow().is_none());
+        for rpc_id in self.session_requests.on_session_ended(session_id) {
+            self.abort_registry.cancel(&rpc_id);
+        }
+        self.tool_queues.remove(session_id);
+        self.dialog_operations.remove_session(&session_id.0);
+        self.session_interrupts.drop_session(session_id);
+        let transfer_dirs = self.transfers.drain_session_dirs(&session_id.0);
+        self.run_logs.remove_session(&session_id.0);
+        self.scopes.on_session_ended(session_id, reason);
+        let wal_seq = self.intent_wal.record_session_ended(session_id);
+        (removed, transfer_dirs, wal_seq)
+    }
+
+    pub fn teardown_session(&self, session_id: &SessionId, reason: &'static str) -> bool {
+        let (removed, transfer_dirs, wal_seq) = self.teardown_session_in_memory(session_id, reason);
+        if !transfer_dirs.is_empty() || wal_seq > 0 {
+            let wal = self.intent_wal.clone();
+            let cleanup = move || {
+                TransferRegistry::remove_dirs(transfer_dirs);
+                wal.flush_up_to(wal_seq);
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                drop(handle.spawn_blocking(cleanup));
+            } else {
+                cleanup();
+            }
+        }
+        removed
+    }
+
+    /// Round-trip `tool.session_stop` to the owning extension and, on success,
+    /// atomically finalize all daemon session state through
+    /// [`Self::teardown_session`] with `reason`.
+    pub async fn stop_session_with_reason(
+        &self,
+        session_id: &SessionId,
+        reason: &'static str,
+        timeout_dur: Duration,
+        cancel: Option<AbortToken>,
+    ) -> Result<SessionStopResult, StopSessionError> {
+        let (result, graceful_audit) = send_session_stop(
+            &self.browsers,
+            &self.sessions,
+            &self.tool_queues,
+            session_id,
+            timeout_dur,
+            cancel,
+        )
+        .await?;
+        if graceful_audit {
+            self.sessions.mark_graceful_audit_end(session_id);
+        }
+        let (_, transfer_dirs, wal_seq) = self.teardown_session_in_memory(session_id, reason);
+        if !transfer_dirs.is_empty() || wal_seq > 0 {
+            let wal = self.intent_wal.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                TransferRegistry::remove_dirs(transfer_dirs);
+                wal.flush_up_to(wal_seq);
+            })
+            .await;
+        }
+        Ok(result)
+    }
+
+    /// Forget every session owned by `browser_id` through [`Self::teardown_session`].
     ///
     /// Shared by every browser-driven purge (maintainer review of
     /// issue #465): the reconnect-time stale purge, the ordinary socket
@@ -75,18 +189,61 @@ impl DaemonState {
         end_reason: &'static str,
         note: &'static str,
     ) {
-        for session in self.sessions.purge_browser(browser_id) {
-            self.tool_queues.remove(&session.id);
-            self.session_interrupts.drop_session(&session.id);
-            self.transfers.release_session(&session.id.0);
-            self.dialog_operations.remove_session(&session.id.0);
-            self.sessions.remember_end(&session.id, end_reason);
-            tracing::debug!(session = %session.id, note);
+        for session_id in self.sessions.ids_for_browser(browser_id) {
+            if self.teardown_session(&session_id, end_reason) {
+                tracing::debug!(session = %session_id, note);
+            }
         }
     }
 }
 
 impl DaemonState {
+    pub fn record_unpaired(&self, version: Option<&str>) {
+        let extension_version = version
+            .and_then(|v| semver::Version::parse(v).ok())
+            .map(|v| v.to_string());
+        let at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("current timestamp");
+        *self.last_unpaired_attempt.lock().unwrap() = Some((
+            std::time::Instant::now(),
+            bsk_protocol::system::UnpairedAttempt {
+                at,
+                extension_version,
+            },
+        ));
+    }
+    pub fn recent_unpaired(&self) -> Option<bsk_protocol::system::UnpairedAttempt> {
+        if self.local_auth.mode().accepts_legacy() {
+            return None;
+        }
+        self.last_unpaired_attempt
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(when, _)| when.elapsed() < std::time::Duration::from_secs(300))
+            .map(|(_, attempt)| attempt.clone())
+    }
+    pub fn local_auth_status(&self) -> Option<bsk_protocol::system::LocalAuthStatus> {
+        if self.config.server.is_some() {
+            return None;
+        }
+        Some(bsk_protocol::system::LocalAuthStatus {
+            mode: serde_json::to_value(self.local_auth.mode())
+                .expect("local policy")
+                .as_str()
+                .unwrap()
+                .into(),
+            paired_devices: self
+                .local_auth
+                .store
+                .devices()
+                .iter()
+                .filter(|d| d.status == super::local_auth::store::DeviceStatus::Active)
+                .count(),
+            last_unpaired_attempt: self.recent_unpaired(),
+        })
+    }
     pub fn new(config: DaemonConfig) -> Self {
         if crate::cli::human_loop::legacy_help_override_requested() {
             crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
@@ -106,9 +263,12 @@ impl DaemonState {
         let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
         Self {
             audit,
+            local_auth: Arc::new(super::local_auth::LocalAuth::memory(config.local_auth)),
+            last_unpaired_attempt: Default::default(),
             config,
             browsers,
             sessions,
+            record_session_stops: Default::default(),
             session_requests: Default::default(),
             tool_queues,
             abort_registry,
@@ -116,6 +276,9 @@ impl DaemonState {
             dialog_operations: Default::default(),
             session_interrupts,
             transfers,
+            run_logs: Default::default(),
+            scopes: Default::default(),
+            intent_wal: super::intent_wal::IntentWal::new(super::paths::intent_ledger_path().ok()),
         }
     }
 }

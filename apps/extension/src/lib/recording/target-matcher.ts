@@ -62,15 +62,17 @@ export function matchObservationTarget(input: {
   const frameId = input.hint?.frameId ?? input.observation.rootFrameId;
   const geometry = input.hint?.geometry;
   if (geometry) {
-    const matches = input.observation.index
+    const candidates = input.observation.index
       .candidates(frameId, geometry.tag)
-      .filter(
-        (candidate) =>
-          candidate.ref &&
-          candidateMatches(candidate, geometry, input.hint?.geometrySpace ?? "top"),
-      );
+      .filter((candidate) => candidate.ref);
+    const matches = candidates.filter((candidate) =>
+      candidateMatches(candidate, geometry, input.hint?.geometrySpace ?? "top"),
+    );
     if (matches.length === 1) return descriptor(matches[0]!.ref!);
-    const semanticMatches = matches.filter(
+    // No rect matches once the page has scrolled or the element has changed size since the
+    // observation. A name that only one same-tag ref carries still identifies the target.
+    const pool = matches.length > 0 ? matches : normalized(input.fallback?.name) ? candidates : [];
+    const semanticMatches = pool.filter(
       (candidate) => candidate.ref && matchesSemantics(candidate.ref, input.fallback),
     );
     if (semanticMatches.length === 1) return descriptor(semanticMatches[0]!.ref!);

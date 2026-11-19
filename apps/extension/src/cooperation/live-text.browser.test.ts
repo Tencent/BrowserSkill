@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; each test owns its browser, profile and HTTP server.
+// Opt in with BSK_TEST_CHROME; each test owns its browser, profile and HTTP server.
 // Real Chrome observations, target resolution and native input run through the
 // production controller. The page reports DOM revisions like the content
 // script's collector, so this is integration rather than installed-extension
@@ -7,13 +7,13 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
+import { createFrameDocumentInfo, type FrameDocumentInfo } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { type EmulateCdpRunner, handleEmulate } from "@/tools/emulate";
 import { handleEvaluate } from "@/tools/evaluate";
 import { handleBlur, handleClick, handleFill, handlePress } from "@/tools/interaction";
 import { handleObserve, handleScreenshot, handleSnapshot } from "@/tools/observation";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
 import { CooperationController } from "./controller";
 import type { FrameState } from "./types";
@@ -80,6 +80,14 @@ const pages: Record<string, string> = {
     <iframe name="detail" src="/frame-initial"></iframe>`,
   "frame-initial": "<p>Initial detail</p>",
   "frame-next": "<p>Saved detail</p>",
+  "enter-link": '<a id="enter" href="/submitted">Next</a>',
+  "enter-form":
+    '<form action="/submitted"><label>Search <input id="enter" name="q" value="flex"></label></form>',
+  "enter-keydown": `<input id="enter" aria-label="Navigate" onkeydown="if(event.key==='Enter') location.href='/submitted'">`,
+  submitted: '<p>Saved once</p><button id="next" type="button">Next action</button>',
+  "context-cards": `<button>Replace target</button><span id="record">Record 42</span>
+    <div>Candidate A <button>Continue</button></div>
+    <div><button>Continue</button> Candidate B</div>`,
   responsive: `<meta name="viewport" content="width=device-width,initial-scale=1">
     <p id="viewport"></p><script>
     const sample = () => document.querySelector('#viewport').textContent = innerWidth + 'x' + innerHeight;
@@ -107,10 +115,14 @@ async function withCooperation(
   }) => Promise<void>,
   options: { policy?: "strict" | "target" } = {},
 ) {
+  let submissions = 0;
   const server = createServer((request, response) => {
     const name = decodeURIComponent((request.url ?? "/").slice(1).split("?")[0]);
+    if (name === "submitted") submissions++;
     response.setHeader("Content-Type", "text/html");
-    response.end(`<!doctype html><title>${name}</title><body>${pages[name] ?? ""}${collector}`);
+    response.end(
+      `<!doctype html><title>${name}</title><body>${pages[name] ?? ""}${collector}<script>window.submissions=${submissions}</script>`,
+    );
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -124,7 +136,7 @@ async function withCooperation(
   try {
     await withChrome(
       {
-        executable: process.env.BSK_CLICK_CHROME,
+        executable: process.env.BSK_TEST_CHROME,
         deviceScale: 1,
         zoom: 1,
         startupTimeout: 30_000,
@@ -151,15 +163,25 @@ async function withCooperation(
         };
         await local("Page.enable");
         await local("Page.bringToFront");
-        const graph = async (): Promise<CdpFrameGraph> => {
+        const getFrameDocuments = async (): Promise<{
+          rootFrameId: string;
+          frames: FrameDocumentInfo[];
+        }> => {
           interface Tree {
-            frame: { id: string };
+            frame: { id: string; loaderId?: string };
             childFrames?: Tree[];
           }
           const { frameTree } = await local<{ frameTree: Tree }>("Page.getFrameTree");
-          const frames: CdpFrame[] = [];
+          const frames: FrameDocumentInfo[] = [];
           const visit = (tree: Tree, parentFrameId?: string) => {
-            frames.push({ frameId: tree.frame.id, parentFrameId, target: { tabId: 4 } });
+            frames.push(
+              createFrameDocumentInfo({
+                tabId: 4,
+                frameId: tree.frame.id,
+                loaderId: tree.frame.loaderId ?? "",
+                parentFrameId,
+              }),
+            );
             for (const child of tree.childFrames ?? []) visit(child, tree.frame.id);
           };
           visit(frameTree);
@@ -171,16 +193,21 @@ async function withCooperation(
           if (method === "Accessibility.getFullAXTree") captures.accessibility++;
           return local(method, params);
         };
-        const cdp: CdpRunner & EmulateCdpRunner = {
-          send: (_tabId, method, params) => instrumented(method, params),
-          sendToTarget: (_target, method, params) => instrumented(method, params),
-          getAttachmentId: () => sessionId,
-          getFrameGraph: graph,
-          setDeviceMetricsOverride: ChromiumCdp.prototype.setDeviceMetricsOverride,
-          clearDeviceMetricsOverride: ChromiumCdp.prototype.clearDeviceMetricsOverride,
-          setUserAgentOverride: ChromiumCdp.prototype.setUserAgentOverride,
-          setTouchEmulationEnabled: ChromiumCdp.prototype.setTouchEmulationEnabled,
-        };
+        const cdp: CdpRunner & EmulateCdpRunner = Object.assign(
+          createStubCdpRunner({
+            send: (_tabId, method, params) => instrumented(method, params),
+            sendToFrame: (_handle, method, params) => instrumented(method, params),
+            getAttachmentId: () => sessionId,
+            getFrameDocuments,
+            getMainFrameHandle: async () => (await getFrameDocuments()).frames[0].handle,
+          }),
+          {
+            setDeviceMetricsOverride: ChromiumCdp.prototype.setDeviceMetricsOverride,
+            clearDeviceMetricsOverride: ChromiumCdp.prototype.clearDeviceMetricsOverride,
+            setUserAgentOverride: ChromiumCdp.prototype.setUserAgentOverride,
+            setTouchEmulationEnabled: ChromiumCdp.prototype.setTouchEmulationEnabled,
+          },
+        );
         const sessions = new SessionManager({
           agentWindow: {
             create: async () => ({ windowId: 100, initialTabIds: [4] }),
@@ -358,7 +385,69 @@ const learned = expect.stringContaining("changed by itself");
 const changed = "The action's observed content changed; synchronize and replan";
 const refused = { data: { reason: "cooperation_sync_required", effect_state: "none" } };
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("completed input during frame navigation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)(
+  "release-blocking navigation and context regressions",
+  () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    describe.each(["strict", "target"] as const)("%s policy", (policy) => {
+      it.each([
+        "enter-link",
+        "enter-form",
+        "enter-keydown",
+      ])("keeps the completed Enter receipt on %s without replaying input", async (name) => {
+        await withCooperation(
+          async (page) => {
+            await page.open(name);
+            const synced = await page.sync();
+            const result = await page.act("tool.press", {
+              context_id: synced.context_id,
+              observation_id: synced.observation_id,
+              selector: "#enter",
+              key: "Enter",
+            });
+            expect(result, JSON.stringify(result)).toMatchObject({
+              tab_id: 4,
+              key: "Enter",
+              code: "Enter",
+            });
+            expect(result).not.toHaveProperty("message");
+            await expect.poll(() => page.read("document.title")).toBe("submitted");
+            expect(await page.read("window.submissions")).toBe(1);
+            expect(await page.click(synced.context_id, "#next")).toMatchObject({
+              code: "permission_denied",
+            });
+            const fresh = await page.sync();
+            expect(fresh.context_id).not.toBe(synced.context_id);
+            expect(await page.click(fresh.context_id, "#next")).not.toHaveProperty("code");
+            expect(await page.read("window.submissions")).toBe(1);
+            expect((await page.inputs()).keys).toEqual([]);
+          },
+          { policy },
+        );
+      }, 120_000);
+    });
+
+    it("keeps each Continue in its own DOM card across unrelated record changes", async () => {
+      await withCooperation(async (page) => {
+        await page.open("context-cards");
+        for (const record of ["Record 42", "Record 99"]) {
+          if (record === "Record 99") await page.set("#record", record);
+          const observed = await page.observe();
+          const contexts = observed.text
+            .split("\n")
+            .filter((line: string) => line.includes('button "Continue"'));
+          expect(contexts).toHaveLength(2);
+          expect(contexts[0]).toContain("[ctx: Candidate A]");
+          expect(contexts[1]).toContain("[ctx: Candidate B]");
+          expect(contexts.join(" ")).not.toContain("Record");
+        }
+      });
+    }, 120_000);
+  },
+);
+
+describe.skipIf(!process.env.BSK_TEST_CHROME)("completed input during frame navigation", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   describe.each(["strict", "target"] as const)("%s policy", (policy) => {
@@ -423,7 +512,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("completed input during frame nav
   });
 });
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("shared control with self-updating text", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("shared control with self-updating text", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -587,7 +676,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("shared control with self-updatin
   }, 120_000);
 });
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("target policy in a real browser", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("target policy in a real browser", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -929,6 +1018,22 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("target policy in a real browser"
         });
         expect(await page.read("document.activeElement.id")).toBe("other");
         expect((await page.inputs()).keys).toEqual([]);
+
+        const resynced = await page.sync();
+        const directed = await page.act("tool.press", {
+          context_id: resynced.context_id,
+          selector: "#other",
+          key: "Enter",
+        });
+        expect(directed, JSON.stringify(directed)).toMatchObject({
+          key: "Enter",
+          code: "Enter",
+          modifiers: [],
+        });
+        expect(directed).not.toHaveProperty("used_selector");
+        expect(directed).not.toHaveProperty("used_ref");
+        expect(await page.read("document.activeElement.id")).toBe("other");
+        expect((await page.inputs()).keys).toEqual(["Enter:true"]);
       },
       { policy: "target" },
     );

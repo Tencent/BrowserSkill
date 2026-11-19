@@ -1,11 +1,16 @@
 /** The collector reports facts, never instructions or inferred user intent. */
 export interface InputExpectation {
-  type: "pointerdown" | "keydown" | "wheel";
+  type: "pointerdown" | "keydown" | "keypress" | "wheel" | "beforeinput" | "clear";
   x?: number;
   y?: number;
   key?: string;
+  /** This keydown also dispatches text/keypress in the same native browser task. */
+  keypress?: boolean;
   /** Native event time in epoch milliseconds, shared across frame coordinate spaces. */
   timestamp?: number;
+  /** One-shot insertText attribution, cleared when the native command settles. Never logged. */
+  text?: string;
+  id?: string;
 }
 
 export interface FieldChange {
@@ -42,8 +47,21 @@ export interface MediaState {
   sources: { id: string; src: string; type: string; media: string }[];
 }
 
+/** One text node whose data was replaced while everything around it stayed. */
+export interface TextChange {
+  /** The frame's `textual` count once this batch was recorded. */
+  sequence: number;
+  /** Collector-local identity of the element holding the text. */
+  id: string;
+  /** How to find that element: its tag, with `#id` when it has one. */
+  label: string;
+  previous_value: string;
+  value: string;
+}
+
 export interface FrameState {
   document: string;
+  url?: string;
   /** Collector-local identity of the deep active element in this document. */
   focus?: string;
   /** True only for the ordinary document focus, without a specific recipient. */
@@ -51,8 +69,24 @@ export interface FrameState {
   media?: MediaState[];
   revision: number;
   structure: number;
+  /**
+   * How many of the `structure` batches only replaced visible text, each logged
+   * in `texts`. A frame whose `structure` and `textual` advanced by the same
+   * amount changed nothing else in its DOM.
+   */
+  textual?: number;
+  /** Bounded log of those replacements, oldest first. */
+  texts?: TextChange[];
+  /** `sequence` of the newest replacement dropped from `texts`; absent when none was. */
+  textFloor?: number;
+  /** False when a style that applies under the current focus may show or hide content. */
+  focusNeutral?: boolean;
   human: number;
   busy: boolean;
+  /** A gesture may still become a click or edit. It has not revoked control. */
+  pending?: boolean;
+  /** Only coordinate-dependent input waits for an actively scrolling viewport. */
+  scrolling?: boolean;
   editing: boolean;
   lastInput: number;
   fields: FieldChange[];
@@ -65,9 +99,13 @@ export interface FrameIdentity {
   url: string;
 }
 
-/** Documents that cannot receive page input and need no interaction collector. */
+/**
+ * Documents that cannot receive page input and need no interaction collector.
+ * `hidden_frame` is a child document that failed collection while its frame
+ * element was proven not displayed, without area, or invisible, and unfocused.
+ */
 export interface FrameGap extends FrameIdentity {
-  reason: "load_error" | "inactive_document";
+  reason: "load_error" | "inactive_document" | "hidden_frame";
 }
 
 export interface CooperationFrames {
@@ -77,6 +115,13 @@ export interface CooperationFrames {
 
 /** Shared by concurrent collections; pruned against the tab's document inventory. */
 export type FrameRepairs = Map<string, Promise<void>>;
+
+/**
+ * Child documents that failed collection while hidden. Later collections
+ * recheck the frame element instead of waiting for the document again.
+ * Pruned against the tab's document inventory, like FrameRepairs.
+ */
+export type HiddenFrames = Set<string>;
 
 export interface CooperationView {
   target?: { x: number; y: number; expires: number };
@@ -95,10 +140,13 @@ export interface CooperationParams {
   control_policy?: "auto" | "strict" | "target";
 }
 
-export const COOPERATION_READY = "cooperation.ready";
+export const COOPERATION_ARM_FRAME = "cooperation.arm_frame";
+export const COOPERATION_SUBFRAME_READY = "cooperation.subframe_ready";
 export const COOPERATION_MESSAGE = "cooperation.frame";
 export const COOPERATION_CONTROL = "cooperation.control";
 export const COOPERATION_READ = "cooperation.read";
 export const COOPERATION_ARM = "cooperation.arm";
 export const COOPERATION_RESUME = "cooperation.resume";
 export const COOPERATION_DISABLE = "cooperation.disable";
+/** Read-only layout facts about a document's frame elements; carries no lease or authority. */
+export const COOPERATION_OWNERS = "cooperation.owners";

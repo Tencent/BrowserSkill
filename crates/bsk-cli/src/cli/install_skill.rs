@@ -41,6 +41,10 @@ pub struct InstallSkillArgs {
     /// Overwrite an existing `browser-skill` skill installation.
     #[arg(long)]
     pub force: bool,
+
+    /// Also configure the BrowserSkill MCP server for Codex, Claude Code or Cursor.
+    #[arg(long)]
+    pub mcp: bool,
 }
 
 impl InstallSkillArgs {
@@ -68,7 +72,17 @@ pub fn dispatch(args: InstallSkillArgs, output: Output) -> Result<(), CliError> 
     let harnesses = resolve_targets(&args, &reports).map_err(CliError::Local)?;
     let source = load_source(args.source.as_deref()).map_err(CliError::Local)?;
 
-    let install_output = crate::skill_install::install_to_harnesses(&InstallOptions {
+    if args.mcp {
+        for &harness in &harnesses {
+            if !crate::skill_install::mcp::supported(harness) {
+                return Err(CliError::Local(anyhow::anyhow!(
+                    "--mcp supports codex, claude-code and cursor; {} is not supported",
+                    harness.cli_name()
+                )));
+            }
+        }
+    }
+    let mut install_output = crate::skill_install::install_to_harnesses(&InstallOptions {
         harnesses: &harnesses,
         source: &source,
         source_kind: args.source_kind(),
@@ -76,11 +90,52 @@ pub fn dispatch(args: InstallSkillArgs, output: Output) -> Result<(), CliError> 
         home: None,
     });
 
+    let mut mcp_results = Vec::new();
+    if args.mcp {
+        let home = crate::skill_install::harness::home_dir().map_err(CliError::Local)?;
+        let executable = std::env::current_exe()
+            .context("locate bsk executable")
+            .map_err(CliError::Local)?;
+        for &harness in &harnesses {
+            if install_output
+                .errors
+                .iter()
+                .any(|e| e.harness == harness.cli_name())
+            {
+                continue;
+            }
+            match crate::skill_install::mcp::install(&home, harness, &executable) {
+                Ok(result) => mcp_results.push(result),
+                Err(err) => install_output
+                    .errors
+                    .push(crate::skill_install::InstallError {
+                        harness: harness.cli_name().into(),
+                        message: format!("MCP setup: {err:#}"),
+                    }),
+            }
+        }
+    }
+
     match output {
-        Output::Human => render_human(&install_output),
+        Output::Human => {
+            render_human(&install_output);
+            for result in &mcp_results {
+                eprintln!(
+                    "✓ {} MCP → {} ({})",
+                    result.harness,
+                    result.path.display(),
+                    result.status
+                );
+            }
+        }
         Output::Json => {
-            let json = serde_json::to_string_pretty(&install_output.to_json_output())
-                .context("encode json")?;
+            let mut value =
+                serde_json::to_value(install_output.to_json_output()).context("encode json")?;
+            if args.mcp {
+                value["mcp_results"] =
+                    serde_json::to_value(&mcp_results).context("encode MCP results")?;
+            }
+            let json = serde_json::to_string_pretty(&value).context("encode json")?;
             println!("{json}");
         }
     }
@@ -200,6 +255,7 @@ mod tests {
             yes,
             source: None,
             force: false,
+            mcp: false,
         }
     }
 

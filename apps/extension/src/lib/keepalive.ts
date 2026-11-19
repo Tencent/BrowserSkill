@@ -56,6 +56,8 @@ export interface KeepaliveOptions {
   shouldConnect?: () => boolean;
   /** Let the connection owner coordinate cleanup and retry policy. */
   requestConnect?: () => void | Promise<void>;
+  /** Optional liveness callback invoked on alarm ticks when already connected. */
+  onConnectedTick?: () => void;
   alarms?: AlarmsApi;
   /** Override the alarm name (tests). */
   alarmName?: string;
@@ -82,7 +84,10 @@ export function startKeepalive(options: KeepaliveOptions): KeepaliveHandle {
 
   const tick = async () => {
     if (options.shouldConnect && !options.shouldConnect()) return;
-    if (options.transport.state === "connected") return;
+    if (options.transport.state === "connected") {
+      options.onConnectedTick?.();
+      return;
+    }
     try {
       if (options.requestConnect) await options.requestConnect();
       else await options.transport.connect();

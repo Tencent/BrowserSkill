@@ -69,6 +69,32 @@ describe("record observation annotations", () => {
     expect(dumped).not.toContain(secret);
   });
 
+  it("omits a fill literal when an individual draft is marked redacted", () => {
+    const session = sessionWithInput(false);
+    const draft: RecordingDraftStep = {
+      op: "fill",
+      captureTarget: { tag: "input", role: "textbox", name: "Password" },
+      value: "***",
+      redacted: true,
+      targetHint: {
+        geometry: { rect: { x: 20, y: 40, w: 200, h: 30 }, tag: "input" },
+      },
+    };
+    session.bindDraft(draft, 1);
+    draft.postStateId = draft.preStateId;
+    const trace = buildTraceV3({
+      registry: session.registry,
+      drafts: [draft],
+      annotations: session.annotations,
+      startedAt: "2026-08-12T00:00:00.000Z",
+      stoppedBy: "user_finish",
+      bskVersion: "test",
+      redactValues: false,
+    });
+    expect(trace.states[0]?.body).toContain("⟵ step 1: fill\n");
+    expect(trace.states[0]?.body).not.toContain('"***"');
+  });
+
   it("keeps ordinary fill details", () => {
     expect(finalizedFillBody("ordinary text", false)).toContain('step 1: fill: "ordinary text"');
   });
