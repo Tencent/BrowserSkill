@@ -85,6 +85,21 @@ function ownText(el: Element): string | null {
   return text ? truncate(text) : null;
 }
 
+/**
+ * A plain button does not copy a child image's alt into textContent.
+ * When the button has no text of its own, the first non-empty alt is its name.
+ * Empty and whitespace-only alts are skipped.
+ */
+function buttonImageName(el: Element): string | null {
+  if (el.tagName !== "BUTTON") return null;
+  for (const node of el.querySelectorAll("img")) {
+    if (!(node instanceof HTMLImageElement)) continue;
+    const alt = normalizeWhitespace(node.alt);
+    if (alt) return truncate(alt);
+  }
+  return null;
+}
+
 /** Prefer a compact title inside links (e.g. SERP result `<h3>`), not the whole blob. */
 function compactLinkName(el: Element): string | null {
   const heading = el.querySelector("h1, h2, h3, h4");
@@ -139,8 +154,12 @@ export function accessibleName(el: Element): string | undefined {
   const text = ownText(el);
   if (text) return text;
 
+  const imageName = buttonImageName(el);
+  if (imageName) return imageName;
+
   if (el instanceof HTMLInputElement || el instanceof HTMLButtonElement) {
-    const value = normalizeWhitespace(el.value);
+    // An omitted value is the empty string. Some DOM implementations return null instead.
+    const value = normalizeWhitespace(el.value ?? "");
     if (
       value &&
       (el instanceof HTMLButtonElement ||
