@@ -239,11 +239,9 @@ pub fn dispatch(
 ) -> Result<(), CliError> {
     let output = args.output.clone();
     let params = args.params()?;
-    if params.action != DebugAction::Replay
-        && (ctx.verification_requested() || ctx.context_id.is_some())
-    {
+    if !params.action.cooperation_guarded() && ctx.has_any_action_metadata() {
         return Err(CliError::invalid_params(anyhow::anyhow!(
-            "context, depends_on, observation, and expect on debug apply only to replay"
+            "context, depends_on, observation, and expect on debug apply only to guarded debug actions"
         )));
     }
     if params.action == DebugAction::Capabilities && params.session_id.is_empty() {

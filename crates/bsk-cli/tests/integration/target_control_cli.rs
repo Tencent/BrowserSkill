@@ -277,6 +277,42 @@ async fn current_daemon_receives_exact_conditions_without_extra_status_calls() {
 }
 
 #[tokio::test]
+async fn debug_rule_mutations_forward_cooperation_ids() {
+    let rule = r#"{"match":{"url":"https://example.test/api"},"effect":{"type":"block"}}"#;
+    for (action, options) in [
+        ("rule_add", &["--rule", rule][..]),
+        ("rule_disable", &["r1"][..]),
+        ("rule_enable", &["r1"][..]),
+        ("rule_remove", &["r1"][..]),
+    ] {
+        let mut args = vec!["debug", action];
+        args.extend_from_slice(options);
+        args.extend([
+            "--session",
+            "s",
+            "--context",
+            "c",
+            "--observation",
+            "o",
+            "--json",
+        ]);
+        let (output, calls) = run_cli("2.0", &args, json!({"session_id":"s"})).await;
+        assert!(
+            output.status.success(),
+            "{action}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let call = calls
+            .iter()
+            .find(|call| call["method"] == "tool.debug")
+            .unwrap();
+        assert_eq!(call["params"]["action"], action);
+        assert_eq!(call["params"]["context_id"], "c");
+        assert_eq!(call["params"]["observation_id"], "o");
+    }
+}
+
+#[tokio::test]
 async fn dom_read_requires_new_daemon_and_never_falls_back_to_evaluate() {
     let result = json!({"tab_id":7,"page_url":"https://example.test/","frame_url":"https://example.test/",
         "frame_id":"root","title":"Test","captured_at":"now","scope":"current_dom","items":[],"truncated":false});
