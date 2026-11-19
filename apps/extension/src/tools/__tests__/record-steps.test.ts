@@ -60,6 +60,8 @@ function chromeEvent<T extends (...args: never[]) => unknown>() {
 function installChrome() {
   const runtimeOnMessage = chromeEvent<RuntimeListener>();
   const tabsOnActivated = chromeEvent<(activeInfo: chrome.tabs.TabActiveInfo) => unknown>();
+  const tabsOnUpdated =
+    chromeEvent<(tabId: number, change: chrome.tabs.TabChangeInfo) => unknown>();
   const webNavigationOnCompleted =
     chromeEvent<(details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => unknown>();
   const webNavigationOnCommitted =
@@ -71,14 +73,20 @@ function installChrome() {
     tabs: {
       onActivated: tabsOnActivated,
       onCreated: chromeEvent(),
-      onUpdated: chromeEvent(),
+      onUpdated: tabsOnUpdated,
     },
     webNavigation: {
       onCompleted: webNavigationOnCompleted,
       onCommitted: webNavigationOnCommitted,
     },
   });
-  return { runtimeOnMessage, tabsOnActivated, webNavigationOnCompleted, webNavigationOnCommitted };
+  return {
+    runtimeOnMessage,
+    tabsOnActivated,
+    tabsOnUpdated,
+    webNavigationOnCompleted,
+    webNavigationOnCommitted,
+  };
 }
 
 function fakeManager() {
@@ -308,6 +316,32 @@ describe("recorded user steps reach the exported trace", () => {
     stepSequenceByProducer.clear();
     resetBrowserObservationForTests();
     vi.unstubAllGlobals();
+  });
+
+  it("starts recording promptly when a complete event overtakes a loading tab snapshot", async () => {
+    const { tabsOnUpdated } = installChrome();
+    const tabsApi = makeTabsApi();
+    const start = Date.now();
+    let armedAt: number | undefined;
+
+    const result = await handleRecordStart(fakeManager(), RECORD_START_V3, {
+      cdp: makeFakeCdp(),
+      tabsApi: {
+        ...tabsApi,
+        get: async () => {
+          const tab = await tabsApi.get();
+          tabsOnUpdated.emit(TAB_ID, { status: "complete" });
+          return { ...tab, status: "loading" };
+        },
+      },
+      sendToTab: async () => {
+        armedAt = Date.now();
+        return { ok: true };
+      },
+    });
+
+    expect(result).toEqual({ tab_id: TAB_ID, recording: true });
+    expect(armedAt).toBe(start);
   });
 
   it("keeps a click captured after start, even when the step listener has no cdp", async () => {

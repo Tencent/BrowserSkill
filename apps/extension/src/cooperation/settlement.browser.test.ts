@@ -1142,30 +1142,62 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
                 traceDir,
                 "--json",
               ],
-              { env, stdio: "ignore" },
+              { env, stdio: ["ignore", "pipe", "pipe"] },
             );
-            const recExited = once(recordProc, "exit");
-            await expect
-              .poll(
-                async () => {
-                  try {
-                    const stateRaw = await readFile(
-                      path.join(env.BSK_HOME, "record-session.json"),
-                      "utf8",
-                    );
-                    return Boolean(JSON.parse(stateRaw).session_id);
-                  } catch {
-                    return false;
-                  }
-                },
-                { timeout: 15000 },
-              )
-              .toBe(true);
-            expect(Date.now() - recordStart).toBeLessThan(13000);
-            const recStopped = await runCli("record", "stop", "--output", traceDir);
-            expect(recStopped.exitCode, JSON.stringify(recStopped)).toBe(0);
-            const [recExitCode] = await recExited;
-            expect(recExitCode).toBe(0);
+            const recClosed = once(recordProc, "close");
+            let stdout = "";
+            let stderr = "";
+            recordProc.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+              stdout = (stdout + chunk).slice(-8192);
+            });
+            recordProc.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+              stderr = (stderr + chunk).slice(-8192);
+            });
+            let processClosed = false;
+            void recClosed.then(
+              () => {
+                processClosed = true;
+              },
+              () => {
+                processClosed = true;
+              },
+            );
+            try {
+              await expect
+                .poll(
+                  async () => {
+                    if (processClosed) return true;
+                    try {
+                      const stateRaw = await readFile(
+                        path.join(env.BSK_HOME, "record-session.json"),
+                        "utf8",
+                      );
+                      return Boolean(JSON.parse(stateRaw).session_id);
+                    } catch {
+                      return false;
+                    }
+                  },
+                  { timeout: 15000 },
+                )
+                .toBe(true);
+              if (processClosed) {
+                await recClosed;
+                throw new Error("bsk record start exited before recording was ready");
+              }
+              expect(Date.now() - recordStart).toBeLessThan(13000);
+              const recStopped = await runCli("record", "stop", "--output", traceDir);
+              expect(recStopped.exitCode, JSON.stringify(recStopped)).toBe(0);
+              const [recExitCode] = await recClosed;
+              expect(recExitCode).toBe(0);
+            } catch (error) {
+              throw new Error(
+                `bsk record start failed (exit=${recordProc.exitCode}, signal=${recordProc.signalCode})\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+                { cause: error },
+              );
+            } finally {
+              if (!processClosed) recordProc.kill();
+              await recClosed.catch(() => {});
+            }
 
             // 2. Genuinely wedged main frame (`for (;;) {}`): settled `bsk sync --timeout-ms`
             // respects its wall-clock deadline without multiplying retries (Sync -> Wait -> Sync),

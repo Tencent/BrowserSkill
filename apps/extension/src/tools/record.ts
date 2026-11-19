@@ -175,25 +175,26 @@ async function waitForTabReady(
   tabsApi: ChromeTabsApi,
   timeoutMs = 10_000,
 ): Promise<void> {
-  try {
-    const tab = await tabsApi.get(tabId);
-    if (tab.status === "complete") return;
-  } catch {
-    return;
-  }
-
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      reject(new Error("tab load timeout"));
-    }, timeoutMs);
-    const listener = (updatedTabId: number, info: chrome.tabs.TabChangeInfo) => {
-      if (updatedTabId !== tabId || info.status !== "complete") return;
+    const finish = (error?: Error) => {
       clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
+      if (error) reject(error);
+      else resolve();
     };
+    const listener = (updatedTabId: number, info: chrome.tabs.TabChangeInfo) => {
+      if (updatedTabId === tabId && info.status === "complete") finish();
+    };
+    const timer = setTimeout(() => finish(new Error("tab load timeout")), timeoutMs);
+    // The complete event can arrive while the initial tab snapshot is in flight.
     chrome.tabs.onUpdated.addListener(listener);
+    void (async () => {
+      try {
+        if ((await tabsApi.get(tabId)).status === "complete") finish();
+      } catch {
+        finish();
+      }
+    })();
   });
 }
 
