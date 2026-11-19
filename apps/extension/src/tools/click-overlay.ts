@@ -21,6 +21,38 @@ export interface ClickOverlayDeps {
 
 type OverlayHit = "absent" | "clear" | "covered" | "unknown";
 
+/**
+ * Why the click point could not be proven clear. The three causes need
+ * different follow-up and used to share one opaque message, so a caller could
+ * not tell "the overlay is still there" from "the hit test never answered" or
+ * "the passthrough lease expired" (#556).
+ */
+type OverlayClearFailure =
+  | "overlay_still_covered"
+  | "overlay_state_unknown"
+  | "passthrough_deadline";
+
+const OVERLAY_CLEAR_MESSAGES: Record<
+  OverlayClearFailure,
+  (point: { x: number; y: number }) => string
+> = {
+  overlay_still_covered: ({ x, y }) =>
+    `The BrowserSkill overlay still covers the click point (${x}, ${y}) after bypass and input passthrough`,
+  overlay_state_unknown: ({ x, y }) =>
+    `Could not confirm the click point (${x}, ${y}) is clear: the overlay hit test did not answer after bypass`,
+  passthrough_deadline: ({ x, y }) =>
+    `Input passthrough expired before the click point (${x}, ${y}) could be verified`,
+};
+
+const OVERLAY_CLEAR_RECOVERY: Record<OverlayClearFailure, string> = {
+  overlay_still_covered:
+    "Synchronize and inspect the reported click point. If the overlay still covers it, reload the tab once before retrying.",
+  overlay_state_unknown:
+    "Retry the action; a page that keeps the hit test unreadable is not safe to click through. Use get-html or snapshot to inspect it instead.",
+  passthrough_deadline:
+    "Wait for the page to settle and retry, or reduce the action deadline so the lease outlives the gesture.",
+};
+
 /** Prepare before mouseMoved, then check again before every press. */
 export async function withClickOverlay<T>(
   tabId: number,
@@ -59,16 +91,16 @@ export async function withClickOverlay<T>(
   const expired = () => Date.now() >= passthroughExpiresAt;
   // Reserve enough lease for the gesture; slow delivery still reports an unknown outcome.
   const pressDeadlineReached = () => Date.now() >= passthroughExpiresAt - inputBudgetMs;
-  const notReady = () =>
-    rpcError(
-      "cdp_failed",
-      "input_not_ready",
-      "Could not clear the extension overlay from the click point",
-      {
-        effect_state: "none",
-        pointer_moved: false,
-      },
-    );
+  const notReady = (failure: OverlayClearFailure, observed: OverlayHit) =>
+    rpcError("cdp_failed", "input_not_ready", OVERLAY_CLEAR_MESSAGES[failure](point), {
+      effect_state: "none",
+      pointer_moved: false,
+      click_point: { x: point.x, y: point.y },
+      overlay_probe: observed,
+      overlay_bypass: bypass ? "enabled" : deps.bypassOverlay ? "unavailable" : "unsupported",
+      overlay_passthrough: passthroughId ? "attempted" : "not_started",
+      recovery: OVERLAY_CLEAR_RECOVERY[failure],
+    });
   const cancelled = (): RpcError => ({
     code: "cancelled",
     message: "click aborted",
@@ -128,15 +160,17 @@ export async function withClickOverlay<T>(
       hit = await probe();
     }
     if (retired || deps.signal?.aborted) return cancelled();
-    if (pressDeadlineReached() || hit === "covered" || (covered && hit === "unknown"))
-      return notReady();
+    if (pressDeadlineReached()) return notReady("passthrough_deadline", hit);
+    if (hit === "covered") return notReady("overlay_still_covered", hit);
+    if (covered && hit === "unknown") return notReady("overlay_state_unknown", hit);
     const result = await click(async () => {
-      if (pressDeadlineReached()) return notReady();
+      if (pressDeadlineReached()) return notReady("passthrough_deadline", hit);
       const current = await probe();
+      if (pressDeadlineReached()) return notReady("passthrough_deadline", current);
       // Unknown probes preserve ordinary-page behavior, but cannot clear a known obstruction.
-      return pressDeadlineReached() || current === "covered" || (covered && current === "unknown")
-        ? notReady()
-        : null;
+      if (current === "covered") return notReady("overlay_still_covered", current);
+      if (covered && current === "unknown") return notReady("overlay_state_unknown", current);
+      return null;
     });
     // The lease can expire while a slow press/release is in flight. Always release
     // the mouse, but do not claim success (or retry) when delivery is uncertain.
