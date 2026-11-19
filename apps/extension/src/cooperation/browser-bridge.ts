@@ -49,6 +49,36 @@ function missingReceiver(error: unknown): boolean {
   return error instanceof Error && error.message.includes("Receiving end does not exist");
 }
 
+/** Schemes that host an extension's own page rather than page content. */
+const EXTENSION_PAGE_PROTOCOLS: ReadonlySet<string> = new Set([
+  "chrome-extension:",
+  "moz-extension:",
+  "safari-web-extension:",
+  "ms-browser-extension:",
+]);
+
+/**
+ * A child frame that hosts another extension's page is never part of the
+ * observed page. Chrome refuses `tabs.sendMessage` into such a frame with
+ * "Cannot access a chrome-extension:// URL of different extension", and only a
+ * missing receiver was tolerated here, so one unrelated extension that injects
+ * a hidden iframe (the pattern many shopping and translate extensions use) used
+ * to fail every collection for the whole tab.
+ *
+ * These documents cannot receive human input either, so leaving them out cannot
+ * conceal activity. The top document is exempt: a tab that really is an
+ * extension page keeps its existing failure path instead of silently
+ * collecting nothing.
+ */
+function isChildExtensionPage(frame: chrome.webNavigation.GetAllFrameResultDetails): boolean {
+  if (frame.frameId === 0) return false;
+  try {
+    return EXTENSION_PAGE_PROTOCOLS.has(new URL(frame.url).protocol);
+  } catch {
+    return false;
+  }
+}
+
 function frameIdentity(frame: chrome.webNavigation.GetAllFrameResultDetails): FrameIdentity {
   let url = "[unavailable]";
   try {
@@ -201,6 +231,7 @@ export async function collectCooperationFrames(
       gaps.push({ ...frameIdentity(frame), reason: "inactive_document" });
       return false;
     }
+    if (isChildExtensionPage(frame)) return false;
     return true;
   });
   // A child that already failed while hidden is not awaited again while its

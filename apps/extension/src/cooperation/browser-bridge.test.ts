@@ -159,6 +159,39 @@ it.each([
   expect(execute).not.toHaveBeenCalled();
 });
 
+it("skips a child frame that hosts another extension's page", async () => {
+  const send = vi.fn().mockResolvedValue(frame());
+  const execute = bridge(send, [
+    main,
+    {
+      ...main,
+      frameId: 2,
+      documentId: "foreign-extension-iframe",
+      url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/handler.html",
+    },
+  ]);
+  const result = await collectCooperationFrames(7, COOPERATION_READ, "lease");
+  expect([...result.frames.keys()]).toEqual([0]);
+  expect(result.gaps).toEqual([]);
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0]?.[2]).toEqual({ documentId: "chrome-document-a" });
+  expect(execute).not.toHaveBeenCalled();
+});
+
+it.each([
+  "chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html",
+  "moz-extension://11111111-2222-3333-4444-555555555555/page.html",
+])("does not exempt a top document that is itself an extension page: %s", async (url) => {
+  const send = vi
+    .fn()
+    .mockRejectedValue(new Error("Cannot access a chrome-extension:// URL of different extension"));
+  bridge(send, [{ ...main, url }]);
+  await expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toThrow(
+    "Cannot access a chrome-extension:// URL of different extension",
+  );
+  expect(send).toHaveBeenCalledOnce();
+});
+
 it("rejects a failed main page before messaging any frames", async () => {
   const send = vi.fn();
   const execute = bridge(send, [{ ...main, errorOccurred: true }]);
