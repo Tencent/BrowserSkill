@@ -170,6 +170,14 @@ export interface CooperationDeps {
 const DEFAULT_FRAME_REPLY_MS = 3_000;
 const MAX_FRAME_REPLY_MS = 25_000;
 const QUIET_MS = 2_000;
+/**
+ * Default wait budget for transient target readiness (`target_hidden`,
+ * `target_disabled`, `target_readonly`) when callers omit `timeout_ms`.
+ * Kept well below the daemon's 30s default tool RPC timeout so permanently
+ * hidden/disabled targets return a structured readiness error instead of
+ * losing the race to a generic transport timeout.
+ */
+const DEFAULT_TARGET_READINESS_TIMEOUT_MS = 5_000;
 /** Idle gap after which a fresh `cooperate sync`/`enable` automatically resumes a paused or editing tab. */
 const IDLE_RESUME_MS = 3_000;
 /** Upper bound on nodes whose self-changing text the default check tolerates. */
@@ -1586,10 +1594,16 @@ export class CooperationController implements ControlAuthority {
           try {
             await this.prepareFrames(state, signal);
           } catch (error) {
-            // A blank page offers no human input to miss. A borrowed one has no
-            // collector, and refusing here would also block returning it.
+            // A blank page or an owned (non-borrowed) agent tab stuck on a settled
+            // failed-load error page offers no live document or human input to miss.
+            // Borrowed user tabs remain gated except when returning that tab itself.
+            const failedAgentTab =
+              isAgentControlledTab(session, state.tabId) &&
+              !session.borrowedTabs.has(state.tabId) &&
+              (await this.unobservableFailedRootLoad(state, error));
             if (
               !(await this.unobservableBlank(state, error)) &&
+              !failedAgentTab &&
               !(await this.unobservableReturnTarget(session, state, returningTabId, error))
             )
               throw error;
@@ -2601,7 +2615,18 @@ export class CooperationController implements ControlAuthority {
       }
       // Wait only before execution, and only for transient element readiness.
       // Business facts, missing nodes and ambiguous selectors fail immediately.
-      const deadline = Date.now() + (params.timeout_ms ?? 30_000);
+      // Cap the pre-execution readiness poll at `DEFAULT_TARGET_READINESS_TIMEOUT_MS`
+      // (and below the caller's transport timeout with a short reply margin) so
+      // permanently hidden/disabled/readonly controls return structured readiness
+      // diagnostics instead of hanging for 30s/2m and losing the race to the
+      // daemon's RPC timeout.
+      const deadline = runEnteredAt + (params.timeout_ms ?? 30_000);
+      const transportBudgetMs =
+        params.timeout_ms === undefined
+          ? DEFAULT_TARGET_READINESS_TIMEOUT_MS
+          : Math.max(0, params.timeout_ms - Math.min(500, Math.floor(params.timeout_ms / 4)));
+      const readinessDeadline =
+        runEnteredAt + Math.min(DEFAULT_TARGET_READINESS_TIMEOUT_MS, transportBudgetMs);
       while (true) {
         try {
           await verifyDecision();
@@ -2615,11 +2640,13 @@ export class CooperationController implements ControlAuthority {
             )
           )
             throw error;
-          if (Date.now() >= deadline) {
+          if (Date.now() >= readinessDeadline) {
             checkFailure = { ...error.rpcError, code: "timeout" };
             throw new ActionCheckError(checkFailure);
           }
-          await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.max(0, Math.min(50, readinessDeadline - Date.now()))),
+          );
           // Push events revoke control while waiting. The dispatch guard still
           // refreshes every frame before any effect, including missed events.
           checkFailure = undefined;
@@ -2889,15 +2916,28 @@ export class CooperationController implements ControlAuthority {
           },
         };
       }
-      failedLoadRecovery =
+      const failedAgentTabClose =
         !sent &&
-        isNavigationAction &&
+        req.method === "tool.tab_close" &&
+        isAgentControlledTab(session, state.tabId) &&
+        !session.borrowedTabs.has(state.tabId) &&
         (!params.context_id || targetPolicy || bound !== undefined) &&
         !state.held &&
         !this.humanActive(state) &&
-        (await this.unrecoverableNavigationSource(state, error));
+        (await this.unobservableFailedRootLoad(state, error));
+      failedLoadRecovery =
+        failedAgentTabClose ||
+        (!sent &&
+          isNavigationAction &&
+          (!params.context_id || targetPolicy || bound !== undefined) &&
+          !state.held &&
+          !this.humanActive(state) &&
+          (await this.unrecoverableNavigationSource(state, error)));
       unresponsiveSourceRecovery =
-        failedLoadRecovery && error instanceof FrameUnresponsiveError && error.frames.length > 0;
+        failedLoadRecovery &&
+        !failedAgentTabClose &&
+        error instanceof FrameUnresponsiveError &&
+        error.frames.length > 0;
       if (
         failedLoadRecovery ||
         (!sent &&
@@ -2920,12 +2960,14 @@ export class CooperationController implements ControlAuthority {
           return {
             code: "invalid_params",
             message: failedLoadRecovery
-              ? "This tab has no responsive or observable document; omit expect, observation_id and depends_on to recover with navigate, reload, navigate_back or navigate_forward"
+              ? failedAgentTabClose
+                ? "This tab is on a failed-load error page with no observed content; omit expect, observation_id and depends_on to close it"
+                : "This tab has no responsive or observable document; omit expect, observation_id and depends_on to recover with navigate, reload, navigate_back or navigate_forward"
               : "The initial blank tab has no observed content; omit expect, observation_id and depends_on or synchronize first",
             data: { phase: "precondition", effect_state: "none" },
           };
         const refreshElapsedMs = Date.now() - runEnteredAt;
-        if (failedLoadRecovery && refreshElapsedMs > 0) {
+        if (failedLoadRecovery && isNavigationAction && refreshElapsedMs > 0) {
           const baseTimeoutMs =
             typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms)
               ? params.timeout_ms
