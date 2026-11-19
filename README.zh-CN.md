@@ -87,8 +87,10 @@ Qoder、Qoder CN 与 DeepSeek Harness 同样作为 skill 安装目标支持（`b
 | 组件 | 支持环境 |
 | --- | --- |
 | CLI / daemon | macOS：Apple Silicon、Intel；Linux：x64、ARM64；Windows：x64 |
-| 浏览器扩展 | 基于 Chromium 125 或更新版本的 Chrome、Microsoft Edge。其他 Chromium 浏览器可能可用，但不保证兼容。 |
+| 浏览器扩展 | 基于 Chromium 125 或更新版本的桌面版 Chrome、Microsoft Edge。其他 Chromium 浏览器可能可用，但不保证兼容。 |
 | Agent 接入 | 能调用 Shell 或支持 MCP 的 Agent 配合 BrowserSkill skill（[MCP 配置](docs/mcp.md)）。 |
+
+扩展需要 `chrome.debugger` API 和访问受控网站的权限。如果扩展弹窗提示调试 API 不可用，请在桌面版 Chrome 或 Edge 中使用 BrowserSkill。
 
 ### 让 Agent 帮你安装
 

@@ -6,6 +6,7 @@ import { attachDebugBridge } from "@/debug/bridge";
 import { DebugManager } from "@/debug/manager";
 import { getAuditEnabled } from "@/lib/audit";
 import { attachAuditBridge } from "@/lib/audit-bridge";
+import { hasChromeDebugger } from "@/lib/browser-capabilities";
 import { ConnectionController } from "@/lib/connection-controller";
 import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { attachDaemonUpgradeNotice } from "@/lib/daemon-upgrade-notice";
@@ -87,6 +88,11 @@ import { VideoManager } from "@/video/manager";
 import { VIDEO_OVERLAY } from "@/video/overlay";
 
 export default defineBackground(() => {
+  if (!hasChromeDebugger()) {
+    console.warn("[browser-skill] browser is missing the required chrome.debugger API");
+    return;
+  }
+
   const controller = new ConnectionController();
   let remoteEndpoint: RemoteEndpoint | null = null;
   let connectionPreferenceValid = false;

@@ -27,6 +27,10 @@
     "interactionCompatibilityWarning": "Connesso a un daemon precedente (protocollo v{{cliProtocol}}). Aggiorna la CLI e il daemon per supportare completamente le impostazioni di automazione.",
     "brandCategory": "Automazione del browser",
     "brandName": "BrowserSkill",
+    "unsupportedBrowser": {
+      "title": "Browser non supportato",
+      "description": "In questo browser manca l’API chrome.debugger richiesta da BrowserSkill. Usa BrowserSkill nella versione desktop di Chrome o Microsoft Edge."
+    },
     "stateLabel": {
       "disconnected": "Disconnesso",
       "connecting": "Connessione…",

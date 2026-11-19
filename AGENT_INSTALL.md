@@ -110,11 +110,16 @@ go to Step 4.
 
 If the intended browser is already connected, continue to Step 5.
 
-If the extension is not installed, give the user the page matching their browser —
+Recommend desktop Chrome or Edge based on Chromium 125 or later. If the extension
+is not installed, give the user the page matching their browser —
 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
 for Chrome and other Chromium browsers,
 [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)
 for Microsoft Edge — and ask them to install it on the computer with that browser.
+
+BrowserSkill needs the `chrome.debugger` API and access to the sites it controls.
+If the popup reports the debugger API is unavailable, ask the user to switch to
+a supported desktop browser before troubleshooting the daemon connection.
 
 - **Local:** enable the connection and continue when connected. Pairing is optional;
   an unpaired warning does not block installation or browser use. Do not make the

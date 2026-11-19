@@ -27,6 +27,10 @@
     "interactionCompatibilityWarning": "이전 Daemon에 연결되었습니다(프로토콜 v{{cliProtocol}}). 자동화 설정을 완전히 지원하려면 CLI와 Daemon을 업데이트하세요.",
     "brandCategory": "브라우저 자동화",
     "brandName": "BrowserSkill",
+    "unsupportedBrowser": {
+      "title": "지원되지 않는 브라우저",
+      "description": "현재 브라우저에는 BrowserSkill에 필요한 chrome.debugger API가 없습니다. 데스크톱 버전의 Chrome 또는 Microsoft Edge에서 BrowserSkill을 사용하세요."
+    },
     "stateLabel": {
       "disconnected": "연결되지 않음",
       "connecting": "연결 중…",

@@ -27,6 +27,10 @@
     "interactionCompatibilityWarning": "已连接到旧版 Daemon（协议 v{{cliProtocol}}）。部分自动化设置需要更新 CLI 和 Daemon 才能完整生效。",
     "brandCategory": "Browser Automation",
     "brandName": "BrowserSkill",
+    "unsupportedBrowser": {
+      "title": "浏览器不兼容",
+      "description": "当前浏览器缺少 BrowserSkill 所需的 chrome.debugger API。请在桌面版 Chrome 或 Microsoft Edge 中使用 BrowserSkill。"
+    },
     "stateLabel": {
       "disconnected": "未连接",
       "connecting": "连接中…",
