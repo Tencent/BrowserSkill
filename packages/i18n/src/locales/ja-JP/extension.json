@@ -27,6 +27,10 @@
     "interactionCompatibilityWarning": "古いバージョンのデーモンに接続しています(プロトコル v{{cliProtocol}})。自動化設定を完全にサポートするには、CLI とデーモンを更新してください。",
     "brandCategory": "ブラウザ自動化",
     "brandName": "BrowserSkill",
+    "unsupportedBrowser": {
+      "title": "サポート対象外のブラウザー",
+      "description": "このブラウザーには BrowserSkill に必要な chrome.debugger API がありません。デスクトップ版の Chrome または Microsoft Edge で BrowserSkill を使用してください。"
+    },
     "stateLabel": {
       "disconnected": "未接続",
       "connecting": "接続中…",

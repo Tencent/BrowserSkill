@@ -87,8 +87,12 @@ For local automation, you need **an AI agent + the `bsk` CLI + the browser exten
 | Component | Supported environments |
 | --- | --- |
 | CLI / daemon | macOS: Apple Silicon and Intel · Linux: x64 and ARM64 · Windows: x64 |
-| Extension | Chrome and Microsoft Edge, based on Chromium 125 or later. Other Chromium browsers may work; compatibility is not guaranteed. |
+| Extension | Desktop Chrome and Microsoft Edge, based on Chromium 125 or later. Other Chromium browsers may work; compatibility is not guaranteed. |
 | Agent integration | A shell-capable or MCP-capable agent with the BrowserSkill skill ([MCP setup](docs/mcp.md)). |
+
+The extension requires the `chrome.debugger` API and permission to access the
+sites it controls. If the popup reports that the debugger API is unavailable,
+open BrowserSkill in desktop Chrome or Edge.
 
 ### Let your agent set it up
 

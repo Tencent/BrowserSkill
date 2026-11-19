@@ -3,6 +3,7 @@ import { Badge, Button, Input, Label } from "@browser-skill/ui";
 import { RiArrowLeftLine, RiArrowRightSLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { AuditPanel } from "@/components/audit-panel";
+import { hasChromeDebugger } from "@/lib/browser-capabilities";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { BrowserProfile } from "./browser-profile";
@@ -27,6 +28,8 @@ const STATE_LABEL_KEYS = {
   disabled: "popup.stateLabel.disabled",
 } as const satisfies Record<PopupStatusState, string>;
 
+const POPUP_ROOT_CLASS = "min-w-[320px] max-w-[340px] space-y-3 bg-background p-3 text-foreground";
+
 function getLogoSrc() {
   if (typeof chrome !== "undefined" && chrome.runtime?.getURL) {
     return chrome.runtime.getURL("icon/logo.png");
@@ -35,6 +38,45 @@ function getLogoSrc() {
 }
 
 export function App() {
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = (isDark: boolean) => {
+      document.documentElement.classList.toggle("dark", isDark);
+    };
+    applyTheme(query.matches);
+    const onChange = (event: MediaQueryListEvent) => applyTheme(event.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+
+  // The popup must detect this even if the background worker cannot start.
+  return hasChromeDebugger() ? <Popup /> : <UnsupportedBrowser />;
+}
+
+function UnsupportedBrowser() {
+  const { t } = useTranslation("extension");
+
+  return (
+    <main className={POPUP_ROOT_CLASS} data-slot="popup-root">
+      <header className="flex items-center gap-2">
+        <img src={getLogoSrc()} alt="" className="size-7 rounded-lg" />
+        <h1 className="text-sm font-semibold tracking-tight">{t("popup.brandName")}</h1>
+      </header>
+      <section
+        role="alert"
+        aria-labelledby="unsupported-browser-title"
+        className="space-y-1 rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2.5"
+      >
+        <h2 id="unsupported-browser-title" className="text-sm font-semibold text-destructive">
+          {t("popup.unsupportedBrowser.title")}
+        </h2>
+        <p className="text-xs leading-snug">{t("popup.unsupportedBrowser.description")}</p>
+      </section>
+    </main>
+  );
+}
+
+function Popup() {
   const { t } = useTranslation("extension");
   const { snapshot, statusState, setLabel, setConnectionEnabled } = useConnectionState();
   const [controlHintsHidden, setControlHintsHidden] = useControlHintsHidden();
@@ -46,17 +88,6 @@ export function App() {
   // auto-hide timer restarts) even when the copied content is unchanged.
   const [copiedTick, setCopiedTick] = useState(0);
   const showCopiedToast = copiedTick > 0;
-
-  useEffect(() => {
-    const query = window.matchMedia("(prefers-color-scheme: dark)");
-    const applyTheme = (isDark: boolean) => {
-      document.documentElement.classList.toggle("dark", isDark);
-    };
-    applyTheme(query.matches);
-    const onChange = (event: MediaQueryListEvent) => applyTheme(event.matches);
-    query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
-  }, []);
 
   useEffect(() => {
     setCopiedInstanceId(false);
@@ -136,7 +167,7 @@ export function App() {
 
   return (
     <main
-      className="min-w-[320px] max-w-[340px] space-y-3 bg-background p-3 text-foreground"
+      className={POPUP_ROOT_CLASS}
       data-slot="popup-root"
       data-view={view}
       data-version-skew={isSkewed ? "true" : undefined}

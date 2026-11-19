@@ -19,6 +19,7 @@ import {
   subscribeActiveRecordings,
 } from "@/tools/record";
 import { handleTabCreate } from "@/tools/tabs";
+import { WSTransport } from "@/transport/ws-transport";
 import { VideoManager } from "@/video/manager";
 
 vi.hoisted(() => {
@@ -141,7 +142,13 @@ async function fixture() {
       onRemoved: event(),
       onMoved: event(),
     },
-    debugger: { onDetach: event() },
+    debugger: {
+      attach: vi.fn(),
+      detach: vi.fn(),
+      sendCommand: vi.fn(),
+      onEvent: event(),
+      onDetach: event(),
+    },
     webNavigation: {
       onBeforeNavigate: event(),
       onCommitted,
@@ -178,6 +185,29 @@ async function fixture() {
     task,
   };
 }
+
+it.each([
+  { name: "missing", debuggerApi: undefined },
+  {
+    name: "incomplete",
+    debuggerApi: { attach: vi.fn(), detach: vi.fn(), sendCommand: vi.fn(), onDetach: event() },
+  },
+])("skips browser service startup when chrome.debugger is $name", ({ debuggerApi }) => {
+  vi.stubGlobal("chrome", {
+    debugger: debuggerApi,
+    runtime: { getURL: vi.fn((path: string) => `chrome-extension://test/${path}`) },
+  });
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    (background as unknown as () => void)();
+    expect(WSTransport).not.toHaveBeenCalled();
+    expect(ChromiumCdp).not.toHaveBeenCalled();
+    expect(watchDaemonConnection).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("chrome.debugger"));
+  } finally {
+    warn.mockRestore();
+  }
+});
 
 it("keeps task tabs ungrouped while showing controls after creation and attachment", async () => {
   vi.useFakeTimers();

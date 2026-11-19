@@ -1,12 +1,17 @@
 import { i18n } from "@browser-skill/i18n";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hasChromeDebugger } from "@/lib/browser-capabilities";
 import { STORAGE_KEYS } from "@/lib/instance-id";
 import type { PopupSnapshotInfo } from "@/lib/popup-bridge";
 import { DEFAULT_DAEMON_PORT } from "@/transport/daemon-endpoint";
 import { EXTENSION_VERSION, PROTOCOL_VERSION } from "@/transport/handshake";
 import { App } from "./App";
 import { useConnectionState } from "./use-connection-state";
+
+vi.mock("@/lib/browser-capabilities", () => ({
+  hasChromeDebugger: vi.fn(),
+}));
 
 vi.mock("./use-connection-state", () => ({
   useConnectionState: vi.fn(),
@@ -38,6 +43,7 @@ describe("App", () => {
   const setConnectionEnabled = vi.fn();
 
   beforeEach(() => {
+    vi.mocked(hasChromeDebugger).mockReturnValue(true);
     mockUseConnectionState.mockReturnValue({
       snapshot: baseSnapshot,
       statusState: "disconnected",
@@ -65,6 +71,19 @@ describe("App", () => {
     await i18n.changeLanguage("zh-CN");
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("diagnoses a missing debugger API even when the background cannot start", () => {
+    vi.mocked(hasChromeDebugger).mockReturnValue(false);
+
+    render(<App />);
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "当前浏览器缺少 BrowserSkill 所需的 chrome.debugger API。请在桌面版 Chrome 或 Microsoft Edge 中使用 BrowserSkill。",
+    );
+    expect(screen.queryByText("无法连接，请确认 daemon 已启动且端口一致。")).toBeNull();
+    expect(screen.queryByRole("switch", { name: "BrowserSkill 连接" })).toBeNull();
+    expect(mockUseConnectionState).not.toHaveBeenCalled();
   });
 
   it("keeps an unpaired connection enabled and displays a nonblocking warning", async () => {
