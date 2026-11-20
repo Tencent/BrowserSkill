@@ -47,6 +47,37 @@ pub(super) fn origin_allowed(origin: &str) -> bool {
     false
 }
 
+/// Explain a failed bind on the default daemon port, which the OS — not bsk —
+/// usually owns.
+///
+/// On Windows, WinNAT/Hyper-V/WSL2 reserve blocks inside the TCP dynamic port
+/// range after a reboot, so the default port can already be held when no bsk
+/// daemon is running: `TcpListener::bind` then fails with `WSAEACCES` (10013) or
+/// `WSAEADDRINUSE` (10048) and the bare OS error gives the user no way forward.
+fn bind_error_message(addr: SocketAddr, err: &std::io::Error) -> String {
+    let base = format!("bind WS server on {addr}: {err}");
+    if addr.port() != super::DEFAULT_WS_PORT {
+        return base;
+    }
+
+    let mut message = format!(
+        "{base}\n{} is the default daemon port and could not be bound",
+        super::DEFAULT_WS_PORT
+    );
+    if matches!(err.raw_os_error(), Some(10013) | Some(10048)) {
+        message.push_str(
+            ". On Windows, WinNAT, Hyper-V and WSL2 reserve blocks inside the TCP dynamic port \
+             range (49152-65535) after a reboot, so the default port can be held even when no bsk \
+             daemon is running; check `netsh int ipv4 show excludedportrange protocol=tcp`",
+        );
+    }
+    message.push_str(
+        ". Start the daemon on a free port with `bsk daemon start --foreground --port <port>` and \
+         point the extension at that port",
+    );
+    message
+}
+
 pub struct WsServer {
     state: Arc<DaemonState>,
 }
@@ -62,7 +93,7 @@ impl WsServer {
         }
         let listener = TcpListener::bind(addr)
             .await
-            .with_context(|| format!("bind WS server on {addr}"))?;
+            .map_err(|err| anyhow!("{}", bind_error_message(addr, &err)))?;
         let local_addr = listener
             .local_addr()
             .with_context(|| "failed to read WS server local addr")?;
@@ -829,6 +860,35 @@ mod tests {
     fn origin_allowlist_rejects_chars_outside_ap() {
         let id = "z".repeat(32); // 'z' > 'p'
         assert!(!origin_allowed(&format!("chrome-extension://{id}")));
+    }
+
+    #[test]
+    fn default_port_bind_failure_names_the_os_owner_of_the_port() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], super::super::DEFAULT_WS_PORT));
+        let message = bind_error_message(addr, &std::io::Error::from_raw_os_error(10048));
+
+        assert!(message.contains("bind WS server on 127.0.0.1:52800"));
+        assert!(message.contains("netsh int ipv4 show excludedportrange protocol=tcp"));
+        assert!(message.contains("bsk daemon start --foreground --port <port>"));
+    }
+
+    #[test]
+    fn default_port_bind_failure_without_a_windows_code_skips_the_win_nat_hint() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], super::super::DEFAULT_WS_PORT));
+        let message = bind_error_message(addr, &std::io::Error::from_raw_os_error(13));
+
+        assert!(!message.contains("netsh int ipv4 show excludedportrange protocol=tcp"));
+        assert!(message.contains("bsk daemon start --foreground --port <port>"));
+    }
+
+    #[test]
+    fn explicit_port_bind_failure_reports_the_plain_os_error() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 42800));
+        let message = bind_error_message(addr, &std::io::Error::from_raw_os_error(10048));
+
+        assert!(message.starts_with("bind WS server on 127.0.0.1:42800"));
+        assert!(!message.contains("default daemon port"));
+        assert!(!message.contains("netsh int ipv4 show excludedportrange protocol=tcp"));
     }
 
     #[test]
