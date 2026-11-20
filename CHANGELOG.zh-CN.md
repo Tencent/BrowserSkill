@@ -30,6 +30,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 - 将所有真浏览器测试与回归套件的环境变量统一收敛至 `BSK_TEST_CHROME` 与 `BSK_TEST_CLI`（补齐 Windows `.exe` 后缀并在隔离 daemon 用例中清理宿主子代理作用域环境变量），将 `.browser.test.ts` 与 `.bench.ts` 从单元测试配置剥离至 `apps/extension/vitest.browser.config.ts` 与零跳过运行器 `scripts/run-browser-tests.mjs`（将 `pnpm --filter @browser-skill/extension test:browser` 统一路由至该运行器，强制校验 `skipped === 0`、每个套件存在有效断言以及多目标参数逐项命中），并在 CI 中接入全部扩展真浏览器测试套件、`eval:browser:check` 与 `eval:browser:dynamic-read`（#731、#732）。
 - 将分散手写的默认守护进程端口、WebSocket URL、本地配对与远程鉴权协议常量、实例 ID 长度、JSON-RPC 标准错误码以及 `BASE_TOOL_NAMES` 统一收敛至 `bsk-protocol` / `bsk` 单一事实源（消除跨语言重复定义与脆弱的集合长度魔法断言），将 Rust 集成测试二进制从 51 个合并为 6 个并为 `dev`/`test` Profile 启用 `debug = "line-tables-only"`，将扩展 Vitest 单元测试拆分为 `threads` 并发池下的 `unit-node` 与 `unit-dom` 项目并清理冗余/恒真测试及合并单函数碎片用例，将多处固定墙钟睡眠替换为确定性虚拟时钟/时间戳/就绪态检查，新增 `copyIsolatedExtension` 以消除 CI 中重复的按端口全量构建扩展步骤，并在 `.github/workflows/ci.yml` 中增加 Cargo 缓存及合并测试步骤以缩短 CI 耗时。
 
+- 修复任意第三方扩展向页面注入 `chrome-extension://` iframe 时 `cooperate sync` 必然失败并报 `Cannot access a chrome-extension:// URL of different extension` 的问题（#686）：`collectCooperationFrames` 现将承载扩展自身页面的子文档及其继承同源的后代一律视为不可达，不再向其发送消息并中断整轮采集。该子树仅在 `provenHiddenFrames()` 证明最外层帧隐藏后才被排除——因为可见的扩展 iframe 仍可能包含无人观测的控件与输入框，故可见的扩展帧依旧失败，但错误会点名该帧而非透传浏览器原始报错。释放路径跳过该证明；顶层文档不受影响，真正的扩展页面标签页仍走原有失败路径。
 ### 修复
 
 - `bsk daemon start` 现在会解释默认守护端口绑定失败的原因：Windows 上 WinNAT / Hyper-V / WSL2 可能在重启后占用 TCP 动态端口段内的 52800，错误信息会指出这一原因、给出 `netsh int ipv4 show excludedportrange protocol=tcp` 的确认方式，并提示用 `bsk daemon start --foreground --port <port>` 换端口启动、把扩展指向该端口；显式 `--port` 失败仍保持原始系统错误（#767）。

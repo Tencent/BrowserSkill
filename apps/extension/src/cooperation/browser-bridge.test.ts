@@ -159,6 +159,87 @@ it.each([
   expect(execute).not.toHaveBeenCalled();
 });
 
+const foreignExtensionFrame = {
+  ...main,
+  frameId: 2,
+  parentFrameId: 0,
+  documentId: "foreign-extension-iframe",
+  url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/handler.html",
+};
+
+/** Answers owner probes with the given frame-owner facts and reads with a state. */
+function ownerAwareSend(owners: unknown) {
+  return vi.fn(
+    async (_tabId: number, message: { kind: string }, _target?: { documentId?: string }) =>
+      message.kind === COOPERATION_OWNERS ? owners : frame(),
+  );
+}
+
+const hiddenOwner = [{ hidden: true, url: null, declaredSrc: null }];
+
+it("skips a hidden child frame that hosts another extension's page", async () => {
+  const send = ownerAwareSend(hiddenOwner);
+  const execute = bridge(send, [main, foreignExtensionFrame]);
+  const result = await collectCooperationFrames(7, COOPERATION_READ, "lease");
+
+  expect([...result.frames.keys()]).toEqual([0]);
+  expect(result.gaps).toEqual([]);
+  const reads = send.mock.calls.filter(([, message]) => message.kind === COOPERATION_READ);
+  expect(reads).toHaveLength(1);
+  expect(reads[0]?.[2]).toEqual({ documentId: "chrome-document-a" });
+  expect(execute).not.toHaveBeenCalled();
+});
+
+it("does not reach documents nested inside an unreachable extension frame", async () => {
+  const send = ownerAwareSend(hiddenOwner);
+  const nested = {
+    ...main,
+    frameId: 3,
+    parentFrameId: 2,
+    documentId: "nested-extension-document",
+    url: "about:blank",
+  };
+  bridge(send, [main, foreignExtensionFrame, nested]);
+  const result = await collectCooperationFrames(7, COOPERATION_READ, "lease");
+
+  expect([...result.frames.keys()]).toEqual([0]);
+  const reached = send.mock.calls.map((call) => call[2]?.documentId);
+  expect(reached).not.toContain("nested-extension-document");
+  expect(reached).not.toContain("foreign-extension-iframe");
+});
+
+it("still fails, naming the frame, when an extension frame is displayed", async () => {
+  const send = ownerAwareSend([{ hidden: false, url: null, declaredSrc: null }]);
+  bridge(send, [main, foreignExtensionFrame]);
+
+  await expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toMatchObject({
+    reason: "frame_unobservable",
+    frames: [{ frame_id: 2, url: "chrome-extension:" }],
+  });
+});
+
+it("releases without proving extension frames hidden", async () => {
+  const send = ownerAwareSend([{ hidden: false, url: null, declaredSrc: null }]);
+  bridge(send, [main, foreignExtensionFrame]);
+
+  await expect(collectCooperationFrames(7, COOPERATION_DISABLE, "lease")).resolves.toBeTruthy();
+  expect(send.mock.calls.some(([, message]) => message.kind === COOPERATION_OWNERS)).toBe(false);
+});
+
+it.each([
+  "chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html",
+  "moz-extension://11111111-2222-3333-4444-555555555555/page.html",
+])("does not exempt a top document that is itself an extension page: %s", async (url) => {
+  const send = vi
+    .fn()
+    .mockRejectedValue(new Error("Cannot access a chrome-extension:// URL of different extension"));
+  bridge(send, [{ ...main, url }]);
+  await expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toThrow(
+    "Cannot access a chrome-extension:// URL of different extension",
+  );
+  expect(send).toHaveBeenCalledOnce();
+});
+
 it("rejects a failed main page before messaging any frames", async () => {
   const send = vi.fn();
   const execute = bridge(send, [{ ...main, errorOccurred: true }]);
