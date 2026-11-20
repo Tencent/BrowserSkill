@@ -258,7 +258,9 @@ async function resolveWheelPoint(
       scrollIntoView: true,
     });
     if (isRpcError(geometry)) return geometry;
-    const bounds = await scrollVisibleBounds(cdp, target.tabId, node.handle, deadline);
+    const bounds = await scrollVisibleBounds(cdp, target.tabId, node.handle, deadline, {
+      fallbackRegion: geometry.topVisibleRegions,
+    });
     const clip =
       bounds && rectPolygon({ x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height });
     const regions = clip

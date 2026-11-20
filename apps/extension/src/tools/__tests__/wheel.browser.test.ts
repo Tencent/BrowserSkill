@@ -368,4 +368,96 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wheel", () => {
       });
     });
   });
+
+  it("keeps wheel usable when an OOPIF visibility observer does not callback", async () => {
+    const { createEvalServer } = await import(
+      new URL("../../../../../evals/browser/lib/server.mjs", import.meta.url).href
+    );
+    const server = createEvalServer();
+    const { baseUrl } = await server.start();
+    try {
+      await withBrowser(async (h) => {
+        await h.send(
+          "Page.navigate",
+          { url: `${baseUrl}/wheel-visibility-timeout?run=wheel-visibility-timeout` },
+          h.rootSession,
+        );
+        await expect
+          .poll(() =>
+            server
+              .snapshot("wheel-visibility-timeout")
+              .events.some((event: { type: string }) => event.type === "fixture.child-ready"),
+          )
+          .toBe(true);
+
+        const frames = await h.loadFrames();
+        const child = frames.find((frame) => Boolean(frame.target.sessionId));
+        expect(child?.target.sessionId).toBeTruthy();
+        const childSession = child!.target.sessionId!;
+        const patched = await h.send<{ exceptionDetails?: unknown }>(
+          "Runtime.evaluate",
+          {
+            expression: `(() => {
+              window.__withheldObserverConstructions = 0;
+              class WithheldIntersectionObserver {
+                constructor() { window.__withheldObserverConstructions++; }
+                observe() {}
+                unobserve() {}
+                disconnect() {}
+                takeRecords() { return []; }
+              }
+              Object.defineProperty(window, "IntersectionObserver", {
+                configurable: true,
+                writable: true,
+                value: WithheldIntersectionObserver,
+              });
+            })()`,
+            returnByValue: true,
+          },
+          childSession,
+        );
+        expect(patched.exceptionDetails).toBeUndefined();
+        await h.ref(child!, "#probe");
+
+        const before = await h.evaluate<number>(
+          "document.querySelector('#inner').scrollTop",
+          child,
+        );
+        const result = await h.wheel({ ref: "e1", delta_y: 120, timeout_ms: 5_000 });
+        expect(result).not.toHaveProperty("code");
+        await expect
+          .poll(() => h.evaluate<number>("document.querySelector('#inner').scrollTop", child), {
+            timeout: 5_000,
+          })
+          .toBeGreaterThan(before);
+        await expect
+          .poll(async () => {
+            const events = await h.send<{ result: { value: number } }>(
+              "Runtime.evaluate",
+              { expression: "window.wheels.length", returnByValue: true },
+              childSession,
+            );
+            return events.result.value;
+          })
+          .toBe(1);
+        const firstWheel = await h.send<{
+          result: { value: { deltaY: number; trusted: boolean } };
+        }>(
+          "Runtime.evaluate",
+          { expression: "window.wheels[0]", returnByValue: true },
+          childSession,
+        );
+        expect(firstWheel.result.value.trusted).toBe(true);
+        expect(firstWheel.result.value.deltaY).toBeGreaterThan(0);
+        const observers = await h.send<{ result: { value: number } }>(
+          "Runtime.evaluate",
+          { expression: "window.__withheldObserverConstructions", returnByValue: true },
+          childSession,
+        );
+        expect(observers.result.value).toBeGreaterThan(0);
+      }, 1);
+    } finally {
+      await server.stop();
+    }
+  }, 30_000);
 });
