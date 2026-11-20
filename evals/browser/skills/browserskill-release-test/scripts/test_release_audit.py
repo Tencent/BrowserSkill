@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Behavioral tests of the audit helper, not BrowserSkill product tests."""
 
-import contextlib, csv, importlib.util, io, json, sys, tempfile, time, unittest
+import contextlib, csv, importlib.util, io, json, socket, ssl, sys, tempfile, time, unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -27,6 +28,59 @@ elif '--fail' in args:
 elif '--unsatisfied' in args:print(json.dumps({'satisfied':False}))
 else:print(json.dumps({'ok':True,'value':'synthetic'}))
 """
+
+
+class QuietHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, *_args):
+        pass
+
+
+class PreflightHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def do_HEAD(self):
+        if self.path == "/reset":
+            self.close_connection = True
+            return
+        if self.path == "/head-405":
+            self.send_response(405)
+            self.end_headers()
+            return
+        self.respond(head=True)
+
+    def do_GET(self):
+        if self.path == "/reset":
+            self.close_connection = True
+            return
+        self.respond(head=False)
+
+    def respond(self, head):
+        if self.path == "/ok":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            if not head:
+                self.wfile.write(b"ok")
+        elif self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/ok")
+            self.end_headers()
+        elif self.path == "/missing":
+            self.send_response(404)
+            self.end_headers()
+        elif self.path == "/slow":
+            time.sleep(0.5)
+            self.send_response(200)
+            self.end_headers()
+        elif self.path == "/head-405":
+            self.send_response(200)
+            self.end_headers()
+            if not head:
+                self.wfile.write(b"ok")
+        else:
+            self.send_response(500)
+            self.end_headers()
 
 
 class AuditTests(unittest.TestCase):
@@ -167,6 +221,130 @@ class AuditTests(unittest.TestCase):
         d = self.root / "commands" / ("a" * 32)
         audit.write(d / "started.json", {})
         self.assertEqual(self.gate()[0], 1)
+
+    @contextlib.contextmanager
+    def preflight_server(self):
+        server = QuietHTTPServer(("127.0.0.1", 0), PreflightHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}"
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def preflight(self, urls, timeout=0.2):
+        cfg = audit.load(self.root / "run.json")
+        cfg["site_urls"] = urls
+        audit.write(self.root / "run.json", cfg)
+        with patch.object(audit.urllib.request, "getproxies", return_value={}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = audit.preflight(NS(run=str(self.root), timeout=timeout))
+        return code, audit.load(self.root / "preflight.json")
+
+    def test_preflight_records_status_redirects_and_failures(self):
+        self.init()
+        with self.preflight_server() as base:
+            code, report = self.preflight(
+                [base + "/ok", base + "/redirect", base + "/missing"], timeout=1
+            )
+        self.assertEqual(code, 1)
+        sites = {site["url"].rsplit("/", 1)[-1]: site for site in report["sites"]}
+        self.assertTrue(sites["ok"]["ok"])
+        self.assertEqual(sites["ok"]["status"], 200)
+        self.assertTrue(sites["redirect"]["ok"])
+        self.assertEqual(sites["redirect"]["final_url"], base + "/ok")
+        self.assertEqual(
+            sites["redirect"]["redirect_chain"],
+            [{"status": 302, "from": base + "/redirect", "to": base + "/ok"}],
+        )
+        self.assertFalse(sites["missing"]["ok"])
+        self.assertEqual(sites["missing"]["status"], 404)
+        self.assertEqual(
+            report["summary"],
+            {"total": 3, "ok": 2, "reachable": 3, "failed": 0},
+        )
+        self.assertEqual(report["candidate"], "synthetic-build")
+        self.assertEqual(report["schema_version"], 1)
+
+    def test_preflight_falls_back_to_get_when_head_is_rejected(self):
+        self.init()
+        with self.preflight_server() as base:
+            code, report = self.preflight([base + "/head-405"], timeout=1)
+        self.assertEqual(code, 0)
+        site = report["sites"][0]
+        self.assertEqual(site["method"], "GET")
+        self.assertEqual(site["status"], 200)
+        self.assertEqual([a["method"] for a in site["attempts"]], ["HEAD", "GET"])
+        self.assertEqual(site["attempts"][0]["status"], 405)
+
+    def test_preflight_classifies_timeout_and_connection_errors(self):
+        self.init()
+        with self.preflight_server() as base:
+            code, report = self.preflight([base + "/slow"], timeout=0.1)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["sites"][0]["error_type"], "timeout")
+        self.assertEqual(report["summary"]["failed"], 1)
+        with self.preflight_server() as base:
+            code, report = self.preflight([base + "/reset"], timeout=2)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["sites"][0]["error_type"], "connection")
+        self.assertEqual(report["summary"]["failed"], 1)
+
+    def test_preflight_error_classification(self):
+        self.assertEqual(audit.preflight_error_type(socket.gaierror()), "dns")
+        self.assertEqual(audit.preflight_error_type(ssl.SSLError()), "tls")
+        self.assertEqual(audit.preflight_error_type(TimeoutError()), "timeout")
+        self.assertEqual(audit.preflight_error_type(ConnectionError()), "connection")
+
+    def test_preflight_requires_site_urls(self):
+        self.init()
+        cfg = audit.load(self.root / "run.json")
+        cfg.pop("site_urls", None)
+        audit.write(self.root / "run.json", cfg)
+        with self.assertRaises(ValueError):
+            audit.preflight(NS(run=str(self.root), timeout=1))
+
+    def test_gate_reports_preflight_without_changing_pass(self):
+        self.init()
+        rid = self.execute()
+        self.fill(rid)
+        audit.write(
+            self.root / "preflight.json",
+            {
+                "schema_version": 1,
+                "checked_at": "2026-11-21T00:00:00Z",
+                "timeout_s": 1,
+                "proxy_mode": "direct",
+                "summary": {"total": 1, "ok": 0, "reachable": 1, "failed": 0},
+                "sites": [
+                    {
+                        "url": "https://example.invalid/",
+                        "ok": False,
+                        "status": 503,
+                        "error_type": "http",
+                    }
+                ],
+            },
+        )
+        code, report = self.gate()
+        self.assertEqual(code, 0)
+        self.assertTrue(report["release_ready"])
+        self.assertEqual(report["preflight"]["summary"]["ok"], 0)
+        self.assertEqual(report["preflight"]["not_ok"][0]["status"], 503)
+        self.assertEqual(report["preflight"]["proxy_mode"], "direct")
+
+    def test_malformed_preflight_blocks(self):
+        self.init()
+        rid = self.execute()
+        self.fill(rid)
+        audit.write(self.root / "preflight.json", {"schema_version": 99})
+        code, report = self.gate()
+        self.assertEqual(code, 1)
+        self.assertTrue(
+            any("Preflight evidence is malformed" in e for e in report["errors"])
+        )
 
     def test_declared_negative_exact_error_passes(self):
         self.init([{"id": "NEG", "negative": True, "required_commands": ["status"]}])

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bsk-only execution ledger, fail-closed release gate, and multi-run benchmark suite. Standard library only."""
+"""Bsk-only execution ledger, reachability preflight, fail-closed release gate, and multi-run benchmark suite. Standard library only."""
 
 import argparse
 import datetime as dt
@@ -11,13 +11,22 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.error
+import urllib.request
 import uuid
 
 SKILL = Path(__file__).resolve().parents[1]
+
+PREFLIGHT_SCHEMA_VERSION = 1
+PREFLIGHT_DEFAULT_TIMEOUT = 8.0
+PREFLIGHT_MAX_BODY = 64 * 1024
 
 ACTION_COMMANDS = {
     "open",
@@ -441,6 +450,162 @@ def semantic_failure(meta, value):
     ):
         return "Navigation timed out"
     return None
+
+
+class RecordingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects while retaining the chain for environment evidence."""
+
+    def __init__(self):
+        super().__init__()
+        self.chain = []
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self.chain.append({"status": code, "from": req.full_url, "to": newurl})
+        forwarded = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if forwarded is not None and req.get_method() == "HEAD":
+            forwarded.method = "HEAD"
+        return forwarded
+
+
+def preflight_error_type(exc):
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return "timeout"
+    if isinstance(reason, socket.gaierror):
+        return "dns"
+    if isinstance(reason, ssl.SSLError):
+        return "tls"
+    if isinstance(reason, OSError):
+        return "connection"
+    return "other"
+
+
+def preflight_proxy_mode():
+    env = os.environ
+    if any(
+        env.get(name) or env.get(name.lower())
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+    ):
+        return "env"
+    proxies = urllib.request.getproxies()
+    if "pac" in proxies:
+        return "pac"
+    return "system" if proxies else "direct"
+
+
+def preflight_request(url, method, timeout, redirects):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler(), redirects)
+    request = urllib.request.Request(
+        url,
+        method=method,
+        headers={"User-Agent": "bsk-release-preflight/1"},
+    )
+    started = time.monotonic()
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = response.status
+            final_url = response.geturl()
+            if method == "GET":
+                response.read(PREFLIGHT_MAX_BODY)
+        return {
+            "method": method,
+            "status": status,
+            "final_url": final_url,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "error_type": None,
+            "error": None,
+        }
+    except urllib.error.HTTPError as exc:
+        if exc.code >= 400:
+            error_type = "http"
+        elif 300 <= exc.code < 400:
+            error_type = "redirect"
+        else:
+            error_type = None
+        return {
+            "method": method,
+            "status": exc.code,
+            "final_url": exc.geturl() or url,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "error_type": error_type,
+            "error": "HTTP " + str(exc.code) + " " + str(exc.reason),
+        }
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {
+            "method": method,
+            "status": None,
+            "final_url": None,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "error_type": preflight_error_type(exc),
+            "error": str(getattr(exc, "reason", exc)),
+        }
+
+
+def preflight_check_site(url, timeout):
+    redirects = RecordingRedirectHandler()
+    attempt = preflight_request(url, "HEAD", timeout, redirects)
+    attempts = [attempt]
+    # Some CDNs reject HEAD; retry with a bounded GET before calling a site
+    # unreachable. Timeouts are retried too because HEAD may hang where GET does
+    # not, and both attempts stay in the evidence.
+    if attempt["status"] in (403, 405, 501) or (
+        attempt["status"] is None
+        and attempt["error_type"] in ("connection", "timeout", "other")
+    ):
+        redirects = RecordingRedirectHandler()
+        attempt = preflight_request(url, "GET", timeout, redirects)
+        attempts.append(attempt)
+    ok = (
+        attempt["error_type"] is None
+        and isinstance(attempt["status"], int)
+        and 200 <= attempt["status"] < 400
+    )
+    result = {
+        "url": url,
+        "ok": ok,
+        "method": attempt["method"],
+        "status": attempt["status"],
+        "final_url": attempt["final_url"],
+        "redirect_chain": redirects.chain,
+        "elapsed_ms": attempt["elapsed_ms"],
+        "checked_at": now(),
+        "error_type": attempt["error_type"],
+        "error": attempt["error"],
+    }
+    if len(attempts) > 1:
+        result["attempts"] = attempts
+    return result
+
+
+def preflight(args):
+    root = Path(args.run).resolve()
+    cfg = load(root / "run.json")
+    urls = cfg.get("site_urls")
+    if not isinstance(urls, list) or not urls:
+        raise ValueError("run.json has no site_urls; start a fresh round with init")
+    timeout = float(args.timeout)
+    if not timeout > 0:
+        raise ValueError("--timeout must be greater than zero")
+    sites = [preflight_check_site(str(url), timeout) for url in urls]
+    summary = {
+        "total": len(sites),
+        "ok": sum(1 for site in sites if site["ok"]),
+        "reachable": sum(1 for site in sites if site["status"] is not None),
+        "failed": sum(1 for site in sites if site["status"] is None),
+    }
+    report = {
+        "schema_version": PREFLIGHT_SCHEMA_VERSION,
+        "checked_at": now(),
+        "timeout_s": timeout,
+        "candidate": cfg.get("candidate"),
+        "binary_sha256": cfg.get("binary_sha256"),
+        "proxy_mode": preflight_proxy_mode(),
+        "summary": summary,
+        "sites": sites,
+    }
+    write(root / "preflight.json", report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if summary["ok"] == summary["total"] else 1
 
 
 def init(args):
@@ -1914,6 +2079,38 @@ def gate(root):
         types[key]["required"] += 1
         types[key]["passed"] += int(c["id"] in passed)
 
+    preflight_report = None
+    preflight_path = root / "preflight.json"
+    if preflight_path.exists():
+        try:
+            evidence = load(preflight_path)
+            if evidence.get("schema_version") != PREFLIGHT_SCHEMA_VERSION:
+                raise ValueError("unsupported schema version")
+            sites = evidence.get("sites")
+            if (
+                not isinstance(sites, list)
+                or not all(isinstance(site, dict) for site in sites)
+                or not isinstance(evidence.get("summary"), dict)
+            ):
+                raise ValueError("missing summary or sites")
+            preflight_report = {
+                "checked_at": evidence.get("checked_at"),
+                "proxy_mode": evidence.get("proxy_mode"),
+                "summary": evidence["summary"],
+                "sha256": digest(preflight_path),
+                "not_ok": [
+                    {
+                        "url": site.get("url"),
+                        "status": site.get("status"),
+                        "error_type": site.get("error_type"),
+                    }
+                    for site in sites
+                    if not site.get("ok")
+                ],
+            }
+        except (ValueError, KeyError, TypeError, OSError) as e:
+            errors.append("Preflight evidence is malformed: " + str(e))
+
     bench = compute_run_benchmark(root, passed_ids=passed)
     write(root / "benchmark.json", bench)
     (root / "benchmark.md").write_text(
@@ -1946,6 +2143,7 @@ def gate(root):
         ),
         "benchmark_summary": bench["summary"],
         "execution_modes": bench["execution_modes"],
+        "preflight": preflight_report,
         "uncovered_commands": missing,
         "errors": errors,
         "case_commands": case_coverage,
@@ -2017,6 +2215,9 @@ def main():
     q = subs.add_parser("result")
     q.add_argument("--run", required=True)
     q.add_argument("--file", required=True)
+    q = subs.add_parser("preflight")
+    q.add_argument("--run", required=True)
+    q.add_argument("--timeout", type=float, default=PREFLIGHT_DEFAULT_TIMEOUT)
     q = subs.add_parser("gate")
     q.add_argument("--run", required=True)
     q = subs.add_parser("benchmark")
@@ -2033,6 +2234,8 @@ def main():
     if a.action == "result":
         result(a)
         return 0
+    if a.action == "preflight":
+        return preflight(a)
     if a.action == "benchmark":
         return benchmark_cmd(a)
     return gate(a.run)
