@@ -845,6 +845,35 @@ async fn mcp_and_cli_accept_the_same_action_evidence() {
         let (code, stderr) = cli(cli_args);
         assert_eq!(code, Some(1), "bsk {cli_args:?}: {stderr}");
     }
+
+    // The evidence arguments parse for every action of these tools. An action
+    // that is not guarded must refuse them instead of dropping the check.
+    let unguarded = [
+        ("bsk_page", json!({"action": "wait_ms", "duration_ms": 1})),
+        ("bsk_page", json!({"action": "wait_for_navigation"})),
+        ("bsk_tabs", json!({"action": "list"})),
+        ("bsk_tabs", json!({"action": "create"})),
+        ("bsk_tabs", json!({"action": "select", "tab_id": 3})),
+        ("bsk_tabs", json!({"action": "return", "tab_id": 3})),
+        ("bsk_tabs", json!({"action": "borrow", "tab_id": 3})),
+        ("bsk_assist", json!({"action": "dialog_status"})),
+        (
+            "bsk_assist",
+            json!({"action": "operation_await", "operation_id": "op"}),
+        ),
+        (
+            "bsk_assist",
+            json!({"action": "operation_cancel", "operation_id": "op"}),
+        ),
+    ];
+    for (tool, arguments) in &unguarded {
+        let (_, body) = mcp.call_tool_raw(tool, arguments.clone()).await;
+        assert_ne!(body["code"], "invalid_params", "{tool} {arguments}: {body}");
+        let mut guarded = arguments.clone();
+        guarded["expect"] = expect.clone();
+        let body = mcp.call_err(tool, guarded.clone()).await;
+        assert_eq!(body["code"], "invalid_params", "{tool} {guarded}: {body}");
+    }
 }
 
 #[tokio::test]
