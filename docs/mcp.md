@@ -93,9 +93,12 @@ request token before passing `request_id` to `start`, then use `request_claim`,
 available but has no durable client-side recovery journal. Session cleanup is
 explicit; closing the MCP connection does not close all existing sessions.
 
-The MCP adapter provides 100% parity with CLI automation, inspection, file transfer
+The MCP adapter covers CLI automation, inspection, file transfer
 (`upload`/`download`), emulation, dialog/cooperation control, ledger management,
-debugging, video recording, and trace v3 recording/export. Sensitive-value/keychain
+debugging, video recording, and trace v3 recording/export. Guarded actions take the
+CLI's `--context`, `--observation`, `--expect` and `--depends-on` evidence as the
+`context`, `observation`, `expect` and `depends_on` arguments; `bsk_inspect` takes
+`context` only. Sensitive-value/keychain
 input is not implemented; avoid passing credentials in tool arguments when the client
 logs them. Protocol `"2.0"` is required across client, daemon, and extension.
 
