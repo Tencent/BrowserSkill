@@ -40,6 +40,18 @@ recorder 不注入 session/receipt、不重试、不修正 Bsk 参数。`stdout`
 
 admin 命令明确加 `--lane admin`，使用相同 raw binary、`RUN/admin-runtime`。stdio MCP 可将协议 NDJSON 输入放 RUN 内，通过 `--stdin-file inputs/mcp.ndjson -- mcp` 送入，或使用 `exec --interactive --timeout 900 -- mcp` 放入托管 PTY。
 
+## 站点可达性 preflight
+
+`init` 把八个公网站点写入 `run.json.site_urls`。开始公网实战前显式运行：
+
+```bash
+python3 "$SKILL/scripts/release_audit.py" preflight --run "$RUN" --timeout 8
+```
+
+它只发 HTTP `HEAD`（收到 403/405/501、连接失败或超时时回退一次有界 `GET`），不启动浏览器、不写 `results.json`，输出 `$RUN/preflight.json`：每站记录 `status`、`final_url`、`redirect_chain`、`elapsed_ms`、`checked_at`、`error_type`（`dns` / `tls` / `timeout` / `connection` / `http` / `redirect` / `other`）与 `error`；顶层记录 `checked_at`、`timeout_s`、`summary`（`total` / `ok` / `reachable` / `failed`）和 `proxy_mode`（`direct` / `env` / `system` / `pac`，只记模式，不记代理主机）。退出码 `0` 表示全部站点返回 `<400`；`1` 表示有站点不可达或返回 4xx/5xx（证据仍写出）；`2` 表示参数或 IO 错误。
+
+preflight 是环境证据，不是放行条件：站点不可达时仍按实际结果登记，`blocked` 永远不能算作 passed。`gate` 在 `preflight.json` 存在时把摘要、`proxy_mode` 和 sha256 写进 `gate.json`；只有文件损坏才报错，站点失败本身不改变 `release_ready`。它只证明 HTTP 可达，不能替代登录墙、验证码或 JS 渲染判断。
+
 ## 每项结果与放行检查
 
 结果 JSON 写在 RUN 下，`records` 是 recorder 返回的真实 UUID；JSON pointer 路径以当轮输出为准。每条 passed 至少有可追溯 Bsk 记录、原始输出断言和具体业务 oracle。产物路径必须在 RUN 内。

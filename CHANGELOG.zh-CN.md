@@ -17,6 +17,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
   控制方身份标识（#731）。
 - 在扩展弹窗“自动化设置”中新增 **最小化打开 Agent 窗口** 开关（`bsk_interaction_preferences.openAgentWindowMinimized`，默认关闭），开启后新建的后台 Agent 窗口直接以最小化状态启动而不在屏幕上闪出白框，显式前台打开的会话（`--focus`）与操作录制仍保持正常显示（[#649](https://github.com/Tencent/BrowserSkill/issues/649)）。
 - 新增 `BSK_SESSION_IDLE` 与 `BSK_DAEMON_IDLE` 环境变量支持，可在自动启动、`bsk daemon start`、`bsk daemon restart` 及 `bsk update` 重启时配置会话和本地守护进程空闲超时（显式 CLI 参数始终优先，空白值自动忽略，`--mode server` 模式下忽略 `BSK_DAEMON_IDLE`）（[#456](https://github.com/Tencent/BrowserSkill/issues/456)）。
+- **发版测评站点可达性 preflight**：`release_audit.py preflight` 从 `run.json.site_urls` 逐站记录 HTTP 状态、重定向链、耗时、代理模式与传输错误分类；`gate` 将摘要作为环境证据嵌入报告，不改变放行判定（[#791](https://github.com/Tencent/BrowserSkill/issues/791)）。
 
 ### 变更
 
