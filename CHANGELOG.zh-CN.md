@@ -15,6 +15,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
   同步支持与 `bsk session start` 一致的 `agent_name`、`project` 与 `controller_color`
   控制方身份标识（#731）。
 - 在扩展弹窗“自动化设置”中新增 **最小化打开 Agent 窗口** 开关（`bsk_interaction_preferences.openAgentWindowMinimized`，默认关闭），开启后新建的后台 Agent 窗口直接以最小化状态启动而不在屏幕上闪出白框，显式前台打开的会话（`--focus`）与操作录制仍保持正常显示（[#649](https://github.com/Tencent/BrowserSkill/issues/649)）。
+- **发版测评站点可达性 preflight**：`release_audit.py preflight` 从 `run.json.site_urls` 逐站记录 HTTP 状态、重定向链、耗时、代理模式与传输错误分类；`gate` 将摘要作为环境证据嵌入报告，不改变放行判定（[#791](https://github.com/Tencent/BrowserSkill/issues/791)）。
 
 ### 变更
 

@@ -24,6 +24,10 @@ determines which versions can connect.
   default) so background Agent Windows can start directly in the minimized state
   without flashing a normal window frame on screen, while keeping explicit
   foreground sessions (`--focus`) and action recording visible ([#649](https://github.com/Tencent/BrowserSkill/issues/649)).
+- **Release-test reachability preflight**: `release_audit.py preflight` records
+  each real-site HTTP status, redirect chain, latency, proxy mode, and transport
+  error class from `run.json.site_urls`; `gate` embeds the summary as environment
+  evidence without changing pass criteria ([#791](https://github.com/Tencent/BrowserSkill/issues/791)).
 
 ### Changed
 

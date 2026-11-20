@@ -2,6 +2,8 @@
 
 每站独立 session、显式 browser、capture 在导航前启动，保存最终 URL/标题/截图/原始观察及 Benchmark 指标（交互轮次、动作数、单步与总耗时）。读取网站当次真实结构，refs、选择器和推荐卡片可能变化，不能复用旧日志。全部动作使用候选 Bsk。
 
+每轮开始前先运行 `release_audit.py preflight` 并读取 `preflight.json`；站点在 preflight 中不可达或返回 4xx/5xx 时，按环境阻塞记录，不归因产品。preflight 只证明 HTTP 可达，不能替代登录墙、验证码或地区限制判断。
+
 巨量引擎、淘宝除下面的 `evaluate` 场景，还必须执行 [dynamic-pages.md](dynamic-pages.md) 中各自独立的 `wheel` 场景：运行中轮播下至少四次滚轮、八次前后求值，包含规划延迟变体，并验证实际滚动和轮播持续变化。
 
 ## 1. 巨量引擎 https://www.oceanengine.com/
