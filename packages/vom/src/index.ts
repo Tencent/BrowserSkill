@@ -1,3 +1,4 @@
+export { detectBlockingLayer } from "./layers";
 export {
   applyVomInteractionRecovery,
   encodeVomNameContent,

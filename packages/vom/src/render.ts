@@ -1756,6 +1756,7 @@ function renderPageOcclusionLine(hiddenNodeCount: number): string {
 function isPositionedRegionCandidate(node: VomNode): boolean {
   return (
     node.pointerEvents !== "none" &&
+    node.hitThrough !== true &&
     node.rect !== null &&
     ACTIVE_REGION_POSITIONS.has(node.position)
   );

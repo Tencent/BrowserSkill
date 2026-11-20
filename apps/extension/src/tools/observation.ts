@@ -68,6 +68,7 @@ import {
   type ToolEffect,
 } from "./shared";
 import { lookupRefTarget, resolveSnapshotRef } from "./snapshot-ref";
+import { pointReachesTarget } from "./target-hit";
 import {
   captureControlledViewport,
   isHiddenCompositorSurface,
@@ -82,6 +83,7 @@ import {
 } from "./vom/capture-coordinator";
 import type { FrameDocument as CapturedFrameDocument } from "./vom/frame-document";
 import { withOverlayBypass } from "./vom/hover-perception";
+import { markHitThroughLayers } from "./vom/layer-hit-check";
 import { probeTooltipNames } from "./vom/name-enrichment";
 import {
   type CaptureVomObservationResult,
@@ -1044,6 +1046,29 @@ async function buildVomObservation(
     captured,
     hoverProbes.surfaceProbes,
   );
+  // Our own blocking overlay would answer every hit test, so it is bypassed
+  // for the probes; without a bypass a covered probe keeps the candidate.
+  if (!options.skipRender)
+    await markHitThroughLayers(
+      decoratedScene,
+      (node, point) => {
+        const frameId = node.frameId ?? rootFrameId ?? "";
+        return pointReachesTarget(
+          cdp,
+          {
+            handle: {
+              tabId,
+              frameId,
+              loaderId: loaderByFrameId.get(frameId) ?? "",
+              backendNodeId: node.backendNodeId!,
+            },
+          },
+          point,
+        );
+      },
+      (body) => withOverlayBypass(options.hoverProbeBypassOverlay, tabId, body),
+    );
+  throwIfAborted(options.signal, "observation");
   options.onScene?.(decoratedScene);
   // Reserve space using the renderer's token estimate. Like VOM
   // headers, this integrity notice remains visible even under a tiny token budget.

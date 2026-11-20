@@ -19,7 +19,29 @@ type Send = <T = Record<string, unknown>>(
 ) => Promise<T>;
 type FrameTree = { frame: { id: string; loaderId?: string }; childFrames?: FrameTree[] };
 
-const cases = [
+type Case = {
+  name: string;
+  width: number;
+  role?: string;
+  native?: string;
+  modal?: boolean;
+  small?: boolean;
+  ariaModal?: boolean;
+  ignored?: boolean;
+  backdrop?: boolean;
+  transparent?: boolean;
+  frame?: boolean;
+  /** Markup placed before and after the page content. */
+  before?: string;
+  after?: string;
+  /** The drawer covers the page only when opened on a narrow screen. */
+  responsive?: boolean;
+};
+
+const BACKGROUND = '<div id="background"></div>';
+const DRAWER_LINK = '<a href="#home">Home</a>';
+
+const cases: Case[] = [
   { name: "sidebar 64%", width: 64 },
   { name: "sidebar 95%", width: 95 },
   { name: "nonmodal dialog role", width: 64, role: "dialog" },
@@ -34,9 +56,34 @@ const cases = [
   { name: "CSS backdrop", width: 64, backdrop: true },
   { name: "pointer-transparent sidebar", width: 95, transparent: true },
   { name: "iframe beside sidebar", width: 64, frame: true },
+  // Positioned boxes that span the viewport without covering the page. Layout
+  // rectangles and layer paint order alone cannot tell them from a backdrop.
+  { name: "negative z-index background", width: 64, before: BACKGROUND },
+  {
+    name: "clip-path drawer",
+    width: 64,
+    after: `<nav id="drawer" style="clip-path:inset(0 100% 0 0)">${DRAWER_LINK}</nav>`,
+  },
+  {
+    name: "overflow-clipped drawer",
+    width: 64,
+    after: `<div id="clip"><nav id="clipped">${DRAWER_LINK}</nav></div>`,
+  },
+  {
+    name: "visible toggle in a hidden drawer",
+    width: 64,
+    after: `<nav id="drawer" style="visibility:hidden">${DRAWER_LINK}<button id="toggle" style="visibility:visible">Menu</button></nav>`,
+  },
+  {
+    name: "responsive navigation",
+    width: 64,
+    before: BACKGROUND,
+    after: `<button id="toggle">Menu</button><nav id="drawer" class="responsive">${DRAWER_LINK}</nav>`,
+    responsive: true,
+  },
 ];
 
-function fixture(c: (typeof cases)[number]): string {
+function fixture(c: Case): string {
   const tag = c.native ? "dialog" : "aside";
   return `<!doctype html><style>
     * { box-sizing: border-box; } html,body { margin:0; }
@@ -49,12 +96,19 @@ function fixture(c: (typeof cases)[number]): string {
     #offscreen { position:absolute; top:150vh; left:8px; width:120px; }
     #backdrop { position:fixed; inset:0; z-index:9; background:#0008; }
     iframe { width:100%; height:120px; border:0; }
-  </style><main>
+    #background { position:fixed; inset:0; z-index:-1; background:linear-gradient(#eef,#fee); }
+    #drawer { position:fixed; inset:0; z-index:20; background:white; }
+    #drawer.responsive { clip-path:inset(0 100% 0 0); }
+    @media (max-width:600px) { #drawer.responsive.open { clip-path:none; } }
+    #clip { position:fixed; left:0; top:0; width:0; height:100vh; overflow:hidden; z-index:20; }
+    #clipped { position:absolute; left:0; top:0; width:100vw; height:100vh; background:white; }
+    #toggle { position:fixed; left:8px; bottom:8px; width:60px; z-index:30; }
+  </style>${c.before ?? ""}<main>
     <button id="main">Main action</button>
     <canvas aria-label="Main canvas" width="40" height="30"></canvas>
     ${c.frame ? `<iframe srcdoc="<button id='child' onclick='parent.frameClicks++'>Frame action</button>"></iframe>` : ""}
   </main><button id="covered">Covered action</button>
-  <button id="offscreen">Offscreen action</button>
+  <button id="offscreen">Offscreen action</button>${c.after ?? ""}
   ${c.backdrop ? '<div id="backdrop"></div>' : ""}
   <${tag} id="panel" ${c.role ? `role="${c.role}"` : ""} ${c.ariaModal || (c.modal && !c.native) ? 'aria-modal="true"' : c.role ? 'aria-modal="false"' : ""} ${c.ignored ? 'aria-hidden="true"' : ""}>
     <button id="inside">Panel action</button>
@@ -168,13 +222,17 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser observation layers",
                   ),
                 )
                 .toBe(true);
-            const result = await handleObserve(
-              manager,
-              { session_id: ctx.sessionId },
-              { cdp, tabsApi, conditionalSurfaceProbe: false },
-            );
-            expect(result, c.name + ": " + JSON.stringify(result)).not.toHaveProperty("code");
-            if (!("text" in result)) throw new Error("Observation failed");
+            const observe = async () => {
+              const result = await handleObserve(
+                manager,
+                { session_id: ctx.sessionId },
+                { cdp, tabsApi, conditionalSurfaceProbe: false },
+              );
+              expect(result, c.name + ": " + JSON.stringify(result)).not.toHaveProperty("code");
+              if (!("text" in result)) throw new Error("Observation failed");
+              return result;
+            };
+            const result = await observe();
             const blocked = c.modal || c.backdrop || false;
             const mainRef = result.text.match(/(@e\d+) button "Main action"/)?.[1];
             expect(!!mainRef, c.name + "\n" + result.text).toBe(!blocked);
@@ -199,6 +257,27 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser observation layers",
             }
             if (!c.transparent && !c.small && !c.ignored && !blocked)
               expect(result.text, c.name).not.toContain('button "Covered action"');
+            if (c.after?.includes('id="toggle"'))
+              expect(result.text, c.name).toMatch(/@e\d+ button "Menu"/);
+            if (c.responsive) {
+              // Opened on a narrow screen the same drawer is a real cover.
+              await local("Emulation.setDeviceMetricsOverride", {
+                width: 390,
+                height: 844,
+                deviceScaleFactor: 0,
+                mobile: false,
+              });
+              await expect.poll(() => evaluate("innerWidth")).toBeLessThanOrEqual(600);
+              await evaluate("document.querySelector('#drawer').classList.add('open')");
+              const narrow = await observe();
+              expect(narrow.text, c.name + "\n" + narrow.text).toContain("@layers 2");
+              expect(narrow.text, c.name).not.toContain('button "Main action"');
+              await local("Emulation.clearDeviceMetricsOverride");
+              await expect.poll(() => evaluate("innerWidth")).toBeGreaterThan(600);
+              const wide = await observe();
+              expect(wide.text, c.name + "\n" + wide.text).toContain("@layers 1");
+              expect(wide.text, c.name).toMatch(/@e\d+ button "Main action"/);
+            }
             if (c.frame) {
               const frameRef = result.text.match(/(@e\d+) button "Frame action"/)?.[1];
               expect(frameRef, result.text).toBeDefined();
