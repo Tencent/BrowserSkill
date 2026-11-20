@@ -30,7 +30,7 @@ impl DaemonLock {
 impl Drop for DaemonLock {
     fn drop(&mut self) {
         // Best-effort: unlock then close. Kernel would do this anyway.
-        // Keep using fs2 explicitly across Rust versions with an inherent File::unlock.
+        // Use the same fs2 locking API as acquire_at.
         let _ = <std::fs::File as fs2::FileExt>::unlock(&self.file);
     }
 }

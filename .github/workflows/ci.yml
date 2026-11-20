@@ -59,7 +59,7 @@ jobs:
         run: |
           msrv=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["rust-version"])')
           rustup toolchain install "$msrv" --profile minimal --no-self-update
-          cargo +"$msrv" check --workspace --all-targets --locked
+          cargo +"$msrv" test --workspace --locked
 
   rust:
     name: Rust fmt, clippy, tests
