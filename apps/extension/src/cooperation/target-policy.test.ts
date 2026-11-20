@@ -917,6 +917,38 @@ describe("negotiated target control", () => {
     expect(await f.run({ context_id: next.context_id })).toEqual({});
   });
 
+  it.each([
+    { reason: "target_readonly" },
+    { reason: "target_disabled" },
+  ] as const)("fails fill on the first check for $reason instead of polling to the deadline", async ({
+    reason,
+  }) => {
+    const f = await fixture();
+    vi.mocked(checkActionTarget).mockResolvedValueOnce({
+      code: "permission_denied",
+      message: reason,
+      data: { reason, effect_state: "none" },
+    });
+    expect(await f.run({ ref: "e1" }, "tool.fill")).toMatchObject({
+      code: "permission_denied",
+      data: { reason, effect_state: "none" },
+    });
+    expect(checkActionTarget).toHaveBeenCalledTimes(1);
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps waiting for a hidden fill target to become visible", async () => {
+    const f = await fixture();
+    vi.mocked(checkActionTarget).mockResolvedValueOnce({
+      code: "permission_denied",
+      message: "hidden",
+      data: { reason: "target_hidden", effect_state: "none" },
+    });
+    expect(await f.run({ ref: "e1" }, "tool.fill")).toEqual({});
+    expect(checkActionTarget).toHaveBeenCalledTimes(2);
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
   it("waits only for initial target readiness and never repeats input", async () => {
     const f = await fixture();
     f.readFrames.mockClear();
