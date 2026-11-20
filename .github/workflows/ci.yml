@@ -381,6 +381,7 @@ jobs:
         run: >-
           node scripts/run-browser-tests.mjs
           src/content/__tests__/record-input-buttons.browser.test.ts
+          src/content/__tests__/record-editor-value.browser.test.ts
           src/tools/__tests__/focus.browser.test.ts
           src/tools/__tests__/scroll.browser.test.ts
           src/tools/__tests__/select.browser.test.ts
