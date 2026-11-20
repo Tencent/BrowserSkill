@@ -2101,6 +2101,18 @@ describe("legacy capabilities under default cooperation", () => {
     expect(await f.command("sync")).toMatchObject({ kind: "baseline", observation: { tab_id: 7 } });
   });
 
+  it("recaptures the observation after a dispatched viewport emulation", async () => {
+    const f = await fixture();
+    const baseline = await f.command("sync");
+    expect(baseline.kind).toBe("unchanged");
+    await f.act(
+      baseline.context_id,
+      (cdp) => cdp.send(7, "Emulation.setDeviceMetricsOverride", { width: 390, height: 844 }),
+      "tool.emulate",
+    );
+    expect(await f.command("sync")).toMatchObject({ kind: "baseline", observation: { tab_id: 7 } });
+  });
+
   it.each([
     false,
     true,

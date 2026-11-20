@@ -670,6 +670,11 @@ export class CooperationController implements ControlAuthority {
     // Window geometry can change every tab's layout without a DOM mutation.
     for (const tab of this.tabs.values()) if (tab.sessionId === sessionId) tab.baseline = undefined;
   }
+  /** A resized window or an emulated viewport lays pages out again without a DOM mutation. */
+  private clearLayoutObservations(state: TabState, method: string) {
+    if (method === "tool.window_resize") this.clearWindowObservations(state.sessionId);
+    else if (method === "tool.emulate") state.baseline = undefined;
+  }
   receive(tabId: number, frameId: number, frame: FrameState, lease?: string) {
     const state = this.tabs.get(tabId);
     if (!state || (lease !== undefined && lease !== state.lease)) return;
@@ -1454,7 +1459,7 @@ export class CooperationController implements ControlAuthority {
         sent ? "unknown" : "none",
       );
     } finally {
-      if (sent && method === "tool.window_resize") this.clearWindowObservations(state.sessionId);
+      if (sent) this.clearLayoutObservations(state, method);
       if (sent) state.lastAgentActivity = this.now();
       state.working = false;
       if (
@@ -3000,8 +3005,7 @@ export class CooperationController implements ControlAuthority {
         state.epoch++;
         state.context = undefined;
       }
-      if (sent && req.method === "tool.window_resize")
-        this.clearWindowObservations(state.sessionId);
+      if (sent) this.clearLayoutObservations(state, req.method);
       if (sent) state.lastAgentActivity = this.now();
       if (state.interruption === intervention) state.interruption = undefined;
       if (state.completion === completion) state.completion = undefined;
