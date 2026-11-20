@@ -606,7 +606,15 @@ fn symlinked_resources_are_never_read_or_overwritten() {
     );
     symlink(outside.path(), dir.join("references")).unwrap();
     let source = bundle("new", &[("references/a.md", "new")]);
-    assert_eq!(sync_with_bundle(home.path(), &source).errors.len(), 1);
+    // Automatic sync pauses as externally managed instead of reporting a
+    // filesystem failure (issue #795)…
+    let report = sync_with_bundle(home.path(), &source);
+    assert_eq!(
+        report.paused,
+        [(HarnessId::Cursor, PauseReason::ExternalSymlink)]
+    );
+    assert!(report.errors.is_empty());
+    // …while explicit installs still refuse to touch the link.
     assert!(
         install_one_at_home(
             home.path(),

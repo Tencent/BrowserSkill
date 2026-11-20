@@ -1107,6 +1107,7 @@ mod m2_tests {
             PauseReason::LocalChanges,
             PauseReason::InvalidMarker,
             PauseReason::InterruptedUpdate,
+            PauseReason::ExternalSymlink,
         ] {
             for updated in [false, true] {
                 let mut report = SyncReport {
