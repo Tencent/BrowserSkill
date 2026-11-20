@@ -4,12 +4,7 @@
   "id": "fill-input-events",
   "title": "Fill notifies each final value once",
   "suite": "regression",
-  "tags": [
-    "badcase",
-    "regression",
-    "fill",
-    "events"
-  ],
+  "tags": ["badcase", "regression", "fill", "events"],
   "source": {
     "type": "user-badcase",
     "reference": "#624"

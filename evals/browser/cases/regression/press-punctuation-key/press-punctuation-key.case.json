@@ -4,12 +4,7 @@
   "id": "press-punctuation-key",
   "title": "Press reports the physical code for punctuation keys",
   "suite": "regression",
-  "tags": [
-    "badcase",
-    "regression",
-    "press",
-    "keyboard"
-  ],
+  "tags": ["badcase", "regression", "press", "keyboard"],
   "source": {
     "type": "user-badcase",
     "reference": "#623"
