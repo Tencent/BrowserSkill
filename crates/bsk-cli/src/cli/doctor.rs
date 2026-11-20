@@ -23,11 +23,11 @@ use crate::daemon::start_error::{DaemonStartFailure, recovery_hint};
 use crate::daemon::state::PROTOCOL_VERSION;
 
 /// Chrome Web Store listing for the browser-skill extension.
-const EXTENSION_STORE_URL: &str =
+pub(crate) const EXTENSION_STORE_URL: &str =
     "https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi";
 
 /// Edge Add-ons listing for the browser-skill extension.
-const EXTENSION_STORE_URL_EDGE: &str = "https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg";
+pub(crate) const EXTENSION_STORE_URL_EDGE: &str = "https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg";
 
 /// Store listings highlighted in repair hints, in the order they appear.
 const EXTENSION_STORE_URLS: [&str; 2] = [EXTENSION_STORE_URL, EXTENSION_STORE_URL_EDGE];
@@ -117,6 +117,13 @@ pub fn run(output: Output) -> Result<Vec<CheckResult>> {
         Output::Json => render_json(&checks)?,
     }
     Ok(checks)
+}
+
+/// Collect the full doctor check suite against the current daemon snapshot
+/// without triggering an extra startup or browser-connect wait (used by
+/// `bsk setup` Step 4 after Steps 1–3 have already ensured daemon & browser).
+pub(crate) fn collect_current_checks() -> Vec<CheckResult> {
+    collect_checks(current_state(Duration::ZERO))
 }
 
 /// Whether the rendered doctor report contains an active failure.

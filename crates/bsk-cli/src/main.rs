@@ -75,6 +75,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
                 Ok(())
             }
         }
+        Command::Setup(args) => cli::setup::dispatch(args, &cli.flags, format),
         Command::InstallSkill(args) => {
             let output = if cli.flags.json {
                 Output::Json
