@@ -1,0 +1,89 @@
+{
+  "$schema": "../../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "press-punctuation-key",
+  "title": "Press reports the physical code for punctuation keys",
+  "suite": "regression",
+  "tags": [
+    "badcase",
+    "regression",
+    "press",
+    "keyboard"
+  ],
+  "source": {
+    "type": "user-badcase",
+    "reference": "#623"
+  },
+  "fixture": {
+    "startPath": "/cases/press-punctuation-key"
+  },
+  "prompts": {
+    "en": "Open {url}. Press Ctrl+/ on the Event field, then click Check key. Confirm the page reports PRESS-PUNCT-OK, report PRESS-PUNCT-OK, and close the browser session.",
+    "zh-CN": "打开 {url}。在 Event field 上按 Ctrl+/，然后点击 Check key。确认页面显示 PRESS-PUNCT-OK，报告 PRESS-PUNCT-OK，最后关闭浏览器会话。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "interact.press",
+    "interact.click",
+    "inspect.observe"
+  ],
+  "assertions": {
+    "site": [
+      {
+        "label": "Ctrl+/ carried the physical Slash code",
+        "type": "press.checked",
+        "where": {
+          "data.key": "/",
+          "data.code": "Slash",
+          "data.keyCode": 191,
+          "data.ctrlKey": true,
+          "data.ok": true
+        },
+        "minCount": 1
+      }
+    ],
+    "response": [
+      {
+        "label": "reported regression marker",
+        "includes": "PRESS-PUNCT-OK"
+      }
+    ],
+    "adapter": [
+      {
+        "label": "browser session was closed",
+        "key": "sessionStopped"
+      }
+    ]
+  },
+  "smoke": {
+    "steps": [
+      {
+        "action": "navigate"
+      },
+      {
+        "action": "sync",
+        "saveAs": "control"
+      },
+      {
+        "action": "press",
+        "key": "Ctrl+/",
+        "selector": "#field",
+        "contextId": "{control.context_id}"
+      },
+      {
+        "action": "click",
+        "selector": "#check",
+        "contextId": "{control.context_id}"
+      },
+      {
+        "action": "wait-site-event",
+        "type": "press.checked"
+      },
+      {
+        "action": "observe"
+      }
+    ]
+  }
+}
