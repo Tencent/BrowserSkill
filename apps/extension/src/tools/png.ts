@@ -13,7 +13,11 @@ export function parsePngDimensions(base64: string): { width: number; height: num
     const head = base64.length > 64 ? base64.slice(0, 64) : base64;
     const bin = atob(head);
     if (bin.length < 33) return null;
-    if (bin.slice(0, 8) !== "\x89PNG\r\n\x1a\n" || bin.slice(8, 16) !== "\x00\x00\x00\x0dIHDR") {
+    if (
+      bin.charCodeAt(0) !== 0x89 ||
+      bin.slice(1, 8) !== "PNG\r\n\x1a\n" ||
+      bin.slice(8, 16) !== "\x00\x00\x00\x0dIHDR"
+    ) {
       return null;
     }
     const u32 = (off: number) =>

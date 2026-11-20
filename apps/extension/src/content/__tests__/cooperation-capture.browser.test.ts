@@ -9,6 +9,7 @@ import { collectCooperationFrames } from "@/cooperation/browser-bridge";
 import { CooperationController } from "@/cooperation/controller";
 import { COOPERATION_ARM, COOPERATION_READ, type FrameState } from "@/cooperation/types";
 import { SessionManager } from "@/session-manager/manager";
+import { createStubCdpRunner } from "@/tools/shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -16,7 +17,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 
-describe.skipIf(!process.env.BSK_COOP_CHROME)("frame interaction coverage", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("frame interaction coverage", () => {
   it("collects HTTP frames, skips load failures and repairs old tabs while preserving human control", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-http-cooperation-"));
     const brokenFrame = await readFile(
@@ -103,7 +104,7 @@ globalThis.httpCooperationReady = true;`,
       );
       await withChrome(
         {
-          executable: process.env.BSK_COOP_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           extensionPath: directory,
           extensionViaCdp: true,
           deviceScale: 1,
@@ -302,10 +303,10 @@ globalThis.httpCooperationReady = true;`,
             expression: "document.querySelector('input').focus()",
           });
           const guarded = guardedRunner(
-            {
+            createStubCdpRunner({
               send: <T>(_tabId: number, method: string, params?: object) =>
                 enterSend<T>(method, params),
-            },
+            }),
             {
               prepare: async (input) => {
                 if (input)
@@ -375,14 +376,15 @@ globalThis.httpCooperationReady = true;`,
           const repaired = await collectCooperationFrames(delayed.id, COOPERATION_READ, "late");
           expect(executeScript).toHaveBeenCalledOnce();
           const repairedDocument = repaired.frames.get(child.frameId)!.document;
-          // Let the delayed declared script run after the repair. WXT must
-          // dispose the previous collector rather than leave both listening.
+          // Let the delayed declared script run after the repair. The idempotent
+          // mount guard must preserve the active collector rather than wipe its
+          // document/lease or leave two collectors listening.
           await evaluate(
             `chrome.scripting.executeScript({target:{tabId:${delayed.id},documentIds:[${JSON.stringify(child.documentId)}]},func:()=>globalThis.fixtureStartCapture()})`,
           );
           const declared = await collectCooperationFrames(delayed.id, COOPERATION_READ, "late");
           const declaredDocument = declared.frames.get(child.frameId)!.document;
-          expect(declaredDocument).not.toBe(repairedDocument);
+          expect(declaredDocument).toBe(repairedDocument);
           await evaluate("globalThis.frameUpdates = []");
           await clickFrame("/late-frame");
           const afterInput = await collectCooperationFrames(delayed.id, COOPERATION_READ, "late");

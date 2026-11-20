@@ -10,6 +10,7 @@ mod server;
 mod tools;
 
 pub use server::{Daemon, PROTOCOL_VERSIONS, serve};
+pub use tools::BASE_TOOL_NAMES;
 
 use std::time::Duration;
 

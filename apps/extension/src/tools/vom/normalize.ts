@@ -1,5 +1,9 @@
 import type { Viewport } from "@browser-skill/vom";
-import { type CdpFrame, type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentInfo,
+  type FrameProcessBoundary,
+  frameProcessIdentityKey,
+} from "@/browser-driver/frame-handles";
 import { type GeometryProjection, projectRectToViewport } from "../geometry";
 import {
   type FrameProjectionState,
@@ -39,7 +43,7 @@ export interface FrameContext {
   ownerFrameBackendNodeId: number | null;
   projection: FrameProjectionState | null;
   targetProjection?: GeometryProjection | null;
-  target: CdpTarget;
+  process: FrameProcessBoundary;
   coordinates: SnapshotCoordinates | null;
   pageScale?: number;
 }
@@ -152,7 +156,12 @@ export async function normalizeDocument(
         (Number.parseFloat(opacity) || 0) >= 0.05,
     });
   }
-  const index = await buildDocumentIndex(nodes, signal, profile.includeVisualFacts);
+  const index = await buildDocumentIndex(
+    nodes,
+    signal,
+    profile.includeVisualFacts,
+    context.coordinates?.layoutUnitsPerCssPixel,
+  );
   await captureCustomProgressFormMembership(index, signal);
   const document: NormalizedDocument = {
     nodes: nodes.filter(
@@ -188,7 +197,7 @@ async function projectDocument(
     const bounds = node.layout?.bounds ?? [];
     const input = snapshotViewportRect(
       bounds,
-      { target: context.target, frameId: context.frameId },
+      { process: context.process, frameId: context.frameId },
       context.coordinates,
     );
     const local = input?.rect;
@@ -224,7 +233,7 @@ async function projectDocument(
 }
 
 export interface NormalizedFrameDocument extends NormalizedDocument {
-  frame: CdpFrame;
+  frame: FrameDocumentInfo;
 }
 
 export interface PreparedFrameDocument extends NormalizedFrameDocument {
@@ -235,8 +244,8 @@ export interface PreparedFrameDocument extends NormalizedFrameDocument {
  * before optional geometry is allowed to time out and close the read gate. */
 export async function prepareSnapshot(
   snapshot: SnapshotReply,
-  target: CdpTarget,
-  frames: readonly CdpFrame[],
+  process: FrameProcessBoundary,
+  frames: readonly FrameDocumentInfo[],
   issues: CaptureIssue[],
   signal?: AbortSignal,
   profile: SnapshotProfile = BASIC_SNAPSHOT,
@@ -250,7 +259,8 @@ export async function prepareSnapshot(
     const frame = id ? frameById.get(id) : undefined;
     if (!id || !frame || seen.has(id)) {
       issues.push({
-        target,
+        tabId: process.tabId,
+        processKey: process.processKey,
         frameId: id,
         stage: "ownership",
         reason: "frame-ownership-unresolved",
@@ -263,7 +273,7 @@ export async function prepareSnapshot(
       strings,
       {
         frameId: id,
-        target,
+        process,
         ownerFrameBackendNodeId: frame.ownerBackendNodeId ?? null,
         projection: null,
         coordinates: null,
@@ -279,8 +289,8 @@ export async function prepareSnapshot(
 /** Apply optional geometry after collection and document verification. */
 export async function projectSnapshot(
   documents: readonly PreparedFrameDocument[],
-  target: CdpTarget,
-  frames: readonly CdpFrame[],
+  process: FrameProcessBoundary,
+  frames: readonly FrameDocumentInfo[],
   geometry: GeometryContext,
   issues: CaptureIssue[],
   signal?: AbortSignal,
@@ -294,13 +304,13 @@ export async function projectSnapshot(
       if (id !== undefined) ownerIds.add(id);
     }
   }
-  geometry.registerSnapshotOwners(target, ownerIds);
+  geometry.registerSnapshotOwners(process, ownerIds);
   const frameById = new Map(frames.map((frame) => [frame.frameId, frame]));
   const sources = new Map(documents.map((doc) => [doc.frame.frameId, doc.snapshot]));
   const prepared = new Map(documents.map((doc) => [doc.frame.frameId, doc]));
   let metrics: LayoutMetrics = {};
   try {
-    metrics = await geometry.layoutMetrics(target);
+    metrics = await geometry.layoutMetrics(process);
   } catch (error) {
     if (isCaptureAbort(error)) throw error;
   }
@@ -313,8 +323,8 @@ export async function projectSnapshot(
     (size) => Number.isFinite(size) && size > 0,
   );
 
-  const children = new Map<string, CdpFrame[]>();
-  const pending: CdpFrame[] = [];
+  const children = new Map<string, FrameDocumentInfo[]>();
+  const pending: FrameDocumentInfo[] = [];
   for (const frame of frames) {
     if (!frame.parentFrameId || !frameById.has(frame.parentFrameId)) pending.push(frame);
     else {
@@ -326,10 +336,14 @@ export async function projectSnapshot(
   const projections = new Map<string, FrameProjectionState | null>();
   let targetProjection: GeometryProjection | null = null;
   const targetRoot = rootFrameId ? frameById.get(rootFrameId) : undefined;
-  if (target.sessionId && targetRoot) {
+  if (process.isOutOfProcess && targetRoot) {
     try {
       const known = await geometry.frame(targetRoot.frameId);
-      if (known && cdpTargetKey(known.target) === cdpTargetKey(target))
+      if (
+        known &&
+        frameProcessIdentityKey({ tabId: known.handle.tabId, processKey: known.processKey }) ===
+          frameProcessIdentityKey(process)
+      )
         targetProjection = await geometry.targetProjection(targetRoot.frameId);
     } catch (error) {
       if (isCaptureAbort(error)) throw error;
@@ -355,7 +369,7 @@ export async function projectSnapshot(
     for (const child of children.get(frame.frameId) ?? []) pending.push(child);
     const doc = sources.get(frame.frameId);
     if (!doc) continue;
-    const source = { target, frameId: frame.frameId };
+    const source = { process, frameId: frame.frameId };
     const coordinates = snapshotCoordinates(
       doc,
       layoutUnitsPerCssPixel,
@@ -377,7 +391,8 @@ export async function projectSnapshot(
         : (projections.get(frame.frameId) ?? null);
     if (!state && frame.frameId !== rootFrameId)
       issues.push({
-        target,
+        tabId: process.tabId,
+        processKey: process.processKey,
         frameId: frame.frameId,
         stage: "ownership",
         reason: "frame-ownership-unresolved",
@@ -386,9 +401,10 @@ export async function projectSnapshot(
       state = { status: "unavailable", source, reason: "snapshot-coordinates-unavailable" };
     projections.set(frame.frameId, state);
     const projection = state?.status === "available" ? state.projection : null;
-    if (!projection || (target.sessionId && !targetProjection))
+    if (!projection || (process.isOutOfProcess && !targetProjection))
       issues.push({
-        target,
+        tabId: process.tabId,
+        processKey: process.processKey,
         frameId: frame.frameId,
         stage: "geometry",
         reason: "geometry-unavailable",
@@ -410,7 +426,7 @@ export async function projectSnapshot(
       Array.from({ length: Math.min(4, siblings.length) }, async () => {
         while (next < siblings.length && !signal?.aborted && !failure) {
           const child = siblings[next++];
-          const childSource = { target, frameId: child.frameId };
+          const childSource = { process, frameId: child.frameId };
           if (!projection) {
             projections.set(
               child.frameId,
@@ -464,8 +480,8 @@ export async function projectSnapshot(
         ...(profile.includeVisualFacts
           ? { pageScale: metrics.cssVisualViewport?.scale ?? metrics.visualViewport?.scale }
           : {}),
-        target,
-        ...(target.sessionId ? { targetProjection } : {}),
+        process,
+        ...(process.isOutOfProcess ? { targetProjection } : {}),
         coordinates,
       },
       signal,

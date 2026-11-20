@@ -1,3 +1,20 @@
+import type { FrameDocumentGraphOptions } from "./frame-handles";
+
+export {
+  type FrameDocumentGraph,
+  type FrameDocumentGraphOptions,
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  type FrameNodeHandle,
+  isStaleFrameHandleError,
+  StaleFrameHandleError,
+  type TabEventSource,
+  toFrameDocumentHandle,
+  toRootFrameHandle,
+  type UnavailableFrameDocument,
+} from "./frame-handles";
+
+/** Internal to `browser-driver/` — never import outside `apps/extension/src/browser-driver/`. */
 export interface CdpTarget {
   tabId: number;
   sessionId?: string;
@@ -5,9 +22,11 @@ export interface CdpTarget {
 
 export interface CdpFrame {
   frameId: string;
+  loaderId?: string;
   parentFrameId?: string;
   ownerBackendNodeId?: number;
   url?: string;
+  urlFragment?: string;
   target: CdpTarget;
 }
 
@@ -17,6 +36,8 @@ export interface CdpFrameGraph {
   /** Unavailable subtrees are excluded from routing, but remain visible as gaps. */
   unavailableFrames?: CdpFrame[];
 }
+
+export type CdpFrameGraphOptions = FrameDocumentGraphOptions;
 
 export function omitFrameSubtrees(
   graph: CdpFrameGraph,
@@ -57,7 +78,9 @@ export interface CdpFrameTreeNode {
   frame: {
     id: string;
     parentId?: string;
+    loaderId?: string;
     url?: string;
+    urlFragment?: string;
   };
   childFrames?: CdpFrameTreeNode[];
 }
@@ -76,15 +99,24 @@ function mergeFrame(
   order: string[],
   node: CdpFrameTreeNode,
   target: CdpTarget,
+  authoritative: boolean,
 ): void {
   const existing = frames.get(node.frame.id);
   if (!existing) order.push(node.frame.id);
   const parentFrameId = node.frame.parentId || existing?.parentFrameId;
-  const url = node.frame.url || existing?.url;
+  const loaderId = authoritative
+    ? node.frame.loaderId || existing?.loaderId
+    : existing?.loaderId || node.frame.loaderId;
+  const url = authoritative ? node.frame.url || existing?.url : existing?.url || node.frame.url;
+  const urlFragment = authoritative
+    ? (node.frame.urlFragment ?? existing?.urlFragment)
+    : (existing?.urlFragment ?? node.frame.urlFragment);
   frames.set(node.frame.id, {
     frameId: node.frame.id,
+    ...(loaderId !== undefined ? { loaderId } : {}),
     ...(parentFrameId ? { parentFrameId } : {}),
     ...(url ? { url } : {}),
+    ...(urlFragment !== undefined ? { urlFragment } : {}),
     target,
   });
 }
@@ -106,7 +138,9 @@ function walkFrameTree(
     expanded.add(current.node);
 
     const target = targetByRootFrameId.get(current.node.frame.id) ?? current.inheritedTarget;
-    mergeFrame(frames, order, current.node, target);
+    const authoritative =
+      target.sessionId === source.target.sessionId && target.tabId === source.target.tabId;
+    mergeFrame(frames, order, current.node, target, authoritative);
 
     const children = current.node.childFrames ?? [];
     for (let index = children.length - 1; index >= 0; index -= 1) {
@@ -115,7 +149,7 @@ function walkFrameTree(
   }
 }
 
-export function buildFrameGraph(sources: CdpFrameTreeSource[]): CdpFrameGraph | null {
+export function buildFrameGraph(sources: readonly CdpFrameTreeSource[]): CdpFrameGraph | null {
   const rootSource = sources.find((source) => source.target.sessionId === undefined) ?? sources[0];
   if (!rootSource) return null;
 

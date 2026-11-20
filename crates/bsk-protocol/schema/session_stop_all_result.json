@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "DaemonSessionStopFailure": {
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "description": "Stable daemon/extension error codes (§4.5).",
+      "oneOf": [
+        {
+          "enum": [
+            "unknown_method",
+            "unsupported",
+            "invalid_params",
+            "not_found",
+            "permission_denied",
+            "timeout",
+            "cdp_failed",
+            "protocol_error",
+            "cancelled",
+            "user_aborted",
+            "version_too_old",
+            "multiple_browsers_online",
+            "no_browser_connected",
+            "pairing_required"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "dialog_pending",
+          "description": "The original operation is still running and needs an agent dialog decision.",
+          "type": "string"
+        }
+      ]
+    },
+    "ReturnFailure": {
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "tab_id": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id",
+        "code",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "failed": {
+      "items": {
+        "$ref": "#/definitions/DaemonSessionStopFailure"
+      },
+      "type": "array"
+    },
+    "return_failures": {
+      "items": {
+        "$ref": "#/definitions/ReturnFailure"
+      },
+      "type": "array"
+    },
+    "returned_tab_ids": {
+      "items": {
+        "format": "int64",
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "stopped": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "stopped"
+  ],
+  "title": "DaemonSessionStopResult",
+  "type": "object"
+}

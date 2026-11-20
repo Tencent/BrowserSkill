@@ -1,7 +1,4 @@
-import {
-  RECORD_PASSWORD_ATTRIBUTE,
-  SENSITIVE_AUTOCOMPLETE_SELECTOR,
-} from "@/lib/sensitive-autocomplete";
+import { SENSITIVE_READ_INPUT_SELECTOR } from "@/lib/dom-predicates";
 import type { SessionContext } from "@/session-manager/manager";
 import { isMissingNode } from "@/tools/errors";
 import { FOCUS_CHECK } from "@/tools/focus-state";
@@ -10,7 +7,8 @@ import {
   type CdpRunner,
   isRpcError,
   type ResolvedTargetTab,
-  sendToCdpTarget,
+  sendToFrameHandle,
+  withObjectGroup,
 } from "@/tools/shared";
 import { buildInPageRowAnchorSnippet } from "@/tools/vom/row-anchor-spec";
 import type { RpcError, RpcErrorReason } from "@/transport/types";
@@ -88,7 +86,7 @@ const SAMPLE_TARGET = `function(field, attribute, needRowAnchor) {
   if (!this.isConnected) return { connected: false };
   if (field === 'exists') return { connected: true, value: true };
   if (field === 'text') return { connected: true, value: this.textContent };
-  const sensitiveSelector = 'input[type="password"],input[type="file"],input[type="hidden"],' + ${JSON.stringify(`[${RECORD_PASSWORD_ATTRIBUTE}],${SENSITIVE_AUTOCOMPLETE_SELECTOR}`)};
+  const sensitiveSelector = ${JSON.stringify(SENSITIVE_READ_INPUT_SELECTOR)};
   const sensitive = this.matches(sensitiveSelector);
   if (field === 'attribute') return { connected: true, value: this.getAttribute(attribute), redacted: sensitive && attribute.toLowerCase() === 'value' };
   if (field) return { connected: true, value: this[field] ?? null, redacted: sensitive && field === 'value' };
@@ -121,50 +119,48 @@ async function sample(
   target: ResolvedActionTarget,
   check?: ActionExpectation,
 ): Promise<Sample | RpcError> {
-  const objectGroup = `action-check-${crypto.randomUUID()}`;
   const send = <T>(method: string, params: object) =>
-    sendToCdpTarget<T>(cdp, target.cdpTarget, method, params);
-  try {
-    const resolved = await send<{ object?: { objectId?: string } }>("DOM.resolveNode", {
-      backendNodeId: target.backendNodeId,
-      objectGroup,
-    });
-    if (!resolved.object?.objectId) return { connected: false };
-    const reply = await send<{ result?: { value?: Sample }; exceptionDetails?: unknown }>(
-      "Runtime.callFunctionOn",
-      {
-        objectId: resolved.object.objectId,
-        functionDeclaration: SAMPLE_TARGET,
-        arguments: [
-          { value: check?.field ?? null },
-          { value: check?.attribute ?? null },
-          { value: !check && Boolean(target.usedRef && target.rowAnchor) },
-        ],
-        returnByValue: true,
-      },
-    );
-    if (reply.exceptionDetails || !reply.result?.value)
+    sendToFrameHandle<T>(cdp, target.handle, method, params);
+  return withObjectGroup(cdp, target.handle, "action-check", async (objectGroup) => {
+    try {
+      const resolved = await send<{ object?: { objectId?: string } }>("DOM.resolveNode", {
+        backendNodeId: target.backendNodeId,
+        objectGroup,
+      });
+      if (!resolved.object?.objectId) return { connected: false };
+      const reply = await send<{ result?: { value?: Sample }; exceptionDetails?: unknown }>(
+        "Runtime.callFunctionOn",
+        {
+          objectId: resolved.object.objectId,
+          functionDeclaration: SAMPLE_TARGET,
+          arguments: [
+            { value: check?.field ?? null },
+            { value: check?.attribute ?? null },
+            { value: !check && Boolean(target.usedRef && target.rowAnchor) },
+          ],
+          returnByValue: true,
+        },
+      );
+      if (reply.exceptionDetails || !reply.result?.value)
+        return actionError(
+          "target_unavailable",
+          "Could not inspect the action target",
+          "target",
+          "Inspect the target again before deciding on another action.",
+        );
+      return reply.result.value;
+    } catch (error) {
+      // CDP can collect an already removed node before it can be sampled. This is
+      // the same detached identity, not an unavailable browser or a new target.
+      if (isMissingNode(error)) return { connected: false };
       return actionError(
         "target_unavailable",
-        "Could not inspect the action target",
+        error instanceof Error ? error.message : String(error),
         "target",
-        "Inspect the target again before deciding on another action.",
+        "Inspect the target again; the document or node may have been replaced.",
       );
-    return reply.result.value;
-  } catch (error) {
-    // CDP can collect an already removed node before it can be sampled. This is
-    // the same detached identity, not an unavailable browser or a new target.
-    if (isMissingNode(error)) return { connected: false };
-    return actionError(
-      "target_unavailable",
-      error instanceof Error ? error.message : String(error),
-      "target",
-      "Inspect the target again; the document or node may have been replaced.",
-    );
-  } finally {
-    // Navigation may already have released the execution context.
-    await send("Runtime.releaseObjectGroup", { objectGroup }).catch(() => {});
-  }
+    }
+  });
 }
 
 export async function checkActionTarget(

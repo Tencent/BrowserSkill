@@ -1,5 +1,9 @@
-import type { VomNode, VomSelectOption } from "@browser-skill/vom";
-import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+import { VOM_DERIVED_NAME_CAP, type VomNode, type VomSelectOption } from "@browser-skill/vom";
+import {
+  INTERACTIVE_ARIA_ROLES,
+  RECORD_PASSWORD_ATTRIBUTE,
+  sensitiveAutocomplete,
+} from "@/lib/dom-predicates";
 import type { NodeFacts } from "../facts";
 import {
   MAX_ROW_ANCHOR_CHARS,
@@ -12,6 +16,7 @@ import {
   VIRTUAL_POOL_EXCLUDED_TAGS,
   VOLATILE_ROW_TEXT_RE,
 } from "../row-anchor-spec";
+import { NON_TEXT_CONTAINER_TAGS } from "../snapshot";
 import { stableIdentifierName } from "./name-evidence";
 import type {
   ResolvedSemanticGraph,
@@ -26,25 +31,7 @@ import { frameBackendKey } from "./types";
 const FORM_TAGS = new Set(["input", "textarea", "select"]);
 const NATIVE_CONTROL_TAGS = new Set(["button", "input", "select", "textarea"]);
 const TEXT_AX_ROLES = new Set(["statictext", "inlinetextbox", "labeltext", "text"]);
-const INTERACTIVE_ROLES = new Set([
-  "button",
-  "checkbox",
-  "combobox",
-  "link",
-  "listbox",
-  "menuitem",
-  "menuitemcheckbox",
-  "menuitemradio",
-  "option",
-  "radio",
-  "searchbox",
-  "slider",
-  "spinbutton",
-  "switch",
-  "tab",
-  "textbox",
-  "treeitem",
-]);
+const INTERACTIVE_ROLES = INTERACTIVE_ARIA_ROLES;
 const SENSITIVE_INPUT_TYPES = new Set([
   "password",
   "credit-card",
@@ -241,6 +228,7 @@ interface ResolveIndexes {
   axRoleLower: Map<SemanticNodeId, string>;
   domText: (nodeId: SemanticNodeId) => string | undefined;
   axText: (nodeId: SemanticNodeId) => string | undefined;
+  hasExcludedAxTextDescendant: (nodeId: SemanticNodeId) => boolean;
   hasNativeDescendant: (nodeId: SemanticNodeId) => boolean;
   isOrInsideNative: (nodeId: SemanticNodeId) => boolean;
   selfOrEnclosingLabel: (nodeId: SemanticNodeId) => SemanticNodeId | undefined;
@@ -324,7 +312,11 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     if (textMemo.has(nodeId)) return textMemo.get(nodeId);
     if (resolvingText.has(nodeId)) return undefined;
     const node = graph.nodes.get(nodeId);
-    if (!node || node.excluded) {
+    if (
+      !node ||
+      node.excluded ||
+      (node.dom !== undefined && NON_TEXT_CONTAINER_TAGS.has(node.dom.tag.toLowerCase()))
+    ) {
       textMemo.set(nodeId, undefined);
       return undefined;
     }
@@ -348,10 +340,11 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
         joinedLength += (parts.length > 0 ? 1 : 0) + childText.length;
         parts.push(childText);
       }
-      if (joinedLength >= 240) break;
+      if (joinedLength >= VOM_DERIVED_NAME_CAP) break;
     }
     resolvingText.delete(nodeId);
-    const result = parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, 240));
+    const result =
+      parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, VOM_DERIVED_NAME_CAP));
     textMemo.set(nodeId, result);
     return result;
   };
@@ -389,9 +382,67 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
         joinedLength += (parts.length > 0 ? 1 : 0) + childText.length;
         parts.push(childText);
       }
-      if (joinedLength >= 240) break;
+      if (joinedLength >= VOM_DERIVED_NAME_CAP) break;
     }
-    return complete(parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, 240)));
+    return complete(
+      parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, VOM_DERIVED_NAME_CAP)),
+    );
+  };
+
+  const excludedAxSubtreeMemo = new Map<SemanticNodeId, boolean>();
+  const visitingExcludedAxSubtree = new Set<SemanticNodeId>();
+  const subtreeContainsAxText = (nodeId: SemanticNodeId): boolean => {
+    const cached = excludedAxSubtreeMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (visitingExcludedAxSubtree.has(nodeId)) return false;
+    const role = axRoleLower.get(nodeId) ?? "";
+    if (INTERACTIVE_ROLES.has(role)) {
+      excludedAxSubtreeMemo.set(nodeId, false);
+      return false;
+    }
+    if (TEXT_AX_ROLES.has(role)) {
+      excludedAxSubtreeMemo.set(nodeId, true);
+      return true;
+    }
+    visitingExcludedAxSubtree.add(nodeId);
+    let found = false;
+    for (const childId of axChildren.get(nodeId) ?? []) {
+      if (subtreeContainsAxText(childId)) {
+        found = true;
+        break;
+      }
+    }
+    visitingExcludedAxSubtree.delete(nodeId);
+    excludedAxSubtreeMemo.set(nodeId, found);
+    return found;
+  };
+
+  const excludedAxDescendantMemo = new Map<SemanticNodeId, boolean>();
+  const visitingExcludedAxDescendant = new Set<SemanticNodeId>();
+  const hasExcludedAxTextDescendant = (nodeId: SemanticNodeId): boolean => {
+    const cached = excludedAxDescendantMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (visitingExcludedAxDescendant.has(nodeId)) return false;
+    const role = axRoleLower.get(nodeId) ?? "";
+    if (role === "rootwebarea" || role === "webarea") {
+      excludedAxDescendantMemo.set(nodeId, false);
+      return false;
+    }
+    visitingExcludedAxDescendant.add(nodeId);
+    let found = false;
+    for (const childId of axChildren.get(nodeId) ?? []) {
+      const child = graph.nodes.get(childId);
+      if (!child) continue;
+      const childRole = axRoleLower.get(childId) ?? "";
+      if (INTERACTIVE_ROLES.has(childRole)) continue;
+      if (child.excluded ? subtreeContainsAxText(childId) : hasExcludedAxTextDescendant(childId)) {
+        found = true;
+        break;
+      }
+    }
+    visitingExcludedAxDescendant.delete(nodeId);
+    excludedAxDescendantMemo.set(nodeId, found);
+    return found;
   };
 
   const nativeMemo = new Map<SemanticNodeId, boolean>();
@@ -462,6 +513,7 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     axRoleLower,
     domText,
     axText,
+    hasExcludedAxTextDescendant,
     hasNativeDescendant,
     isOrInsideNative,
     selfOrEnclosingLabel,
@@ -544,7 +596,6 @@ function resolvedName(
   node: SemanticGraphNode,
   role: string | undefined,
   tag: string,
-  axProps: ExtractedAxProps | undefined,
   graph: SemanticGraph,
   indexes: ResolveIndexes,
   supplementalNames: ReadonlyMap<string, string>,
@@ -552,8 +603,10 @@ function resolvedName(
 ): string | undefined {
   const attrs = node.dom?.attrs ?? EMPTY_ATTRS;
   const axIgnored = node.ax?.ignored === true;
+  const skipTaintedAxName =
+    !axIgnored && node.ax !== undefined && indexes.hasExcludedAxTextDescendant(node.id);
   let name =
-    (axIgnored ? undefined : axValue(node.ax?.name)) ??
+    (axIgnored || skipTaintedAxName ? undefined : axValue(node.ax?.name)) ??
     (attrs["aria-labelledby"] ? ariaLabelledText(node, indexes) : undefined) ??
     clean(attrs["aria-label"]) ??
     nativeLabelText(node, indexes) ??
@@ -584,10 +637,6 @@ function resolvedName(
         name = stableIdentifierName(attrs);
       }
     }
-  }
-  const hasPopup = axProps?.hasPopup;
-  if (name && hasPopup && hasPopup !== "false") {
-    name = axProps?.expanded === "true" ? `${name} [expanded]` : `${name} [has-submenu]`;
   }
   if (!name && role?.toLowerCase() === "iframe") return clean(attrs.id);
   return name;
@@ -944,7 +993,6 @@ export function resolveSemanticGraph(
       node,
       role,
       tag,
-      axProps,
       graph,
       indexes,
       supplementalNames,
@@ -962,7 +1010,7 @@ export function resolveSemanticGraph(
     const inForm = node.dom?.inForm;
     const nearby = nearbyText(node, indexes);
     const placeholder = clean(node.dom?.formPlaceholder ?? attrs.placeholder);
-    const textContent = clean(node.dom?.textContent);
+    const textContent = NON_TEXT_CONTAINER_TAGS.has(tag) ? undefined : clean(node.dom?.textContent);
     const selectInfo =
       tag === "select" && !isSensitive
         ? extractSelectOptions(node, sourceValue, graph, indexes)
@@ -1019,7 +1067,31 @@ export function resolveSemanticGraph(
     };
     const selected = axIgnored ? undefined : axProps?.selected;
     const expanded = axIgnored ? undefined : axProps?.expanded;
+    const hasPopup = axIgnored ? undefined : axProps?.hasPopup;
     const controls = axIgnored ? undefined : axProps?.controls;
+    const ariaHasPopup = clean(attrs["aria-haspopup"])?.toLowerCase();
+    const ariaExpanded = clean(attrs["aria-expanded"])?.toLowerCase();
+    if (
+      (hasPopup !== undefined && hasPopup !== "false") ||
+      (hasPopup === undefined && ariaHasPopup !== undefined && ariaHasPopup !== "false")
+    ) {
+      vom.hasPopup = true;
+    }
+    const expandedBool =
+      expanded === "true"
+        ? true
+        : expanded === "false"
+          ? false
+          : expanded === undefined
+            ? ariaExpanded === "true"
+              ? true
+              : ariaExpanded === "false"
+                ? false
+                : undefined
+            : undefined;
+    if (expandedBool !== undefined) {
+      vom.expanded = expandedBool;
+    }
     if ((selected === "true" || selected === "false") && !vom.attrs?.["aria-selected"]) {
       vom.attrs = { ...(vom.attrs ?? {}), "aria-selected": selected };
     }

@@ -1,14 +1,21 @@
 import { afterEach, expect, it, vi } from "vitest";
-import type { SessionManager } from "@/session-manager/manager";
-import { attachCooperation, collectCooperationFrames } from "./browser-bridge";
+import { SessionManager } from "@/session-manager/manager";
+import {
+  attachCooperation,
+  COOPERATION_SUBFRAME_DEBOUNCE_MS,
+  collectCooperationFrames,
+  FRAME_REPLY_TIMEOUT_MS,
+} from "./browser-bridge";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import type { FrameOwner } from "./hidden-frames";
 import {
   COOPERATION_ARM,
+  COOPERATION_ARM_FRAME,
   COOPERATION_DISABLE,
   COOPERATION_OWNERS,
   COOPERATION_READ,
   COOPERATION_RESUME,
+  COOPERATION_SUBFRAME_READY,
   type FrameRepairs,
   type FrameState,
   type HiddenFrames,
@@ -93,7 +100,7 @@ it("keeps the collection deadline when a retry never responds", async () => {
   const result = expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toThrow(
     "A page frame is not responding",
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   await result;
   expect(send).toHaveBeenCalledTimes(2);
 });
@@ -119,7 +126,7 @@ it("cannot arm a late retry after the collection deadline", async () => {
   const result = expect(collectCooperationFrames(7, COOPERATION_ARM, "lease")).rejects.toThrow(
     "A page frame is not responding",
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   await result;
   reply(undefined);
   await vi.advanceTimersByTimeAsync(25);
@@ -329,7 +336,7 @@ it("cannot arm a repaired collector after the deadline", async () => {
   const result = expect(collectCooperationFrames(7, COOPERATION_ARM, "lease")).rejects.toThrow(
     "not responding",
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   await result;
   finish();
   await vi.advanceTimersByTimeAsync(25);
@@ -447,7 +454,7 @@ const settle = async <T>(work: Promise<T>) => {
     (value) => ({ value }),
     (error: unknown) => ({ error }),
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   return outcome as Promise<{ value?: T; error?: unknown }>;
 };
 
@@ -648,4 +655,254 @@ it("never conceals a silent main page and does not ask during release", async ()
   );
   expect(released.error).toBeInstanceOf(FrameUnresponsiveError);
   expect(ownerQueries(send)).toEqual([]);
+});
+
+it("arms controlled frames on webNavigation.onCommitted and coalesces subframe bursts with a 50ms debounce", async () => {
+  vi.useFakeTimers();
+  const committedListeners = new Set<
+    (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void
+  >();
+  const messageListeners = new Set<
+    (message: unknown, sender: chrome.runtime.MessageSender) => void
+  >();
+  const frames = [main];
+  const sendMessage = vi.fn(async (_tab: number, message: { kind: string }) => {
+    if (message.kind === COOPERATION_ARM_FRAME) return { ok: true };
+    return frame();
+  });
+  const executeScript = vi.fn().mockResolvedValue([]);
+  vi.stubGlobal("chrome", {
+    runtime: {
+      id: "test",
+      onMessage: {
+        addListener: (listener: (message: unknown, sender: chrome.runtime.MessageSender) => void) =>
+          messageListeners.add(listener),
+        removeListener: (
+          listener: (message: unknown, sender: chrome.runtime.MessageSender) => void,
+        ) => messageListeners.delete(listener),
+      },
+    },
+    webNavigation: {
+      getAllFrames: vi.fn(async () => [...frames]),
+      onBeforeNavigate: { addListener: vi.fn(), removeListener: vi.fn() },
+      onCommitted: {
+        addListener: (
+          listener: (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void,
+        ) => committedListeners.add(listener),
+        removeListener: (
+          listener: (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void,
+        ) => committedListeners.delete(listener),
+      },
+    },
+    tabs: {
+      get: vi.fn(async (id: number) => ({ id, windowId: 10, url: main.url })),
+      sendMessage,
+      onRemoved: { addListener: vi.fn(), removeListener: vi.fn() },
+      onDetached: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
+    scripting: { executeScript },
+  });
+
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 10, initialTabIds: [7] }),
+      ensureActiveTab: async () => 7,
+      remove: async () => {},
+    },
+  });
+  await manager.start("s-1");
+
+  const controller = attachCooperation(
+    manager,
+    () => {},
+    () => {},
+  );
+  controller.startSession("s-1");
+
+  // Uncontrolled tab 99 must be ignored completely.
+  for (const listener of committedListeners) {
+    listener({
+      tabId: 99,
+      frameId: 0,
+      documentId: "uncontrolled-doc",
+    } as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+  }
+  expect(sendMessage).not.toHaveBeenCalled();
+
+  // Burst of 4 child frames committing on controlled tab 7:
+  for (let i = 1; i <= 4; i++) {
+    const docId = `child-doc-${i}`;
+    frames.push({ ...main, frameId: i, documentId: docId });
+    for (const listener of committedListeners) {
+      listener({
+        tabId: 7,
+        frameId: i,
+        documentId: docId,
+      } as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+    }
+  }
+
+  // Immediate targeted COOPERATION_ARM_FRAME per committed child document, but 0 full-tab getAllFrames scans before 50ms!
+  expect(
+    sendMessage.mock.calls.filter((call) => call[1]?.kind === COOPERATION_ARM_FRAME),
+  ).toHaveLength(4);
+  expect(chrome.webNavigation.getAllFrames).not.toHaveBeenCalled();
+
+  await vi.advanceTimersByTimeAsync(COOPERATION_SUBFRAME_DEBOUNCE_MS);
+  expect(chrome.webNavigation.getAllFrames).toHaveBeenCalledExactlyOnceWith({ tabId: 7 });
+  expect(executeScript).not.toHaveBeenCalled();
+});
+
+it("injects cooperation.js into dynamic subframes on COOPERATION_SUBFRAME_READY even when another frame script returns undefined and onCommitted resets the 50ms debounce", async () => {
+  vi.useFakeTimers();
+  const committedListeners = new Set<
+    (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void
+  >();
+  const messageListeners = new Set<
+    (message: unknown, sender: chrome.runtime.MessageSender) => void
+  >();
+  const removedListeners = new Set<(tabId: number) => void>();
+
+  const blankChild = {
+    ...main,
+    frameId: 2,
+    parentFrameId: 0,
+    documentId: "blank-with-record-frame",
+    url: "about:blank",
+  };
+  const committedChild = {
+    ...main,
+    frameId: 3,
+    parentFrameId: 0,
+    documentId: "committed-child",
+    url: "https://page.test/child",
+  };
+  const frames = [main, blankChild];
+  const cooperationInjectedDocs = new Set([main.documentId, committedChild.documentId]);
+
+  const sendMessage = vi.fn(
+    async (_tab: number, message: { kind: string }, target?: { documentId?: string }) => {
+      const docId = target?.documentId;
+      // Simulate `record-frame.js` already active in `blank-with-record-frame`:
+      // its `chrome.runtime.onMessage` listener returns `false`, so `sendMessage`
+      // resolves to `undefined` instead of rejecting with "Receiving end does not exist"
+      // until `cooperation.js` is explicitly injected into that documentId.
+      if (docId && !cooperationInjectedDocs.has(docId)) {
+        return undefined;
+      }
+      if (message.kind === COOPERATION_ARM_FRAME) return { ok: true };
+      return { ...frame(), document: `uuid-${docId ?? "main"}` };
+    },
+  );
+  const executeScript = vi.fn(
+    async (injection: { target: { tabId: number; documentIds?: string[] }; files?: string[] }) => {
+      if (injection.files?.includes("content-scripts/cooperation.js")) {
+        for (const docId of injection.target.documentIds ?? []) {
+          cooperationInjectedDocs.add(docId);
+        }
+      }
+      return [];
+    },
+  );
+
+  vi.stubGlobal("chrome", {
+    runtime: {
+      id: "test",
+      onMessage: {
+        addListener: (listener: (message: unknown, sender: chrome.runtime.MessageSender) => void) =>
+          messageListeners.add(listener),
+        removeListener: (
+          listener: (message: unknown, sender: chrome.runtime.MessageSender) => void,
+        ) => messageListeners.delete(listener),
+      },
+    },
+    webNavigation: {
+      getAllFrames: vi.fn(async () => [...frames]),
+      onBeforeNavigate: { addListener: vi.fn(), removeListener: vi.fn() },
+      onCommitted: {
+        addListener: (
+          listener: (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void,
+        ) => committedListeners.add(listener),
+        removeListener: (
+          listener: (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void,
+        ) => committedListeners.delete(listener),
+      },
+    },
+    tabs: {
+      get: vi.fn(async (id: number) => ({ id, windowId: 10, url: main.url })),
+      sendMessage,
+      onRemoved: {
+        addListener: (listener: (tabId: number) => void) => removedListeners.add(listener),
+        removeListener: (listener: (tabId: number) => void) => removedListeners.delete(listener),
+      },
+      onDetached: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
+    scripting: { executeScript },
+  });
+
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 10, initialTabIds: [7] }),
+      ensureActiveTab: async () => 7,
+      remove: async () => {},
+    },
+  });
+  await manager.start("s-1");
+
+  const controller = attachCooperation(
+    manager,
+    () => {},
+    () => {},
+  );
+  controller.startSession("s-1");
+
+  // t = 0ms: dynamic empty `about:blank` iframe notifies COOPERATION_SUBFRAME_READY.
+  for (const listener of messageListeners) {
+    listener({ kind: COOPERATION_SUBFRAME_READY }, {
+      id: "test",
+      tab: { id: 7 },
+    } as chrome.runtime.MessageSender);
+  }
+
+  // t = 20ms: a sibling navigated iframe commits, resetting the 50ms debounce timer via `scheduleObserveTab(7)`.
+  // `clearObserveTimer(7)` MUST NOT lose `subframeNeedsInject` for tab 7!
+  await vi.advanceTimersByTimeAsync(20);
+  frames.push(committedChild);
+  for (const listener of committedListeners) {
+    listener({
+      tabId: 7,
+      frameId: committedChild.frameId,
+      documentId: committedChild.documentId,
+    } as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+  }
+
+  // t = 55ms (35ms after reset): debounce has not fired yet.
+  await vi.advanceTimersByTimeAsync(35);
+  expect(executeScript).not.toHaveBeenCalled();
+
+  // t = 70ms (50ms after reset): `injectCooperationAllFrames(7)` runs BEFORE `controller.observeTab(7)`,
+  // injecting `cooperation.js` ONLY into `blank-with-record-frame` so `COOPERATION_READ` succeeds across all 3 frames!
+  await vi.advanceTimersByTimeAsync(15);
+  expect(executeScript).toHaveBeenCalledExactlyOnceWith({
+    target: { tabId: 7, documentIds: ["blank-with-record-frame"] },
+    files: ["content-scripts/cooperation.js"],
+    injectImmediately: true,
+  });
+  expect(controller.view(7)?.mode).toBe("syncing");
+  expect(controller.controlGuard("s-1", 7)).not.toThrow();
+
+  // Closing the tab before the 50ms timer expires clears `subframeNeedsInject` cleanly.
+  executeScript.mockClear();
+  cooperationInjectedDocs.delete("blank-with-record-frame");
+  for (const listener of messageListeners) {
+    listener({ kind: COOPERATION_SUBFRAME_READY }, {
+      id: "test",
+      tab: { id: 7 },
+    } as chrome.runtime.MessageSender);
+  }
+  for (const listener of removedListeners) {
+    listener(7);
+  }
+  await vi.advanceTimersByTimeAsync(COOPERATION_SUBFRAME_DEBOUNCE_MS);
+  expect(executeScript).not.toHaveBeenCalled();
 });

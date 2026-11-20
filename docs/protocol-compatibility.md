@@ -1,79 +1,60 @@
 # Version compatibility
 
-CLI, daemon, Agent Skill and browser extensions can update at different times.
-Their application versions do not have to match. The connection handshake checks
-the base protocol, while optional features check the version of each component
-that must understand them.
+CLI, MCP server (`bsk mcp`), daemon, Agent Skill, and browser extensions can update at
+different times. Their application semvers (`CARGO_PKG_VERSION`, extension manifest
+version) do not have to match; runtime compatibility is governed by the wire protocol
+version (`PROTOCOL_VERSION = "2.0"`, `MIN_COMPATIBLE_PROTOCOL = "2.0"` in
+`crates/bsk-protocol/src/catalog.rs`).
 
-## What users see
+## Handshake and version checks
 
-- Ordinary requests keep their existing defaults. For example, omitting
-  `--incognito` does not require incognito support, and omitting the borrow
-  confirmation timeout keeps the older behavior.
-- An explicitly requested feature is checked before dispatch. CLI business RPCs
-  reuse the daemon protocol version cached during discovery or startup for the
-  daemon's socket path. Without a cached version, the business RPC checks
-  `system.status` over the same IPC connection used for the action. The daemon
-  checks the actual target browser connection before sending it a request.
-- A failed feature check returns `unsupported` with `data.reason =
-  "unsupported_feature"`, `component`, `required_protocol`, `actual_protocol`,
-  `feature`, `effect_state: "none"` and `recovery`. The request is rejected before
-  browser effects; the requested feature is not removed to make the call succeed.
+- **Major-version and floor enforcement**: Both CLI↔daemon discovery (`check_daemon_protocol`
+  in `crates/bsk-cli/src/cli/business_rpc.rs` and `ensure_daemon.rs`) and daemon↔extension
+  WebSocket registration (`system.register` evaluated via `evaluate_handshake_compat` in
+  `crates/bsk-protocol/src/system.rs`) require the peer's `(major, minor)` protocol version to
+  share the local major (`2`) and meet `MIN_COMPATIBLE_PROTOCOL` (`2.0`). Peers on protocol
+  `1.x`, a newer major, or below either side's floor are rejected before business dispatch.
+- **Same-major minor skew**: When a connected extension advertises a different `2.x` minor
+  version that still satisfies both peers' `min_compatible_protocol`, the handshake succeeds
+  with `HandshakeCompat::Skew`. `system.status` surfaces this in
+  `browsers[].version_skew`, `browsers[].extension_protocol_version`, and
+  `version_skew_browsers`, which `bsk status` and `bsk doctor` display with upgrade guidance.
+- **Rolling-upgrade local IPC framing (`ipc_envelope`)**: Within protocol `2.0`, upgraded
+  daemons advertise `ipc_envelope: true` in `daemon.json` (`DaemonInfo`) and `system.status`
+  (`StatusResult`). Updated CLI and `bsk mcp` processes send out-of-band `IpcEnvelope`
+  metadata (`meta` header carrying caller scope, `bind_scope`, and `return_scope_meta`) to
+  envelope-capable daemons while transparently falling back to legacy `"2.0"` in-band `_`-prefixed
+  scope fields when talking to an older `"2.0"` daemon before restart. Upgraded daemons accept
+  both framings simultaneously (`crates/bsk-cli/src/ipc_client.rs`, `crates/bsk-cli/src/daemon/ipc.rs`).
 
-Run `bsk status --json` to see `compatibility.daemon` and
-`compatibility.browsers[].features`. Each feature reports `available` and its
-`blocked_by` components. Existing status fields and the daemon's status wire
-format are unchanged. `bsk doctor` gives a readable explanation. Availability is
-a version check, not a guarantee of permissions, settings or a live session.
+Run `bsk status --json` to inspect `daemon_version`, `protocol_version`, `ipc_envelope`,
+`browsers[].extension_protocol_version`, and `version_skew_browsers`. Run `bsk doctor` for
+actionable diagnostics.
 
-If the daemon is too old, update bsk and restart that daemon after active tasks
-finish. A host-managed foreground daemon must be restarted by its host. If an
-extension is too old, update that browser profile and wait for reconnection.
-Updating the CLI cannot update an extension awaiting store approval or rollout;
-supported features remain usable in the meantime. Each connected profile is
-checked separately, and reconnection replaces its reported version.
+If the daemon is on an incompatible protocol version, update `bsk` and restart the daemon
+after active tasks finish (host-managed foreground daemons must be restarted by their host).
+If an extension profile is on an older major protocol, update or reload that browser profile's
+extension and wait for reconnection. Each connected browser profile is checked independently.
 
-The Agent Skill supplies instructions, not runtime capability. Reload it or start
-a new conversation after a skill update. Even a stale conversation receives the
-same structured runtime rejection. Do not remove an explicitly requested option
-just to make an unsupported operation run.
+The Agent Skill (`crates/bsk-cli/skill/`) supplies workflow instructions rather than runtime
+capability; reload the skill or start a new conversation after updating `bsk`.
 
 ## Where maintainers change the contract
 
-The CLI cache lasts for the current process and is keyed by socket path, not by
-daemon identity or IPC connection. Reusing it assumes the daemon has not been
-replaced at that path since discovery. The cached path does not provide a
-same-connection version check or detect such a replacement.
+`crates/bsk-protocol` is the single source of truth (SSOT) for wire methods, dispatch
+policies, and schemas:
 
-1. Define a feature and its daemon/extension protocol requirements in
-   `crates/bsk-protocol/src/compatibility.rs`. Bump the protocol when adding a new
-   requirement; keep old defaults for omitted optional parameters.
-2. Attach the feature to every relevant CLI/daemon/extension method in
-   `crates/bsk-protocol/src/method.rs`. Every method explicitly declares its
-   feature list, including `[]` for base operations. Include any daemon method
-   that translates into an extension request.
-3. Run `pnpm protocol:generate`, then `pnpm protocol:check`. The same catalog
-   generates extension contracts, feature metadata and the checked-in schemas.
-   Popup guidance reads these generated requirements too.
-
-The feature table covers borrow confirmation timeouts (1.2), request-help
-interaction policy (daemon 1.3; existing extension support starts at 1.0),
-incognito sessions (1.4), native dialog and suspended operation control (1.5),
-click-move-click drag gestures (1.7), target control and `expect` preconditions
-(1.8), and declarative DOM `read` plus `evaluate --unverified` (1.9). It does not
-claim to reconstruct introduction versions for every historical base method.
-
-Base compatibility also does not remove a feature's workflow requirements. In
-particular, shared-browser cooperation requires `cooperate sync` and a fresh
-context before page mutations. An older CLI without that command can still
-start a session, navigate its initial page and read it, but must be updated for
-the new mutation workflow. This feature table does not certify that older
-clients support every workflow in a newer extension.
-
-Generated-file checks prove consistency within this checkout. Before release,
-also exercise the new CLI with older daemons/extensions and an older CLI with the
-new daemon/extension: ordinary operations must still work, requested unsupported
-features must fail before browser effects, and the error must name the right
-component. Keep the new extension compatible with existing daemon requests while
-its store release is pending; enable new operations only when the target peers
-meet their declared requirements.
+1. **Declare method metadata in `crates/bsk-protocol/src/method.rs`**: Every `Method` variant
+   defines a single `MethodSpec` entry specifying `owner` (`Daemon`, `Extension`, or `Shared`),
+   `queue_mode` (`Serial`, `Unlocked`, `CooperateDynamic`, or `VideoDynamic`), `deadline`
+   (`Standard`, `FullPage`, or `BorrowConfirmation`), `cancel_at_deadline`, `outcome`
+   (`Ordinary`, `EffectAwareAction`, or `FileTransfer`), `wal_tracking`, `action_metadata`
+   (`None`, `ContextOnly`, or `Full`), and `recipe_step`.
+2. **Keep additive changes backward-compatible within a major**: Add optional fields with
+   `#[serde(default, skip_serializing_if = ...)]` when preserving compatibility within `2.x`.
+   Bump `PROTOCOL_VERSION` (and `MIN_COMPATIBLE_PROTOCOL` when breaking wire invariants) in
+   `crates/bsk-protocol/src/catalog.rs` when introducing new protocol revisions.
+3. **Regenerate and verify artifacts**: Run `pnpm protocol:generate`, then `pnpm protocol:check`.
+   `crates/bsk-protocol/src/catalog.rs` exports both the checked-in JSON Schemas under
+   `crates/bsk-protocol/schema/` and the TypeScript wire contracts under
+   `apps/extension/src/transport/generated/`. Never hand-edit generated files.

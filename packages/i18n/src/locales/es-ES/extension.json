@@ -112,7 +112,11 @@
       "readFailed": "No se pudieron cargar los ajustes. Vuelve a abrir la extensión.",
       "writeFailed": "No se pudo guardar. Tus ajustes no han cambiado. Inténtalo de nuevo.",
       "confirmTabBorrowInfoLabel": "Acerca de la confirmación para tomar prestadas pestañas",
-      "requestHelpEnabledInfoLabel": "Acerca de las solicitudes de ayuda humana"
+      "requestHelpEnabledInfoLabel": "Acerca de las solicitudes de ayuda humana",
+      "openAgentWindowMinimized": "Abrir ventanas del agente minimizadas",
+      "openAgentWindowMinimizedHint": "Si está activado, las nuevas ventanas del agente en segundo plano se crean directamente minimizadas en lugar de aparecer en pantalla. Si está desactivado, se abren como ventanas normales sin foco.",
+      "openAgentWindowMinimizedScope": "Se guarda automáticamente para este perfil del navegador. Se aplica a las nuevas ventanas del agente en segundo plano; las sesiones explícitas en primer plano y la grabación de acciones siguen abriéndose visiblemente.",
+      "openAgentWindowMinimizedInfoLabel": "Acerca de abrir ventanas del agente minimizadas"
     },
     "remoteLocal": "Cambiar a local",
     "remotePairing": "Enlace de emparejamiento",
@@ -154,7 +158,7 @@
       "unavailableHint": "Conecta este perfil del navegador a bsk para copiar sus instrucciones.",
       "copyButton": "Copiar instrucciones",
       "copyFailed": "No se pudieron copiar las instrucciones. Inténtalo de nuevo.",
-      "promptTemplate": "Para esta tarea, usa BrowserSkill en el navegador {{name}} (ID de instancia: {{instanceId}}). Inicia cada nueva sesión de esta tarea con la interfaz correspondiente:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nEn DeepSeek Harness, llama a la herramienta sin ejecutar el comando CLI por separado.\nSi esta instancia no está conectada, detente y pídeme que vuelva a conectar este perfil. No omitas --browser / browser ni cambies a otra instancia.",
+      "promptTemplate": "Para esta tarea, usa BrowserSkill en el navegador {{name}} (ID de instancia: {{instanceId}}). Inicia cada nueva sesión de esta tarea con la interfaz correspondiente:\nCLI: {{command}}\nMCP: {{toolCall}}\nCon herramientas MCP, llama a la herramienta sin ejecutar el comando CLI por separado.\nSi esta instancia no está conectada, detente y pídeme que vuelva a conectar este perfil. No omitas --browser / browser ni cambies a otra instancia.",
       "title": "Navegador actual",
       "unnamed": "Navegador sin nombre"
     },
@@ -389,7 +393,21 @@
       "recordStop": "Detener grabación de operaciones",
       "recordAwait": "Esperar grabación",
       "resize": "Redimensionar ventana",
-      "emulate": "Cambiar ajustes de emulación"
+      "emulate": "Cambiar ajustes de emulación",
+      "cooperate": "Sincronizar pestaña compartida",
+      "sessionStart": "Iniciar sesión",
+      "sessionStop": "Detener sesión",
+      "screenshotFullPage": "Capturar pantalla completa",
+      "screenshotRead": "Leer captura",
+      "screenshotRelease": "Liberar captura",
+      "debug": "Ejecutar acción de depuración",
+      "video": "Gestionar grabación de vídeo",
+      "dialogStatus": "Comprobar estado del diálogo",
+      "dialogAccept": "Aceptar diálogo",
+      "dialogDismiss": "Descartar diálogo",
+      "waitForElement": "Esperar elemento",
+      "operationAwait": "Esperar operación",
+      "operationCancel": "Cancelar operación"
     }
   },
   "debug": {

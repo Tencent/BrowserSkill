@@ -1,23 +1,29 @@
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type FrameNodeHandle, isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type { SessionManager } from "@/session-manager/manager";
 import type { DragParams, DragPoint, DragResult, DragTarget, RpcError } from "@/transport/types";
 import { withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
+import { rpcError } from "./errors";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
 import { withInputReady } from "./input-readiness";
 import { type InteractionDeps, modifiersBitfield, resolveActionTarget } from "./interaction";
 import { pointerTransactionDeps } from "./pointer-transaction";
 import {
   type CdpRunner,
-  chromeTabsApi,
+  delegateCdpRunner,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
   resolveTargetTab,
-  sendToCdpTarget,
+  sendToFrameHandle,
 } from "./shared";
 import { pointReachesTarget } from "./target-hit";
 import { BoundedWaitError, waitBounded } from "./transfer-transaction";
+
+function isOutOfProcessNode(cdp: CdpRunner, tabId: number, handle: FrameNodeHandle): boolean {
+  if (!handle.frameId) return false;
+  return cdp.hasOwnFrameTarget(tabId, handle.frameId);
+}
 
 const validPoint = (p: DragPoint | undefined) =>
   !!p && Number.isFinite(p.x) && Number.isFinite(p.y);
@@ -74,7 +80,7 @@ export function validateDrag(p: DragParams): RpcError | null {
 export async function handleDrag(
   manager: SessionManager,
   params: DragParams,
-  deps: InteractionDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi },
+  deps: InteractionDeps,
 ): Promise<DragResult | RpcError> {
   if (deps.signal?.aborted)
     return { code: "cancelled", message: "drag aborted", data: { effect_state: "none" } };
@@ -109,18 +115,19 @@ export async function handleDrag(
   };
   // Check identity even between frames of a gesture. The transaction also fences
   // late CDP continuations after the outer time boundary has retired the operation.
-  const cdp = new Proxy(inputDeps.cdp, {
-    get(target, key) {
-      if (key === "resourceCleanup") return deps.cdp.resourceCleanup ?? deps.cdp;
-      const value = Reflect.get(target, key);
-      return typeof value === "function"
-        ? (...args: unknown[]) => {
-            check();
-            return value.apply(target, args);
-          }
-        : value;
+  const cdp = delegateCdpRunner(
+    inputDeps.cdp,
+    { resourceCleanup: deps.cdp.resourceCleanup ?? deps.cdp },
+    {
+      intercept: (target, _key, value) =>
+        typeof value === "function"
+          ? (...args: unknown[]) => {
+              check();
+              return value.apply(target, args);
+            }
+          : undefined,
     },
-  }) as CdpRunner;
+  );
   let outcome: DragResult | RpcError;
   try {
     outcome = await waitBounded(
@@ -143,39 +150,37 @@ export async function handleDrag(
         return withInputReady(
           ctx,
           tab.tabId,
-          { ...deps, deadline, registerCleanup: inputDeps.registerClickCleanup },
+          {
+            ...deps,
+            deadline,
+            preserveWindowFocus: true,
+            registerCleanup: inputDeps.registerClickCleanup,
+          },
           async (input): Promise<DragResult | RpcError> => {
-            const address = (r: typeof source) => ({
-              target: r.cdpTarget,
-              backendNodeId: r.backendNodeId,
-              frameId: r.frameId,
-            });
             // Scroll both ends first, then measure both again. Scrolling the second
             // endpoint must never leave us using stale coordinates for the first.
             for (const node of target ? [source, target] : [source]) {
-              const error = await scrollElementAndFramesIntoView(
-                cdp,
-                tab.tabId,
-                node.cdpTarget,
-                node.backendNodeId,
-                node.frameId,
-              );
+              const error = await scrollElementAndFramesIntoView(cdp, tab.tabId, node.handle);
               if (error) return error;
             }
-            const startGeometry = await resolveNodeGeometry(cdp, tab.tabId, address(source));
+            const startGeometry = await resolveNodeGeometry(cdp, tab.tabId, source.handle);
             if (isRpcError(startGeometry)) return startGeometry;
             const endGeometry = target
-              ? await resolveNodeGeometry(cdp, tab.tabId, address(target))
+              ? await resolveNodeGeometry(cdp, tab.tabId, target.handle)
               : undefined;
             if (endGeometry && isRpcError(endGeometry)) return endGeometry;
             const offset = (p: DragPoint, o?: DragPoint): DragPoint => ({
               x: p.x + (o?.x ?? 0),
               y: p.y + (o?.y ?? 0),
             });
-            if (
-              (source.cdpTarget.sessionId && params.source.offset) ||
-              (target?.cdpTarget.sessionId && params.target?.offset)
-            )
+            const sourceOopif = params.source.offset
+              ? isOutOfProcessNode(cdp, tab.tabId, source.handle)
+              : false;
+            const targetOopif =
+              target && params.target?.offset
+                ? isOutOfProcessNode(cdp, tab.tabId, target.handle)
+                : false;
+            if (sourceOopif || targetOopif)
               return {
                 code: "unsupported",
                 message:
@@ -220,17 +225,17 @@ export async function handleDrag(
                 const group = `drag-hit-${crypto.randomUUID()}`;
                 try {
                   for (const node of clickMoveClick && target ? [source, target] : [source]) {
-                    const { object } = await sendToCdpTarget<{ object?: { objectId?: string } }>(
+                    const { object } = await sendToFrameHandle<{ object?: { objectId?: string } }>(
                       cdp,
-                      node.cdpTarget,
+                      node.handle,
                       "DOM.resolveNode",
                       { backendNodeId: node.backendNodeId, objectGroup: group },
                     );
                     if (!object?.objectId)
                       return { code: "not_found", message: "drag endpoint is detached" };
-                    const state = await sendToCdpTarget<{ result?: { value?: boolean } }>(
+                    const state = await sendToFrameHandle<{ result?: { value?: boolean } }>(
                       cdp,
-                      node.cdpTarget,
+                      node.handle,
                       "Runtime.callFunctionOn",
                       {
                         objectId: object.objectId,
@@ -247,7 +252,7 @@ export async function handleDrag(
                   const endpoints: [typeof source, DragPoint][] = [[source, start]];
                   if (target) endpoints.push([target, end]);
                   for (const [node, point] of endpoints) {
-                    if (!(await pointReachesTarget(cdp, { ...node, tabId: tab.tabId }, point)))
+                    if (!(await pointReachesTarget(cdp, { handle: node.handle }, point)))
                       return {
                         code: "permission_denied",
                         message:
@@ -257,12 +262,16 @@ export async function handleDrag(
                 } finally {
                   const cleanup = deps.cdp.resourceCleanup ?? deps.cdp;
                   for (const node of target ? [source, target] : [source])
-                    await sendToCdpTarget(cleanup, node.cdpTarget, "Runtime.releaseObjectGroup", {
-                      objectGroup: group,
-                    }).catch(() => {});
+                    await sendToFrameHandle(
+                      cleanup,
+                      node.handle,
+                      "Runtime.releaseObjectGroup",
+                      { objectGroup: group },
+                      { allowReattach: false },
+                    ).catch(() => {});
                 }
                 await cdp.verifyPointerTarget?.(
-                  { ...source, tabId: tab.tabId },
+                  { handle: source.handle },
                   start,
                   params.source.offset,
                 );
@@ -341,13 +350,13 @@ export async function handleDrag(
                 if (clickMoveClick && target) {
                   // The first click/preview may move, replace, disable or cover the
                   // destination. Never retarget or click stale coordinates silently.
-                  const geometry = await resolveNodeGeometry(cdp, tab.tabId, address(target));
+                  const geometry = await resolveNodeGeometry(cdp, tab.tabId, target.handle);
                   if (isRpcError(geometry)) return geometry;
                   const current = offset(geometry.actionPoint, params.target?.offset);
                   if (
                     Math.abs(current.x - end.x) > 2 ||
                     Math.abs(current.y - end.y) > 2 ||
-                    !(await pointReachesTarget(cdp, { ...target, tabId: tab.tabId }, end))
+                    !(await pointReachesTarget(cdp, { handle: target.handle }, end))
                   )
                     return {
                       code: "permission_denied",
@@ -356,9 +365,9 @@ export async function handleDrag(
                     };
                   const group = `range-end-${crypto.randomUUID()}`;
                   try {
-                    const { object } = await sendToCdpTarget<{ object?: { objectId?: string } }>(
+                    const { object } = await sendToFrameHandle<{ object?: { objectId?: string } }>(
                       cdp,
-                      target.cdpTarget,
+                      target.handle,
                       "DOM.resolveNode",
                       { backendNodeId: target.backendNodeId, objectGroup: group },
                     );
@@ -367,9 +376,9 @@ export async function handleDrag(
                         code: "not_found",
                         message: "click-move-click destination detached",
                       };
-                    const state = await sendToCdpTarget<{ result?: { value?: boolean } }>(
+                    const state = await sendToFrameHandle<{ result?: { value?: boolean } }>(
                       cdp,
-                      target.cdpTarget,
+                      target.handle,
                       "Runtime.callFunctionOn",
                       {
                         objectId: object.objectId,
@@ -383,15 +392,16 @@ export async function handleDrag(
                         message: "click-move-click destination is disabled or inert",
                       };
                   } finally {
-                    await sendToCdpTarget(
+                    await sendToFrameHandle(
                       deps.cdp.resourceCleanup ?? deps.cdp,
-                      target.cdpTarget,
+                      target.handle,
                       "Runtime.releaseObjectGroup",
                       { objectGroup: group },
+                      { allowReattach: false },
                     ).catch(() => {});
                   }
                   await cdp.verifyPointerTarget?.(
-                    { ...target, tabId: tab.tabId },
+                    { handle: target.handle },
                     end,
                     params.target?.offset,
                   );
@@ -436,10 +446,16 @@ export async function handleDrag(
     const timeout =
       (error instanceof BoundedWaitError && error.kind === "timeout") ||
       (error instanceof Error && error.name === "TimeoutError");
-    outcome = {
-      code: aborted ? "cancelled" : timeout ? "timeout" : "cdp_failed",
-      message: aborted ? "drag aborted" : error instanceof Error ? error.message : String(error),
-    };
+    outcome = isStaleFrameHandleError(error)
+      ? rpcError("not_found", "ref_not_found", error.message)
+      : {
+          code: aborted ? "cancelled" : timeout ? "timeout" : "cdp_failed",
+          message: aborted
+            ? "drag aborted"
+            : error instanceof Error
+              ? error.message
+              : String(error),
+        };
   }
   try {
     await transaction.cleanup(Date.now() + 2000);

@@ -6,7 +6,6 @@ mod atomic_output;
 pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
-pub(crate) mod compatibility;
 pub mod console;
 pub mod cooperate;
 pub mod daemon;
@@ -26,6 +25,7 @@ pub mod human_loop;
 pub mod install_skill;
 pub mod interaction;
 pub(crate) mod interaction_policy;
+pub mod ledger;
 pub mod lifecycle;
 pub mod logs;
 pub mod mcp;
@@ -33,8 +33,8 @@ pub mod navigate;
 pub mod network;
 pub mod observation_view;
 pub mod observe;
+pub mod orchestration;
 pub mod plan;
-pub(crate) mod protocol;
 pub mod read;
 pub mod recipe;
 pub mod record;
@@ -147,6 +147,8 @@ pub enum Command {
     Sync(lifecycle::SyncArgs),
     /// Stop the active session, return borrowed tabs, and detach the debugger immediately.
     Close(lifecycle::CloseArgs),
+    /// Inspect or manually reconcile pending `UNKNOWN` actions in the Intent WAL.
+    Ledger(ledger::LedgerCmd),
     /// Decide native JavaScript dialogs (alert, confirm, prompt, beforeunload).
     Dialog(dialog_control::DialogCmd),
     /// Retrieve or cancel the original operation suspended by a native dialog.
@@ -310,6 +312,118 @@ pub struct LogsCmd {
     /// Number of trailing lines to print before following (default 200).
     #[arg(short = 'n', long, default_value_t = 200)]
     pub lines: usize,
+}
+
+impl GlobalFlags {
+    pub fn has_any_evidence(&self) -> bool {
+        self.context.is_some()
+            || !self.depends_on.is_empty()
+            || self.observation.is_some()
+            || self.expect.is_some()
+    }
+}
+
+fn command_caller_action_metadata_policy(command: &Command) -> bsk_protocol::ActionMetadataPolicy {
+    use bsk_protocol::{ActionMetadataPolicy, Method};
+    let (method, params) = match command {
+        // `open` and `step` wrap a guarded browser action (`tool.navigate` / inner step action).
+        Command::Open(_) | Command::Step(_) => (Method::ToolNavigate, None),
+        Command::Upload(_) => (Method::ToolUpload, None),
+        Command::Download(_) => (Method::ToolDownload, None),
+        Command::Screenshot(args) => (
+            if args.full_page {
+                Method::ToolScreenshotFullPage
+            } else {
+                Method::ToolScreenshot
+            },
+            None,
+        ),
+        Command::Navigate(_) => (Method::ToolNavigate, None),
+        Command::NavigateBack(_) => (Method::ToolNavigateBack, None),
+        Command::NavigateForward(_) => (Method::ToolNavigateForward, None),
+        Command::Reload(_) => (Method::ToolReload, None),
+        Command::Click(_) => (Method::ToolClick, None),
+        Command::Hover(_) => (Method::ToolHover, None),
+        Command::Drag(_) => (Method::ToolDrag, None),
+        Command::Wheel(_) => (Method::ToolWheel, None),
+        Command::ScrollTo(_) => (Method::ToolScrollTo, None),
+        Command::Focus(_) => (Method::ToolFocus, None),
+        Command::Blur(_) => (Method::ToolBlur, None),
+        Command::Fill(_) => (Method::ToolFill, None),
+        Command::Press(_) => (Method::ToolPress, None),
+        Command::Select(_) => (Method::ToolSelect, None),
+        Command::Evaluate(_) => (Method::ToolEvaluate, None),
+        Command::Emulate(_) => (Method::ToolEmulate, None),
+        Command::Window(WindowCmd {
+            sub: window::WindowSub::Resize(_),
+        }) => (Method::ToolWindowResize, None),
+        Command::Tab(TabCmd {
+            sub: tab::TabSub::Close(_),
+        }) => (Method::ToolTabClose, None),
+        Command::Observe(args) => (
+            Method::ToolObserve,
+            Some(serde_json::json!({ "probe_hover": args.probe_hover })),
+        ),
+        Command::Debug(args) => (
+            Method::ToolDebug,
+            Some(serde_json::json!({ "action": args.action })),
+        ),
+        Command::Read(_) => (Method::ToolRead, None),
+        Command::Snapshot(_) => (Method::ToolSnapshot, None),
+        Command::Console(_) => (Method::ToolConsole, None),
+        Command::Network(_) => (Method::ToolNetwork, None),
+        Command::GetHtml(_) => (Method::ToolGetHtml, None),
+        Command::Extract(_) => (Method::ToolExtract, None),
+        Command::WaitForNavigation(_) => (Method::ToolWaitForNavigation, None),
+        Command::WaitForElement(_) => (Method::ToolWaitForElement, None),
+        Command::WaitMs(_) => (Method::ToolWaitMs, None),
+        Command::RequestHelp(_) => (Method::ToolRequestHelp, None),
+        _ => return ActionMetadataPolicy::None,
+    };
+    method.caller_action_metadata_policy_with_params(params.as_ref())
+}
+
+/// Fail closed when caller action conditions are supplied to commands that never verify them.
+pub fn validate_command_evidence(
+    command: &Command,
+    flags: &GlobalFlags,
+) -> Result<(), error::CliError> {
+    if matches!(command, Command::Plan(_) | Command::Recipe(_)) {
+        return Ok(());
+    }
+    if matches!(command, Command::Evaluate(args) if args.unverified)
+        && (!flags.depends_on.is_empty() || flags.observation.is_some() || flags.expect.is_some())
+    {
+        return Ok(());
+    }
+    match command_caller_action_metadata_policy(command) {
+        bsk_protocol::ActionMetadataPolicy::Full => {
+            if !flags.depends_on.is_empty() && flags.context.is_none() {
+                return Err(error::CliError::invalid_params(anyhow::anyhow!(
+                    "--depends-on requires --context"
+                )));
+            }
+            Ok(())
+        }
+        bsk_protocol::ActionMetadataPolicy::ContextOnly => {
+            if !flags.depends_on.is_empty() || flags.observation.is_some() || flags.expect.is_some()
+            {
+                return Err(error::CliError::invalid_params(anyhow::anyhow!(
+                    "--observation, --expect and --depends-on apply only to guarded browser actions; read accepts --context only"
+                )));
+            }
+            Ok(())
+        }
+        bsk_protocol::ActionMetadataPolicy::None
+        | bsk_protocol::ActionMetadataPolicy::TabBindingContext => {
+            if flags.has_any_evidence() {
+                return Err(error::CliError::invalid_params(anyhow::anyhow!(
+                    "action conditions (--context, --depends-on, --observation, --expect) apply only to guarded browser actions and read (--context)"
+                )));
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

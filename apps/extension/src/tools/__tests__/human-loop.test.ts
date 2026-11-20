@@ -3,11 +3,13 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { SessionManager } from "@/session-manager/manager";
 import { RefStore } from "@/session-manager/ref-store";
 import type { RequestHelpParams } from "@/transport/types";
 import { handleRequestHelp, type RequestHelpDeps, resetHelpLifecycleForTests } from "../human-loop";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 function chromeEvent<T extends (...args: never[]) => unknown>() {
   const listeners = new Set<T>();
@@ -154,6 +156,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockReturnValue({
       confirmTabBorrow: true,
       requestHelpEnabled: false,
+      openAgentWindowMinimized: false,
     });
     const deps = baseDeps({ preferences });
     expect(await handleRequestHelp(fakeManager("abcd", 99, 5), baseParams(), deps)).toMatchObject({
@@ -174,6 +177,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockImplementation(() => ({
       confirmTabBorrow: true,
       requestHelpEnabled: enabled,
+      openAgentWindowMinimized: false,
     }));
     let respond!: (value: unknown) => void;
     const deps = baseDeps({
@@ -215,6 +219,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockImplementation(() => ({
       confirmTabBorrow: true,
       requestHelpEnabled: enabled,
+      openAgentWindowMinimized: false,
     }));
     vi.spyOn(preferences, "subscribe").mockImplementation((listener) => {
       changed = () => listener(preferences.get());
@@ -258,6 +263,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockImplementation(() => ({
       confirmTabBorrow: true,
       requestHelpEnabled: enabled,
+      openAgentWindowMinimized: false,
     }));
     vi.spyOn(preferences, "subscribe").mockImplementation((listener) => {
       changed = () => listener(preferences.get());
@@ -1014,7 +1020,7 @@ describe("handleRequestHelp", () => {
       findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
     } as unknown as SessionManager;
     const deps = baseDeps({
-      cdp: {
+      cdp: createStubCdpRunner({
         send: vi.fn(async (_tabId, method) => {
           if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
           if (method === "DOM.scrollIntoViewIfNeeded") return {};
@@ -1026,7 +1032,7 @@ describe("handleRequestHelp", () => {
           }
           throw new Error(`unexpected ${method}`);
         }),
-      } as unknown as RequestHelpDeps["cdp"],
+      }),
     });
     const res = await handleRequestHelp(
       mgr,
@@ -1061,7 +1067,12 @@ describe("handleRequestHelp", () => {
                   backendNodeId: 42,
                   tabId: 5,
                   frameId: "child",
-                  cdpSessionId: "child-session",
+                  handle: {
+                    tabId: 5,
+                    frameId: "child",
+                    loaderId: "child-loader",
+                    backendNodeId: 42,
+                  },
                   generation: 1,
                 }),
               },
@@ -1081,34 +1092,48 @@ describe("handleRequestHelp", () => {
       }
       throw new Error(`unexpected root ${method}`);
     });
-    const sendToTarget = vi.fn(async (_target, method) => {
-      if (method === "DOM.scrollIntoViewIfNeeded") return {};
-      if (method === "DOM.getContentQuads") {
-        return { quads: [[10, 20, 110, 20, 110, 60, 10, 60]] };
-      }
-      if (method === "Runtime.evaluate") return { result: { value: { width: 200, height: 100 } } };
-      if (method === "Page.getLayoutMetrics") {
-        return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
-      }
-      throw new Error(`unexpected child ${method}`);
-    });
+    const sendToFrame = vi.fn(
+      async (handle: { tabId: number; frameId: string }, method: string) => {
+        if (handle.frameId !== "child") return send(handle.tabId, method);
+        if (method === "DOM.scrollIntoViewIfNeeded") return {};
+        if (method === "DOM.getContentQuads") {
+          return { quads: [[10, 20, 110, 20, 110, 60, 10, 60]] };
+        }
+        if (method === "Runtime.evaluate")
+          return { result: { value: { width: 200, height: 100 } } };
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
+        }
+        throw new Error(`unexpected child ${method}`);
+      },
+    );
+    const childHandle = toFrameDocumentHandle(5, { frameId: "child", loaderId: "child-loader" });
     const deps = baseDeps({
-      cdp: {
+      cdp: createStubCdpRunner({
         send,
-        sendToTarget,
-        getFrameGraph: vi.fn(async () => ({
+        sendToFrame: sendToFrame as CdpRunner["sendToFrame"],
+        getFrameDocuments: vi.fn(async () => ({
           rootFrameId: "main",
           frames: [
-            { frameId: "main", target: { tabId: 5 } },
             {
+              handle: toFrameDocumentHandle(5, { frameId: "main", loaderId: "main-loader" }),
+              frameId: "main",
+              loaderId: "main-loader",
+              processKey: "root",
+              isOutOfProcess: false,
+            },
+            {
+              handle: childHandle,
               frameId: "child",
+              loaderId: "child-loader",
               parentFrameId: "main",
               ownerBackendNodeId: 99,
-              target: { tabId: 5, sessionId: "child-session" },
+              processKey: "oopif:child",
+              isOutOfProcess: true,
             },
           ],
         })),
-      } as unknown as NonNullable<RequestHelpDeps["cdp"]>,
+      }),
     });
 
     const res = await handleRequestHelp(
@@ -1120,10 +1145,12 @@ describe("handleRequestHelp", () => {
     const sentMsg = (deps.sendToTab as ReturnType<typeof vi.fn>).mock.calls[0][1];
     expect(sentMsg.rects).toEqual([{ top: 346, left: 224, width: 200, height: 80 }]);
     expect(res).toMatchObject({ resolved_targets: [{ matched: true, ref: "@e1" }] });
-    expect(sendToTarget).toHaveBeenCalledWith(
-      { tabId: 5, sessionId: "child-session" },
+    expect(sendToFrame).toHaveBeenCalledWith(
+      expect.objectContaining(childHandle),
       "DOM.getContentQuads",
-      { backendNodeId: 42 },
+      {
+        backendNodeId: 42,
+      },
     );
   });
 

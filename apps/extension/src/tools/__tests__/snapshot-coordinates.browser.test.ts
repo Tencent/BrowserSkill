@@ -1,8 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentGraph,
+  type FrameDocumentInfo,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { resolveNodeGeometry } from "../frame-geometry";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { captureObservationFacts } from "../vom/capture-coordinator";
 
 type Send = <T = Record<string, unknown>>(
@@ -48,7 +52,7 @@ const oracleExpression = `(() => {
   return { probes, viewport: { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight }, owners };
 })()`;
 
-describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate contract", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real DOMSnapshot coordinate contract", () => {
   it.each(
     [
       { deviceScale: 1, zoom: 1 },
@@ -79,7 +83,7 @@ describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate c
     const { baseUrl } = await server.start();
     try {
       await withChrome(
-        { executable: process.env.BSK_GEOMETRY_CHROME, ...configuration },
+        { executable: process.env.BSK_TEST_CHROME, ...configuration },
         async (send: Send) => {
           const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
             url: "about:blank",
@@ -120,21 +124,26 @@ describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate c
             sessions.push(sessionId);
           }
           expect(sessions.length).toBe(configuration.fixture === "oopif-scrollbars" ? 3 : 2);
-          const frames: CdpFrame[] = [];
+          type FrameRecord = FrameDocumentInfo & { targetSession?: string };
+          const frames: FrameRecord[] = [];
           const names = new Map<string, string>();
-          const sessionFor = (target: CdpTarget) => target.sessionId ?? rootSession;
           for (const sessionId of sessions) {
             const { frameTree } = await send<{ frameTree: Tree }>(
               "Page.getFrameTree",
               {},
               sessionId,
             );
-            const target: CdpTarget = {
-              tabId: 1,
-              ...(sessionId === rootSession ? {} : { sessionId }),
-            };
+            const targetSession = sessionId === rootSession ? undefined : sessionId;
             const visit = (tree: Tree, parentFrameId = tree.frame.parentId) => {
-              frames.push({ frameId: tree.frame.id, parentFrameId, target });
+              frames.push({
+                handle: toFrameDocumentHandle(1, { frameId: tree.frame.id, loaderId: "" }),
+                frameId: tree.frame.id,
+                loaderId: "",
+                parentFrameId,
+                processKey: targetSession ? `oopif:${targetSession}` : "root",
+                isOutOfProcess: Boolean(targetSession),
+                ...(targetSession ? { targetSession } : {}),
+              });
               names.set(tree.frame.id, tree.frame.name ?? "");
               for (const child of tree.childFrames ?? []) visit(child, tree.frame.id);
             };
@@ -147,32 +156,38 @@ describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate c
             const owner = await send<{ backendNodeId: number }>(
               "DOM.getFrameOwner",
               { frameId: frame.frameId },
-              sessionFor(parent.target),
+              parent.targetSession ?? rootSession,
             );
-            frame.ownerBackendNodeId = owner.backendNodeId;
+            (frame as { ownerBackendNodeId?: number }).ownerBackendNodeId = owner.backendNodeId;
           }
-          const graph: CdpFrameGraph = { rootFrameId: frames[0].frameId, frames };
+          const graph: FrameDocumentGraph = { rootFrameId: frames[0].frameId, frames };
           const calls: string[] = [];
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: (tabId, method, params) => {
               calls.push(`${tabId}:${method}`);
               return send(method, params, rootSession);
             },
-            sendToTarget: (target, method, params) => {
-              calls.push(`${target.sessionId ?? target.tabId}:${method}`);
+            sendToFrame: (handle, method, params) => {
+              const targetSession = handle.frameId
+                ? frames.find((item) => item.frameId === handle.frameId)?.targetSession
+                : undefined;
+              const prefix = targetSession ?? handle.tabId;
+              calls.push(`${prefix}:${method}`);
               if (
                 method === "Runtime.evaluate" &&
                 (params as { expression?: string })?.expression?.includes("window.innerWidth")
               )
-                calls.push(`${target.sessionId ?? target.tabId}:viewport-size`);
-              return send(method, params, sessionFor(target));
+                calls.push(`${prefix}:viewport-size`);
+              return send(method, params, targetSession ?? rootSession);
             },
-            getFrameGraph: async () => graph,
+            hasOwnFrameTarget: (_tabId, frameId) =>
+              Boolean(frames.find((item) => item.frameId === frameId)?.isOutOfProcess),
+            getFrameDocuments: async () => graph,
             getAttachmentId: () => rootSession,
-          };
+          });
           const oracles = new Map<string, Oracle>();
           for (const frame of frames) {
-            const session = sessionFor(frame.target);
+            const session = frame.targetSession ?? rootSession;
             const { executionContextId } = await send<{ executionContextId: number }>(
               "Page.createIsolatedWorld",
               { frameId: frame.frameId, worldName: "coordinate-oracle" },
@@ -282,8 +297,9 @@ describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate c
                 if (configuration.fixture === "oopif-scrollbars")
                   expect(
                     await resolveNodeGeometry(cdp, 1, {
-                      target: frame.target,
+                      tabId: 1,
                       frameId: frame.frameId,
+                      loaderId: frame.loaderId ?? "",
                       backendNodeId: node!.backendNodeId,
                     }),
                   ).toMatchObject({ code: "permission_denied" });
@@ -297,8 +313,9 @@ describe.skipIf(!process.env.BSK_GEOMETRY_CHROME)("real DOMSnapshot coordinate c
                 ).toBeLessThan(2);
               if (configuration.fixture !== "oopif-scrollbars") continue;
               const live = await resolveNodeGeometry(cdp, 1, {
-                target: frame.target,
+                tabId: 1,
                 frameId: frame.frameId,
+                loaderId: frame.loaderId ?? "",
                 backendNodeId: node!.backendNodeId,
               });
               if ("code" in live) throw new Error(live.message);

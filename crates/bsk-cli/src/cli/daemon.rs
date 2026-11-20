@@ -7,7 +7,7 @@ use clap::Subcommand;
 use crate::daemon;
 
 /// Default WebSocket port the daemon listens on.
-pub const DEFAULT_WS_PORT: u16 = 52800;
+pub const DEFAULT_WS_PORT: u16 = bsk_protocol::DEFAULT_DAEMON_PORT;
 /// Default daemon idle timeout (10 minutes per design §3.2).
 pub const DEFAULT_DAEMON_IDLE: Duration = Duration::from_secs(10 * 60);
 /// Default session idle timeout (5 minutes per design §5).
@@ -27,7 +27,7 @@ pub enum DaemonCmd {
     /// Generate a local pairing link (or a remote link in server mode).
     Pair {
         /// Replace this local browser/device after successful activation.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_device_id)]
         replace: Option<String>,
     },
 
@@ -36,13 +36,21 @@ pub enum DaemonCmd {
 
     /// Revoke a device grant, or all grants and outstanding pairing links.
     Revoke {
-        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        #[arg(
+            required_unless_present = "all",
+            conflicts_with = "all",
+            allow_hyphen_values = true,
+            value_parser = parse_device_id
+        )]
         device_id: Option<String>,
         #[arg(long)]
         all: bool,
     },
     /// Rotate a local device key on its next connection.
-    Rotate { device_id: String },
+    Rotate {
+        #[arg(allow_hyphen_values = true, value_parser = parse_device_id)]
+        device_id: String,
+    },
     /// Explicitly allow or stop allowing unverified local connections.
     TrustLocal {
         #[arg(value_enum)]
@@ -317,6 +325,16 @@ fn maintain(
     }
 }
 
+fn parse_device_id(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("device ID must not be empty".into());
+    }
+    if value.starts_with('-') && bsk_protocol::local_auth::Bytes::<16>::decode(value).is_err() {
+        return Err(format!("unexpected flag or invalid device ID '{value}'"));
+    }
+    Ok(value.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,7 +383,7 @@ mod tests {
         }
         args = StartArgs {
             mode: DaemonMode::Server,
-            public_url: Some("ws://127.0.0.1:52800/extension".into()),
+            public_url: Some(format!("{}/extension", bsk_protocol::DEFAULT_DAEMON_WS_URL)),
             ..Default::default()
         };
         args.renew_after = Some(Duration::from_secs(90 * 86400));

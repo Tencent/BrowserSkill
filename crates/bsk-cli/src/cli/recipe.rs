@@ -191,7 +191,7 @@ fn held(store: &Store, name: &str, checked: Option<&str>) -> Option<Refusal> {
         format!(
             "Run {run} stopped with an effect nobody has checked ({what}), so repeating it could \
              do it twice. Check the application's records for what it did, then run again with \
-             --checked {run} (checked in MCP and DSH).",
+             --checked {run} (checked in MCP).",
             run = unchecked.run_id
         ),
     ))
@@ -608,7 +608,12 @@ fn write_new_file(path: &std::path::Path, value: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    cmd: RecipeCmd,
+    flags: &GlobalFlags,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     {
         let rejected = || -> anyhow::Result<()> {
             ensure!(
@@ -628,6 +633,7 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
             })
         })?;
     }
+    let op_ctx = ctx.without_action_metadata();
     match cmd.command {
         RecipeCommand::List { site } => {
             let (reply, exit) = list(site.as_deref());
@@ -650,14 +656,14 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
             print(&reply, exit)
         }
         RecipeCommand::Draft(args) => {
-            let (daemon, _protocol) =
-                ensure_daemon::ensure_daemon_with_protocol().context("ensure daemon is running")?;
+            let (daemon, _protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
+                .context("ensure daemon is running")?;
             let reply = draft(
                 &args.session,
                 &args.name,
                 &args.description,
                 |method, params, timeout| {
-                    business_rpc::call(
+                    op_ctx.call(
                         daemon.sock_path.clone(),
                         "recipe",
                         method,
@@ -705,11 +711,11 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
                     return print(&reply, exit);
                 }
             }
-            let (daemon, protocol) =
-                ensure_daemon::ensure_daemon_with_protocol().context("ensure daemon is running")?;
+            let (daemon, protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
+                .context("ensure daemon is running")?;
             plan::check_protocol(&protocol).map_err(CliError::Local)?;
             let (mut reply, mut exit) = run(&request, |method, params, timeout| {
-                business_rpc::call(
+                op_ctx.call(
                     daemon.sock_path.clone(),
                     "recipe",
                     method,

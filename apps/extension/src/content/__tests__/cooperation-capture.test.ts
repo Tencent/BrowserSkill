@@ -2,13 +2,14 @@ import { afterEach, expect, it, vi } from "vitest";
 import { guardedRunner } from "@/cooperation/action-guard";
 import {
   COOPERATION_ARM,
+  COOPERATION_ARM_FRAME,
   COOPERATION_DISABLE,
   COOPERATION_READ,
-  COOPERATION_READY,
+  COOPERATION_SUBFRAME_READY,
   type FrameState,
   type InputExpectation,
 } from "@/cooperation/types";
-import type { CdpRunner } from "@/tools/shared";
+import { createStubCdpRunner } from "@/tools/shared";
 import { attachCooperationCapture } from "../cooperation-capture";
 
 let dispose: (() => void) | undefined;
@@ -626,7 +627,7 @@ it("clears text attribution when preparation fails before native dispatch", asyn
   const target = document.querySelector("input")!;
   target.focus();
   const native = vi.fn();
-  const runner = guardedRunner({ send: native } as CdpRunner, {
+  const runner = guardedRunner(createStubCdpRunner({ send: native }), {
     prepare: async (input) => {
       read(COOPERATION_ARM, "first", input);
       throw new Error("target changed");
@@ -746,13 +747,13 @@ it("attributes a keyless caret command to the Agent while preserving subsequent 
     });
     completeInput(document.querySelector("input")!, event);
   };
-  const cdp = {
-    send: vi.fn(async (_tabId, _method, params) => {
+  const cdp = createStubCdpRunner({
+    send: vi.fn(async (_tabId, _method, params: any) => {
       // Chromium emits an empty key for native editor commands without a key descriptor.
-      press(params.key ?? "", params.timestamp * 1000);
-      return {};
+      press(params?.key ?? "", (params?.timestamp ?? 0) * 1000);
+      return {} as never;
     }),
-  } as CdpRunner;
+  });
   const runner = guardedRunner(cdp, {
     prepare: async (input) => {
       read(COOPERATION_ARM, "first", input);
@@ -918,10 +919,141 @@ it("preserves editing across a focus transition into a shadow field", async () =
   expect(read()).toMatchObject({ editing: false });
 });
 
-it("announces renderer readiness once after the collection listener exists", () => {
+it("loads silently with zero startup messages and zero DOM listeners until explicitly armed", async () => {
+  const closedRoots = new WeakMap<HTMLElement, ShadowRoot>();
+  document.body.innerHTML =
+    '<input aria-label="City" value="Shanghai"><div id="preexisting-closed"></div>';
+  const preHost = document.querySelector<HTMLElement>("#preexisting-closed")!;
+  const preClosed = preHost.attachShadow({ mode: "closed" });
+  closedRoots.set(preHost, preClosed);
+
+  const read = collector((el) => closedRoots.get(el) ?? null);
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+
+  // Unarmed mutations and human pointer events are ignored before COOPERATION_ARM_FRAME / COOPERATION_READ.
+  const field = document.querySelector<HTMLInputElement>("input")!;
+  const press = new MouseEvent("pointerdown", { bubbles: true, clientX: 5, clientY: 5 });
+  Object.defineProperty(press, "isTrusted", { value: true });
+  field.dispatchEvent(press);
+  document.body.appendChild(document.createElement("span")).textContent = "unarmed";
+
+  expect(read(COOPERATION_ARM_FRAME)).toEqual({ ok: true });
+
+  // Once armed (even before any `COOPERATION_READ` grants a lease or traverses `controls()`),
+  // dynamically inserted light-DOM and closed-ShadowRoot subframes emit `COOPERATION_SUBFRAME_READY`.
+  const firstFrame = document.createElement("iframe");
+  const secondFrame = document.createElement("iframe");
+  document.body.append(firstFrame, secondFrame);
+  await vi.waitFor(
+    () => {
+      expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+        kind: COOPERATION_SUBFRAME_READY,
+      });
+    },
+    { interval: 5 },
+  );
+
+  // Pre-existing closed ShadowRoot observed solely by `COOPERATION_ARM_FRAME` reports dynamic iframes.
+  vi.mocked(chrome.runtime.sendMessage).mockClear();
+  preClosed.appendChild(document.createElement("iframe"));
+  await vi.waitFor(
+    () => {
+      expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+        kind: COOPERATION_SUBFRAME_READY,
+      });
+    },
+    { interval: 5 },
+  );
+
+  // Dynamically inserted closed ShadowRoot host containing an iframe reports `COOPERATION_SUBFRAME_READY`
+  // AND continues observing subsequent iframe insertions inside that closed ShadowRoot.
+  vi.mocked(chrome.runtime.sendMessage).mockClear();
+  const dynamicHost = document.createElement("div");
+  const dynamicClosed = dynamicHost.attachShadow({ mode: "closed" });
+  closedRoots.set(dynamicHost, dynamicClosed);
+  dynamicClosed.appendChild(document.createElement("iframe"));
+  document.body.appendChild(dynamicHost);
+  await vi.waitFor(
+    () => {
+      expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+        kind: COOPERATION_SUBFRAME_READY,
+      });
+    },
+    { interval: 5 },
+  );
+
+  vi.mocked(chrome.runtime.sendMessage).mockClear();
+  dynamicClosed.appendChild(document.createElement("iframe"));
+  await vi.waitFor(
+    () => {
+      expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+        kind: COOPERATION_SUBFRAME_READY,
+      });
+    },
+    { interval: 5 },
+  );
+
+  expect(read()).toMatchObject({
+    human: 0,
+    structure: 0,
+  });
+});
+
+it("ignores internal data-bsk-* attributes and browser-skill-overlay mutations and UI interactions", async () => {
+  document.body.innerHTML =
+    '<input id="search" aria-label="Search" value="ok"><input id="secret" aria-label="Secret" value="s3cr3t">';
   const read = collector();
-  expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({ kind: COOPERATION_READY });
-  expect(read()).toHaveProperty("document");
+  const initial = read()!;
+
+  // Recording / sensitive-field private markers and overlay host mount must not advance `structure` or `revision`.
+  document.documentElement.setAttribute("data-bsk-record-document", "doc-1");
+  const secret = document.querySelector<HTMLInputElement>("#secret")!;
+  secret.setAttribute("data-bsk-record-password", "");
+  const overlayHost = document.createElement("browser-skill-overlay");
+  overlayHost.setAttribute("data-bsk-overlay", "");
+  const shadow = overlayHost.attachShadow({ mode: "open" });
+  shadow.innerHTML =
+    '<div class="help-card"><input id="help-note" aria-label="Help note"><button id="help-send">Continue</button></div>';
+  document.documentElement.appendChild(overlayHost);
+
+  await Promise.resolve();
+  expect(read()).toMatchObject({
+    document: initial.document,
+    revision: initial.revision,
+    structure: 0,
+    human: 0,
+    editing: false,
+  });
+
+  // Clicking, focusing, and typing inside the extension's own ShadowRoot UI must not advance `human` or `editing`.
+  const helpNote = shadow.querySelector<HTMLInputElement>("#help-note")!;
+  const helpSend = shadow.querySelector<HTMLButtonElement>("#help-send")!;
+  for (const target of [helpNote, helpSend]) {
+    const down = new MouseEvent("pointerdown", {
+      bubbles: true,
+      composed: true,
+      clientX: 4,
+      clientY: 4,
+    });
+    Object.defineProperty(down, "isTrusted", { value: true });
+    target.dispatchEvent(down);
+  }
+  helpNote.focus();
+  helpNote.value = "User typed note inside HelpRequestOverlay";
+  const inputEvent = new InputEvent("input", { bubbles: true, composed: true });
+  Object.defineProperty(inputEvent, "isTrusted", { value: true });
+  helpNote.dispatchEvent(inputEvent);
+
+  const afterOverlay = read()!;
+  expect(afterOverlay).toMatchObject({
+    revision: initial.revision,
+    structure: 0,
+    human: 0,
+    editing: false,
+  });
+  expect(afterOverlay.fields).toEqual([expect.objectContaining({ label: "Search", value: "ok" })]);
+  overlayHost.remove();
+  document.documentElement.removeAttribute("data-bsk-record-document");
 });
 
 it("classifies a non-submitted media timeline without masking business fields", () => {
@@ -1067,4 +1199,139 @@ it.each([
   submit();
   key("keyup", 10);
   expect(read()?.human).toBe(scenario === "matched" ? 1 : 2);
+});
+
+const page =
+  '<header><span id="cell" data-rev="0">Version: rev-0</span><p id="other">Other</p></header>';
+/** How far each counter moved across `change`, and what the frame logged for it. */
+function across(read: () => FrameState | undefined, change: () => void) {
+  const before = read()!;
+  change();
+  const after = read()!;
+  return {
+    structure: after.structure - before.structure,
+    textual: after.textual! - before.textual!,
+    texts: after.texts!.slice(before.texts!.length),
+    after,
+  };
+}
+
+it("logs a batch that only replaces visible text, whichever way the page writes it", () => {
+  document.body.innerHTML = page;
+  const read = collector();
+  const cell = document.querySelector<HTMLElement>("#cell")!;
+
+  // The arena's own update: page-private data and textContent in one task.
+  const first = across(read, () => {
+    cell.dataset.rev = "1";
+    cell.textContent = "Version: rev-1";
+  });
+  expect(first).toMatchObject({ structure: 1, textual: 1 });
+  expect(first.texts).toEqual([
+    {
+      sequence: first.after.textual,
+      id: expect.any(String),
+      label: "span#cell",
+      previous_value: "Version: rev-0",
+      value: "Version: rev-1",
+    },
+  ]);
+
+  const second = across(read, () => {
+    (cell.firstChild as Text).data = "  Version:\n rev-2 ";
+  });
+  expect(second).toMatchObject({ structure: 1, textual: 1 });
+  expect(second.texts).toMatchObject([
+    { previous_value: "Version: rev-1", value: "Version: rev-2" },
+  ]);
+
+  // Two writes before anyone reads are one replacement, first text to last.
+  const third = across(read, () => {
+    cell.textContent = "Version: rev-3";
+    cell.textContent = "Version: rev-4";
+  });
+  expect(third.texts).toMatchObject([
+    { previous_value: "Version: rev-2", value: "Version: rev-4" },
+  ]);
+});
+
+it.each<[string, () => unknown]>([
+  ["a node is added", () => document.querySelector("header")!.append(document.createElement("b"))],
+  ["text appears where there was none", () => document.querySelector("header")!.append("new")],
+  ["text is emptied", () => (document.querySelector("#cell")!.textContent = "")],
+  ["a class changes", () => document.querySelector("#cell")!.setAttribute("class", "hidden")],
+  ["the element is hidden", () => document.querySelector("#cell")!.setAttribute("hidden", "")],
+  // The observation reads data-state, and a style sheet reads data-shown.
+  ["observed data changes", () => document.querySelector("#cell")!.setAttribute("data-state", "x")],
+  ["styled data changes", () => document.querySelector("#cell")!.setAttribute("data-shown", "no")],
+  [
+    "punctuated data-* attribute changes",
+    () => document.querySelector("#cell")!.setAttribute("data-shown.now", "no"),
+  ],
+  ["a heading changes", () => (document.querySelector("h2")!.textContent = "Renamed")],
+  ["a label changes", () => (document.querySelector("label")!.textContent = "Renamed")],
+  // Refs inside a row or list item are identified by its text.
+  ["a list item changes", () => (document.querySelector("li")!.textContent = "Renamed")],
+  ["a table cell changes", () => (document.querySelector("td")!.textContent = "Renamed")],
+  ["a name source changes", () => (document.querySelector("#named")!.textContent = "Renamed")],
+  ["the old text is not unique", () => (document.querySelector("#twin")!.textContent = "Solo")],
+  [
+    "text changes along with structure",
+    () => {
+      document.querySelector("#cell")!.textContent = "Version: rev-1";
+      document.querySelector("#other")!.remove();
+    },
+  ],
+])("keeps requiring a fresh observation when %s", (_name, change) => {
+  document.body.innerHTML = `<style>[data-shown="no"] { display: none }</style>${page}
+    <h2>Title</h2><label>Name</label><span id="named">Describes</span>
+    <button aria-describedby="named">Go</button><i id="twin">Twin</i><i>Twin</i>
+    <ul><li>Item</li></ul><table><tbody><tr><td>Cell</td></tr></tbody></table>`;
+  const read = collector();
+  expect(across(read, change)).toMatchObject({ structure: 1, textual: 0, texts: [] });
+});
+
+it("marks the log incomplete once it drops a replacement", () => {
+  document.body.innerHTML = page;
+  const read = collector();
+  const cell = document.querySelector("#cell")!;
+  read();
+  for (let version = 1; version <= 70; version++) {
+    // Reads are spaced out: the collector refuses to index a text ticker.
+    vi.setSystemTime(Date.now() + 200);
+    cell.textContent = `Version: rev-${version}`;
+    read();
+  }
+  const state = read()!;
+  expect(state.textual).toBe(70);
+  expect(state.texts).toHaveLength(64);
+  expect(state.texts![0]).toMatchObject({ sequence: 7, value: "Version: rev-7" });
+  expect(state.textFloor).toBe(6);
+});
+
+it("stops logging text that changes more than ten times a second", () => {
+  document.body.innerHTML = page;
+  const read = collector();
+  const cell = document.querySelector("#cell")!;
+  read();
+  for (let version = 1; version <= 12; version++) {
+    cell.textContent = `Version: rev-${version}`;
+    read();
+  }
+  expect(read()).toMatchObject({ structure: 12, textual: 10 });
+});
+
+it("reports whether a style tied to focus could show or hide content", () => {
+  document.body.innerHTML = `<style>
+      button:focus { outline: 2px solid; color: red }
+      #menu-button:focus + .panel { display: block }
+    </style>
+    <button id="plain">Plain</button>
+    <div class="menu"><button id="menu-button">Open</button><div class="panel">Panel</div></div>`;
+  const read = collector();
+  expect(read()).toMatchObject({ focusNeutral: true });
+  document.querySelector<HTMLElement>("#plain")!.focus();
+  expect(read()).toMatchObject({ focusNeutral: true });
+  document.querySelector<HTMLElement>("#menu-button")!.focus();
+  expect(read()).toMatchObject({ focusNeutral: false });
 });

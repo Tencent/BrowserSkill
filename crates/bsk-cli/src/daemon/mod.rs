@@ -8,7 +8,10 @@ pub mod dialog_operations;
 pub mod file_transfer;
 pub mod inflight;
 pub mod info;
+pub mod intent_wal;
 pub mod ipc;
+mod ipc_sessions;
+mod ipc_transport;
 pub(crate) mod json_store;
 pub mod local_auth;
 pub mod lockfile;
@@ -25,6 +28,7 @@ pub mod sessions;
 pub mod start;
 pub(crate) mod start_error;
 pub mod state;
+mod tool_pipeline;
 mod tool_policy;
 pub mod ws;
 
@@ -39,7 +43,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Default WebSocket port (design §3.2). Override via `--port`.
-pub const DEFAULT_WS_PORT: u16 = 52800;
+pub const DEFAULT_WS_PORT: u16 = bsk_protocol::DEFAULT_DAEMON_PORT;
 
 /// Test/embed entry point used by M4/M5 integration tests and the
 /// experimental `bsk daemon start --foreground` flag. Spins up the WS

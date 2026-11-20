@@ -2,6 +2,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { STORAGE_KEYS } from "@/lib/instance-id";
+import { LOCAL_PAIRING_MESSAGE } from "@/lib/local-pairing-bridge";
+import {
+  DEFAULT_DAEMON_PORT,
+  DEFAULT_DAEMON_WS_URL,
+  LOCAL_PAIRING_FRAGMENT_PREFIX,
+} from "@/transport/generated/methods";
 import type { RemoteEndpoint } from "@/transport/remote-endpoint";
 import { readRemoteConnection, readSavedRemoteConnection } from "@/transport/remote-storage";
 import { ConnectionSettings } from "./connection-settings";
@@ -21,7 +27,7 @@ import type { LocalAuthStatus } from "@/transport/local-auth";
 import v from "../../../../../crates/bsk-protocol/tests/fixtures/local-auth-v1.json";
 import { readLocalPairingInfo } from "./local-pairing";
 
-const localLink = `ws://127.0.0.1:52800/#bsk-local.v1.${v.daemon_id}.${v.device_id}.${v.key}`;
+const localLink = `${DEFAULT_DAEMON_WS_URL}/#${LOCAL_PAIRING_FRAGMENT_PREFIX}${v.daemon_id}.${v.device_id}.${v.key}`;
 const endpoint: RemoteEndpoint = {
   url: "wss://browser.example/extension",
   token: "a".repeat(43),
@@ -43,7 +49,7 @@ beforeEach(() => {
   remote = null;
   storageFails = false;
   portWriteFails = false;
-  store = { [STORAGE_KEYS.DAEMON_PORT]: 52800 };
+  store = { [STORAGE_KEYS.DAEMON_PORT]: DEFAULT_DAEMON_PORT };
   listeners = new Set();
   vi.mocked(readLocalPairingInfo)
     .mockReset()
@@ -122,7 +128,7 @@ it("shows the settings without a disclosure and the address under the selected t
   await waitFor(() => expect(settings.firstElementChild?.textContent).toContain("本机"));
   expect(settings.firstElementChild?.textContent).not.toContain("ws://");
   const address = settings.querySelector('[data-slot="popup-current-connection"]')!;
-  expect(address.textContent).toBe("本机 · ws://127.0.0.1:52800");
+  expect(address.textContent).toBe(`本机 · ${DEFAULT_DAEMON_WS_URL}`);
   const tabs = screen.getByRole("group", { name: "连接方式" });
   expect(tabs.compareDocumentPosition(address) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   await choose("远程");
@@ -140,7 +146,9 @@ it("explains what saving does only once there is a valid change to save", async 
   submit();
   await screen.findByText("请输入 1 到 65535 之间的端口号。");
   expect(warning()).toBeNull();
-  fireEvent.change(screen.getByLabelText("本机端口"), { target: { value: "52800" } });
+  fireEvent.change(screen.getByLabelText("本机端口"), {
+    target: { value: String(DEFAULT_DAEMON_PORT) },
+  });
   expect(warning()).toBeNull();
 });
 
@@ -167,7 +175,9 @@ it("only changes the form until saved, and cancels both mode and port drafts wit
   fireEvent.change(screen.getByLabelText("配对链接"), { target: { value: pairing } });
   expect(screen.getByText("将连接到：wss://other.example:8443/extension")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "取消修改" }));
-  expect((screen.getByLabelText("本机端口") as HTMLInputElement).value).toBe("52800");
+  expect((screen.getByLabelText("本机端口") as HTMLInputElement).value).toBe(
+    String(DEFAULT_DAEMON_PORT),
+  );
   expect(chrome.storage.local.set).not.toHaveBeenCalled();
   expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
 });
@@ -331,7 +341,7 @@ it("pair: opens local pairing immediately and recognizes local links from either
   submit();
   await screen.findByText("配对成功。");
   expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
-    kind: "bsk-local-pairing",
+    kind: LOCAL_PAIRING_MESSAGE,
     action: "pair",
     link: localLink,
   });
@@ -340,7 +350,13 @@ it("pair: opens local pairing immediately and recognizes local links from either
 function pairedInfo(skip = false) {
   vi.mocked(readLocalPairingInfo).mockResolvedValue({
     policy: { skip },
-    devices: [{ daemonId: v.daemon_id, deviceId: v.device_id, endpoint: "ws://127.0.0.1:52800/" }],
+    devices: [
+      {
+        daemonId: v.daemon_id,
+        deviceId: v.device_id,
+        endpoint: `${DEFAULT_DAEMON_WS_URL}/`,
+      },
+    ],
   });
 }
 it("connected/settings: the new-link input and advanced settings stay hidden until asked for", async () => {
@@ -396,7 +412,7 @@ it("skip: requires confirmation and keeps restore guidance visible without a cli
   fireEvent.click(screen.getByText("确认跳过"));
   await screen.findByText("恢复验证");
   expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
-    kind: "bsk-local-pairing",
+    kind: LOCAL_PAIRING_MESSAGE,
     action: "skip",
     value: true,
   });
@@ -430,7 +446,7 @@ it.each([
     vi.mocked(chrome.runtime.sendMessage).mockResolvedValueOnce({ ok: true });
     fireEvent.click(screen.getByText("重试"));
     expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({
-      kind: "bsk-local-pairing",
+      kind: LOCAL_PAIRING_MESSAGE,
       action: "retry",
     });
   }

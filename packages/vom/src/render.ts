@@ -6,6 +6,7 @@ import type {
   CondSurface,
   Rect,
   RenderedRef,
+  VomLineMetadata,
   VomNode,
   VomOptions,
   VomResult,
@@ -77,8 +78,124 @@ const STRUCTURAL_ROLES = new Set([
   "webarea",
 ]);
 
+/** Maximum length for names derived by joining descendant text without an ellipsis mark. */
+export const VOM_DERIVED_NAME_CAP = 240;
+
 export function isVomStructuralRole(role: string | undefined): boolean {
   return STRUCTURAL_ROLES.has(role?.toLowerCase() ?? "");
+}
+
+/** Normalize and JSON-escape a text string exactly as VOM renders node names. */
+export function encodeVomNameContent(value: string): string {
+  return JSON.stringify(value.replace(/\s+/g, " ").trim()).slice(1, -1);
+}
+
+const PRE_NAME_DRAG_HINTS = [" [draggable]", " [drop-target]", " [drag-handle]"] as const;
+
+function readLeadingJsonEscapedContent(
+  text: string,
+): { escaped: string; rest: string } | undefined {
+  if (!text.startsWith('"')) return undefined;
+  let escaped = false;
+  for (let i = 1; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "\\" && !escaped) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"' && !escaped) {
+      return { escaped: text.slice(1, i), rest: text.slice(i + 1) };
+    }
+    escaped = false;
+  }
+  return undefined;
+}
+
+/** Structured inspection of one rendered VOM line shared with incremental text-delta patching. */
+export function inspectVomLine(line: string): VomLineMetadata {
+  const trimmed = line.replace(/^ +/, "");
+  const indent = line.length - trimmed.length;
+  if (trimmed.startsWith("@context ")) {
+    const body = trimmed.slice("@context ".length);
+    const spaceAt = body.indexOf(" ");
+    const role = spaceAt >= 0 ? body.slice(0, spaceAt) : body;
+    const quoted =
+      spaceAt >= 0 ? readLeadingJsonEscapedContent(body.slice(spaceAt + 1)) : undefined;
+    return {
+      indent,
+      kind: "context",
+      ...(role ? { role } : {}),
+      ...(quoted && quoted.rest.length === 0 ? { escapedName: quoted.escaped } : {}),
+      plainNamedNode: false,
+      silentlyTruncatesLabel: true,
+    };
+  }
+  if (
+    trimmed.startsWith("@warning ") ||
+    trimmed.startsWith("@more ") ||
+    trimmed.startsWith("@continued ")
+  ) {
+    return { indent, kind: "notice", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+  if (
+    trimmed.startsWith("@vom ") ||
+    trimmed.startsWith("@view ") ||
+    trimmed.startsWith("@layers ")
+  ) {
+    return { indent, kind: "header", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+  if (/^L\d+\s/.test(trimmed)) {
+    return { indent, kind: "layer", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+  if (trimmed.startsWith("[§ active:")) {
+    return { indent, kind: "active-scope", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+
+  let rest = trimmed;
+  let ref: string | undefined;
+  if (rest.startsWith("@e")) {
+    const spaceAt = rest.indexOf(" ");
+    if (spaceAt > 2) {
+      const digits = rest.slice(2, spaceAt);
+      if (/^\d+$/.test(digits)) {
+        ref = `e${digits}`;
+        rest = rest.slice(spaceAt + 1);
+      }
+    }
+  }
+  const roleMatch = /^[A-Za-z][\w-]*/.exec(rest);
+  if (!roleMatch) {
+    return { indent, kind: "node", plainNamedNode: false, silentlyTruncatesLabel: false };
+  }
+  const role = roleMatch[0];
+  rest = rest.slice(role.length);
+  let hadPreNameAnnotation = false;
+  for (const hint of PRE_NAME_DRAG_HINTS) {
+    if (rest.startsWith(hint)) {
+      hadPreNameAnnotation = true;
+      rest = rest.slice(hint.length);
+      break;
+    }
+  }
+  let escapedName: string | undefined;
+  if (rest.startsWith(' "')) {
+    const parsed = readLeadingJsonEscapedContent(rest.slice(1));
+    if (parsed) {
+      escapedName = parsed.escaped;
+      rest = parsed.rest;
+    }
+  }
+  const plainNamedNode =
+    ref === undefined && !hadPreNameAnnotation && escapedName !== undefined && rest.length === 0;
+  return {
+    indent,
+    kind: "node",
+    ...(ref ? { ref } : {}),
+    role,
+    ...(escapedName !== undefined ? { escapedName } : {}),
+    plainNamedNode,
+    silentlyTruncatesLabel: role === "canvas",
+  };
 }
 
 const SENSITIVE_MASK = "•••";
@@ -169,14 +286,14 @@ function cleanSemanticText(value: string | undefined): string | undefined {
 }
 
 function isLowValueContext(value: string): boolean {
-  const clean = value.trim();
-  const key = clean.toLowerCase();
-  if (clean === "欢迎") return true;
-  if (key.includes("icp") || key.includes("备案")) return true;
-  if (clean.includes("联系方式") || clean.includes("政府网站标识")) return true;
-  if (/^\d{5,}$/.test(clean)) return true;
-  if (/北京市小客车指标调控管理信息系统|beijing municipal commission/i.test(clean)) return true;
-  return false;
+  return /^\d{5,}$/.test(value.trim());
+}
+
+function isDocumentRootContextStop(node: VomNode): boolean {
+  return (
+    ["rootwebarea", "webarea", "document"].includes(normalizedRole(node)) ||
+    ["body", "html"].includes(normalizedTag(node))
+  );
 }
 
 function normalizedRole(node: VomNode): string {
@@ -407,6 +524,7 @@ function rectArea(node: VomNode): number {
 
 function passesStaticRecoveryGuards(node: VomNode): boolean {
   const tag = normalizedTag(node);
+  if (node.referenceable === false) return false;
   if (node.pointerEvents === "none") return false;
   if (node.disabled || node.inert || node.insideNative) return false;
   if (node.hasNativeDescendant && !isContentEditable(node)) return false;
@@ -449,6 +567,32 @@ function isAncestorOf(
   return false;
 }
 
+const FOLDABLE_NAMED_REF_ROLES = new Set([
+  "button",
+  "link",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "tab",
+  "switch",
+  "checkbox",
+  "radio",
+  "combobox",
+]);
+
+const POPUP_OR_COMPOSITE_BOUNDARY_ROLES = new Set([
+  "menu",
+  "menubar",
+  "listbox",
+  "dialog",
+  "alertdialog",
+  "table",
+  "grid",
+  "list",
+  "tree",
+]);
+
 const DELEGATED_LIST_TAGS = new Set(["ul", "ol", "menu"]);
 const DELEGATED_LIST_ROLES = new Set([
   "list",
@@ -459,48 +603,11 @@ const DELEGATED_LIST_ROLES = new Set([
   "treegrid",
   "tablist",
 ]);
-const TEXT_NODE_TAGS = new Set(["#text", "#cdata-section"]);
+const TEXT_FRAGMENT_TAGS = new Set(["#text", "#cdata-section"]);
 const TEXT_FRAGMENT_ROLES = new Set(["statictext", "inlinetextbox", "listmarker"]);
 const NON_DELEGATED_CONTAINER_TAGS = new Set(["a", "summary", "details", "label"]);
-const NON_ROW_CONTAINER_TAGS = new Set([
-  "hr",
-  "thead",
-  "tbody",
-  "tfoot",
-  "caption",
-  "colgroup",
-  "ul",
-  "ol",
-  "menu",
-  "table",
-  "dl",
-  "dialog",
-  "summary",
-  "details",
-  "label",
-]);
-const NON_ROW_ROLES = new Set([
-  "separator",
-  "rowgroup",
-  "group",
-  "table",
-  "grid",
-  "treegrid",
-  "list",
-  "listbox",
-  "menu",
-  "menubar",
-  "tree",
-  "tablist",
-  "dialog",
-  "alertdialog",
-  "heading",
-  "columnheader",
-]);
 const NESTED_COLLECTION_TAGS = new Set([
-  "ul",
-  "ol",
-  "menu",
+  ...DELEGATED_LIST_TAGS,
   "table",
   "dl",
   "dialog",
@@ -509,239 +616,103 @@ const NESTED_COLLECTION_TAGS = new Set([
   "tbody",
   "tfoot",
 ]);
-const NESTED_COLLECTION_ROLES = new Set([
-  "list",
-  "listbox",
-  "menu",
-  "menubar",
-  "tree",
-  "treegrid",
-  "tablist",
-  "table",
-  "grid",
-  "rowgroup",
-  "dialog",
-  "alertdialog",
-  "columnheader",
-]);
-const NESTED_LIST_GROUP_TAGS = new Set(["ul", "ol", "menu"]);
-const NESTED_LIST_GROUP_ROLES = new Set(["list", "listbox", "menu", "menubar", "tree", "group"]);
 
 function isTextFragmentNode(node: VomNode): boolean {
-  return TEXT_NODE_TAGS.has(normalizedTag(node)) || TEXT_FRAGMENT_ROLES.has(normalizedRole(node));
+  return (
+    TEXT_FRAGMENT_TAGS.has(normalizedTag(node)) || TEXT_FRAGMENT_ROLES.has(normalizedRole(node))
+  );
 }
 
-function canDelegateContainer(node: VomNode): boolean {
-  if (!hasRecoveryHandler(node)) return false;
-  if (node.pointerEvents === "none" || node.disabled || node.inert || node.insideNative) {
+function isDelegatedList(node: VomNode): boolean {
+  return (
+    DELEGATED_LIST_TAGS.has(normalizedTag(node)) || DELEGATED_LIST_ROLES.has(normalizedRole(node))
+  );
+}
+
+function isNestedCollection(node: VomNode): boolean {
+  const role = normalizedRole(node);
+  return (
+    NESTED_COLLECTION_TAGS.has(normalizedTag(node)) ||
+    DELEGATED_LIST_ROLES.has(role) ||
+    POPUP_OR_COMPOSITE_BOUNDARY_ROLES.has(role) ||
+    role === "rowgroup" ||
+    role === "columnheader"
+  );
+}
+
+function isNonRowItem(node: VomNode): boolean {
+  const tag = normalizedTag(node);
+  const role = normalizedRole(node);
+  return (
+    isNestedCollection(node) ||
+    NON_DELEGATED_CONTAINER_TAGS.has(tag) ||
+    tag === "hr" ||
+    tag === "caption" ||
+    tag === "colgroup" ||
+    role === "separator" ||
+    role === "group" ||
+    role === "heading"
+  );
+}
+
+function explicitAttrRole(node: VomNode): string {
+  return node.attrs?.role?.trim().toLowerCase() ?? "";
+}
+
+function isPassiveDelegationShell(node: VomNode): boolean {
+  if (
+    node.pointerEvents === "none" ||
+    node.disabled ||
+    node.inert ||
+    node.insideNative ||
+    isContentEditable(node)
+  ) {
     return false;
   }
-  if (isContentEditable(node)) return false;
   const tag = normalizedTag(node);
   if (NATIVE_TAGS.has(tag) || NON_DELEGATED_CONTAINER_TAGS.has(tag) || GRAPHIC_ONLY_TAGS.has(tag)) {
     return false;
   }
-  const explicitRole = node.attrs?.role?.trim().toLowerCase() ?? "";
-  if (EXPLICIT_RECOVERY_ROLES.has(explicitRole) || explicitRole === "combobox") {
-    return false;
-  }
-  const role = normalizedRole(node);
-  if (isSemanticReferenceNode(node) && role !== "listbox") return false;
-  return true;
+  const explicit = explicitAttrRole(node);
+  if (EXPLICIT_RECOVERY_ROLES.has(explicit) || explicit === "combobox") return false;
+  return !isSemanticReferenceNode(node) || normalizedRole(node) === "listbox";
 }
 
-function unwrapDelegatedTarget(
+function isNestedListGroup(node: VomNode): boolean {
+  return (
+    isPassiveDelegationShell(node) && (isDelegatedList(node) || normalizedRole(node) === "group")
+  );
+}
+
+/** Direct non-text element children, or null if loose non-empty text sits directly inside. */
+function directElementChildren(
   node: VomNode,
   children: Map<number | null, VomNode[]>,
-): { target: VomNode; chainIds: number[] } {
+): VomNode[] | null {
+  const elements: VomNode[] = [];
+  for (const kid of children.get(node.id) ?? []) {
+    if (isTextFragmentNode(kid)) {
+      if (cleaned(kid.name) !== undefined || cleaned(kid.text) !== undefined) return null;
+    } else {
+      elements.push(kid);
+    }
+  }
+  return elements;
+}
+
+function unwrapDelegatedTarget(node: VomNode, children: Map<number | null, VomNode[]>): VomNode {
   let cur = node;
-  const chainIds = [node.id];
-  for (let hop = 0; hop < 2; hop++) {
-    const curTag = normalizedTag(cur);
-    const curRole = normalizedRole(cur);
-    if (DELEGATED_LIST_TAGS.has(curTag) || DELEGATED_LIST_ROLES.has(curRole)) break;
-    if (
-      cleaned(cur.attrs?.["aria-label"]) !== undefined ||
-      cleaned(cur.attrs?.title) !== undefined ||
-      cleaned(cur.text) !== undefined
-    ) {
+  for (let hop = 0; hop < 2 && !isDelegatedList(cur); hop++) {
+    if (cleaned(cur.attrs?.["aria-label"]) || cleaned(cur.attrs?.title) || cleaned(cur.text)) {
       break;
     }
-    const rawKids = children.get(cur.id) ?? [];
-    let hasLooseText = false;
-    const elementKids: VomNode[] = [];
-    for (const kid of rawKids) {
-      if (isTextFragmentNode(kid)) {
-        if (cleaned(kid.name) !== undefined || cleaned(kid.text) !== undefined) {
-          hasLooseText = true;
-          break;
-        }
-      } else {
-        elementKids.push(kid);
-      }
-    }
-    if (hasLooseText || elementKids.length !== 1) break;
-    const sole = elementKids[0];
-    const soleTag = normalizedTag(sole);
-    const soleRole = normalizedRole(sole);
-    const soleExplicitRole = sole.attrs?.role?.trim().toLowerCase() ?? "";
-    if (
-      sole.pointerEvents === "none" ||
-      sole.disabled ||
-      sole.inert ||
-      sole.insideNative ||
-      isContentEditable(sole) ||
-      (isSemanticReferenceNode(sole) && soleRole !== "listbox") ||
-      NATIVE_TAGS.has(soleTag) ||
-      NON_DELEGATED_CONTAINER_TAGS.has(soleTag) ||
-      GRAPHIC_ONLY_TAGS.has(soleTag) ||
-      EXPLICIT_RECOVERY_ROLES.has(soleExplicitRole) ||
-      soleExplicitRole === "combobox"
-    ) {
-      break;
-    }
-    const soleKids = children.get(sole.id) ?? [];
-    if (!soleKids.some((c) => !isTextFragmentNode(c))) break;
+    const elementKids = directElementChildren(cur, children);
+    const sole = elementKids?.length === 1 ? elementKids[0] : undefined;
+    if (!sole || !isPassiveDelegationShell(sole)) break;
+    if (!(children.get(sole.id) ?? []).some((c) => !isTextFragmentNode(c))) break;
     cur = sole;
-    chainIds.push(cur.id);
   }
-  return { target: cur, chainIds };
-}
-
-function collectDelegatedRowText(node: VomNode, children: Map<number | null, VomNode[]>): string {
-  if (normalizedRole(node) === "listmarker") return "";
-  const kids = children.get(node.id) ?? [];
-  const ownName = cleaned(node.name);
-  if (kids.length === 0) {
-    return ownName ?? cleaned(node.text) ?? cleaned(node.value) ?? "";
-  }
-  const kidTexts = kids.map((child) => collectDelegatedRowText(child, children)).filter(Boolean);
-  if (ownName && (kidTexts.length === 0 || kidTexts.every((text) => ownName.includes(text)))) {
-    return ownName;
-  }
-  if (kidTexts.length > 0) return kidTexts.join(" ");
-  return ownName ?? cleaned(node.text) ?? cleaned(node.value) ?? "";
-}
-
-function delegatedRowName(
-  row: VomNode,
-  children: Map<number | null, VomNode[]>,
-): string | undefined {
-  return (
-    cleaned(row.attrs?.["aria-label"]) ??
-    cleaned(row.attrs?.title) ??
-    cleaned(row.name) ??
-    cleaned(row.text) ??
-    cleaned(collectDelegatedRowText(row, children)) ??
-    iconHintFromSubtree(row, children)
-  );
-}
-
-function delegatedRowRole(row: VomNode): string {
-  const explicit = row.attrs?.role?.trim().toLowerCase() ?? "";
-  if (
-    explicit === "switch" ||
-    explicit === "checkbox" ||
-    explicit === "radio" ||
-    explicit === "tab" ||
-    explicit === "menuitem" ||
-    explicit === "option"
-  ) {
-    return explicit;
-  }
-  return "button";
-}
-
-function canTraverseNestedListGroup(node: VomNode): boolean {
-  if (node.pointerEvents === "none" || node.disabled || node.inert || node.insideNative) {
-    return false;
-  }
-  if (isContentEditable(node)) return false;
-  const tag = normalizedTag(node);
-  const role = normalizedRole(node);
-  const explicitRole = node.attrs?.role?.trim().toLowerCase() ?? "";
-  if (EXPLICIT_RECOVERY_ROLES.has(explicitRole) || explicitRole === "combobox") return false;
-  if (isSemanticReferenceNode(node) && role !== "listbox") return false;
-  return NESTED_LIST_GROUP_TAGS.has(tag) || NESTED_LIST_GROUP_ROLES.has(role);
-}
-
-interface RowSubtreeInspection {
-  hasInteractiveDescendant: boolean;
-  hasBlockedStructure: boolean;
-  nestedGroups: VomNode[];
-}
-
-function inspectRowSubtree(
-  row: VomNode,
-  children: Map<number | null, VomNode[]>,
-): RowSubtreeInspection {
-  let hasInteractiveDescendant = false;
-  let hasBlockedStructure = false;
-  let tableCells = 0;
-  const nestedGroups: VomNode[] = [];
-  for (const directChild of children.get(row.id) ?? []) {
-    if (!isTextFragmentNode(directChild) && canTraverseNestedListGroup(directChild)) {
-      nestedGroups.push(directChild);
-    }
-  }
-  const stack: Array<{ desc: VomNode; parent: VomNode }> = (children.get(row.id) ?? []).map(
-    (desc) => ({ desc, parent: row }),
-  );
-  while (stack.length > 0) {
-    const { desc, parent } = stack.pop()!;
-    if (isTextFragmentNode(desc)) continue;
-    const descTag = normalizedTag(desc);
-    const descRole = normalizedRole(desc);
-    const descExplicitRole = desc.attrs?.role?.trim().toLowerCase() ?? "";
-    if (
-      (isSemanticReferenceNode(desc) && descRole !== "listbox") ||
-      NATIVE_TAGS.has(descTag) ||
-      descTag === "a" ||
-      descTag === "summary" ||
-      (descTag === "label" && Boolean(desc.attrs?.for?.trim())) ||
-      isContentEditable(desc) ||
-      hasRecoveryHandler(desc) ||
-      ((EXPLICIT_RECOVERY_ROLES.has(descExplicitRole) || descExplicitRole === "combobox") &&
-        passesStaticRecoveryGuards(desc)) ||
-      (desc.cursor === "pointer" &&
-        parent.cursor !== "pointer" &&
-        passesStaticRecoveryGuards(desc) &&
-        (!descRole || SKIP_ROLES.has(descRole)))
-    ) {
-      hasInteractiveDescendant = true;
-    }
-    if (NESTED_COLLECTION_TAGS.has(descTag) || NESTED_COLLECTION_ROLES.has(descRole)) {
-      hasBlockedStructure = true;
-    }
-    if (TABLE_CELL_ROLES.has(descRole)) {
-      tableCells += 1;
-      if (tableCells >= 2) hasBlockedStructure = true;
-    }
-    for (const child of children.get(desc.id) ?? []) {
-      stack.push({ desc: child, parent: desc });
-    }
-  }
-  return { hasInteractiveDescendant, hasBlockedStructure, nestedGroups };
-}
-
-function hasDisjointSlotClasses(rows: readonly VomNode[]): boolean {
-  const tokenSets: Set<string>[] = [];
-  for (const row of rows) {
-    const tokens = (row.attrs?.class ?? "")
-      .split(/\s+/)
-      .map((t) => t.trim())
-      .filter(Boolean);
-    if (tokens.length === 0) return false;
-    tokenSets.push(new Set(tokens));
-  }
-  for (let i = 0; i < tokenSets.length; i++) {
-    for (let j = i + 1; j < tokenSets.length; j++) {
-      for (const token of tokenSets[i]) {
-        if (tokenSets[j].has(token)) return false;
-      }
-    }
-  }
-  return true;
+  return cur;
 }
 
 interface DelegatedRowCandidate {
@@ -750,61 +721,122 @@ interface DelegatedRowCandidate {
   name: string;
 }
 
+function toDelegatedRowCandidate(
+  row: VomNode,
+  children: Map<number | null, VomNode[]>,
+): DelegatedRowCandidate | undefined {
+  if (!passesStaticRecoveryGuards(row)) return undefined;
+  const name =
+    cleaned(row.attrs?.["aria-label"]) ??
+    cleaned(row.attrs?.title) ??
+    cleaned(row.name) ??
+    cleaned(row.text) ??
+    cleaned(collectSubtreeText(row, children)) ??
+    iconHintFromSubtree(row, children);
+  if (!name || !passesAreaRecoveryGuard(row, () => name)) return undefined;
+  const explicit = explicitAttrRole(row);
+  const role = explicit === "option" || EXPLICIT_RECOVERY_ROLES.has(explicit) ? explicit : "button";
+  return { node: row, role, name };
+}
+
+function inspectRowSubtree(
+  row: VomNode,
+  children: Map<number | null, VomNode[]>,
+): { hasInteractiveDescendant: boolean; hasNestedCollection: boolean } {
+  let hasInteractiveDescendant = false;
+  let hasNestedCollection = false;
+  const visited = new Set<number>([row.id]);
+  const stack: Array<{ desc: VomNode; parent: VomNode }> = (children.get(row.id) ?? []).map(
+    (desc) => ({ desc, parent: row }),
+  );
+  while (stack.length > 0) {
+    const { desc, parent } = stack.pop()!;
+    if (visited.has(desc.id)) continue;
+    visited.add(desc.id);
+    if (isTextFragmentNode(desc)) continue;
+    const descTag = normalizedTag(desc);
+    const descRole = normalizedRole(desc);
+    const descExplicit = explicitAttrRole(desc);
+    if (
+      (isSemanticReferenceNode(desc) && descRole !== "listbox") ||
+      NATIVE_TAGS.has(descTag) ||
+      descTag === "a" ||
+      descTag === "summary" ||
+      (descTag === "label" && Boolean(desc.attrs?.for?.trim())) ||
+      isContentEditable(desc) ||
+      hasRecoveryHandler(desc) ||
+      ((EXPLICIT_RECOVERY_ROLES.has(descExplicit) || descExplicit === "combobox") &&
+        passesStaticRecoveryGuards(desc)) ||
+      (desc.cursor === "pointer" &&
+        parent.cursor !== "pointer" &&
+        passesStaticRecoveryGuards(desc) &&
+        (!descRole || SKIP_ROLES.has(descRole)))
+    ) {
+      hasInteractiveDescendant = true;
+      break;
+    }
+    if (isNestedCollection(desc)) hasNestedCollection = true;
+    for (const child of children.get(desc.id) ?? []) {
+      stack.push({ desc: child, parent: desc });
+    }
+  }
+  return { hasInteractiveDescendant, hasNestedCollection };
+}
+
+function hasDisjointSlotClasses(rows: readonly VomNode[]): boolean {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const tokens = new Set((row.attrs?.class ?? "").split(/\s+/).filter(Boolean));
+    if (tokens.size === 0) return false;
+    for (const token of tokens) {
+      if (seen.has(token)) return false;
+      seen.add(token);
+    }
+  }
+  return true;
+}
+
 /**
- * A delegated list/row container carries the click itself while its rows are
- * not individually clickable. Only propagate refs to rows for list-like
- * structures (list tags/roles, or homogeneous repeated rows), never for a
- * multi-child compound button.
+ * Recover direct rows of a click-delegated list container (list tags/roles or
+ * vertically stacked homogeneous rows) without splitting compound buttons or
+ * multi-slot cards.
  */
 function delegatedRecoverableRows(
-  node: VomNode,
+  target: VomNode,
   children: Map<number | null, VomNode[]>,
-): { suppressContainerIds: number[]; rows: DelegatedRowCandidate[] } {
-  if (!canDelegateContainer(node)) return { suppressContainerIds: [], rows: [] };
-  const { target, chainIds } = unwrapDelegatedTarget(node, children);
-  const targetTag = normalizedTag(target);
-  const targetRole = normalizedRole(target);
-
-  if (DELEGATED_LIST_TAGS.has(targetTag) || DELEGATED_LIST_ROLES.has(targetRole)) {
+): DelegatedRowCandidate[] {
+  if (isDelegatedList(target)) {
     const candidates: DelegatedRowCandidate[] = [];
     let interactiveBranches = 0;
-    let hasStructuredBranches = false;
     const collectFromList = (listNode: VomNode, depth: number): void => {
       for (const item of children.get(listNode.id) ?? []) {
         if (isTextFragmentNode(item)) continue;
-        if (depth < 2 && canTraverseNestedListGroup(item)) {
-          hasStructuredBranches = true;
+        if (depth < 2 && isNestedListGroup(item)) {
           collectFromList(item, depth + 1);
           continue;
         }
-        const itemTag = normalizedTag(item);
-        const itemRole = normalizedRole(item);
         if (isSemanticReferenceNode(item)) {
           interactiveBranches += 1;
           continue;
         }
-        if (NON_ROW_CONTAINER_TAGS.has(itemTag) || NON_ROW_ROLES.has(itemRole)) {
-          continue;
-        }
+        if (isNonRowItem(item)) continue;
         const subtree = inspectRowSubtree(item, children);
         if (subtree.hasInteractiveDescendant) {
           interactiveBranches += 1;
           continue;
         }
-        if (subtree.hasBlockedStructure) {
-          hasStructuredBranches = true;
+        if (subtree.hasNestedCollection) {
           if (depth < 2) {
-            for (const group of subtree.nestedGroups) {
-              collectFromList(group, depth + 1);
+            for (const child of children.get(item.id) ?? []) {
+              if (!isTextFragmentNode(child) && isNestedListGroup(child)) {
+                collectFromList(child, depth + 1);
+              }
             }
           }
           continue;
         }
-        if (item.referenceable === false || !passesStaticRecoveryGuards(item)) continue;
-        const rowName = delegatedRowName(item, children);
-        if (!rowName) continue;
-        if (!passesAreaRecoveryGuard(item, () => rowName)) continue;
-        candidates.push({ node: item, role: delegatedRowRole(item), name: rowName });
+        const candidate = toDelegatedRowCandidate(item, children);
+        if (candidate) candidates.push(candidate);
       }
     };
     collectFromList(target, 0);
@@ -812,77 +844,108 @@ function delegatedRecoverableRows(
       interactiveBranches > 0 &&
       (candidates.length < 2 || candidates.length < interactiveBranches)
     ) {
-      return { suppressContainerIds: chainIds, rows: [] };
+      return [];
     }
-    const suppress = candidates.length > 0 || interactiveBranches > 0 || hasStructuredBranches;
-    return { suppressContainerIds: suppress ? chainIds : [], rows: candidates };
+    return candidates;
   }
 
-  // Homogeneous repeated rows (>=3): same tag, text-bearing, non-disjoint slot
-  // classes, similarly sized and vertically stacked. Keeps two-line compound
-  // buttons and multi-slot cards as a single control.
-  const rawKids = children.get(target.id) ?? [];
-  const direct: VomNode[] = [];
-  for (const kid of rawKids) {
-    if (isTextFragmentNode(kid)) {
-      if (cleaned(kid.name) !== undefined || cleaned(kid.text) !== undefined) {
-        return { suppressContainerIds: [], rows: [] };
-      }
-    } else {
-      direct.push(kid);
-    }
-  }
-  if (direct.length < 3) return { suppressContainerIds: [], rows: [] };
+  // Homogeneous repeated rows (>=3): same tag, non-disjoint slot classes,
+  // left-aligned, similar heights, and vertically stacked.
+  const direct = directElementChildren(target, children);
+  if (!direct || direct.length < 3) return [];
   const firstTag = normalizedTag(direct[0]);
-  if (NON_ROW_CONTAINER_TAGS.has(firstTag)) return { suppressContainerIds: [], rows: [] };
-  if (!direct.every((child) => normalizedTag(child) === firstTag)) {
-    return { suppressContainerIds: [], rows: [] };
+  if (isNonRowItem(direct[0]) || !direct.every((child) => normalizedTag(child) === firstTag)) {
+    return [];
   }
-  if (hasDisjointSlotClasses(direct)) return { suppressContainerIds: [], rows: [] };
+  if (hasDisjointSlotClasses(direct)) return [];
 
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minH = Number.POSITIVE_INFINITY;
+  let maxH = 0;
   const rects: Rect[] = [];
   for (const child of direct) {
-    if (!child.rect || child.rect.w <= 0 || child.rect.h <= 0) {
-      return { suppressContainerIds: [], rows: [] };
-    }
+    if (!child.rect || child.rect.w <= 0 || child.rect.h <= 0) return [];
     rects.push(child.rect);
+    if (child.rect.x < minX) minX = child.rect.x;
+    if (child.rect.x > maxX) maxX = child.rect.x;
+    if (child.rect.h < minH) minH = child.rect.h;
+    if (child.rect.h > maxH) maxH = child.rect.h;
   }
-  const minX = Math.min(...rects.map((r) => r.x));
-  const maxX = Math.max(...rects.map((r) => r.x));
-  if (maxX - minX > 16) return { suppressContainerIds: [], rows: [] };
-  const minH = Math.min(...rects.map((r) => r.h));
-  const maxH = Math.max(...rects.map((r) => r.h));
-  if (minH <= 0 || maxH > minH * 2.5) return { suppressContainerIds: [], rows: [] };
-  const sortedRects = [...rects].sort((a, b) => a.y - b.y);
-  for (let i = 1; i < sortedRects.length; i++) {
-    const prev = sortedRects[i - 1];
-    const cur = sortedRects[i];
-    if (cur.y < prev.y + Math.min(prev.h, cur.h) * 0.5) {
-      return { suppressContainerIds: [], rows: [] };
-    }
+  if (maxX - minX > 16 || maxH > minH * 2.5) return [];
+  rects.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < rects.length; i++) {
+    if (rects[i].y < rects[i - 1].y + Math.min(rects[i - 1].h, rects[i].h) * 0.5) return [];
   }
 
   const candidates: DelegatedRowCandidate[] = [];
   for (const row of direct) {
-    if (
-      row.referenceable === false ||
-      isSemanticReferenceNode(row) ||
-      NON_ROW_ROLES.has(normalizedRole(row)) ||
-      !passesStaticRecoveryGuards(row)
-    ) {
-      return { suppressContainerIds: [], rows: [] };
-    }
+    if (isSemanticReferenceNode(row) || isNonRowItem(row)) return [];
     const subtree = inspectRowSubtree(row, children);
-    if (subtree.hasInteractiveDescendant || subtree.hasBlockedStructure) {
-      return { suppressContainerIds: [], rows: [] };
-    }
-    const rowName = delegatedRowName(row, children);
-    if (!rowName || !passesAreaRecoveryGuard(row, () => rowName)) {
-      return { suppressContainerIds: [], rows: [] };
-    }
-    candidates.push({ node: row, role: delegatedRowRole(row), name: rowName });
+    if (subtree.hasInteractiveDescendant || subtree.hasNestedCollection) return [];
+    const candidate = toDelegatedRowCandidate(row, children);
+    if (!candidate) return [];
+    candidates.push(candidate);
   }
-  return { suppressContainerIds: chainIds, rows: candidates };
+  return candidates;
+}
+
+function pruneControlSkinRecoveries(
+  children: ReadonlyMap<number | null, VomNode[]>,
+  recoveredIds: Set<number>,
+  delegatedRowIds: ReadonlySet<number>,
+  recoveredRoleById: ReadonlyMap<number, string>,
+): void {
+  const stack: Array<{
+    node: VomNode;
+    inControlSkin: boolean;
+    inheritedPointer: boolean;
+  }> = [];
+  for (const root of children.get(null) ?? []) {
+    stack.push({ node: root, inControlSkin: false, inheritedPointer: false });
+  }
+  const visited = new Set<number>();
+  while (stack.length > 0) {
+    const { node, inControlSkin, inheritedPointer } = stack.pop()!;
+    if (visited.has(node.id)) continue;
+    visited.add(node.id);
+
+    const role = normalizedRole(node);
+    const crossedBoundary =
+      POPUP_OR_COMPOSITE_BOUNDARY_ROLES.has(role) ||
+      node.position === "absolute" ||
+      node.position === "fixed";
+    const skinHere = !crossedBoundary && inControlSkin;
+    const pointerSkinHere = !crossedBoundary && inheritedPointer && node.cursor === "pointer";
+
+    if (recoveredIds.has(node.id) && (skinHere || (pointerSkinHere && !hasRecoveryHandler(node)))) {
+      const explicitRole = node.attrs?.role?.toLowerCase() ?? "";
+      if (
+        !isContentEditable(node) &&
+        !EXPLICIT_RECOVERY_ROLES.has(explicitRole) &&
+        explicitRole !== "combobox"
+      ) {
+        recoveredIds.delete(node.id);
+      }
+    }
+
+    const isDelegatedRow = delegatedRowIds.has(node.id);
+    const isAtomicSemantic =
+      (isSemanticReferenceNode(node) && !POPUP_OR_COMPOSITE_BOUNDARY_ROLES.has(role)) ||
+      isDelegatedRow;
+    const effectiveRole = isDelegatedRow ? (recoveredRoleById.get(node.id) ?? role) : role;
+    const nextSkin = skinHere || (isAtomicSemantic && FOLDABLE_NAMED_REF_ROLES.has(effectiveRole));
+    const nextPointer = pointerSkinHere || (isAtomicSemantic && node.cursor === "pointer");
+
+    for (const child of children.get(node.id) ?? []) {
+      const sameFrame = child.frameId === node.frameId;
+      stack.push({
+        node: child,
+        inControlSkin: sameFrame ? nextSkin : false,
+        inheritedPointer: sameFrame ? nextPointer : false,
+      });
+    }
+  }
 }
 
 export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
@@ -902,9 +965,31 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
     });
   }
 
+  const eligible: VomNode[] = [];
+  const delegatedContainers: VomNode[] = [];
+  let hasAnyRecoverySignal = false;
+  for (const node of nodes) {
+    if (hasRecoveryHandler(node) && isPassiveDelegationShell(node)) {
+      delegatedContainers.push(node);
+      hasAnyRecoverySignal = true;
+    }
+    // Drag evidence adds a capability; it must not suppress existing role/name recovery.
+    if (!isSemanticReferenceNode(node) && passesStaticRecoveryGuards(node)) {
+      eligible.push(node);
+      if (
+        !hasAnyRecoverySignal &&
+        (node.cursor === "pointer" ||
+          hasRecoveryHandler(node) ||
+          isContentEditable(node) ||
+          isFocusable(node))
+      ) {
+        hasAnyRecoverySignal = true;
+      }
+    }
+  }
+  if (!hasAnyRecoverySignal) return nodes;
+
   const children = buildChildren(nodes);
-  const parentMap = buildParentMap(nodes);
-  const byId = new Map(nodes.map((node) => [node.id, node]));
   const recoveredIds = new Set<number>();
   const recoveredRoleById = new Map<number, string>();
   const recoveredNameById = new Map<number, string>();
@@ -912,12 +997,13 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
   // Delegated row lists keep the click on the container while their rows are
   // not individually clickable. Expose each text-bearing row instead of
   // collapsing the whole list into one button.
-  const delegatedRowContainers = new Set<number>();
   const delegatedRowIds = new Set<number>();
-  for (const node of nodes) {
-    const { suppressContainerIds, rows } = delegatedRecoverableRows(node, children);
-    for (const cid of suppressContainerIds) delegatedRowContainers.add(cid);
-    for (const row of rows) {
+  const visitedTargets = new Set<number>();
+  for (const container of delegatedContainers) {
+    const target = unwrapDelegatedTarget(container, children);
+    if (visitedTargets.has(target.id)) continue;
+    visitedTargets.add(target.id);
+    for (const row of delegatedRecoverableRows(target, children)) {
       delegatedRowIds.add(row.node.id);
       recoveredIds.add(row.node.id);
       recoveredRoleById.set(row.node.id, row.role);
@@ -925,50 +1011,8 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
     }
   }
 
-  const suppressedByAtomicAncestor = (node: VomNode): boolean => {
-    if (hasRecoveryHandler(node) || isContentEditable(node)) return false;
-    const explicitRole = node.attrs?.role?.trim().toLowerCase() ?? "";
-    if (EXPLICIT_RECOVERY_ROLES.has(explicitRole) || explicitRole === "combobox") return false;
-    let current = parentMap.get(node.id) ?? null;
-    let guard = 0;
-    while (current !== null && guard <= parentMap.size) {
-      if (delegatedRowIds.has(current)) return true;
-      const anc = byId.get(current);
-      if (
-        anc &&
-        isSemanticReferenceNode(anc) &&
-        shouldSkipRedundantRefChildren(anc) &&
-        anc.cursor === node.cursor
-      ) {
-        return true;
-      }
-      current = parentMap.get(current) ?? null;
-      guard += 1;
-    }
-    return false;
-  };
-
-  const eligible: VomNode[] = [];
-  for (const node of nodes) {
-    if (
-      node.referenceable === false ||
-      delegatedRowContainers.has(node.id) ||
-      delegatedRowIds.has(node.id)
-    ) {
-      continue;
-    }
-    // Drag evidence adds a capability; it must not suppress existing role/name recovery.
-    if (
-      !isSemanticReferenceNode(node) &&
-      passesStaticRecoveryGuards(node) &&
-      !suppressedByAtomicAncestor(node)
-    ) {
-      eligible.push(node);
-    }
-  }
-  if (eligible.length === 0 && recoveredIds.size === 0) return nodes;
-
   for (const node of eligible) {
+    if (delegatedRowIds.has(node.id)) continue;
     let computed = false;
     let cachedName: string | undefined;
     const getName = (): string | undefined => {
@@ -989,19 +1033,25 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
 
   if (recoveredIds.size === 0) return nodes;
 
+  pruneControlSkinRecoveries(children, recoveredIds, delegatedRowIds, recoveredRoleById);
+  if (recoveredIds.size === 0) return nodes;
+
+  const parentMap = buildParentMap(nodes);
+  const prunedAncestors = new Set<number>();
   for (const node of nodes) {
     if (!recoveredIds.has(node.id) && !isSemanticReferenceNode(node)) continue;
     let current = parentMap.get(node.id) ?? null;
     let guard = 0;
-    while (current !== null && guard <= parentMap.size) {
-      if (recoveredRoleById.get(current) !== "textbox") {
+    while (current !== null && !prunedAncestors.has(current) && guard <= parentMap.size) {
+      prunedAncestors.add(current);
+      const role = recoveredRoleById.get(current);
+      if (role !== "textbox" && role !== "combobox") {
         recoveredIds.delete(current);
       }
       current = parentMap.get(current) ?? null;
       guard += 1;
     }
   }
-
   if (recoveredIds.size === 0) return nodes;
 
   return nodes.map((node) => {
@@ -1087,7 +1137,7 @@ function contextLabel(node: VomNode, targetName: string): string | undefined {
 }
 
 function weakLabelContext(node: VomNode, targetName: string): string | undefined {
-  if (isVomReferenceNode(node)) return undefined;
+  if (isVomReferenceNode(node) || isDocumentRootContextStop(node)) return undefined;
   return weakContextText(
     cleaned(node.name) ?? cleaned(node.text) ?? cleaned(node.nearbyText),
     targetName,
@@ -1197,7 +1247,7 @@ function collectOwnedContext(
   let guard = 0;
   while (current !== null && guard <= state.parentMap.size) {
     const parent = state.nodesById.get(current);
-    if (!parent) break;
+    if (!parent || isDocumentRootContextStop(parent)) break;
     if (!sharesContextScope(node, parent)) break;
     const label = contextLabel(parent, nodeName);
     if (label) contexts.push({ text: label, source: "owned", order: contexts.length });
@@ -1246,7 +1296,13 @@ function collectSameContainerContext(
     cache.set(key, prefix);
 
     const parent = state.nodesById.get(parentId);
-    if (!parent || !sharesContextScope(node, parent) || isContextBoundary(parent)) break;
+    if (
+      !parent ||
+      !sharesContextScope(node, parent) ||
+      isContextBoundary(parent) ||
+      isDocumentRootContextStop(parent)
+    )
+      break;
     childId = parentId;
     parentId = state.parentMap.get(parentId) ?? null;
     guard += 1;
@@ -1417,8 +1473,13 @@ function renderNodeLine(
     const inlineOpts = formatInlineSelectOptions(node, state);
     if (inlineOpts) line += ` [options: ${inlineOpts}]`;
   } else if (role === "combobox" && !isNativeSelect && !isEditableCombobox(node)) {
-    const expanded = node.attrs?.["aria-expanded"]?.toLowerCase() === "true";
+    const expanded =
+      node.expanded === true || node.attrs?.["aria-expanded"]?.toLowerCase() === "true";
     line += expanded ? " [custom-dropdown: expanded]" : " [custom-dropdown: click to open]";
+  } else if (node.hasPopup && name) {
+    const expanded =
+      node.expanded === true || node.attrs?.["aria-expanded"]?.toLowerCase() === "true";
+    line += expanded ? " [expanded]" : " [has-submenu]";
   }
 
   if (surface && surface.subItems.length > 0) {
@@ -1446,18 +1507,26 @@ function isEditableCombobox(node: VomNode): boolean {
   return false;
 }
 
-function shouldSkipRedundantRefChildren(node: VomNode): boolean {
+function isAlwaysFoldedRefControl(node: VomNode): boolean {
   const role = normalizedRole(node);
-  if (
-    ["textbox", "searchbox"].includes(role) &&
-    ["input", "textarea"].includes((node.tag ?? "").toLowerCase())
-  ) {
+  const tag = normalizedTag(node);
+  if (["textbox", "searchbox"].includes(role) && ["input", "textarea"].includes(tag)) {
     return true;
   }
-  if (!cleaned(node.name)) return false;
-  return ["button", "link", "menuitem", "tab", "switch", "checkbox", "radio", "combobox"].includes(
-    role,
+  return role === "combobox" && tag === "select" && Boolean(cleaned(node.name));
+}
+
+function isFoldableNamedRefControl(node: VomNode): boolean {
+  return (
+    !isAlwaysFoldedRefControl(node) &&
+    Boolean(cleaned(node.name)) &&
+    FOLDABLE_NAMED_REF_ROLES.has(normalizedRole(node))
   );
+}
+
+function shouldSkipRedundantRefChildren(node: VomNode, state: RenderState): boolean {
+  if (isAlwaysFoldedRefControl(node)) return true;
+  return isFoldableNamedRefControl(node) && !state.hasInteractiveDescendant.has(node.id);
 }
 
 function descendantTextCoveredByName(node: VomNode, state: RenderState): boolean {
@@ -1520,23 +1589,38 @@ export interface RenderRow {
   minimal?: string;
 }
 
+interface RenderStackEntry {
+  node: VomNode;
+  depth: number;
+  onlyInteractive?: boolean;
+}
+
 function pushRenderChildren(
-  stack: Array<{ node: VomNode; depth: number }>,
+  stack: RenderStackEntry[],
   children: readonly VomNode[],
   depth: number,
+  onlyInteractive = false,
 ): void {
   for (let index = children.length - 1; index >= 0; index -= 1) {
-    stack.push({ node: children[index], depth });
+    stack.push({ node: children[index], depth, onlyInteractive });
   }
 }
 
-function collectSubtreeText(node: VomNode, children: Map<number | null, VomNode[]>): string {
+function collectSubtreeText(
+  node: VomNode,
+  children: Map<number | null, VomNode[]>,
+  visited = new Set<number>(),
+): string {
+  if (visited.has(node.id) || normalizedRole(node) === "listmarker") return "";
+  visited.add(node.id);
   const kids = children.get(node.id) ?? [];
   const ownName = cleaned(node.name);
   if (kids.length === 0) {
     return ownName ?? cleaned(node.text) ?? cleaned(node.value) ?? "";
   }
-  const kidTexts = kids.map((child) => collectSubtreeText(child, children)).filter(Boolean);
+  const kidTexts = kids
+    .map((child) => collectSubtreeText(child, children, visited))
+    .filter(Boolean);
   if (ownName && (kidTexts.length === 0 || kidTexts.every((text) => ownName.includes(text)))) {
     return ownName;
   }
@@ -1550,13 +1634,23 @@ function* renderTreeRows(
   observation = false,
   representedSources?: ReadonlySet<number>,
 ): Generator<RenderRow> {
-  const stack: Array<{ node: VomNode; depth: number }> = [];
+  const stack: RenderStackEntry[] = [];
   pushRenderChildren(stack, children.get(null) ?? [], 1);
 
   while (stack.length > 0) {
-    const { node, depth } = stack.pop() as { node: VomNode; depth: number };
+    const { node, depth, onlyInteractive } = stack.pop() as RenderStackEntry;
 
     if (state.consumedCaptionIds.has(node.id)) {
+      continue;
+    }
+
+    if (onlyInteractive && node.visualKey === undefined && !isVomReferenceNode(node)) {
+      if (
+        state.hasInteractiveDescendant.has(node.id) ||
+        (observation && state.visualAncestors.has(node.id))
+      ) {
+        pushRenderChildren(stack, children.get(node.id) ?? [], depth, true);
+      }
       continue;
     }
 
@@ -1565,7 +1659,7 @@ function* renderTreeRows(
       representedSources?.has(node.id) ||
       (node.visualKey === undefined && !shouldRender(node))
     ) {
-      pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+      pushRenderChildren(stack, children.get(node.id) ?? [], depth, onlyInteractive);
       continue;
     }
 
@@ -1589,7 +1683,7 @@ function* renderTreeRows(
     if (depth > state.maxDepth && node.visualKey === undefined) {
       state.truncated = true;
       if (observation && state.visualAncestors.has(node.id))
-        pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+        pushRenderChildren(stack, children.get(node.id) ?? [], depth, onlyInteractive);
       continue;
     }
 
@@ -1665,11 +1759,19 @@ function* renderTreeRows(
 
     if (
       (!observation || !state.visualAncestors.has(node.id)) &&
-      ((ref && shouldSkipRedundantRefChildren(node)) || shouldSkipRedundantChildren(node, state))
+      ((ref && shouldSkipRedundantRefChildren(node, state)) ||
+        shouldSkipRedundantChildren(node, state))
     ) {
       continue;
     }
-    pushRenderChildren(stack, children.get(node.id) ?? [], depth + 1);
+    const resetsOnlyInteractive = ["dialog", "alertdialog"].includes(normalizedRole(node));
+    pushRenderChildren(
+      stack,
+      children.get(node.id) ?? [],
+      depth + 1,
+      (!resetsOnlyInteractive && Boolean(onlyInteractive)) ||
+        Boolean(ref && isFoldableNamedRefControl(node)),
+    );
   }
 }
 
@@ -2180,8 +2282,25 @@ function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOp
     "@layers 2 focus=L1",
     `L1 ${layer.kind} cover=${Math.round(layer.coverage * 100)}%`,
   ];
-  const state = renderNodes(visibleNodes, options, header, scene.surfaces, scene.activeScopeBlocks);
-  state.lines.push(renderPageOcclusionLine(hiddenCount));
+  const occlusionLine = renderPageOcclusionLine(hiddenCount);
+  const occlusionCost = estimateLineTokens(occlusionLine);
+  const budgetFinite = options.maxTokens !== undefined && Number.isFinite(options.maxTokens);
+  const nodeOptions = budgetFinite
+    ? { ...options, maxTokens: Math.max(0, options.maxTokens! - occlusionCost) }
+    : options;
+  const state = renderNodes(
+    visibleNodes,
+    nodeOptions,
+    header,
+    scene.surfaces,
+    scene.activeScopeBlocks,
+  );
+  if (!budgetFinite || state.tokens + occlusionCost <= options.maxTokens!) {
+    state.lines.push(occlusionLine);
+    state.tokens += occlusionCost;
+  } else {
+    state.truncated = true;
+  }
 
   return {
     text: state.lines.join("\n"),

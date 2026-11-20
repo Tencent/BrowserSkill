@@ -29,7 +29,7 @@ use clap::{Args, ValueEnum};
 
 use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::{CliWaitUntil, parse_timeout_ms};
@@ -61,26 +61,29 @@ pub struct WaitForNavigationArgs {
 
 pub fn dispatch_wait_for_navigation(
     args: WaitForNavigationArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
     format: Format,
 ) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = WaitForNavigationParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),
+        context_id: None,
     };
-    let reply = call_wait_for_navigation(info.sock_path, params, args.timeout)?;
+    let reply = call_wait_for_navigation(info.sock_path, &op_ctx, params, args.timeout)?;
     render_wait_for_navigation(&reply, format)
 }
 
 fn call_wait_for_navigation(
     sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
     params: WaitForNavigationParams,
     timeout_ms: u32,
 ) -> Result<WaitForNavigationResult, CliError> {
-    crate::cli::business_rpc::call::<WaitForNavigationParams, WaitForNavigationResult>(
+    ctx.call::<WaitForNavigationParams, WaitForNavigationResult>(
         sock,
         "wait-nav",
         Method::ToolWaitForNavigation,
@@ -182,7 +185,11 @@ pub struct WaitForElementArgs {
     pub tab_id: Option<i64>,
 }
 
-pub fn dispatch_wait_for_element(args: WaitForElementArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_wait_for_element(
+    args: WaitForElementArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     // Validate here so a bad flag fails locally instead of spending a daemon
     // round trip; the extension applies the same bounds.
@@ -197,7 +204,7 @@ pub fn dispatch_wait_for_element(args: WaitForElementArgs, format: Format) -> Re
         )));
     }
     let state: ElementState = args.state.into();
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = WaitForElementParams {
         session_id: args.session.unwrap_or_default(),
@@ -207,8 +214,9 @@ pub fn dispatch_wait_for_element(args: WaitForElementArgs, format: Format) -> Re
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
         poll_ms: Some(args.poll_ms),
+        context_id: None,
     };
-    let reply: WaitForElementResult = crate::cli::business_rpc::call(
+    let reply: WaitForElementResult = op_ctx.call(
         info.sock_path,
         "wait-for-element",
         Method::ToolWaitForElement,
@@ -306,17 +314,22 @@ fn parse_duration_ms(arg: &str) -> Result<u64, String> {
     Ok(ms)
 }
 
-pub fn dispatch_wait_ms(args: WaitMsArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_wait_ms(
+    args: WaitMsArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = WaitMsParams {
         duration_ms: args.duration,
     };
-    let reply = call_wait_ms(info.sock_path, params, args.duration)?;
+    let reply = call_wait_ms(info.sock_path, ctx, params, args.duration)?;
     render_wait_ms(&reply, format)
 }
 
 fn call_wait_ms(
     sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
     params: WaitMsParams,
     duration_ms: u64,
 ) -> Result<WaitMsResult, CliError> {
@@ -324,7 +337,7 @@ fn call_wait_ms(
     // doesn't tear the connection down before the daemon's sleep
     // resolves.
     let timeout = Duration::from_millis(duration_ms) + Duration::from_secs(15);
-    crate::cli::business_rpc::call::<WaitMsParams, WaitMsResult>(
+    ctx.call::<WaitMsParams, WaitMsResult>(
         sock,
         "wait-ms",
         Method::ToolWaitMs,
@@ -465,7 +478,11 @@ mod tests {
             };
             assert!(
                 matches!(
-                    dispatch_wait_for_element(args, Format::Json),
+                    dispatch_wait_for_element(
+                        args,
+                        &crate::cli::business_rpc::ClientContext::default(),
+                        Format::Json
+                    ),
                     Err(CliError::Local(_))
                 ),
                 "{argv:?} should have failed locally"
@@ -493,7 +510,11 @@ mod tests {
                 panic!("expected element wait");
             };
             assert!(matches!(
-                dispatch_wait_for_element(args, Format::Json),
+                dispatch_wait_for_element(
+                    args,
+                    &crate::cli::business_rpc::ClientContext::default(),
+                    Format::Json
+                ),
                 Err(CliError::Local(_))
             ));
         }

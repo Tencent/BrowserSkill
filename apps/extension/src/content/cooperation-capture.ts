@@ -2,35 +2,80 @@ import { describeFrameOwners } from "@/cooperation/hidden-frames";
 import { playbackProgressMedia } from "@/cooperation/media-progress";
 import {
   COOPERATION_ARM,
+  COOPERATION_ARM_FRAME,
   COOPERATION_DISABLE,
   COOPERATION_MESSAGE,
   COOPERATION_OWNERS,
   COOPERATION_READ,
-  COOPERATION_READY,
   COOPERATION_RESUME,
+  COOPERATION_SUBFRAME_READY,
   type FieldChange,
   type FrameState,
   type HumanActivity,
   type InputExpectation,
+  type TextChange,
 } from "@/cooperation/types";
-import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
 import { createRandomUuid } from "@/lib/random-uuid";
-import { sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+import {
+  isExtensionOverlayElement,
+  isExtensionOverlayEvent,
+  isExtensionOverlayNode,
+  isInternalBskAttribute,
+  isInternalBskMutation,
+  isPasswordTypeMutation,
+  isSensitiveFormField,
+  openOrClosedShadowRoot,
+  primaryEventTarget,
+  resolveDeepActiveElement,
+  SUBFRAME_OWNER_TAGS,
+  uncheckedElementShadowRoot,
+} from "./dom-primitives";
 
 const MAX_CHANGES = 64;
 // CDP's native clock conversion and the DOM clock round independently.
 // This bound is fixed; renderer/dispatch delays never extend input attribution.
 const INPUT_CLOCK_PRECISION_MS = 1.5;
+const MAX_TEXT = 500;
+/** `data-*` attributes the observation reads; changing one can change what the model sees. */
+const OBSERVED_DATA_ATTRIBUTES = new Set([
+  "data-testid",
+  "data-test-id",
+  "data-state",
+  "data-selected",
+  "data-index",
+  "data-section",
+]);
+/**
+ * Text here names or configures something else, or is not rendered as plain prose.
+ * Rows and list items identify the refs inside them by their text (row anchors).
+ */
+const NOT_PLAIN_TEXT =
+  "tr,li,[role=row],[role=listitem],label,legend,caption,th,summary,figcaption,h1,h2,h3,h4,h5,h6,[role=heading],option,optgroup,title,style,script,noscript,template,textarea,svg,math";
+/** Declarations that restyle an element without showing or hiding content. */
+const COSMETIC =
+  /^(outline|box-shadow|cursor|transition|text-decoration|border|caret-color|accent-color)/;
+// ponytail: a focused element may also recolour itself. A control that hides its own
+// label while focused is not detected; compare computed colours if that ever matters.
+const SELF_COSMETIC =
+  /^(color|background|outline|box-shadow|cursor|transition|text-decoration|border|caret-color|accent-color)/;
+const cleanText = (value: string) => value.replace(/\s+/g, " ").trim();
+const isText = (node: Node | undefined): node is Text => node?.nodeType === 3;
 
 /** Isolated-world collection also covers frames; no page-world control API is exposed. */
 export function attachCooperationCapture() {
   let enabled = false;
+  let listenersAttached = false;
+  let subframeNotifyScheduled = false;
   let lease: string | undefined;
   const retired = new Set<string>();
+  const isTopFrame = window === window.top;
   const state: FrameState = {
     document: createRandomUuid(),
+    ...(isTopFrame ? { url: location.href } : {}),
     revision: 0,
     structure: 0,
+    textual: 0,
+    texts: [],
     human: 0,
     busy: false,
     editing: false,
@@ -51,6 +96,8 @@ export function attachCooperationCapture() {
   let editingTarget: Element | undefined;
   let inputSource: { target: EventTarget | null; agent: boolean; before?: string } | undefined;
   let insertTarget: Element | null | undefined;
+  let scriptedClick = false;
+  let scriptedEditTarget: EventTarget | null | undefined;
   const fields = new Map<Element, FieldChange>();
   const sampledValues = new WeakMap<Element, string>();
   const ids = new WeakMap<object, string>();
@@ -66,12 +113,21 @@ export function attachCooperationCapture() {
   let eventTimer: ReturnType<typeof setTimeout> | undefined;
   let inputTimer: ReturnType<typeof setTimeout> | undefined;
   let scrollTimer: ReturnType<typeof setTimeout> | undefined;
-  const overlay = (target: EventTarget | null) =>
-    target instanceof Element && !!target.closest(OVERLAY_HOST_SELECTOR);
-  const formerPasswords = new WeakSet<Node>();
+  let scriptedTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearScripted = () => {
+    clearTimeout(scriptedTimer);
+    scriptedTimer = undefined;
+    scriptedClick = false;
+    scriptedEditTarget = undefined;
+  };
+  const scheduleScriptedClear = () => {
+    clearTimeout(scriptedTimer);
+    scriptedTimer = setTimeout(clearScripted, 0);
+  };
+  const formerPasswords = new WeakSet<Element>();
   const markFormerPasswords = (records: MutationRecord[]) => {
     for (const r of records) {
-      if (r.oldValue?.toLowerCase() === "password") formerPasswords.add(r.target);
+      if (isPasswordTypeMutation(r)) formerPasswords.add(r.target);
     }
   };
   // Passwords, codes, card details and file selections never enter field state.
@@ -82,8 +138,7 @@ export function attachCooperationCapture() {
     }
     return (
       (target instanceof HTMLInputElement && ["file", "hidden"].includes(target.type)) ||
-      formerPasswords.has(target) ||
-      sensitiveAutocomplete(target.getAttribute("autocomplete"))
+      isSensitiveFormField(target, formerPasswords)
     );
   };
   const label = (target: EventTarget | null) => {
@@ -131,7 +186,8 @@ export function attachCooperationCapture() {
   const publish = () => {
     clearTimeout(timer);
     timer = undefined;
-    if (!enabled) return;
+    if (!enabled || !lease) return;
+    if (isTopFrame) state.url = location.href;
     updateInteraction();
     state.fields = [...fields.values()];
     void chrome.runtime
@@ -141,61 +197,395 @@ export function attachCooperationCapture() {
   const schedule = () => {
     if (!timer) timer = setTimeout(publish, 60);
   };
+  const DATA_ATTR_RE = /data-[-\w]+/gi;
+  const collectDataAttrs = (source: string | null | undefined, into: Set<string>) => {
+    if (!source || !/data-/i.test(source)) return;
+    for (const match of source.matchAll(DATA_ATTR_RE)) into.add(match[0].toLowerCase());
+  };
+  const nonOverlayElements: NodeFilter = {
+    acceptNode: (node) =>
+      isExtensionOverlayElement(node as Element)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT,
+  };
+  const nonOverlayTextAndElements: NodeFilter = {
+    acceptNode: (node) =>
+      node.nodeType === 1 && isExtensionOverlayElement(node as Element)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT,
+  };
+  const roots = new Set<Document | ShadowRoot>();
+  let styles:
+    | { key: string; readable: boolean; dataAttrs: Set<string>; focus: string[] }
+    | undefined;
+  /** What the page's style sheets say about attributes and focus. Unreadable sheets say nothing. */
+  const styleFacts = () => {
+    const sheets = [...roots].flatMap((root) => [
+      ...(root.styleSheets ?? []),
+      ...(root.adoptedStyleSheets ?? []),
+    ]);
+    const top = sheets.map((sheet) => {
+      try {
+        return sheet.cssRules;
+      } catch {
+        return undefined;
+      }
+    });
+    // ponytail: keyed by rule counts. A CSSOM rewrite that keeps every count is
+    // missed until a count changes; hash the rule text if that ever matters.
+    const key = top.map((rules) => rules?.length ?? -1).join();
+    if (styles?.key === key) return styles;
+    const readable = top.every(Boolean);
+    const facts = { key, readable, dataAttrs: new Set<string>(), focus: [] as string[] };
+    if (!readable) {
+      styles = facts;
+      return facts;
+    }
+    const walk = (rules: CSSRuleList) => {
+      for (const rule of rules) {
+        if (!facts.readable) return;
+        // Skip @font-face (5) and @keyframes (7), which cannot select DOM attributes or :focus.
+        if (rule.type === 5 || rule.type === 7) continue;
+        const { selectorText, style } = rule as CSSStyleRule;
+        collectDataAttrs(selectorText, facts.dataAttrs);
+        if ("conditionText" in rule) {
+          collectDataAttrs((rule as CSSConditionRule).conditionText, facts.dataAttrs);
+        }
+        if ("start" in rule) {
+          collectDataAttrs((rule as { start?: string | null }).start, facts.dataAttrs);
+        }
+        if ("end" in rule) {
+          collectDataAttrs((rule as { end?: string | null }).end, facts.dataAttrs);
+        }
+        if (style) {
+          collectDataAttrs(style.getPropertyValue?.("content"), facts.dataAttrs);
+        }
+        if (selectorText?.includes(":focus")) {
+          // Without nesting or functions, each comma-separated selector stands alone.
+          const plain = !/[(&]/.test(selectorText);
+          for (const selector of plain ? selectorText.split(",") : [selectorText]) {
+            if (!selector.includes(":focus")) continue;
+            // The focused element styles only itself when no combinator follows.
+            const self = plain && /:focus(-visible)?(?![-\w])[^\s>+~]*$/.test(selector.trim());
+            const cosmetic = self ? SELF_COSMETIC : COSMETIC;
+            for (let index = 0; index < style.length; index++)
+              if (!cosmetic.test(style.item(index))) {
+                facts.focus.push(selector);
+                break;
+              }
+          }
+        }
+        try {
+          if ("styleSheet" in rule) {
+            const imported = (rule as CSSImportRule).styleSheet;
+            if (imported) walk(imported.cssRules);
+            else {
+              facts.readable = false;
+              return;
+            }
+          }
+          const nested = (rule as CSSGroupingRule).cssRules;
+          if (nested && facts.readable) walk(nested);
+        } catch {
+          facts.readable = false;
+          return;
+        }
+      }
+    };
+    for (const rules of top) {
+      if (!facts.readable) break;
+      if (rules) walk(rules);
+    }
+    styles = facts;
+    return facts;
+  };
+  /** No style that applies because of the current focus may show or hide content. */
+  const focusNeutral = () => {
+    const facts = styleFacts();
+    if (!facts.readable) return false;
+    if (!facts.focus.length) return true;
+    if (
+      facts.focus.every((selector) => !selector.includes("&")) &&
+      [...roots].every((root) => !root.querySelector(":focus"))
+    ) {
+      return true;
+    }
+    return !facts.focus.some((selector) => {
+      try {
+        return selector.includes("&") || [...roots].some((root) => root.querySelector(selector));
+      } catch {
+        return true;
+      }
+    });
+  };
+  /** An attribute write the observation cannot see: unchanged, or page-private data no style reads. */
+  const invisibleAttribute = (r: MutationRecord) => {
+    const name = r.attributeName?.toLowerCase() ?? "";
+    if (isInternalBskAttribute(name)) return true;
+    if (r.target instanceof Element && r.target.getAttribute(name) === r.oldValue) return true;
+    if (!/^data-[-\w]+$/.test(name) || OBSERVED_DATA_ATTRIBUTES.has(name)) return false;
+    const facts = styleFacts();
+    return facts.readable && !facts.dataAttrs.has(name);
+  };
+  /** Prose whose replacement changes its own line and the names derived from it, nothing else. */
+  const plainText = (
+    parent: Element,
+    referencedByRoot: Map<Document | ShadowRoot, Set<string>>,
+  ) => {
+    if (
+      parent.closest(NOT_PLAIN_TEXT) ||
+      (parent instanceof HTMLElement && parent.isContentEditable)
+    )
+      return false;
+    const transform = getComputedStyle(parent).textTransform;
+    if (transform && transform !== "none") return false;
+    const root = parent.getRootNode() as Document | ShadowRoot;
+    let referenced = referencedByRoot.get(root);
+    if (!referenced) {
+      referenced = new Set(
+        [...root.querySelectorAll("[aria-labelledby],[aria-describedby]")].flatMap((element) =>
+          `${element.getAttribute("aria-labelledby") ?? ""} ${element.getAttribute("aria-describedby") ?? ""}`.split(
+            /\s+/,
+          ),
+        ),
+      );
+      referencedByRoot.set(root, referenced);
+    }
+    for (let element: Element | null = parent; element; element = element.parentElement)
+      if (element.id && referenced.has(element.id)) return false;
+    return true;
+  };
+  /**
+   * The replacements a batch made when it changed nothing but visible text.
+   * Undefined for every other batch: those keep requiring a fresh observation.
+   */
+  const textChanges = (records: MutationRecord[]): Omit<TextChange, "sequence">[] | undefined => {
+    const replaced = new Map<Text, string>();
+    const removals = new Map<Node, MutationRecord>();
+    const attributeRecords: MutationRecord[] = [];
+    for (const r of records) {
+      if (r.type === "attributes") {
+        attributeRecords.push(r);
+        continue;
+      }
+      let node: Node | undefined = r.target;
+      let before = r.oldValue;
+      if (r.type === "childList") {
+        // One text node swapped for another in the same place: `textContent = value`
+        // on an element holding one text node, or a removal and then an insertion.
+        if (r.addedNodes.length > 1 || r.removedNodes.length > 1) return;
+        let removed = r.removedNodes[0];
+        node = r.addedNodes[0];
+        if (!node) {
+          if (removals.has(r.target)) return;
+          removals.set(r.target, r);
+          continue;
+        }
+        if (!removed) {
+          const removal = removals.get(r.target);
+          if (
+            removal?.previousSibling !== r.previousSibling ||
+            removal.nextSibling !== r.nextSibling
+          )
+            return;
+          removals.delete(r.target);
+          removed = removal.removedNodes[0];
+        }
+        if (!isText(removed)) return;
+        before = replaced.get(removed) ?? removed.data;
+        replaced.delete(removed);
+      }
+      if (!isText(node) || before === null) return;
+      if (!replaced.has(node)) replaced.set(node, before);
+    }
+    if (removals.size) return;
+    for (const r of attributeRecords) {
+      if (!invisibleAttribute(r)) return;
+    }
+    const changes: Omit<TextChange, "sequence">[] = [];
+    const referencedByRoot = new Map<Document | ShadowRoot, Set<string>>();
+    for (const [node, before] of replaced) {
+      const parent = node.parentElement;
+      const previous = cleanText(before);
+      const value = cleanText(node.data);
+      if (previous === value) continue;
+      if (
+        !parent ||
+        !previous ||
+        !value ||
+        previous.length > MAX_TEXT ||
+        value.length > MAX_TEXT ||
+        !plainText(parent, referencedByRoot)
+      )
+        return;
+      changes.push({
+        id: id(parent),
+        label: `${parent.localName}${parent.id ? `#${parent.id}` : ""}`.slice(0, 160),
+        previous_value: previous,
+        value,
+      });
+    }
+    if (changes.length && !unseenElsewhere(new Set(changes.map((c) => c.previous_value)))) return;
+    return changes;
+  };
+  let burstStart = 0;
+  let burst = 0;
+  /**
+   * A replaced text is located in the observation by its old value alone, so
+   * nothing else in this document may still read the same.
+   */
+  const unseenElsewhere = (texts: Set<string>) => {
+    // ponytail: one walk of the document's text per text-only batch, at most ten
+    // a second. Faster tickers re-capture; index text nodes if they need deltas.
+    const now = Date.now();
+    if (now - burstStart > 1000) {
+      burstStart = now;
+      burst = 0;
+    }
+    if (++burst > 10) return false;
+    for (const root of roots) {
+      const walker = document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+        nonOverlayTextAndElements,
+      );
+      for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+        if (isText(current)) {
+          if (texts.has(cleanText(current.data))) return false;
+          continue;
+        }
+        const element = current as Element;
+        for (const name of ["aria-label", "title", "alt", "placeholder", "value"]) {
+          const value = element.getAttribute(name);
+          if (value && texts.has(cleanText(value))) return false;
+        }
+      }
+    }
+    return true;
+  };
+  const scheduleSubframeNotify = () => {
+    if (!enabled || subframeNotifyScheduled) return;
+    subframeNotifyScheduled = true;
+    queueMicrotask(() => {
+      subframeNotifyScheduled = false;
+      if (!enabled) return;
+      void chrome.runtime.sendMessage({ kind: COOPERATION_SUBFRAME_READY }).catch(() => {});
+    });
+  };
+  // Page JS cannot see closed roots, but the extension can. Observation also
+  // traverses these roots, so source and focus guards must cover the same DOM.
+  const shadowRoot = (element: Element): ShadowRoot | null => openOrClosedShadowRoot(element);
+  const scanAddedSubtree = (target: Element | ShadowRoot, visited: Set<Node>): boolean => {
+    if (visited.has(target)) return false;
+    visited.add(target);
+    let foundSubframe = false;
+    if (target instanceof ShadowRoot) {
+      observeRoot(target);
+    } else {
+      if (isExtensionOverlayElement(target)) return false;
+      if (SUBFRAME_OWNER_TAGS.has(target.localName)) foundSubframe = true;
+      const nested = uncheckedElementShadowRoot(target);
+      if (nested && scanAddedSubtree(nested, visited)) foundSubframe = true;
+    }
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_ELEMENT, nonOverlayElements);
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+      if (visited.has(current)) continue;
+      visited.add(current);
+      const element = current as Element;
+      if (SUBFRAME_OWNER_TAGS.has(element.localName)) foundSubframe = true;
+      const nested = uncheckedElementShadowRoot(element);
+      if (nested && scanAddedSubtree(nested, visited)) foundSubframe = true;
+    }
+    return foundSubframe;
+  };
   const mutations = (records: MutationRecord[]) => {
     markFormerPasswords(records);
-    if (
-      !enabled ||
-      !records.some(
-        (r) => !overlay(r.target instanceof Element ? r.target : r.target.parentElement),
-      )
-    )
-      return;
+    if (enabled) {
+      const visited = new Set<Node>();
+      let addedSubframe = false;
+      for (const r of records) {
+        if (r.type !== "childList" || isExtensionOverlayNode(r.target)) continue;
+        for (const node of r.addedNodes) {
+          if (!(node instanceof Element) || isExtensionOverlayNode(node)) continue;
+          if (scanAddedSubtree(node, visited)) addedSubframe = true;
+        }
+      }
+      if (addedSubframe) scheduleSubframeNotify();
+    }
+    if (!enabled || !lease) return;
+    const seen = records.filter((r) => !isInternalBskMutation(r));
+    if (!seen.length) return;
     state.revision++;
     state.structure++;
+    const texts = textChanges(seen);
+    if (texts) {
+      const sequence = (state.textual ?? 0) + 1;
+      state.textual = sequence;
+      const log = [...(state.texts ?? []), ...texts.map((text) => ({ ...text, sequence }))];
+      const dropped = log.splice(0, Math.max(0, log.length - MAX_CHANGES));
+      if (dropped.length) state.textFloor = dropped[dropped.length - 1]!.sequence;
+      state.texts = log;
+    }
     schedule();
   };
   const observer = new MutationObserver(mutations);
-  const roots = new Set<Document | ShadowRoot>();
-  // Page JS cannot see closed roots, but the extension can. Observation also
-  // traverses these roots, so source and focus guards must cover the same DOM.
-  const shadowRoot = (element: Element): ShadowRoot | null =>
-    element.shadowRoot ??
-    (element instanceof HTMLElement ? (chrome.dom?.openOrClosedShadowRoot(element) ?? null) : null);
-  const activeElement = () => {
-    let active = document.activeElement;
-    while (active) {
-      const nested = shadowRoot(active)?.activeElement;
-      if (!nested) break;
-      active = nested;
-    }
-    return active;
+  const observeRoot = (root: Document | ShadowRoot) => {
+    if (roots.has(root)) return;
+    observer.observe(root, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeOldValue: true,
+      characterData: true,
+      characterDataOldValue: true,
+    });
+    roots.add(root);
   };
-  const controls = function* (root: Document | ShadowRoot): Generator<Element> {
-    if (!roots.has(root)) {
-      observer.observe(root, {
-        subtree: true,
-        childList: true,
-        attributes: true,
-        attributeOldValue: true,
-        characterData: true,
-      });
-      roots.add(root);
+  const observeShadowSubtree = (target: Document | Element | ShadowRoot) => {
+    if (target.nodeType === Node.DOCUMENT_NODE || target instanceof ShadowRoot) {
+      observeRoot(target as Document | ShadowRoot);
+    } else if (target instanceof Element) {
+      if (isExtensionOverlayNode(target)) return;
+      const nested = uncheckedElementShadowRoot(target);
+      if (nested) observeShadowSubtree(nested);
     }
-    for (const element of root.querySelectorAll("*")) {
-      if (overlay(element)) continue;
-      if (element.matches("input,textarea,select,[contenteditable=true]")) yield element;
-      const nested = shadowRoot(element);
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_ELEMENT, nonOverlayElements);
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+      const nested = uncheckedElementShadowRoot(current as Element);
+      if (nested) observeShadowSubtree(nested);
+    }
+  };
+  const activeElement = () => resolveDeepActiveElement(document, shadowRoot);
+  const controls = function* (root: Document | ShadowRoot): Generator<Element> {
+    observeRoot(root);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, nonOverlayElements);
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+      const element = current as Element;
+      const tag = element.localName;
+      if (
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        element.getAttribute("contenteditable") === "true"
+      ) {
+        yield element;
+      }
+      const nested = uncheckedElementShadowRoot(element);
       if (nested) yield* controls(nested);
     }
   };
   let documentUrl = location.href;
   const read = () => {
-    // SPA routes retain the DOM document, but cannot retain its action authority.
-    // This also covers child frames; root CDP route events catch away-and-back.
+    // Child SPA routes rotate `document` so `frameEpoch` invalidates iframe-bound
+    // observations; root SPA routes report `url` so `CooperationController` can
+    // separate out-of-band route changes from in-flight targeted query/hash updates.
     if (documentUrl !== location.href) {
       documentUrl = location.href;
-      state.document = createRandomUuid();
+      if (isTopFrame) state.url = documentUrl;
+      else state.document = createRandomUuid();
       state.revision++;
+    } else if (isTopFrame) {
+      state.url = documentUrl;
     }
     mutations(observer.takeRecords());
     const active = activeElement();
@@ -218,7 +608,7 @@ export function attachCooperationCapture() {
     const mediaByRoot = new Map<Document | ShadowRoot, { id: string }[]>();
     state.fieldsComplete = true;
     for (const target of controls(document)) {
-      if (overlay(target)) continue;
+      if (isExtensionOverlayNode(target)) continue;
       const fullValue =
         target instanceof HTMLInputElement && ["checkbox", "radio"].includes(target.type)
           ? String(target.checked)
@@ -278,35 +668,39 @@ export function attachCooperationCapture() {
     }
     for (const element of fields.keys()) if (!element.isConnected) fields.delete(element);
     const media = [...roots].flatMap((root) =>
-      [...root.querySelectorAll<HTMLMediaElement>("video,audio")].map((element) => {
-        const stream = element.srcObject;
-        return {
-          id: id(element),
-          src: element.getAttribute("src"),
-          currentSrc: element.currentSrc,
-          srcObject: stream ? id(stream) : null,
-          tracks:
-            typeof MediaStream !== "undefined" && stream instanceof MediaStream
-              ? stream
-                  .getTracks()
-                  .map((track) => track.id)
-                  .sort()
-              : [],
-          sources: [...element.children]
-            .filter((child): child is HTMLSourceElement => child instanceof HTMLSourceElement)
-            .map((source) => ({
-              id: id(source),
-              src: source.src,
-              type: source.type,
-              media: source.media,
-            })),
-        };
-      }),
+      [...root.querySelectorAll<HTMLMediaElement>("video,audio")]
+        .filter((element) => !isExtensionOverlayNode(element))
+        .map((element) => {
+          const stream = element.srcObject;
+          return {
+            id: id(element),
+            src: element.getAttribute("src"),
+            currentSrc: element.currentSrc,
+            srcObject: stream ? id(stream) : null,
+            tracks:
+              typeof MediaStream !== "undefined" && stream instanceof MediaStream
+                ? stream
+                    .getTracks()
+                    .map((track) => track.id)
+                    .sort()
+                : [],
+            sources: [...element.children]
+              .filter((child): child is HTMLSourceElement => child instanceof HTMLSourceElement)
+              .map((source) => ({
+                id: id(source),
+                src: source.src,
+                type: source.type,
+                media: source.media,
+              })),
+          };
+        }),
     );
     // currentSrc/srcObject may change without a DOM mutation. Keep the source
     // evidence fresh even when the page's mutation counter did not advance.
     if (state.media && JSON.stringify(state.media) !== JSON.stringify(media)) state.revision++;
     state.media = media;
+    // Every root is observed by now, so every style sheet is in view.
+    state.focusNeutral = focusNeutral();
     updateInteraction();
     state.fields = [...fields.values()];
     return { ...state };
@@ -377,8 +771,8 @@ export function attachCooperationCapture() {
       (dragging && ["dragend", "drop"].includes(event.type)) ||
       (pointer && !pointer.released && ["pointerup", "pointercancel"].includes(event.type)) ||
       (event.type === "keyup" && keys.has((event as KeyboardEvent).key));
-    if (!release && event.composedPath().some(overlay)) return;
-    let target = event.composedPath()[0] ?? event.target;
+    if (!release && isExtensionOverlayEvent(event)) return;
+    let target = primaryEventTarget(event);
     // Closed shadow roots retarget editing events to their host. Resolve the
     // same deep focus used by collection and native text attribution.
     if (
@@ -419,7 +813,46 @@ export function attachCooperationCapture() {
         }
       }
       state.revision++;
-      if (event.isTrusted && !agent && value !== undefined && value !== previous) {
+      const scriptedActivation =
+        scriptedClick &&
+        !inputSource &&
+        eventAgent !== false &&
+        pointer?.agent !== false &&
+        target instanceof HTMLInputElement &&
+        (target.type === "checkbox" || target.type === "radio");
+      // Programmatic `document.execCommand(...)` on editable fields dispatches a
+      // trusted `InputEvent("input")` with no preceding `beforeinput`, key, pointer,
+      // wheel, drop, or IME composition. Real user edits in Chromium always emit at
+      // least one of those originating events first.
+      const scriptedExecCommand =
+        event.isTrusted &&
+        event.type === "input" &&
+        typeof InputEvent !== "undefined" &&
+        event instanceof InputEvent &&
+        editable(target) &&
+        !inputSource &&
+        eventAgent === undefined &&
+        pointer === undefined &&
+        !composing;
+      if (scriptedExecCommand) {
+        scriptedEditTarget = target;
+        scheduleScriptedClear();
+      }
+      const scriptedEditCommit =
+        event.type === "change" &&
+        scriptedEditTarget === target &&
+        !inputSource &&
+        eventAgent !== false &&
+        pointer?.agent !== false;
+      if (
+        event.isTrusted &&
+        !agent &&
+        !scriptedActivation &&
+        !scriptedExecCommand &&
+        !scriptedEditCommit &&
+        value !== undefined &&
+        value !== previous
+      ) {
         editingTarget = editable(target) ? (target as Element) : undefined;
         state.editing = !!editingTarget;
         if (pointer && !pointer.agent) {
@@ -440,7 +873,26 @@ export function attachCooperationCapture() {
       } else schedule();
       return;
     }
-    if (!event.isTrusted) return;
+    if (!event.isTrusted) {
+      // Programmatic `checkbox.click()` / `radio.click()` / `label.click()` fires
+      // an untrusted click whose default activation synchronously emits trusted
+      // `input`/`change` events without any human gesture.
+      if (event.type === "click" && eventAgent !== false && pointer?.agent !== false) {
+        scriptedClick = true;
+        scheduleScriptedClear();
+      }
+      return;
+    }
+    if (
+      event.type === "pointerdown" ||
+      event.type === "keydown" ||
+      event.type === "beforeinput" ||
+      event.type === "wheel" ||
+      event.type === "drop" ||
+      event.type === "compositionstart" ||
+      event.type === "click"
+    )
+      clearScripted();
     if (event.type === "dragend" || event.type === "drop") {
       if (event.type === "drop") {
         eventAgent = dragAgent;
@@ -606,17 +1058,10 @@ export function attachCooperationCapture() {
     "input",
     "change",
   ];
-  for (const event of events)
-    document.addEventListener(event, onEvent, { capture: true, passive: true });
   // Chromium skips a node's legacy `mousewheel` listeners whenever that node has a
-  // `wheel` listener, even a passive one. Listen only while collecting so pages
-  // without a session keep their mousewheel handlers. Window capture runs before
-  // any document listener, so a page that stops propagation there cannot hide an
-  // Agent wheel from attribution even though this listener is registered late.
-  const listenWheel = (on: boolean) =>
-    on
-      ? window.addEventListener("wheel", onEvent, { capture: true, passive: true })
-      : window.removeEventListener("wheel", onEvent, true);
+  // `wheel` listener, even a passive one. Tier B stays completely inert (zero DOM,
+  // scroll, blur or wheel listeners and zero startup IPC) until Background arms or
+  // reads a controlled frame.
   const onScroll = () => {
     if (!enabled) return;
     const started = !state.scrolling;
@@ -628,17 +1073,17 @@ export function attachCooperationCapture() {
     }, 120);
     if (started) publish();
   };
-  document.addEventListener("scroll", onScroll, true);
   const onWindowBlur = () => {
+    if (!enabled) return;
+    clearScripted();
     if (
-      !enabled ||
-      (!pointer &&
-        !composing &&
-        !dragging &&
-        !state.editing &&
-        keys.size === 0 &&
-        !eventAgent &&
-        !inputSource)
+      !pointer &&
+      !composing &&
+      !dragging &&
+      !state.editing &&
+      keys.size === 0 &&
+      !eventAgent &&
+      !inputSource
     )
       return;
     clearTimeout(focusTimer);
@@ -657,20 +1102,60 @@ export function attachCooperationCapture() {
     state.revision++;
     publish();
   };
-  window.addEventListener("blur", onWindowBlur);
+  const setListenersAttached = (active: boolean) => {
+    if (listenersAttached === active) return;
+    listenersAttached = active;
+    if (active) {
+      for (const event of events) {
+        document.addEventListener(event, onEvent, { capture: true, passive: true });
+      }
+      document.addEventListener("scroll", onScroll, true);
+      window.addEventListener("blur", onWindowBlur);
+      window.addEventListener("wheel", onEvent, { capture: true, passive: true });
+    } else {
+      for (const event of events) {
+        document.removeEventListener(event, onEvent, true);
+      }
+      document.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("blur", onWindowBlur);
+      window.removeEventListener("wheel", onEvent, true);
+    }
+  };
   const onMessage = (
-    message: { kind?: string; input?: InputExpectation; lease?: string },
+    message: {
+      kind?: string;
+      input?: InputExpectation;
+      lease?: string;
+      includeDeclaredSrc?: boolean;
+    },
     _sender: chrome.runtime.MessageSender,
     reply: (value: unknown) => void,
   ) => {
     if (message.kind === COOPERATION_OWNERS) {
       // Layout facts for proving a child frame hidden. It grants nothing, so it
       // needs no lease and leaves collection state untouched.
-      reply(describeFrameOwners(document, shadowRoot));
+      reply(
+        describeFrameOwners(
+          document,
+          shadowRoot,
+          message.includeDeclaredSrc ? { includeDeclaredSrc: true } : undefined,
+        ),
+      );
+      return false;
+    }
+    if (message.kind === COOPERATION_ARM_FRAME) {
+      enabled = true;
+      setListenersAttached(true);
+      observeShadowSubtree(document);
+      reply({ ok: true });
       return false;
     }
     if (typeof message.lease !== "string") return false;
-    if (message.kind === COOPERATION_READ) {
+    if (
+      message.kind === COOPERATION_READ ||
+      (message.kind === COOPERATION_ARM && message.input?.type !== "clear") ||
+      (!lease && (message.kind === COOPERATION_ARM || message.kind === COOPERATION_RESUME))
+    ) {
       if (retired.has(message.lease)) {
         reply(undefined);
         return false;
@@ -680,8 +1165,11 @@ export function attachCooperationCapture() {
         expectation = undefined;
         insertTarget = undefined;
         inputSource = undefined;
+        clearScripted();
       }
       lease = message.lease;
+      enabled = true;
+      setListenersAttached(true);
     } else if (message.kind === COOPERATION_DISABLE) {
       retired.add(message.lease);
       if (lease !== message.lease) {
@@ -693,12 +1181,13 @@ export function attachCooperationCapture() {
     }
     if (message.kind === COOPERATION_DISABLE) {
       enabled = false;
-      listenWheel(false);
+      setListenersAttached(false);
       clearTimeout(focusTimer);
       clearTimeout(pointerTimer);
       clearTimeout(eventTimer);
       clearTimeout(inputTimer);
       clearTimeout(scrollTimer);
+      clearScripted();
       observer.disconnect();
       roots.clear();
       fields.clear();
@@ -719,7 +1208,7 @@ export function attachCooperationCapture() {
       reply({ ...state, busy: false, fields: [] });
     } else if (message.kind === COOPERATION_READ) {
       enabled = true;
-      listenWheel(true);
+      setListenersAttached(true);
       reply(read());
     } else if (message.kind === COOPERATION_ARM) {
       if (enabled && message.input?.type === "clear") {
@@ -776,19 +1265,18 @@ export function attachCooperationCapture() {
     return false;
   };
   chrome.runtime.onMessage.addListener(onMessage);
-  void chrome.runtime.sendMessage({ kind: COOPERATION_READY }).catch(() => {});
   return () => {
+    enabled = false;
     clearTimeout(timer);
     clearTimeout(focusTimer);
     clearTimeout(pointerTimer);
     clearTimeout(eventTimer);
     clearTimeout(inputTimer);
     clearTimeout(scrollTimer);
+    clearScripted();
     observer.disconnect();
-    chrome.runtime.onMessage.removeListener(onMessage);
-    window.removeEventListener("blur", onWindowBlur);
-    document.removeEventListener("scroll", onScroll, true);
-    for (const event of events) document.removeEventListener(event, onEvent, true);
-    listenWheel(false);
+    roots.clear();
+    chrome.runtime?.onMessage?.removeListener(onMessage);
+    setListenersAttached(false);
   };
 }

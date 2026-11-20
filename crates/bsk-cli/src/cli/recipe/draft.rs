@@ -171,9 +171,11 @@ impl Builder {
             value,
             values: selected,
             key: key.clone(),
-            modifiers: modifiers
-                .as_ref()
-                .and_then(|value| value.as_array().cloned()),
+            modifiers: modifiers.as_ref().map(|mods| {
+                mods.iter()
+                    .filter_map(|m| serde_json::to_value(m).ok())
+                    .collect()
+            }),
             expect: Vec::new(),
             risk: None,
         };

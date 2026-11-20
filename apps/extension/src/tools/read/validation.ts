@@ -1,7 +1,7 @@
 import {
-  RECORD_PASSWORD_ATTRIBUTE,
-  SENSITIVE_AUTOCOMPLETE_SELECTOR,
-} from "@/lib/sensitive-autocomplete";
+  READ_REDACTED_ANCESTOR_SELECTOR,
+  SENSITIVE_READ_INPUT_SELECTOR,
+} from "@/lib/dom-predicates";
 import type { RpcError, RpcErrorReason } from "@/transport/types";
 import type { ReadOptions, ReadParams } from "./types";
 
@@ -40,8 +40,6 @@ export function validateRead(params: ReadParams): ReadOptions {
     "session_id",
     "tab_id",
     "context_id",
-    "_audit_id",
-    "_operation_id",
     "selector",
     "ref",
     "fields",
@@ -103,6 +101,7 @@ export function validateRead(params: ReadParams): ReadOptions {
     max_nodes: bound(params.max_nodes, 100, 1, 1000),
     max_bytes: bound(params.max_bytes, 262144, 1024, 1048576),
     timeout_ms: bound(params.timeout_ms, 3000, 100, 10000),
-    sensitive: `input[type="password"],input[type="file"],input[type="hidden"],[${RECORD_PASSWORD_ATTRIBUTE}],${SENSITIVE_AUTOCOMPLETE_SELECTOR}`,
+    sensitive: SENSITIVE_READ_INPUT_SELECTOR,
+    excludedAncestors: READ_REDACTED_ANCESTOR_SELECTOR,
   };
 }

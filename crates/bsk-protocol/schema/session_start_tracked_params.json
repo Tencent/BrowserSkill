@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ControllerInfo": {
+      "description": "Display identity of the agent controlling a session. Never an authorization claim.",
+      "properties": {
+        "color": {
+          "description": "Optional six-digit hex color. Omitted colors are derived from the session ID.",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "project": {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "browser_instance_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "controller": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ControllerInfo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "focused": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "height": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "incognito": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "task_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "unattended": {
+      "description": "Deprecated legacy CLI override accepted and ignored so browser policy governs.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "width": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "request_id"
+  ],
+  "title": "DaemonSessionStartTrackedParams",
+  "type": "object"
+}

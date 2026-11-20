@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  createFrameDocumentInfo,
+  type FrameDocumentHandle,
+  type FrameNodeHandle,
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import { resolveNodeGeometry } from "../frame-geometry";
 import {
   clipPolygon,
@@ -11,25 +17,27 @@ import {
   regionBounds,
 } from "../geometry";
 import { GeometryContext } from "../geometry/frame-context";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 function scrollbarDriver(
   visible = { width: 185, height: 89 },
   frameSize: unknown = { width: 200, height: 100 },
 ) {
-  const send = vi.fn(async (target: { sessionId?: string }, method: string) => {
+  const isChildHandle = (handle: FrameDocumentHandle | FrameNodeHandle) =>
+    handle.frameId === "child" || handle.frameId === "same-child";
+  const send = vi.fn(async (handle: FrameDocumentHandle | FrameNodeHandle, method: string) => {
     if (method === "Runtime.evaluate") return { result: { value: frameSize } };
     if (method === "Page.getLayoutMetrics")
       return {
         cssLayoutViewport: {
-          clientWidth: target.sessionId ? visible.width : 800,
-          clientHeight: target.sessionId ? visible.height : 600,
+          clientWidth: isChildHandle(handle) ? visible.width : 800,
+          clientHeight: isChildHandle(handle) ? visible.height : 600,
         },
       };
     if (method === "DOM.getBoxModel")
       return {
         model: {
-          content: target.sessionId
+          content: isChildHandle(handle)
             ? [0, 0, 200, 0, 200, 100, 0, 100]
             : [100, 100, 500, 100, 500, 300, 100, 300],
         },
@@ -38,28 +46,35 @@ function scrollbarDriver(
       return { quads: [[180, 80, 230, 80, 230, 120, 180, 120]] };
     throw new Error(`unexpected ${method}`);
   });
-  const cdp: CdpRunner = {
-    send: (tabId, method) => send({ tabId } as never, method) as never,
-    sendToTarget: send as CdpRunner["sendToTarget"],
-    getFrameGraph: async () => ({
+  const cdp = createStubCdpRunner({
+    send: ((tabId: number, method: string) =>
+      send(toRootFrameHandle(tabId), method)) as CdpRunner["send"],
+    sendToFrame: send as CdpRunner["sendToFrame"],
+    getFrameDocuments: async () => ({
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
-        {
+        createFrameDocumentInfo({ tabId: 4, frameId: "main", loaderId: "main-loader" }),
+        createFrameDocumentInfo({
+          tabId: 4,
           frameId: "child",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
-          target: { tabId: 4, sessionId: "child" },
-        },
-        {
+          processKey: "oopif:child",
+          isOutOfProcess: true,
+          loaderId: "child-loader",
+        }),
+        createFrameDocumentInfo({
+          tabId: 4,
           frameId: "same-child",
           parentFrameId: "child",
           ownerBackendNodeId: 20,
-          target: { tabId: 4, sessionId: "child" },
-        },
+          processKey: "oopif:child",
+          isOutOfProcess: true,
+          loaderId: "same-child-loader",
+        }),
       ],
     }),
-  };
+  });
   return { cdp, send };
 }
 
@@ -72,8 +87,9 @@ describe("frame geometry projection", () => {
   ])("preserves scale and clips scrollbar strips for visible viewport $width × $height", async (visible) => {
     const { cdp, send } = scrollbarDriver(visible);
     const geometry = await resolveNodeGeometry(cdp, 4, {
-      target: { tabId: 4, sessionId: "child" },
+      tabId: 4,
       frameId: "child",
+      loaderId: "child-loader",
       backendNodeId: 101,
     });
     expect(geometry).toMatchObject({
@@ -113,11 +129,11 @@ describe("frame geometry projection", () => {
 
   it("clips an inner OOPIF against an intermediate OOPIF's occupied scrollbar strips", async () => {
     const { cdp } = scrollbarDriver();
-    const outer = cdp.sendToTarget!;
-    cdp.sendToTarget = async (target, method, params) => {
-      if (method === "DOM.getBoxModel")
+    const outer = cdp.sendToFrame;
+    cdp.sendToFrame = (async (handle, method, params, guard) => {
+      if (method === "DOM.getBoxModel" && handle.frameId === "child")
         return { model: { content: [150, 60, 250, 60, 250, 120, 150, 120] } } as never;
-      if (target.sessionId !== "inner") return outer(target, method, params);
+      if (handle.frameId !== "inner") return outer(handle, method, params, guard);
       if (method === "Runtime.evaluate")
         return { result: { value: { width: 100, height: 60 } } } as never;
       if (method === "Page.getLayoutMetrics")
@@ -125,19 +141,23 @@ describe("frame geometry projection", () => {
       if (method === "DOM.getContentQuads")
         return { quads: [[0, 0, 100, 0, 100, 60, 0, 60]] } as never;
       throw new Error(`unexpected ${method}`);
-    };
-    const graph = await cdp.getFrameGraph!(4);
-    graph.frames[2] = {
+    }) as CdpRunner["sendToFrame"];
+    const graph = await cdp.getFrameDocuments(4);
+    graph.frames[2] = createFrameDocumentInfo({
+      tabId: 4,
       frameId: "inner",
       parentFrameId: "child",
       ownerBackendNodeId: 20,
-      target: { tabId: 4, sessionId: "inner" },
-    };
-    cdp.getFrameGraph = async () => graph;
+      processKey: "oopif:inner",
+      isOutOfProcess: true,
+      loaderId: "inner-loader",
+    });
+    cdp.getFrameDocuments = async () => graph;
     expect(
       await resolveNodeGeometry(cdp, 4, {
-        target: { tabId: 4, sessionId: "inner" },
+        tabId: 4,
         frameId: "inner",
+        loaderId: "inner-loader",
         backendNodeId: 101,
       }),
     ).toMatchObject({
@@ -193,7 +213,7 @@ describe("frame geometry projection", () => {
   });
 
   it("does not reapply same-target frame transforms around an OOPIF", async () => {
-    const send = vi.fn(async (_tabId, method, params) => {
+    const rootSend = vi.fn(async (_tabId: number, method: string, params?: object) => {
       if (method === "Page.getLayoutMetrics") {
         return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
       }
@@ -205,33 +225,38 @@ describe("frame geometry projection", () => {
       }
       throw new Error(`unexpected root command ${method}`);
     });
-    const cdp: CdpRunner = {
-      send: send as CdpRunner["send"],
-      sendToTarget: vi.fn(async (_target, method) => {
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: rootSend as CdpRunner["send"],
+      sendToFrame: vi.fn(async (handle, method, params) => {
+        if (handle.frameId !== "oopif") {
+          return rootSend(handle.tabId, method, params);
+        }
         if (method === "Runtime.evaluate")
           return { result: { value: { width: 200, height: 100 } } };
         if (method === "Page.getLayoutMetrics") {
           return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
         }
         throw new Error(`unexpected child command ${method}`);
-      }) as CdpRunner["sendToTarget"],
-    };
+      }) as CdpRunner["sendToFrame"],
+    });
     const projection = await new GeometryContext(cdp, 4, {
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
-        {
+        createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+        createFrameDocumentInfo({
+          tabId: 4,
           frameId: "same-process-parent",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
-          target: { tabId: 4 },
-        },
-        {
+        }),
+        createFrameDocumentInfo({
+          tabId: 4,
           frameId: "oopif",
           parentFrameId: "same-process-parent",
           ownerBackendNodeId: 20,
-          target: { tabId: 4, sessionId: "oopif-session" },
-        },
+          processKey: "oopif:oopif",
+          isOutOfProcess: true,
+        }),
       ],
     }).targetProjection("oopif");
 
@@ -257,17 +282,21 @@ describe("frame geometry projection", () => {
   });
 
   it("clips live OOPIF geometry at every frame boundary", async () => {
-    const cdp: CdpRunner = {
-      send: vi.fn(async (_tabId, method) => {
-        if (method === "Page.getLayoutMetrics") {
-          return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+    const rootSend = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+      }
+      if (method === "DOM.getBoxModel") {
+        return { model: { content: [100, 100, 300, 100, 300, 200, 100, 200] } };
+      }
+      throw new Error(`unexpected root command ${method}`);
+    });
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: rootSend as CdpRunner["send"],
+      sendToFrame: vi.fn(async (handle, method) => {
+        if (handle.frameId !== "child") {
+          return rootSend(handle.tabId, method);
         }
-        if (method === "DOM.getBoxModel") {
-          return { model: { content: [100, 100, 300, 100, 300, 200, 100, 200] } };
-        }
-        throw new Error(`unexpected root command ${method}`);
-      }) as CdpRunner["send"],
-      sendToTarget: vi.fn(async (_target, method) => {
         if (method === "Runtime.evaluate")
           return { result: { value: { width: 200, height: 100 } } };
         if (method === "Page.getLayoutMetrics") {
@@ -277,24 +306,27 @@ describe("frame geometry projection", () => {
           return { quads: [[-50, -20, 250, -20, 250, 120, -50, 120]] };
         }
         throw new Error(`unexpected child command ${method}`);
-      }) as CdpRunner["sendToTarget"],
-      getFrameGraph: vi.fn(async () => ({
+      }) as CdpRunner["sendToFrame"],
+      getFrameDocuments: vi.fn(async () => ({
         rootFrameId: "main",
         frames: [
-          { frameId: "main", target: { tabId: 4 } },
-          {
+          createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+          createFrameDocumentInfo({
+            tabId: 4,
             frameId: "child",
             parentFrameId: "main",
             ownerBackendNodeId: 10,
-            target: { tabId: 4, sessionId: "child-session" },
-          },
+            processKey: "oopif:child",
+            isOutOfProcess: true,
+          }),
         ],
       })),
-    };
+    });
 
     const geometry = await resolveNodeGeometry(cdp, 4, {
-      target: { tabId: 4, sessionId: "child-session" },
+      tabId: 4,
       frameId: "child",
+      loaderId: "",
       backendNodeId: 101,
     });
 
@@ -306,30 +338,36 @@ describe("frame geometry projection", () => {
   });
 
   it("reuses one frame graph while scrolling and projecting live geometry", async () => {
-    const getFrameGraph = vi.fn(async () => ({
+    const getFrameDocuments = vi.fn(async () => ({
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
-        {
+        createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+        createFrameDocumentInfo({
+          tabId: 4,
           frameId: "child",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
-          target: { tabId: 4, sessionId: "child-session" },
-        },
+          processKey: "oopif:child",
+          isOutOfProcess: true,
+        }),
       ],
     }));
-    const cdp: CdpRunner = {
-      send: vi.fn(async (_tabId, method) => {
-        if (method === "DOM.scrollIntoViewIfNeeded") return {};
-        if (method === "Page.getLayoutMetrics") {
-          return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+    const rootSend = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+      }
+      if (method === "DOM.getBoxModel") {
+        return { model: { content: [100, 100, 300, 100, 300, 200, 100, 200] } };
+      }
+      throw new Error(`unexpected root command ${method}`);
+    });
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: rootSend as CdpRunner["send"],
+      sendToFrame: vi.fn(async (handle, method) => {
+        if (handle.frameId !== "child") {
+          return rootSend(handle.tabId, method);
         }
-        if (method === "DOM.getBoxModel") {
-          return { model: { content: [100, 100, 300, 100, 300, 200, 100, 200] } };
-        }
-        throw new Error(`unexpected root command ${method}`);
-      }) as CdpRunner["send"],
-      sendToTarget: vi.fn(async (_target, method) => {
         if (method === "DOM.scrollIntoViewIfNeeded") return {};
         if (method === "Runtime.evaluate")
           return { result: { value: { width: 200, height: 100 } } };
@@ -340,27 +378,28 @@ describe("frame geometry projection", () => {
           return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
         }
         throw new Error(`unexpected child command ${method}`);
-      }) as CdpRunner["sendToTarget"],
-      getFrameGraph,
-    };
+      }) as CdpRunner["sendToFrame"],
+      getFrameDocuments,
+    });
 
     await expect(
       resolveNodeGeometry(
         cdp,
         4,
         {
-          target: { tabId: 4, sessionId: "child-session" },
+          tabId: 4,
           frameId: "child",
+          loaderId: "",
           backendNodeId: 101,
         },
         { scrollIntoView: true },
       ),
     ).resolves.not.toMatchObject({ code: expect.any(String) });
-    expect(getFrameGraph).toHaveBeenCalledOnce();
+    expect(getFrameDocuments).toHaveBeenCalledOnce();
   });
 
   it("clips live geometry to same-target iframe ancestors", async () => {
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async (_tabId, method) => {
         if (method === "Page.getLayoutMetrics") {
           return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
@@ -373,23 +412,24 @@ describe("frame geometry projection", () => {
         }
         throw new Error(`unexpected ${method}`);
       }) as CdpRunner["send"],
-      getFrameGraph: vi.fn(async () => ({
+      getFrameDocuments: vi.fn(async () => ({
         rootFrameId: "main",
         frames: [
-          { frameId: "main", target: { tabId: 4 } },
-          {
+          createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+          createFrameDocumentInfo({
+            tabId: 4,
             frameId: "child",
             parentFrameId: "main",
             ownerBackendNodeId: 10,
-            target: { tabId: 4 },
-          },
+          }),
         ],
       })),
-    };
+    });
 
     const geometry = await resolveNodeGeometry(cdp, 4, {
-      target: { tabId: 4 },
+      tabId: 4,
       frameId: "child",
+      loaderId: "",
       backendNodeId: 101,
     });
 
@@ -401,20 +441,24 @@ describe("frame geometry projection", () => {
   });
 
   it("fails closed when an OOPIF frame graph is unavailable", async () => {
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(),
-      sendToTarget: vi.fn(async (_target, method) => {
+      getFrameDocuments: vi.fn(async () => {
+        throw new Error("frame graph unavailable");
+      }),
+      sendToFrame: vi.fn(async (_handle, method) => {
         if (method === "DOM.getContentQuads") {
           return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
         }
         throw new Error(`unexpected ${method}`);
-      }) as CdpRunner["sendToTarget"],
-    };
+      }) as CdpRunner["sendToFrame"],
+    });
 
     await expect(
       resolveNodeGeometry(cdp, 4, {
-        target: { tabId: 4, sessionId: "child-session" },
+        tabId: 4,
         frameId: "child",
+        loaderId: "child-loader",
         backendNodeId: 101,
       }),
     ).resolves.toMatchObject({ code: "cdp_failed" });

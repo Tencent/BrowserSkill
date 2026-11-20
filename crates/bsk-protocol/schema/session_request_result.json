@@ -1,0 +1,159 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "BorrowConfirmationPolicy": {
+      "enum": [
+        "always",
+        "never"
+      ],
+      "type": "string"
+    },
+    "ControllerInfo": {
+      "description": "Display identity of the agent controlling a session. Never an authorization claim.",
+      "properties": {
+        "color": {
+          "description": "Optional six-digit hex color. Omitted colors are derived from the session ID.",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "project": {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "InteractionPolicy": {
+      "properties": {
+        "borrow_confirmation": {
+          "$ref": "#/definitions/BorrowConfirmationPolicy"
+        },
+        "request_help": {
+          "$ref": "#/definitions/RequestHelpPolicy"
+        }
+      },
+      "required": [
+        "borrow_confirmation",
+        "request_help"
+      ],
+      "type": "object"
+    },
+    "RequestHelpPolicy": {
+      "enum": [
+        "enabled",
+        "disabled"
+      ],
+      "type": "string"
+    },
+    "SessionRequestState": {
+      "enum": [
+        "prepared",
+        "starting",
+        "ready",
+        "active",
+        "cancelling",
+        "closed",
+        "cleanup_failed",
+        "failed",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "SessionStatusEntry": {
+      "description": "Snapshot of a single live session.",
+      "properties": {
+        "agent_window_id": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "browser_instance_id": {
+          "type": "string"
+        },
+        "controller": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ControllerInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at_ms": {
+          "description": "Unix epoch milliseconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "interaction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InteractionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "browser_instance_id",
+        "created_at_ms"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "cleanup_error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "session": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SessionStatusEntry"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "state": {
+      "$ref": "#/definitions/SessionRequestState"
+    }
+  },
+  "required": [
+    "request_id",
+    "state",
+    "session"
+  ],
+  "title": "SessionRequestResult",
+  "type": "object"
+}

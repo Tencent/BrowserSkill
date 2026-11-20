@@ -1,5 +1,10 @@
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentHandle,
+  type FrameNodeHandle,
+  isStaleFrameHandleError,
+  toFrameDocumentHandle,
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import { documentIdentity, type RuntimeReply, SERIALIZATION, unwrap } from "./dom-read-runtime";
@@ -7,13 +12,13 @@ import { collectDomRead } from "./read/collector";
 import type { RawRead, ReadParams, ReadResult } from "./read/types";
 import { ReadFailure, readError, validateRead } from "./read/validation";
 import {
+  type CdpDispatchGuard,
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
+  delegateCdpRunner,
   isRpcError,
   lookupSession,
   resolveCdpAccessibleTargetTab,
-  sendToCdpTarget,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 import { throwIfAborted } from "./vom/capture-abort";
@@ -22,10 +27,7 @@ import { resolveVerifiedNode, verifyDocumentIdentity } from "./vom/document-iden
 export async function handleRead(
   manager: SessionManager,
   params: ReadParams,
-  deps: { cdp: CdpRunner; tabsApi: ChromeTabsApi } = {
-    cdp: new ChromiumCdp(),
-    tabsApi: chromeTabsApi,
-  },
+  deps: { cdp: CdpRunner; tabsApi: ChromeTabsApi },
   signal?: AbortSignal,
 ): Promise<ReadResult | RpcError> {
   const stale = (): never => {
@@ -47,10 +49,10 @@ export async function handleRead(
       "read",
     );
     if (isRpcError(tab)) return tab;
-    deps.cdp.trackSessionTab?.(ctx.sessionId, tab.tabId);
-    await deps.cdp.ensureAttachedToUrl?.(tab.tabId, tab.url);
+    deps.cdp.trackSessionTab(ctx.sessionId, tab.tabId);
+    await deps.cdp.ensureAttachedToUrl(tab.tabId, tab.url);
     const documentRevision = ctx.refStore.documentRevision(tab.tabId);
-    const attachmentId = deps.cdp.getAttachmentId?.(tab.tabId);
+    const attachmentId = deps.cdp.getAttachmentId(tab.tabId);
     if (!attachmentId)
       return {
         code: "unsupported",
@@ -61,59 +63,87 @@ export async function handleRead(
       throwIfAborted(signal);
       if (
         manager.get(ctx.sessionId) !== ctx ||
-        deps.cdp.getAttachmentId?.(tab.tabId) !== attachmentId ||
+        deps.cdp.getAttachmentId(tab.tabId) !== attachmentId ||
         ctx.refStore.documentRevision(tab.tabId) !== documentRevision
       )
         stale();
     };
-    const cdp: CdpRunner = {
-      send: (tabId, method, args) => send({ tabId }, method, args),
-      sendToTarget: (target, method, args) => send(target, method, args),
-      getAttachmentId: (id) => deps.cdp.getAttachmentId?.(id),
+    const guardFor = (method: string) => {
+      if (method !== "Runtime.releaseObjectGroup") {
+        check();
+        return { attachmentId, signal };
+      }
+      if (deps.cdp.getAttachmentId(tab.tabId) !== attachmentId) return null;
+      return { attachmentId, allowReattach: false };
     };
-    const send = async <T>(target: CdpTarget, method: string, args?: object): Promise<T> => {
-      if (method !== "Runtime.releaseObjectGroup") check();
-      else if (deps.cdp.getAttachmentId?.(tab.tabId) !== attachmentId) return undefined as T;
-      return deps.cdp.sendGuarded
-        ? deps.cdp.sendGuarded<T>(target, method, args, {
-            attachmentId,
-            ...(method === "Runtime.releaseObjectGroup" ? {} : { signal }),
-          })
-        : sendToCdpTarget<T>(deps.cdp, target, method, args);
+    const sendFrame = async <T>(
+      handle: FrameDocumentHandle | FrameNodeHandle,
+      method: string,
+      args?: object,
+      extraGuard?: CdpDispatchGuard,
+    ): Promise<T> => {
+      const guard = guardFor(method);
+      if (!guard) return {} as T;
+      return deps.cdp.sendToFrame<T>(handle, method, args, {
+        ...extraGuard,
+        ...guard,
+        signal: extraGuard?.signal ?? guard.signal,
+      });
     };
+    const cdp = delegateCdpRunner(deps.cdp, {
+      resourceCleanup: undefined,
+      send: <T>(tabId: number, method: string, args?: object, sig?: AbortSignal): Promise<T> =>
+        sendFrame<T>(toRootFrameHandle(tabId), method, args, sig ? { signal: sig } : undefined),
+      sendToFrame: <T>(
+        handle: FrameDocumentHandle | FrameNodeHandle,
+        method: string,
+        args?: object,
+        extraGuard?: CdpDispatchGuard,
+      ) => sendFrame<T>(handle, method, args, extraGuard),
+    });
     // A main-document query must not collect unrelated OOPIF documents or wait
     // for their renderers. Only a ref in a child needs the complete frame graph.
-    const tree = await send<{ frameTree?: { frame: { id: string; url?: string } } }>(
-      { tabId: tab.tabId },
-      "Page.getFrameTree",
-      {},
-    );
+    const tree = await cdp.send<{
+      frameTree?: { frame: { id: string; loaderId?: string; url?: string } };
+    }>(tab.tabId, "Page.getFrameTree", {});
     if (!tree.frameTree?.frame.id) return stale();
-    const root: CdpFrame = {
+    const root = toFrameDocumentHandle(tab.tabId, {
       frameId: tree.frameTree.frame.id,
-      url: tree.frameTree.frame.url,
-      target: { tabId: tab.tabId },
-    };
+      loaderId: tree.frameTree.frame.loaderId ?? "",
+    });
+    const rootUrl = tree.frameTree.frame.url;
     check();
     const rootDoc = await documentIdentity(cdp, root, attachmentId, stale);
-    let frame = root;
+    let frame: FrameDocumentHandle = root;
     let backendNodeId: number | undefined;
+    let expectedDocElementBackendNodeId: number | undefined;
     if (params.ref) {
       const ref = resolveSnapshotRef(ctx, params.ref, tab.tabId);
       if (isRpcError(ref)) return ref;
-      if (ref.cdpSessionId || (ref.frameId && ref.frameId !== root.frameId)) {
-        const graph = await deps.cdp.getFrameGraph?.(tab.tabId);
+      expectedDocElementBackendNodeId = ref.documentElementBackendNodeId;
+      if (ref.frameId && ref.frameId !== root.frameId) {
+        const graph = await deps.cdp.getFrameDocuments(tab.tabId, signal);
         check();
-        const selected = graph?.frames.find(
-          (f) => f.frameId === ref.frameId && f.target.sessionId === ref.cdpSessionId,
+        const selected = graph.frames.find(
+          (f) =>
+            f.frameId === ref.frameId &&
+            (!ref.loaderId || !f.loaderId || f.loaderId === ref.loaderId),
         );
         if (!selected) return stale();
-        frame = selected;
+        frame = selected.handle;
+      } else if (ref.loaderId && root.loaderId && ref.loaderId !== root.loaderId) {
+        return stale();
       }
       backendNodeId = ref.backendNodeId;
     }
     const current =
       frame === root ? rootDoc : await documentIdentity(cdp, frame, attachmentId, stale);
+    if (
+      expectedDocElementBackendNodeId !== undefined &&
+      current.identity.documentElementBackendNodeId !== expectedDocElementBackendNodeId
+    ) {
+      stale();
+    }
     const group = `bsk-read-${crypto.randomUUID()}`;
     let node: Awaited<ReturnType<typeof resolveVerifiedNode>> | undefined;
     try {
@@ -121,7 +151,7 @@ export async function handleRead(
         node = await resolveVerifiedNode(cdp, current.identity, backendNodeId, signal);
         if (node.status !== "current") stale();
       }
-      const reply = await send<RuntimeReply>(frame.target, "Runtime.callFunctionOn", {
+      const reply = await sendFrame<RuntimeReply>(current.identity, "Runtime.callFunctionOn", {
         ...(node?.status === "current"
           ? { objectId: node.objectId }
           : { executionContextId: current.contextId }),
@@ -151,12 +181,13 @@ export async function handleRead(
           tabId: tab.tabId,
           backendNodeId: item.backendNodeId,
           frameId: frame.frameId,
-          cdpSessionId: frame.target.sessionId,
+          loaderId: current.identity.loaderId,
+          documentElementBackendNodeId: current.identity.documentElementBackendNodeId,
         };
       });
       const result: ReadResult = {
         tab_id: tab.tabId,
-        page_url: frame === root ? raw.frame_url : (root.url ?? tab.url ?? ""),
+        page_url: frame === root ? raw.frame_url : (rootUrl ?? tab.url ?? ""),
         frame_id: frame.frameId,
         frame_url: raw.frame_url,
         title: raw.title,
@@ -180,11 +211,11 @@ export async function handleRead(
       );
       return result;
     } finally {
-      await send(frame.target, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(
-        () => {},
-      );
+      await sendFrame(current.identity, "Runtime.releaseObjectGroup", {
+        objectGroup: group,
+      }).catch(() => {});
       if (node?.status === "current")
-        await send(frame.target, "Runtime.releaseObjectGroup", {
+        await sendFrame(current.identity, "Runtime.releaseObjectGroup", {
           objectGroup: node.objectGroup,
         }).catch(() => {});
     }
@@ -192,6 +223,13 @@ export async function handleRead(
     if (signal?.aborted || (error instanceof Error && error.name === "AbortError"))
       return { code: "cancelled", message: "DOM read cancelled", data: { effect_state: "none" } };
     if (error instanceof ReadFailure) return readError(error);
+    if (isStaleFrameHandleError(error))
+      return readError(
+        new ReadFailure(
+          "read_target_stale",
+          "The read document or target changed; inspect it again",
+        ),
+      );
     return {
       code: "cdp_failed",
       message: error instanceof Error ? error.message : String(error),

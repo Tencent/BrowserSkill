@@ -16,32 +16,44 @@ type Frame = chrome.webNavigation.GetAllFrameResultDetails;
 
 // #614: a hidden child frame that never answers must not block a whole page,
 // while a displayed one must still be named and block it.
-describe.skipIf(!process.env.BSK_COOP_CHROME)("hidden frames that do not answer", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("hidden frames that do not answer", () => {
   it("records a hidden silent frame as a gap, stops waiting for it and requires it once displayed", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-hidden-frames-"));
     const server = createServer((request, response) => {
+      const port = (server.address() as { port: number }).port;
+      const cross = `http://intranet.test:${port}`;
+      const keepalive = `http://keepalive.test:${port}`;
+      const redirected = `http://redirected.test:${port}`;
+      if (request.url === "/redirect-to-busy") {
+        response.writeHead(302, { Location: `${redirected}/busy` });
+        response.end();
+        return;
+      }
       response.setHeader("Content-Type", "text/html");
-      const cross = `http://intranet.test:${(server.address() as { port: number }).port}`;
       response.end(
         request.url === "/busy"
           ? // Cross-site, so it gets its own renderer. Spin after its collector is installed.
             "<!doctype html><p>busy</p><script>setTimeout(() => { for (;;) {} }, 300)</script>"
           : request.url === "/frame"
             ? '<!doctype html><input aria-label="Frame">'
-            : request.url === "/owners"
-              ? `<!doctype html>
-                <iframe id="none" style="display:none" src="/frame"></iframe>
-                <iframe id="zero" style="width:0;height:0;border:0" src="/frame"></iframe>
-                <iframe id="invisible" style="visibility:hidden" src="/frame"></iframe>
-                <iframe id="transparent" style="opacity:0" src="/frame"></iframe>
-                <iframe id="shown" src="/frame"></iframe>
-                <iframe id="cross" src="${cross}/frame"></iframe>
-                <div id="host"></div>
-                <script>document.getElementById("host").attachShadow({ mode: "closed" }).innerHTML =
-                  '<iframe style="display:none" src="/frame"></iframe>';</script>`
-              : `<!doctype html><input aria-label="Page">
-                <iframe id="sandbox" style="display:none" src="${cross}/busy"></iframe>
-                <iframe src="/frame"></iframe>`,
+            : request.url === "/redirected-displayed"
+              ? `<!doctype html><input aria-label="Page">
+                <iframe id="displayed-redirect" src="${keepalive}/redirect-to-busy"></iframe>
+                <iframe id="hidden-keepalive" style="display:none" src="${keepalive}/frame"></iframe>`
+              : request.url === "/owners"
+                ? `<!doctype html>
+                  <iframe id="none" style="display:none" src="/frame"></iframe>
+                  <iframe id="zero" style="width:0;height:0;border:0" src="/frame"></iframe>
+                  <iframe id="invisible" style="visibility:hidden" src="/frame"></iframe>
+                  <iframe id="transparent" style="opacity:0" src="/frame"></iframe>
+                  <iframe id="shown" src="/frame"></iframe>
+                  <iframe id="cross" src="${cross}/frame"></iframe>
+                  <div id="host"></div>
+                  <script>document.getElementById("host").attachShadow({ mode: "closed" }).innerHTML =
+                    '<iframe style="display:none" src="/frame"></iframe>';</script>`
+                : `<!doctype html><input aria-label="Page">
+                  <iframe id="sandbox" style="display:none" src="${cross}/busy"></iframe>
+                  <iframe src="/frame"></iframe>`,
       );
     });
     try {
@@ -52,7 +64,12 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("hidden frames that do not answer"
       );
       await mkdir(path.join(directory, "content-scripts"));
       await writeFile(path.join(directory, "content-scripts/cooperation.js"), cooperationScript);
-      const matches = ["http://127.0.0.1/*", "http://intranet.test/*"];
+      const matches = [
+        "http://127.0.0.1/*",
+        "http://intranet.test/*",
+        "http://keepalive.test/*",
+        "http://redirected.test/*",
+      ];
       await writeFile(
         path.join(directory, "manifest.json"),
         JSON.stringify({
@@ -86,13 +103,13 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("hidden frames that do not answer"
       );
       await withChrome(
         {
-          executable: process.env.BSK_COOP_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           extensionPath: directory,
           extensionViaCdp: true,
           deviceScale: 1,
           zoom: 1,
           extraArgs: [
-            "--host-resolver-rules=MAP intranet.test 127.0.0.1",
+            "--host-resolver-rules=MAP intranet.test 127.0.0.1,MAP keepalive.test 127.0.0.1,MAP redirected.test 127.0.0.1",
             "--no-proxy-server",
             "--disable-features=HttpsUpgrades",
           ],
@@ -239,6 +256,37 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("hidden frames that do not answer"
           });
           expect(hidden.size).toBe(0);
           await evaluate(`chrome.tabs.remove(${tab.id})`);
+
+          // A displayed cross-origin iframe that redirected to a third origin and hung
+          // must never be misclassified as hidden because a hidden iframe shares its initial src origin.
+          const redirectedTab = await open("/redirected-displayed");
+          const redirectedFrames = await getAllFrames({ tabId: redirectedTab.id });
+          const redirectedBusy = redirectedFrames.find((frame) =>
+            frame.url.startsWith(`http://redirected.test:${port}/busy`),
+          )!;
+          await expect
+            .poll(
+              async () => {
+                try {
+                  await collectCooperationFrames(
+                    redirectedTab.id,
+                    COOPERATION_READ,
+                    "lease-redirect",
+                    undefined,
+                    new Map(),
+                    new Set(),
+                  );
+                  return "ok";
+                } catch (error) {
+                  return error instanceof Error ? error.message : String(error);
+                }
+              },
+              { timeout: 15000, interval: 100 },
+            )
+            .toBe(
+              `A page frame is not responding: ${redirectedBusy.frameId} (http://redirected.test:${port}/busy)`,
+            );
+          await evaluate(`chrome.tabs.remove(${redirectedTab.id})`);
         },
       );
     } finally {

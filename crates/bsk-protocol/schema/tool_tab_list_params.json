@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "definitions": {
     "TabScope": {
       "description": "View scope for [`TabListParams`] (§6 sandbox table).\n\n* `User` — tabs that live in any window other than an Agent Window.\n* `Agent` — tabs in the requesting session's Agent Window only.\n* `All` — both of the above; never reveals other sessions' Agent\n  Windows (cross-session isolation per §6).",

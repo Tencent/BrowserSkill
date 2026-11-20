@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_DAEMON_WS_URL } from "@/transport/generated/methods";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import { WSTransport } from "@/transport/ws-transport";
 import { ConnectionController } from "../connection-controller";
@@ -55,7 +56,7 @@ async function flush() {
 function setup(cleanup = vi.fn(async () => {})) {
   const sockets: Socket[] = [];
   const transport = new WSTransport({
-    url: "ws://127.0.0.1:52800",
+    url: DEFAULT_DAEMON_WS_URL,
     webSocketFactory: (url) => {
       const socket = new Socket(url);
       sockets.push(socket);
@@ -168,7 +169,7 @@ describe("connection reconfiguration with WSTransport", () => {
     gate.resolve();
     await Promise.all([first, last]);
     expect(s.sockets.map((socket) => socket.url)).toEqual([
-      "ws://127.0.0.1:52800",
+      DEFAULT_DAEMON_WS_URL,
       "ws://127.0.0.1:53300",
     ]);
     await s.configure(53300);

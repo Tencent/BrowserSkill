@@ -20,18 +20,17 @@
 //   `EvaluateResult { ok: false, error: { text, line?, column? } }`
 //   so the agent can read the throw text in-band (M9 review intent).
 
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { SessionManager } from "@/session-manager/manager";
 import type { EvaluateError, EvaluateParams, EvaluateResult, RpcError } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import {
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
   resolveTargetTab,
+  withRemoteObject,
 } from "./shared";
 
 export interface EvaluateDeps {
@@ -61,14 +60,6 @@ interface CdpExceptionDetails {
 interface RuntimeEvaluateReply {
   result?: CdpRemoteObject;
   exceptionDetails?: CdpExceptionDetails;
-}
-
-let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
-function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
-  if (!defaultDeps) {
-    defaultDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi };
-  }
-  return defaultDeps;
 }
 
 function abortedError(signal: AbortSignal | undefined): RpcError | null {
@@ -136,7 +127,7 @@ function extractValue(remote: CdpRemoteObject | undefined): unknown {
 export async function handleEvaluate(
   manager: SessionManager,
   params: EvaluateParams,
-  deps: EvaluateDeps = getDefaultDeps(),
+  deps: EvaluateDeps,
 ): Promise<EvaluateResult | RpcError> {
   if (!params || typeof params.expression !== "string" || params.expression.length === 0) {
     return { code: "invalid_params", message: "evaluate requires a non-empty expression" };
@@ -157,7 +148,7 @@ export async function handleEvaluate(
     return { code: "cancelled", message: "evaluate aborted" };
   }
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
-  deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+  deps.cdp.trackSessionTab(ctx.sessionId, target.tabId);
   try {
     await deps.cdp.beginDomMutation?.();
     const reply = await deps.cdp.send<RuntimeEvaluateReply>(target.tabId, "Runtime.evaluate", {
@@ -166,28 +157,43 @@ export async function handleEvaluate(
       returnByValue: params.return_by_value ?? true,
       throwOnSideEffect: false,
     });
-    if (deps.signal?.aborted)
-      return {
-        code: "cancelled",
-        message: "evaluate cancelled after dispatch; page effects may have occurred",
-        data: { effect_state: "unknown" },
-      };
-    // The receipt says so when nothing about the page was verified.
-    const unverified = params.unverified === true ? { verified: false as const } : {};
-    if (reply.exceptionDetails) {
+    const releaseAndFormat = async (): Promise<EvaluateResult | RpcError> => {
+      if (deps.signal?.aborted)
+        return {
+          code: "cancelled",
+          message: "evaluate cancelled after dispatch; page effects may have occurred",
+          data: { effect_state: "unknown" },
+        };
+      // The receipt says so when nothing about the page was verified.
+      const unverified = params.unverified === true ? { verified: false as const } : {};
+      if (reply.exceptionDetails) {
+        return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+          ok: false,
+          tab_id: target.tabId,
+          error: buildEvaluateError(reply.exceptionDetails),
+          ...unverified,
+        });
+      }
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-        ok: false,
+        ok: true,
         tab_id: target.tabId,
-        error: buildEvaluateError(reply.exceptionDetails),
+        value: extractValue(reply.result),
         ...unverified,
       });
+    };
+    const objectIds = [
+      ...new Set(
+        [reply.result?.objectId, reply.exceptionDetails?.exception?.objectId].filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ),
+      ),
+    ];
+    let run = releaseAndFormat;
+    for (const objectId of objectIds) {
+      const next = run;
+      run = () => withRemoteObject(deps.cdp, target.tabId, objectId, next);
     }
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      ok: true,
-      tab_id: target.tabId,
-      value: extractValue(reply.result),
-      ...unverified,
-    });
+    return await run();
   } catch (err) {
     return {
       code: "cdp_failed",

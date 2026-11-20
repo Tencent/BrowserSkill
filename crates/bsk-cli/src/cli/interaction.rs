@@ -18,7 +18,7 @@ use clap::{Args, ValueEnum};
 
 use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::navigate::parse_timeout_ms;
 
@@ -152,7 +152,11 @@ pub struct ClickArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_click(
+    args: ClickArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
@@ -160,8 +164,7 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
     )?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
-    let info = ensure_daemon().context("ensure daemon is running")?;
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let params = ClickParams {
         capture_id: args.capture_id.clone(),
         image_x: args.image_x,
@@ -178,9 +181,17 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
             Some(modifiers)
         },
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
+    crate::cli::orchestration::validate_click_params(&params)
+        .map_err(|msg| CliError::invalid_params(anyhow::anyhow!(msg)))?;
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let reply: ClickResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolClick,
         params,
         "click-1",
@@ -245,7 +256,11 @@ pub struct HoverArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_hover(
+    args: HoverArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
@@ -253,7 +268,7 @@ pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
     )?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = HoverParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -267,9 +282,14 @@ pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
         },
         settle_ms: Some(args.settle),
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: HoverResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolHover,
         params,
         "hover-1",
@@ -324,9 +344,13 @@ pub struct FocusArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_focus(args: FocusArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_focus(
+    args: FocusArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = FocusParams {
         session_id: args.session.unwrap_or_default(),
@@ -334,9 +358,14 @@ pub fn dispatch_focus(args: FocusArgs, format: Format) -> Result<(), CliError> {
         selector,
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: FocusResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolFocus,
         params,
         "focus-1",
@@ -385,9 +414,13 @@ pub struct BlurArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_blur(args: BlurArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_blur(
+    args: BlurArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = BlurParams {
         session_id: args.session.unwrap_or_default(),
@@ -395,9 +428,14 @@ pub fn dispatch_blur(args: BlurArgs, format: Format) -> Result<(), CliError> {
         selector,
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: BlurResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolBlur,
         params,
         "blur-1",
@@ -459,13 +497,17 @@ pub struct FillArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_fill(
+    args: FillArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
         args.selector.clone(),
     )?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = FillParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -475,9 +517,14 @@ pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
         tab_id: args.tab_id,
         clear_before: if args.no_clear { Some(false) } else { None },
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: FillResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolFill,
         params,
         "fill-1",
@@ -492,12 +539,7 @@ pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
             );
         }
         Format::Human => {
-            let target =
-                format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
-            println!(
-                "fill ok tab={} target={target} length={}",
-                reply.tab_id, reply.value_length
-            );
+            println!("{}", fill_summary(&reply));
             print_dialog_summaries(&reply.dialogs);
         }
     }
@@ -542,10 +584,14 @@ pub struct PressArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_press(args: PressArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_press(
+    args: PressArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = PressParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -560,9 +606,14 @@ pub fn dispatch_press(args: PressArgs, format: Format) -> Result<(), CliError> {
         tab_id: args.tab_id,
         hold_ms: args.hold_ms,
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: PressResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolPress,
         params,
         "press-1",
@@ -633,13 +684,17 @@ pub struct SelectArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_select(args: SelectArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_select(
+    args: SelectArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
         args.selector.clone(),
     )?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = SelectParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -648,9 +703,14 @@ pub fn dispatch_select(args: SelectArgs, format: Format) -> Result<(), CliError>
         selector,
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: SelectResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolSelect,
         params,
         "select-1",
@@ -679,6 +739,22 @@ pub fn dispatch_select(args: SelectArgs, format: Format) -> Result<(), CliError>
     Ok(())
 }
 
+/// Human fill receipt. A sensitive control reports `formatted` without its value.
+fn fill_summary(reply: &FillResult) -> String {
+    let target = format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
+    let mut line = format!(
+        "fill ok tab={} target={target} length={}",
+        reply.tab_id, reply.value_length
+    );
+    if reply.formatted == Some(true) {
+        match reply.actual_value.as_deref() {
+            Some(actual) => line.push_str(&format!(" actual_value={actual:?}")),
+            None => line.push_str(" formatted=true"),
+        }
+    }
+    line
+}
+
 fn format_used_target(used_ref: Option<&str>, used_selector: Option<&str>) -> String {
     used_ref
         .map(|r| format!("@{r}"))
@@ -697,6 +773,7 @@ fn modifier_label(m: &KeyModifier) -> &'static str {
 
 fn call<P, R>(
     sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
     method: Method,
     params: P,
     id: &'static str,
@@ -706,12 +783,38 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(sock, id, method, Some(params), ipc_timeout(timeout_ms))
+    ctx.call::<P, R>(sock, id, method, Some(params), ipc_timeout(timeout_ms))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_summary_reports_formatting_without_a_sensitive_value() {
+        let reply = |actual_value: Option<&str>, formatted: Option<bool>| FillResult {
+            tab_id: 4,
+            used_ref: Some("e1".into()),
+            used_selector: None,
+            value_length: 6,
+            actual_value: actual_value.map(Into::into),
+            formatted,
+            dialogs: Vec::new(),
+        };
+        assert_eq!(
+            fill_summary(&reply(None, None)),
+            "fill ok tab=4 target=@e1 length=6"
+        );
+        assert_eq!(
+            fill_summary(&reply(Some("(555)"), Some(true))),
+            "fill ok tab=4 target=@e1 length=6 actual_value=\"(555)\""
+        );
+        // Password and card fields omit the value but still report the change.
+        assert_eq!(
+            fill_summary(&reply(None, Some(true))),
+            "fill ok tab=4 target=@e1 length=6 formatted=true"
+        );
+    }
 
     #[test]
     fn looks_like_ref_handles_both_forms() {

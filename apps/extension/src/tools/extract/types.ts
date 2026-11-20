@@ -91,6 +91,8 @@ export interface CollectorOptions {
   max_columns: number;
   max_bytes: number;
   timeout_ms: number;
+  sensitive?: string;
+  overlaySelector?: string;
 }
 export interface RawCell {
   text: string | null;

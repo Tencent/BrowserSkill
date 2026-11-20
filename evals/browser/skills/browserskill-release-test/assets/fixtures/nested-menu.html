@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Multi-level Dynamic Menu</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    font: 14px/1.5 system-ui, -apple-system, sans-serif;
+    color: #303133;
+    background: #f5f7fa;
+  }
+  .shell {
+    max-width: 860px;
+    margin: 0 auto;
+    background: #ffffff;
+    border: 1px solid #dcdfe6;
+    border-radius: 8px;
+    padding: 20px 24px 180px;
+  }
+  h1 {
+    margin: 0 0 16px;
+    font-size: 18px;
+  }
+  .el-menu {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+  }
+  .el-menu--horizontal {
+    display: flex;
+    align-items: center;
+    height: 48px;
+    border-bottom: 1px solid #dcdfe6;
+    gap: 4px;
+  }
+  .el-menu-item,
+  .el-sub-menu {
+    position: relative;
+    cursor: pointer;
+    user-select: none;
+    color: #303133;
+  }
+  .el-menu--horizontal > .el-menu-item,
+  .el-menu--horizontal > .el-sub-menu > .el-sub-menu__title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 48px;
+    padding: 0 18px;
+    font-weight: 500;
+  }
+  .el-menu--popup {
+    min-width: 184px;
+    padding: 6px 0;
+    border-radius: 6px;
+  }
+  .el-menu--popup > .el-menu-item,
+  .el-menu--popup > .el-sub-menu > .el-sub-menu__title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 36px;
+    padding: 0 16px;
+    white-space: nowrap;
+  }
+  .el-menu-item:hover,
+  .el-sub-menu__title:hover {
+    background: #ecf5ff;
+    color: #409eff;
+  }
+  .el-popper {
+    background: #ffffff;
+    border: 1px solid #e4e7ed;
+    border-radius: 6px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+  }
+  #workspace-popper {
+    display: none;
+    position: fixed;
+    z-index: 2000;
+  }
+  #advanced-popper {
+    display: none;
+    position: absolute;
+    top: 0;
+    left: 100%;
+    margin-left: 4px;
+    z-index: 2001;
+  }
+  .receipt-panel {
+    margin-top: 28px;
+    padding: 12px 16px;
+    background: #f0f9eb;
+    border: 1px solid #e1f3d8;
+    border-radius: 6px;
+  }
+  output {
+    font-weight: 600;
+    color: #1f2d3d;
+  }
+</style>
+<div class="shell">
+  <h1>Console Navigation</h1>
+  <ul id="top-menubar" class="el-menu el-menu--horizontal" role="menubar" aria-label="Console navigation">
+    <li id="menu-overview" class="el-menu-item" role="menuitem" tabindex="0">Overview</li>
+    <li id="menu-workspace" class="el-sub-menu" role="menuitem" aria-haspopup="true" aria-expanded="false" tabindex="0">
+      <div class="el-sub-menu__title">
+        <span>Workspace</span>
+        <span class="el-sub-menu__icon-arrow" aria-hidden="true">▾</span>
+      </div>
+    </li>
+  </ul>
+  <div class="receipt-panel">
+    <span>Selection receipt: </span>
+    <output id="menu-selection-receipt" data-selected="none">None</output>
+  </div>
+</div>
+
+<!-- Level-1 submenu teleports to body (Element Plus horizontal root el-sub-menu) -->
+<div id="workspace-popper" class="el-popper is-pure is-light">
+  <ul id="workspace-menu" class="el-menu el-menu--popup" role="menu">
+    <li id="menu-members" class="el-menu-item" role="menuitem" tabindex="-1">Members</li>
+    <li id="menu-advanced" class="el-sub-menu" role="menuitem" aria-expanded="false" tabindex="-1">
+      <div class="el-sub-menu__title">
+        <span>Advanced</span>
+        <span class="el-sub-menu__icon-arrow" aria-hidden="true">▸</span>
+      </div>
+      <!-- Level-2 submenu stays nested inside parent menuitem (Element Plus deep > 1 teleported=false, ul[role="none"]) -->
+      <div id="advanced-popper" class="el-popper is-pure is-light">
+        <ul id="advanced-menu" class="el-menu el-menu--popup el-menu--popup-right-start" role="none">
+          <li id="menu-audit-export" class="el-menu-item" role="menuitem" tabindex="-1">Audit export</li>
+          <li id="menu-report-history" class="el-menu-item" role="menuitem" tabindex="-1">Report history</li>
+        </ul>
+      </div>
+    </li>
+  </ul>
+</div>
+
+<script>
+(() => {
+  const workspaceTrigger = document.getElementById("menu-workspace");
+  const workspacePopper = document.getElementById("workspace-popper");
+  const advancedTrigger = document.getElementById("menu-advanced");
+  const advancedPopper = document.getElementById("advanced-popper");
+  const receipt = document.getElementById("menu-selection-receipt");
+
+  let openWorkspaceTimer = null;
+  let closeWorkspaceTimer = null;
+  let openAdvancedTimer = null;
+  let closeAdvancedTimer = null;
+
+  function setAdvancedOpen(open) {
+    clearTimeout(openAdvancedTimer);
+    clearTimeout(closeAdvancedTimer);
+    advancedPopper.style.display = open ? "block" : "none";
+    advancedTrigger.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function setWorkspaceOpen(open) {
+    clearTimeout(openWorkspaceTimer);
+    clearTimeout(closeWorkspaceTimer);
+    if (open) {
+      const rect = workspaceTrigger.getBoundingClientRect();
+      workspacePopper.style.left = Math.round(rect.left) + "px";
+      workspacePopper.style.top = Math.round(rect.bottom + 4) + "px";
+      workspacePopper.style.display = "block";
+      workspaceTrigger.setAttribute("aria-expanded", "true");
+    } else {
+      setAdvancedOpen(false);
+      workspacePopper.style.display = "none";
+      workspaceTrigger.setAttribute("aria-expanded", "false");
+    }
+  }
+
+  function scheduleWorkspaceOpen() {
+    clearTimeout(closeWorkspaceTimer);
+    clearTimeout(openWorkspaceTimer);
+    openWorkspaceTimer = setTimeout(() => setWorkspaceOpen(true), 40);
+  }
+
+  function scheduleWorkspaceClose() {
+    clearTimeout(openWorkspaceTimer);
+    clearTimeout(closeWorkspaceTimer);
+    closeWorkspaceTimer = setTimeout(() => setWorkspaceOpen(false), 300);
+  }
+
+  function scheduleAdvancedOpen() {
+    clearTimeout(closeWorkspaceTimer);
+    clearTimeout(closeAdvancedTimer);
+    clearTimeout(openAdvancedTimer);
+    openAdvancedTimer = setTimeout(() => setAdvancedOpen(true), 40);
+  }
+
+  function scheduleAdvancedClose() {
+    clearTimeout(openAdvancedTimer);
+    clearTimeout(closeAdvancedTimer);
+    closeAdvancedTimer = setTimeout(() => setAdvancedOpen(false), 300);
+  }
+
+  workspaceTrigger.addEventListener("mouseenter", scheduleWorkspaceOpen);
+  workspaceTrigger.addEventListener("mouseleave", scheduleWorkspaceClose);
+  workspaceTrigger.querySelector(".el-sub-menu__title").addEventListener("click", (e) => {
+    e.stopPropagation();
+    setWorkspaceOpen(workspacePopper.style.display !== "block");
+  });
+  workspacePopper.addEventListener("mouseenter", () => clearTimeout(closeWorkspaceTimer));
+  workspacePopper.addEventListener("mouseleave", scheduleWorkspaceClose);
+
+  advancedTrigger.addEventListener("mouseenter", scheduleAdvancedOpen);
+  advancedTrigger.addEventListener("mouseleave", scheduleAdvancedClose);
+  advancedTrigger.querySelector(".el-sub-menu__title").addEventListener("click", (e) => {
+    e.stopPropagation();
+    setAdvancedOpen(advancedPopper.style.display !== "block");
+  });
+
+  function choose(item, key, text) {
+    receipt.dataset.selected = key;
+    receipt.textContent = text;
+    setWorkspaceOpen(false);
+    fetch("/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "nested-menu-select", item, receipt: text }),
+    }).catch(() => {});
+  }
+
+  document.getElementById("menu-overview").addEventListener("click", (e) => {
+    e.stopPropagation();
+    choose("Overview", "overview", "Selected overview");
+  });
+  document.getElementById("menu-members").addEventListener("click", (e) => {
+    e.stopPropagation();
+    choose("Members", "members", "Selected members");
+  });
+  document.getElementById("menu-audit-export").addEventListener("click", (e) => {
+    e.stopPropagation();
+    choose("Audit export", "audit", "Selected audit");
+  });
+  document.getElementById("menu-report-history").addEventListener("click", (e) => {
+    e.stopPropagation();
+    choose("Report history", "history", "Selected history");
+  });
+})();
+</script>
+</html>

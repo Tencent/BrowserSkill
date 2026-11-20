@@ -69,6 +69,10 @@ export interface VomNode {
   domAncestorIds?: number[];
 
   modal?: boolean;
+  /** Accessibility/ARIA popup trigger state (`aria-haspopup` / AX `hasPopup`). */
+  hasPopup?: boolean;
+  /** Accessibility/ARIA expansion state (`aria-expanded` / AX `expanded`). */
+  expanded?: boolean;
   sensitive?: boolean;
   disabled?: boolean;
   inert?: boolean;
@@ -143,6 +147,19 @@ export interface RenderedRef extends VomRef {
   rowAnchor?: string;
   /** Zero-based line index in `VomResult.text`. */
   line: number;
+}
+
+export interface VomLineMetadata {
+  indent: number;
+  kind: "header" | "layer" | "context" | "active-scope" | "notice" | "node";
+  ref?: string;
+  role?: string;
+  /** JSON-escaped inner text of the line's primary quoted name, if present. */
+  escapedName?: string;
+  /** True when the line is strictly `role "name"` without `@eN` or trailing annotations. */
+  plainNamedNode: boolean;
+  /** True when the renderer may cut the line's primary label without appending `…`. */
+  silentlyTruncatesLabel: boolean;
 }
 
 export interface VomResult {

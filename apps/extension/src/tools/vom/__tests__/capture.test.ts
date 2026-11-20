@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "../../../lib/overlay-bridge";
+import { createStubCdpRunner } from "../../shared";
 import { collectOverlayExcludedBackendIds, probeHoverSurfaces } from "../capture";
 import { captureObservationFacts, semanticCapture } from "../capture-coordinator";
 
@@ -210,7 +211,7 @@ function nestedHoverTriggerSnapshotReply() {
 }
 
 function makeCdp(snapshot: unknown) {
-  return {
+  return createStubCdpRunner({
     send: vi.fn(async (_tab: number, method: string) => {
       if (method === "DOMSnapshot.enable") return {};
       if (method === "DOMSnapshot.captureSnapshot") return snapshot;
@@ -249,7 +250,7 @@ function makeCdp(snapshot: unknown) {
       if (method === "Runtime.releaseObjectGroup") return {};
       throw new Error(`unexpected ${method}`);
     }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-  };
+  });
 }
 
 describe("snapshot capture and hover", () => {
@@ -275,7 +276,7 @@ describe("snapshot capture and hover", () => {
 
   it("runs hover surface probes when explicitly enabled", async () => {
     let hoverStateCalls = 0;
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_tabId: number, method: string, params?: object) => {
         if (method === "DOMSnapshot.enable") return {};
         if (method === "DOMSnapshot.captureSnapshot") return hoverTriggerSnapshotReply();
@@ -312,7 +313,7 @@ describe("snapshot capture and hover", () => {
         if (method === "Input.dispatchMouseEvent") return {};
         throw new Error(`unexpected ${method}`);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
 
     const captured = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     const surfaceProbes = await probeHoverSurfaces(cdp, 4, captured.nodes);
@@ -340,7 +341,7 @@ describe("snapshot capture and hover", () => {
 
   it("uses a fresh baseline for each hover candidate", async () => {
     let hoverStateCalls = 0;
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_tabId: number, method: string, params?: object) => {
         if (method === "DOMSnapshot.enable") return {};
         if (method === "DOMSnapshot.captureSnapshot") return twoHoverTriggerSnapshotReply();
@@ -374,7 +375,7 @@ describe("snapshot capture and hover", () => {
         if (method === "Input.dispatchMouseEvent") return {};
         throw new Error(`unexpected ${method}`);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
 
     const captured = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     const surfaceProbes = await probeHoverSurfaces(cdp, 4, captured.nodes);
@@ -390,7 +391,7 @@ describe("snapshot capture and hover", () => {
 
   it("deduplicates nested hover candidates for one visual trigger", async () => {
     let hoverMoves = 0;
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_tabId: number, method: string, params?: object) => {
         if (method === "DOMSnapshot.enable") return {};
         if (method === "DOMSnapshot.captureSnapshot") return nestedHoverTriggerSnapshotReply();
@@ -421,7 +422,7 @@ describe("snapshot capture and hover", () => {
         }
         throw new Error(`unexpected ${method}`);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
 
     const captured = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     await probeHoverSurfaces(cdp, 4, captured.nodes);
@@ -737,7 +738,7 @@ describe("snapshot capture and hover", () => {
   });
 
   it("subtracts scroll offset to make rects viewport-relative", async () => {
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_t: number, method: string) => {
         if (method === "DOMSnapshot.enable") return {};
         if (method === "DOMSnapshot.captureSnapshot") return fakeSnapshotReply();
@@ -750,7 +751,7 @@ describe("snapshot capture and hover", () => {
         }
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
     const { nodes } = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     const div = nodes.find((n) => n.backendNodeId === 12);
     expect(div?.localRect?.y).toBe(-200);
@@ -786,7 +787,7 @@ describe("snapshot capture and hover", () => {
         },
       ],
     };
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_t: number, method: string) => {
         if (method === "DOMSnapshot.enable") return {};
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
@@ -800,7 +801,7 @@ describe("snapshot capture and hover", () => {
         }
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
     const { nodes } = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     expect(nodes.find((n) => n.backendNodeId === 12)?.rect).toEqual({
       x: 0,
@@ -864,7 +865,7 @@ describe("snapshot capture and hover", () => {
         },
       ],
     };
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_t: number, method: string) => {
         if (method === "DOMSnapshot.enable") return {};
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
@@ -877,7 +878,7 @@ describe("snapshot capture and hover", () => {
         }
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
     const { nodes } = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     const btn = nodes.find((n) => n.backendNodeId === 12);
     expect(btn?.textContent).toBe("登录");
@@ -956,7 +957,7 @@ describe("snapshot capture and hover", () => {
         },
       ],
     };
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_t: number, method: string) => {
         if (method === "DOMSnapshot.enable") return {};
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
@@ -975,7 +976,7 @@ describe("snapshot capture and hover", () => {
         if (method === "Runtime.releaseObject") return {};
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
     const facts = await captureObservationFacts(cdp, 4);
     const root = facts.documents.find((doc) => doc.frame.frameId === "main-frame")!;
     const child = facts.documents.find((doc) => doc.frame.frameId === "child-frame")!;
@@ -1047,7 +1048,7 @@ describe("snapshot capture and hover", () => {
         },
       ],
     };
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_t: number, method: string) => {
         if (method === "DOMSnapshot.enable") return {};
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
@@ -1066,7 +1067,7 @@ describe("snapshot capture and hover", () => {
         if (method === "Runtime.releaseObject") return {};
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
 
     const { documents } = await captureObservationFacts(cdp, 4);
     const input = documents
@@ -1159,7 +1160,7 @@ describe("snapshot capture and hover", () => {
         },
       ],
     };
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(
         async (
           _t: number,
@@ -1199,7 +1200,7 @@ describe("snapshot capture and hover", () => {
           throw new Error(method);
         },
       ) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
 
     const { documents } = await captureObservationFacts(cdp, 4);
     const nestedIframe = documents
@@ -1245,7 +1246,7 @@ describe("snapshot capture and hover", () => {
         },
       ],
     };
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_t: number, method: string) => {
         if (method === "DOMSnapshot.enable") return {};
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
@@ -1259,13 +1260,13 @@ describe("snapshot capture and hover", () => {
         }
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
     const { nodes } = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     expect(nodes.find((n) => n.backendNodeId === 12)?.rect?.y).toBe(400 / 2 - 100);
   });
 
   it("collectOverlayExcludedBackendIds walks the pierced overlay host subtree", async () => {
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: vi.fn(async (_t: number, method: string) => {
         if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
         if (method === "DOM.querySelector") return { nodeId: 99 };
@@ -1281,7 +1282,7 @@ describe("snapshot capture and hover", () => {
         }
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
-    };
+    });
     const excluded = await collectOverlayExcludedBackendIds(cdp, 4);
     expect(excluded).toEqual(new Set([200, 201, 202]));
   });

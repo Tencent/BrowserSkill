@@ -1,9 +1,8 @@
 //! Retry only read-only synchronization, never the action that preceded it.
 use crate::cli::error::CliError;
-use crate::rpc_reason::OPERATION_SETTLING;
-use bsk_protocol::{ErrorCode, tools::CooperateAction};
+use bsk_protocol::{ErrorCode, RpcErrorReason, tools::CooperateAction};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Pauses before syncing again while an earlier command still owns the
 /// browser call, such as a cancelled observation screenshot (#527). Viewport
@@ -17,10 +16,17 @@ const SETTLING_PAUSES: [Duration; 3] = [
 const LEGACY_SETTLING: &str = "Previous operation is still settling";
 
 fn recoverable(error: &CliError) -> bool {
-    error.code() == Some(ErrorCode::PermissionDenied)
+    (error.code() == Some(ErrorCode::PermissionDenied)
         && error.data().is_some_and(|d| {
             d["reason"] == "cooperation_sync_required" && d["effect_state"] == "none"
-        })
+        }))
+        || (error.code() == Some(ErrorCode::NotFound)
+            && error
+                .data()
+                .is_some_and(|d| d["reason"] == "ref_not_found" && d["effect_state"] != "unknown")
+            && error
+                .to_string()
+                .contains("Document changed during observation"))
 }
 
 /// The sync was refused before dispatch because an earlier command on the
@@ -36,7 +42,8 @@ fn settling(error: &CliError) -> bool {
         return false;
     };
     data["dispatched"] == false
-        && (data["reason"] == OPERATION_SETTLING || message.starts_with(LEGACY_SETTLING))
+        && (data["reason"] == RpcErrorReason::OperationSettling.as_str()
+            || message.starts_with(LEGACY_SETTLING))
 }
 
 pub(crate) fn run(
@@ -45,43 +52,84 @@ pub(crate) fn run(
     run_with_pause(call, std::thread::sleep)
 }
 
+pub(crate) fn run_bounded(
+    budget: Option<Duration>,
+    call: impl FnMut(CooperateAction, Option<Duration>) -> Result<Value, CliError>,
+) -> Result<Value, CliError> {
+    let start = Instant::now();
+    run_with_clock(budget, || start.elapsed(), std::thread::sleep, call)
+}
+
 fn run_with_pause(
     mut call: impl FnMut(CooperateAction) -> Result<Value, CliError>,
+    pause: impl FnMut(Duration),
+) -> Result<Value, CliError> {
+    run_with_clock(None, || Duration::ZERO, pause, |action, _| call(action))
+}
+
+fn remaining_budget(budget: Option<Duration>, elapsed: Duration) -> Option<Duration> {
+    budget.map(|limit| limit.saturating_sub(elapsed))
+}
+
+fn run_with_clock(
+    budget: Option<Duration>,
+    mut elapsed: impl FnMut() -> Duration,
     mut pause: impl FnMut(Duration),
+    mut call: impl FnMut(CooperateAction, Option<Duration>) -> Result<Value, CliError>,
 ) -> Result<Value, CliError> {
     let mut attempt = 0;
     let mut waits = 0;
     let mut pauses = 0;
     loop {
         attempt += 1;
-        match call(CooperateAction::Sync) {
+        let sync_rem = remaining_budget(budget, elapsed());
+        match call(CooperateAction::Sync, sync_rem) {
             Ok(mut reply) => {
                 reply["settle"] = json!({"sync_attempts":attempt,"outcome":"synchronized"});
                 return Ok(reply);
             }
-            // `cooperate wait` would be refused the same way; only time helps.
-            Err(error) if pauses < SETTLING_PAUSES.len() && settling(&error) => {
-                pause(SETTLING_PAUSES[pauses]);
-                pauses += 1;
-            }
-            Err(error) if waits < 2 && recoverable(&error) => {
-                waits += 1;
-                let mut wait = call(CooperateAction::Wait)?;
-                if wait["state"]["mode"] == "unavailable" && wait["stopped"] != true {
-                    // Loading and slow frames can outlast this bounded wait.
-                    // Let the next sync recover or return the actual failure.
+            Err(error) => {
+                let rem = remaining_budget(budget, elapsed());
+                if rem.is_some_and(|r| r.is_zero()) {
+                    return Err(error);
+                }
+                // `cooperate wait` would be refused the same way; only time helps.
+                if pauses < SETTLING_PAUSES.len() && settling(&error) {
+                    let delay =
+                        rem.map_or(SETTLING_PAUSES[pauses], |r| SETTLING_PAUSES[pauses].min(r));
+                    pause(delay);
+                    pauses += 1;
+                    if remaining_budget(budget, elapsed()).is_some_and(|r| r.is_zero()) {
+                        return Err(error);
+                    }
                     continue;
                 }
-                if wait["ready"] != true || wait["stopped"] == true {
-                    // No action context is issued while ownership is unavailable.
-                    if let Some(map) = wait.as_object_mut() {
-                        map.remove("context_id");
+                if waits < 2 && recoverable(&error) {
+                    waits += 1;
+                    let mut wait = call(CooperateAction::Wait, rem)?;
+                    if wait["state"]["mode"] == "unavailable" && wait["stopped"] != true {
+                        // Loading and slow frames can outlast this bounded wait.
+                        // Let the next sync recover or return the actual failure.
+                        if remaining_budget(budget, elapsed()).is_some_and(|r| r.is_zero()) {
+                            return Err(error);
+                        }
+                        continue;
                     }
-                    wait["settle"] = json!({"sync_attempts":attempt,"outcome":"not_ready"});
-                    return Ok(wait);
+                    if wait["ready"] != true || wait["stopped"] == true {
+                        // No action context is issued while ownership is unavailable.
+                        if let Some(map) = wait.as_object_mut() {
+                            map.remove("context_id");
+                        }
+                        wait["settle"] = json!({"sync_attempts":attempt,"outcome":"not_ready"});
+                        return Ok(wait);
+                    }
+                    if remaining_budget(budget, elapsed()).is_some_and(|r| r.is_zero()) {
+                        return Err(error);
+                    }
+                    continue;
                 }
+                return Err(error);
             }
-            Err(error) => return Err(error),
         }
     }
 }
@@ -251,7 +299,12 @@ mod tests {
     #[test]
     fn settling_refusals_pause_and_sync_again_without_waiting_for_control() {
         for error in [
-            || settling_error(Some(OPERATION_SETTLING), "busy"),
+            || {
+                settling_error(
+                    Some(bsk_protocol::RpcErrorReason::OperationSettling.as_str()),
+                    "busy",
+                )
+            },
             || {
                 settling_error(
                     None,
@@ -288,14 +341,109 @@ mod tests {
             |action| {
                 assert!(matches!(action, CooperateAction::Sync));
                 syncs += 1;
-                Err(settling_error(Some(OPERATION_SETTLING), "busy"))
+                Err(settling_error(
+                    Some(bsk_protocol::RpcErrorReason::OperationSettling.as_str()),
+                    "busy",
+                ))
             },
             |pause| paused += pause,
         )
         .unwrap_err();
         assert_eq!(syncs, 4);
         assert_eq!(paused, Duration::from_millis(5000));
-        assert_eq!(error.data().unwrap()["reason"], OPERATION_SETTLING);
+        assert_eq!(
+            error.data().unwrap()["reason"],
+            bsk_protocol::RpcErrorReason::OperationSettling.as_str()
+        );
+    }
+
+    #[test]
+    fn mid_sync_document_change_retries_while_other_not_found_errors_fail_immediately() {
+        let mut calls = Vec::new();
+        let result = run(|action| {
+            calls.push(format!("{action:?}"));
+            match calls.len() {
+                1 => Err(CliError::from_rpc(RpcError {
+                    code: ErrorCode::NotFound,
+                    message: "Document changed during observation; synchronize again".into(),
+                    data: Some(json!({"reason": "ref_not_found", "effect_state": "none"})),
+                })),
+                2 => Ok(json!({"ready": true, "state": {"mode": "syncing"}})),
+                _ => Ok(json!({"context_id": "recovered"})),
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, ["Sync", "Wait", "Sync"]);
+        assert_eq!(result["context_id"], "recovered");
+        assert_eq!(result["settle"]["sync_attempts"], 2);
+
+        let mut policy_calls = Vec::new();
+        let policy_err = run(|action| {
+            policy_calls.push(format!("{action:?}"));
+            Err(CliError::from_rpc(RpcError {
+                code: ErrorCode::NotFound,
+                message: "Control policy changed during observation; observe again".into(),
+                data: Some(json!({"reason": "ref_not_found", "effect_state": "none"})),
+            }))
+        })
+        .unwrap_err();
+        assert_eq!(policy_calls, ["Sync"]);
+        assert!(policy_err.to_string().contains("Control policy changed"));
+    }
+
+    #[test]
+    fn bounded_settle_stops_retries_once_wall_clock_budget_elapses() {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let mut calls = Vec::new();
+        let err = run_with_clock(
+            Some(Duration::from_millis(15_000)),
+            || clock.get(),
+            |d| clock.set(clock.get() + d),
+            |action, rem| {
+                calls.push((format!("{action:?}"), rem));
+                clock.set(clock.get() + Duration::from_millis(15_005));
+                Err(error(ErrorCode::PermissionDenied, "none"))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            calls,
+            vec![("Sync".to_string(), Some(Duration::from_millis(15_000)))]
+        );
+        assert_eq!(err.code(), Some(ErrorCode::PermissionDenied));
+
+        // Fast initial failure retries within remaining budget; unavailable wait exhausting
+        // the budget preserves the last Sync error rather than misreporting not_ready.
+        clock.set(Duration::ZERO);
+        let mut retry_calls = Vec::new();
+        let err = run_with_clock(
+            Some(Duration::from_millis(5_000)),
+            || clock.get(),
+            |d| clock.set(clock.get() + d),
+            |action, rem| {
+                retry_calls.push((format!("{action:?}"), rem));
+                match action {
+                    CooperateAction::Sync => {
+                        clock.set(clock.get() + Duration::from_millis(200));
+                        Err(error(ErrorCode::PermissionDenied, "none"))
+                    }
+                    CooperateAction::Wait => {
+                        clock.set(clock.get() + Duration::from_millis(4_800));
+                        Ok(json!({"ready": false, "state": {"mode": "unavailable"}}))
+                    }
+                    _ => panic!(),
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            retry_calls,
+            vec![
+                ("Sync".to_string(), Some(Duration::from_millis(5_000))),
+                ("Wait".to_string(), Some(Duration::from_millis(4_800))),
+            ]
+        );
+        assert_eq!(err.data().unwrap()["reason"], "cooperation_sync_required");
     }
 
     #[test]
@@ -314,7 +462,10 @@ mod tests {
             CliError::from_rpc(RpcError {
                 code: ErrorCode::Timeout,
                 message: "busy".into(),
-                data: Some(json!({"reason": OPERATION_SETTLING, "dispatched": false})),
+                data: Some(json!({
+                    "reason": bsk_protocol::RpcErrorReason::OperationSettling.as_str(),
+                    "dispatched": false
+                })),
             }),
         ] {
             assert!(!settling(&error));

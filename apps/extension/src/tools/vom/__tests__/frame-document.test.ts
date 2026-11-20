@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CdpFrameGraph } from "@/browser-driver/frame-graph";
+import { createFrameDocumentInfo, type FrameDocumentInfo } from "@/browser-driver/frame-handles";
 import type { CapturedNode } from "../capture";
 import {
   buildFrameDocuments,
@@ -32,11 +32,11 @@ function captured(frameNodes: Map<string, CapturedNode[]>): FrameDomInput {
 
 describe("buildFrameDocuments", () => {
   it("partitions mixed AX results by node ownership and cuts cross-frame parent edges", async () => {
-    const graph: CdpFrameGraph = {
+    const graph: { rootFrameId: string; frames: FrameDocumentInfo[] } = {
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
-        { frameId: "child", parentFrameId: "main", target: { tabId: 4 } },
+        createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+        createFrameDocumentInfo({ tabId: 4, frameId: "child", parentFrameId: "main" }),
       ],
     };
     const batches: FrameAxBatch<FrameOwnedAxNode>[] = [
@@ -75,11 +75,11 @@ describe("buildFrameDocuments", () => {
   });
 
   it("deduplicates overlapping same-target AX results using the strongest ownership", async () => {
-    const graph: CdpFrameGraph = {
+    const graph: { rootFrameId: string; frames: FrameDocumentInfo[] } = {
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
-        { frameId: "child", parentFrameId: "main", target: { tabId: 4 } },
+        createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+        createFrameDocumentInfo({ tabId: 4, frameId: "child", parentFrameId: "main" }),
       ],
     };
     const childNode = { nodeId: "shared", backendDOMNodeId: 100 };
@@ -110,20 +110,24 @@ describe("buildFrameDocuments", () => {
   });
 
   it("uses target-scoped backend ownership when OOPIF backend ids collide", async () => {
-    const graph: CdpFrameGraph = {
+    const graph: { rootFrameId: string; frames: FrameDocumentInfo[] } = {
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
-        {
+        createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+        createFrameDocumentInfo({
+          tabId: 4,
           frameId: "left",
           parentFrameId: "main",
-          target: { tabId: 4, sessionId: "left-session" },
-        },
-        {
+          processKey: "oopif:left",
+          isOutOfProcess: true,
+        }),
+        createFrameDocumentInfo({
+          tabId: 4,
           frameId: "right",
           parentFrameId: "main",
-          target: { tabId: 4, sessionId: "right-session" },
-        },
+          processKey: "oopif:right",
+          isOutOfProcess: true,
+        }),
       ],
     };
     const batches: FrameAxBatch<FrameOwnedAxNode>[] = graph.frames.slice(1).map((frame) => ({
@@ -160,11 +164,11 @@ describe("buildFrameDocuments", () => {
     ]);
     const capture = captured(frameNodes);
     const frames = ["main", "left", "right", "child"].map((frameId) => ({
-      frame: {
+      frame: createFrameDocumentInfo({
+        tabId: 4,
         frameId,
-        target: { tabId: 4 },
         ...(frameId === "child" ? { parentFrameId: "left", ownerBackendNodeId: 7 } : {}),
-      },
+      }),
       nodes: [],
     }));
 
@@ -177,8 +181,13 @@ describe("buildFrameDocuments", () => {
   });
   it("rejects explicit AX frame ownership in a different target", async () => {
     const frames = [
-      { frameId: "main", target: { tabId: 4 } },
-      { frameId: "remote", target: { tabId: 4, sessionId: "remote" } },
+      createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+      createFrameDocumentInfo({
+        tabId: 4,
+        frameId: "remote",
+        processKey: "oopif:remote",
+        isOutOfProcess: true,
+      }),
     ];
     const unresolved = vi.fn();
     const documents = await buildFrameDocuments(
@@ -193,7 +202,7 @@ describe("buildFrameDocuments", () => {
   });
 
   it("resolves a reverse-ordered deep AX parent chain without recursion", async () => {
-    const frame = { frameId: "main", target: { tabId: 4 } };
+    const frame = createFrameDocumentInfo({ tabId: 4, frameId: "main" });
     const nodes: FrameOwnedAxNode[] = Array.from({ length: 10000 }, (_, i) => ({
       nodeId: String(i),
       ...(i ? { parentId: String(i - 1) } : { frameId: "main" }),

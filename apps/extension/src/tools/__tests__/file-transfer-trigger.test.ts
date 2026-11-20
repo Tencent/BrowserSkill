@@ -1,16 +1,16 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { pointerTransactionDeps } from "../pointer-transaction";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 afterEach(() => vi.useRealTimers());
 
 it("does not send cleanup input to a replacement attachment", async () => {
   const abort = new AbortController();
   let attachment = "first";
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: vi.fn(async () => ({})) as CdpRunner["send"],
     getAttachmentId: () => attachment,
-  };
+  });
   const scope = pointerTransactionDeps(
     { cdp, tabsApi: { get: vi.fn(), query: vi.fn() } },
     abort.signal,
@@ -31,10 +31,10 @@ it("does not send cleanup input to a replacement attachment", async () => {
 it("bounds a lost button-release reply and detaches without replaying input", async () => {
   vi.useFakeTimers();
   const abort = new AbortController();
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: vi.fn(async () => ({})) as CdpRunner["send"],
     detach: vi.fn(async () => {}),
-  };
+  });
   const scope = pointerTransactionDeps(
     { cdp, tabsApi: { get: vi.fn(), query: vi.fn() } },
     abort.signal,
@@ -52,10 +52,10 @@ it("bounds a lost button-release reply and detaches without replaying input", as
 
 it("fences an already pending release rather than sending another one", async () => {
   const abort = new AbortController();
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: vi.fn(async () => ({})) as CdpRunner["send"],
     detach: vi.fn(async () => {}),
-  };
+  });
   const scope = pointerTransactionDeps(
     { cdp, tabsApi: { get: vi.fn(), query: vi.fn() } },
     abort.signal,
@@ -65,6 +65,6 @@ it("fences an already pending release rather than sending another one", async ()
   void scope.deps.cdp.send(7, "Input.dispatchMouseEvent", { type: "mouseReleased" });
   abort.abort();
   await scope.cleanup(Date.now() + 1_000);
-  expect(cdp.detach).toHaveBeenCalledWith(7);
+  expect(cdp.detach).toHaveBeenCalledWith(7, "stub-attachment");
   expect(cdp.send).toHaveBeenCalledTimes(2);
 });

@@ -11,9 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use bsk_protocol::system::{HandshakeCompat, HandshakeResult, evaluate_handshake_compat};
-use bsk_protocol::tools::ReturnFailure;
-use bsk_protocol::{Frame, RequestFrame, ResponseBody, ResponseFrame, RpcError};
+use bsk_protocol::system::{
+    AuditRequestParams, HandshakeCompat, HandshakeResult, evaluate_handshake_compat,
+};
+use bsk_protocol::{
+    EventFrame, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcError, SessionEndedEvent,
+    SessionUserInterruptEvent, SessionWindowClosedEvent,
+};
 use futures_util::{SinkExt, StreamExt};
 use semver::Version;
 use tokio::net::{TcpListener, TcpStream};
@@ -29,9 +33,7 @@ use tracing::{debug, info, warn};
 
 use super::browsers::{BrowserClient, BrowserId, BrowserSink, Pending};
 use super::peer_authorization::PeerAuthorization;
-use super::state::{
-    DaemonState, LEGACY_MIN_COMPATIBLE_PEER, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVER_NAME,
-};
+use super::state::{DaemonState, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVER_NAME};
 
 /// Origin is a filtering layer; local identity is established by HMAC below.
 pub(super) fn origin_allowed(origin: &str) -> bool {
@@ -43,6 +45,37 @@ pub(super) fn origin_allowed(origin: &str) -> bool {
         }
     }
     false
+}
+
+/// Explain a failed bind on the default daemon port, which the OS — not bsk —
+/// usually owns.
+///
+/// On Windows, WinNAT/Hyper-V/WSL2 reserve blocks inside the TCP dynamic port
+/// range after a reboot, so the default port can already be held when no bsk
+/// daemon is running: `TcpListener::bind` then fails with `WSAEACCES` (10013) or
+/// `WSAEADDRINUSE` (10048) and the bare OS error gives the user no way forward.
+fn bind_error_message(addr: SocketAddr, err: &std::io::Error) -> String {
+    let base = format!("bind WS server on {addr}: {err}");
+    if addr.port() != super::DEFAULT_WS_PORT {
+        return base;
+    }
+
+    let mut message = format!(
+        "{base}\n{} is the default daemon port and could not be bound",
+        super::DEFAULT_WS_PORT
+    );
+    if matches!(err.raw_os_error(), Some(10013) | Some(10048)) {
+        message.push_str(
+            ". On Windows, WinNAT, Hyper-V and WSL2 reserve blocks inside the TCP dynamic port \
+             range (49152-65535) after a reboot, so the default port can be held even when no bsk \
+             daemon is running; check `netsh int ipv4 show excludedportrange protocol=tcp`",
+        );
+    }
+    message.push_str(
+        ". Start the daemon on a free port with `bsk daemon start --foreground --port <port>` and \
+         point the extension at that port",
+    );
+    message
 }
 
 pub struct WsServer {
@@ -60,7 +93,7 @@ impl WsServer {
         }
         let listener = TcpListener::bind(addr)
             .await
-            .with_context(|| format!("bind WS server on {addr}"))?;
+            .map_err(|err| anyhow!("{}", bind_error_message(addr, &err)))?;
         let local_addr = listener
             .local_addr()
             .with_context(|| "failed to read WS server local addr")?;
@@ -291,9 +324,6 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     let our_app_version: Version = env!("CARGO_PKG_VERSION")
         .parse()
         .expect("CARGO_PKG_VERSION must be a valid semver");
-    let legacy_min_peer: Version = LEGACY_MIN_COMPATIBLE_PEER
-        .parse()
-        .expect("LEGACY_MIN_COMPATIBLE_PEER must be a valid semver");
     let compat = evaluate_handshake_compat(
         &params.protocol_version,
         params.min_compatible_protocol.as_deref(),
@@ -353,7 +383,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // have an Agent Window on the extension side.
     state.purge_sessions_of_browser(
         &browser_id,
-        crate::rpc_reason::BROWSER_DISCONNECTED,
+        bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
         "purged stale session before browser reconnect",
     );
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
@@ -377,7 +407,13 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         liveness: super::browsers::Liveness::default(),
     });
     // Restore opt-in before making the browser available to CLI callers.
-    let audit_ready = state.audit.configure(&browser_id.0, audit_enabled).is_ok();
+    let audit_ready = {
+        let state = Arc::clone(&state);
+        let browser = browser_id.0.clone();
+        tokio::task::spawn_blocking(move || state.audit.configure(&browser, audit_enabled).is_ok())
+            .await
+            .unwrap_or(false)
+    };
     state.browsers.insert(Arc::clone(&client));
     authorization.register(&client);
     drop(registration);
@@ -398,7 +434,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
             .parse()
             .expect("CARGO_PKG_VERSION must be a valid semver"),
         protocol_version: PROTOCOL_VERSION.to_string(),
-        min_compatible_peer: Some(legacy_min_peer),
+        min_compatible_peer: None,
         min_compatible_protocol: Some(MIN_COMPATIBLE_PROTOCOL.to_string()),
     };
     let result = serde_json::to_value(bsk_protocol::system::HandshakeResponse {
@@ -494,7 +530,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         info!(id = %browser_id, generation, "browser disconnected");
         state.purge_sessions_of_browser(
             &browser_id,
-            crate::rpc_reason::BROWSER_DISCONNECTED,
+            bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
             "purged session on browser disconnect",
         );
     } else {
@@ -522,77 +558,87 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
                 debug!(id = %resp.id, "response for unknown rpc id (ignored)");
             }
         }
-        Frame::Event(ev) => match ev.event {
-            bsk_protocol::EventKind::AuditContext => state.audit.context(&client.id.0, &ev.payload),
-            bsk_protocol::EventKind::DialogChanged => {
-                if let Some(sid) = ev.payload["session_id"].as_str()
-                    && state
-                        .sessions
-                        .get(&super::sessions::SessionId(sid.into()))
-                        .is_some_and(|s| s.browser_id == client.id)
+        Frame::Event(ev) => match ev {
+            EventFrame::AuditContext(ctx) => {
+                if state.audit.needs_context(&client.id.0, &ctx.operation_id) {
+                    let state = Arc::clone(state);
+                    let browser = client.id.0.clone();
+                    let _ =
+                        tokio::task::spawn_blocking(move || state.audit.context(&browser, &ctx))
+                            .await;
+                }
+            }
+            EventFrame::DialogChanged(dlg) => {
+                if state
+                    .sessions
+                    .get(&super::sessions::SessionId(dlg.session_id.clone()))
+                    .is_some_and(|s| s.browser_id == client.id)
                 {
-                    state.dialog_operations.dialog_changed(&ev.payload);
-                    if let Some(id) = ev.payload["operation_id"].as_str()
-                        && let Some(operation) = state.dialog_operations.get(sid, id)
+                    state.dialog_operations.dialog_changed(&dlg);
+                    if let Some(id) = dlg.operation_id.as_deref()
+                        && let Some(operation) = state.dialog_operations.get(&dlg.session_id, id)
                         && let Some(inflight) = state.tool_inflight.get(&operation.cli_rpc_id)
                     {
-                        inflight
-                            .dialog_pending
-                            .send_replace(ev.payload["dialog"].is_object());
+                        inflight.dialog_pending.send_replace(dlg.dialog.is_some());
                     }
                 }
             }
-            bsk_protocol::EventKind::SystemHeartbeat => {
+            EventFrame::SystemHeartbeat(_) => {
                 // `touch()` already ran for this frame in the read loop;
                 // additionally opt this browser in to liveness reaping now
                 // that we know it speaks the heartbeat.
                 client.mark_heartbeat_seen();
                 debug!(id = %client.id, "heartbeat");
             }
-            bsk_protocol::EventKind::SessionActivity => {
-                #[derive(serde::Deserialize)]
-                struct Activity {
-                    session_id: String,
-                    idle_protected: bool,
+            EventFrame::SessionActivity(activity) => {
+                state.sessions.update_activity(
+                    &super::sessions::SessionId(activity.session_id),
+                    &client.id,
+                    activity.idle_protected,
+                );
+            }
+            EventFrame::SessionInteractionChanged(change) => {
+                state.sessions.update_interaction(
+                    &super::sessions::SessionId(change.session_id),
+                    &client.id,
+                    change.interaction,
+                );
+            }
+            EventFrame::SessionWindowClosed(closed) => {
+                handle_session_window_closed(state, &client.id, &closed);
+            }
+            EventFrame::SessionEnded(ended) => {
+                handle_session_ended(state, &client.id, &ended);
+            }
+            EventFrame::SessionUserInterrupt(interrupt) => {
+                if let Some(sid) = apply_session_user_interrupt(state, &client.id, &interrupt)
+                    && state.audit.needs_marker(&sid)
+                {
+                    let state = Arc::clone(state);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        state.audit.marker(&sid, "user_interrupt");
+                    })
+                    .await;
                 }
-                if let Ok(activity) = serde_json::from_value::<Activity>(ev.payload) {
-                    state.sessions.update_activity(
-                        &super::sessions::SessionId(activity.session_id),
-                        &client.id,
-                        activity.idle_protected,
-                    );
-                }
             }
-            bsk_protocol::EventKind::SessionInteractionChanged => {
-                #[derive(serde::Deserialize)]
-                struct Change {
-                    session_id: String,
-                    interaction: bsk_protocol::tools::InteractionPolicy,
-                }
-                if let Ok(change) = serde_json::from_value::<Change>(ev.payload) {
-                    state.sessions.update_interaction(
-                        &super::sessions::SessionId(change.session_id),
-                        &client.id,
-                        change.interaction,
-                    );
-                }
-            }
-            bsk_protocol::EventKind::SessionWindowClosed => {
-                handle_session_window_closed(state, &client.id, &ev.payload);
-            }
-            bsk_protocol::EventKind::SessionEnded => {
-                handle_session_ended(state, &client.id, &ev.payload);
-            }
-            bsk_protocol::EventKind::SessionUserInterrupt => {
-                handle_session_user_interrupt(state, &client.id, &ev.payload);
-            }
-            other => {
-                debug!(event = ?other, "event received (no handler yet)");
+            other @ (EventFrame::BrowserConnected(_) | EventFrame::BrowserDisconnected(_)) => {
+                debug!(event = ?other.kind(), "event received (no handler yet)");
             }
         },
         Frame::Request(req) => {
             let body = if req.method == bsk_protocol::Method::AuditRequest {
-                handle_audit_request(state, &client.id.0, req.params.unwrap_or_default())
+                let state = Arc::clone(state);
+                let browser = client.id.0.clone();
+                let params = req.params.unwrap_or_default();
+                tokio::task::spawn_blocking(move || handle_audit_request(&state, &browser, params))
+                    .await
+                    .unwrap_or_else(|_| {
+                        ResponseBody::Err(RpcError {
+                            code: bsk_protocol::ErrorCode::ProtocolError,
+                            message: "Audit request failed. Check local storage, task availability, or retry.".into(),
+                            data: None,
+                        })
+                    })
             } else {
                 ResponseBody::Err(RpcError {
                     code: bsk_protocol::ErrorCode::UnknownMethod,
@@ -612,35 +658,24 @@ fn handle_audit_request(
     browser: &str,
     params: serde_json::Value,
 ) -> ResponseBody {
-    let action = params
-        .get("action")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let id = params
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let offset = params
-        .get("offset")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
-        .min(1_000_000) as usize;
-    let limit = params
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(100)
-        .min(500) as usize;
-    let result = match action {
-        "configure" => match params.get("enabled").and_then(serde_json::Value::as_bool) {
-            Some(enabled) => state.audit.configure(browser, enabled),
-            None => Err(anyhow!("Missing enabled preference")),
-        },
-        "list" => state.audit.list(browser, offset, limit),
-        "get" => state.audit.get(browser, id, offset, limit),
-        "delete" => state.audit.delete(browser, id),
-        "open_directory" => open_audit_directory(&state.audit),
-        _ => Err(anyhow!("Unknown audit action")),
-    };
+    let result = serde_json::from_value::<AuditRequestParams>(params)
+        .map_err(|err| anyhow!(err))
+        .and_then(|params| {
+            let id = params.id.as_deref().unwrap_or("");
+            let offset = params.offset.unwrap_or(0).min(1_000_000) as usize;
+            let limit = params.limit.unwrap_or(100).min(500) as usize;
+            match params.action.as_str() {
+                "configure" => match params.enabled {
+                    Some(enabled) => state.audit.configure(browser, enabled),
+                    None => Err(anyhow!("Missing enabled preference")),
+                },
+                "list" => state.audit.list(browser, offset, limit),
+                "get" => state.audit.get(browser, id, offset, limit),
+                "delete" => state.audit.delete(browser, id),
+                "open_directory" => open_audit_directory(&state.audit),
+                _ => Err(anyhow!("Unknown audit action")),
+            }
+        });
     match result {
         Ok(value) => ResponseBody::Ok(value),
         Err(_) => ResponseBody::Err(RpcError {
@@ -668,30 +703,19 @@ fn open_audit_directory(audit: &super::audit::AuditStore) -> anyhow::Result<serd
 fn handle_session_window_closed(
     state: &Arc<DaemonState>,
     sender: &BrowserId,
-    payload: &serde_json::Value,
+    closed: &SessionWindowClosedEvent,
 ) {
-    let Some(session_id) = payload.get("session_id").and_then(|v| v.as_str()) else {
+    if closed.session_id.is_empty() {
         warn!("session.window_closed event missing session_id");
         return;
-    };
-    let return_failures: Vec<ReturnFailure> = payload
-        .get("return_failures")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .unwrap_or_else(|err| {
-            warn!(%err, session = %session_id, "invalid session.window_closed return_failures payload");
-            None
-        })
-        .unwrap_or_default();
-    let session_id = super::sessions::SessionId(session_id.to_string());
+    }
+    let session_id = super::sessions::SessionId(closed.session_id.clone());
     // Reject events that target a session owned by a *different* browser.
     // Without this, any connected extension (or any same-machine process
     // that completed the WS handshake) could tear down another browser's
     // session by emitting window_closed with its session_id. A session
-    // that is already gone cannot be verified but is harmless to "forget"
-    // (forget_session is a no-op), so we only reject when a live owner
-    // disagrees.
+    // that is already gone cannot be verified and `teardown_session` is
+    // a safe no-op, so we only reject when a live owner disagrees.
     if let Some(session) = state.sessions.get(&session_id)
         && session.browser_id != *sender
     {
@@ -703,12 +727,15 @@ fn handle_session_window_closed(
         );
         return;
     }
-    if forget_browser_session(state, &session_id, crate::rpc_reason::SESSION_WINDOW_CLOSED) {
+    if state.teardown_session(
+        &session_id,
+        bsk_protocol::RpcErrorReason::SessionWindowClosed.as_str(),
+    ) {
         info!(session = %session_id, "session removed: user closed Agent Window");
     } else {
         debug!(session = %session_id, "session.window_closed for unknown session id");
     }
-    for failure in return_failures {
+    for failure in &closed.return_failures {
         warn!(
             session = %session_id,
             tab_id = failure.tab_id,
@@ -719,46 +746,15 @@ fn handle_session_window_closed(
     }
 }
 
-/// Logical termination is independent of whether the browser window stays open.
-fn forget_browser_session(
-    state: &Arc<DaemonState>,
-    session_id: &super::sessions::SessionId,
-    reason: &'static str,
-) -> bool {
-    let removed = super::sessions::forget_session(
-        &state.sessions,
-        &state.tool_queues,
-        &state.session_interrupts,
-        session_id,
-        Some(reason),
-    );
-    if removed {
-        state.transfers.release_session(&session_id.0);
-        state.dialog_operations.remove_session(&session_id.0);
-        state.scopes.on_session_ended(session_id, reason);
-    }
-    removed
-}
-
-fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, payload: &serde_json::Value) {
-    #[derive(serde::Deserialize)]
-    struct Ended {
-        session_id: String,
-        reason: String,
-        tab_id: u64,
-    }
-    let Ok(ended) = serde_json::from_value::<Ended>(payload.clone()) else {
-        warn!("invalid session.ended payload");
-        return;
-    };
+fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, ended: &SessionEndedEvent) {
     if ended.session_id.is_empty()
-        || ended.reason != crate::rpc_reason::SESSION_USER_MOVED_TAB
-        || ended.tab_id == 0
+        || ended.reason != bsk_protocol::SessionEndedReason::UserMovedTab
+        || ended.tab_id <= 0
     {
         warn!("invalid session.ended reason or resource identity");
         return;
     }
-    let sid = super::sessions::SessionId(ended.session_id);
+    let sid = super::sessions::SessionId(ended.session_id.clone());
     let Some(session) = state.sessions.get(&sid) else {
         // Duplicates and late events must not cancel work for an unverified id.
         debug!(session = %sid, "session.ended for unknown session id");
@@ -769,36 +765,9 @@ fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, payload: &
         return;
     }
 
-    // Record the terminal cause on queued and forwarded calls before dropping
-    // the queue. This is not the resumable, one-shot user-interrupt marker.
-    cancel_session_tools(state, &sid, super::inflight::CancelReason::UserMovedTab);
-    if forget_browser_session(state, &sid, crate::rpc_reason::SESSION_USER_MOVED_TAB) {
+    if state.teardown_session(&sid, bsk_protocol::RpcErrorReason::UserMovedTab.as_str()) {
         info!(session = %sid, tab_id = ended.tab_id, "session ended: user moved a controlled tab");
     }
-}
-
-fn cancel_session_tools(
-    state: &Arc<DaemonState>,
-    sid: &super::sessions::SessionId,
-    reason: super::inflight::CancelReason,
-) {
-    let snapshots = state.tool_inflight.cancel_session_with_reason(sid, reason);
-    for snap in snapshots {
-        if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
-            && let Err(err) =
-                super::cancel_forward::forward_cancel_to_browser(state, &browser_id, &ws_rpc_id)
-        {
-            warn!(%browser_id, %ws_rpc_id, %err, "failed to forward session cancellation to extension");
-        }
-    }
-}
-
-fn extract_session_id(payload: &serde_json::Value) -> Option<super::sessions::SessionId> {
-    payload
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| super::sessions::SessionId(s.to_string()))
 }
 
 /// Extension-originated request to interrupt every inflight + queued
@@ -809,15 +778,16 @@ fn extract_session_id(payload: &serde_json::Value) -> Option<super::sessions::Se
 /// forwarded over WS we additionally push a per-RPC cancel frame so
 /// the extension's dispatcher can abort its `AbortController` —
 /// this is the same shape `handle_cancel` uses, just iterated.
-fn handle_session_user_interrupt(
+fn apply_session_user_interrupt(
     state: &Arc<DaemonState>,
     sender: &BrowserId,
-    payload: &serde_json::Value,
-) {
-    let Some(sid) = extract_session_id(payload) else {
+    interrupt: &SessionUserInterruptEvent,
+) -> Option<String> {
+    if interrupt.session_id.is_empty() {
         warn!("session.user_interrupt event missing session_id");
-        return;
-    };
+        return None;
+    }
+    let sid = super::sessions::SessionId(interrupt.session_id.clone());
     // Same ownership guard as window_closed: a browser must not be able
     // to cancel another browser's inflight tools or trip its interrupt
     // marker by sending user_interrupt with a foreign session_id.
@@ -830,7 +800,7 @@ fn handle_session_user_interrupt(
             owner = %session.browser_id,
             "ignoring session.user_interrupt from a browser that does not own this session"
         );
-        return;
+        return None;
     }
     let snapshots = state.tool_inflight.cancel_session(&sid);
     info!(session = %sid, count = snapshots.len(), "user-interrupt: cancelled inflight tools");
@@ -849,8 +819,19 @@ fn handle_session_user_interrupt(
         }
     }
 
-    state.audit.marker(&sid.0, "user_interrupt");
     state.session_interrupts.mark(&sid);
+    Some(sid.0)
+}
+
+#[cfg(test)]
+fn handle_session_user_interrupt(
+    state: &Arc<DaemonState>,
+    sender: &BrowserId,
+    interrupt: &SessionUserInterruptEvent,
+) {
+    if let Some(sid) = apply_session_user_interrupt(state, sender, interrupt) {
+        state.audit.marker(&sid, "user_interrupt");
+    }
 }
 
 #[cfg(test)]
@@ -882,6 +863,35 @@ mod tests {
     }
 
     #[test]
+    fn default_port_bind_failure_names_the_os_owner_of_the_port() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], super::super::DEFAULT_WS_PORT));
+        let message = bind_error_message(addr, &std::io::Error::from_raw_os_error(10048));
+
+        assert!(message.contains("bind WS server on 127.0.0.1:52800"));
+        assert!(message.contains("netsh int ipv4 show excludedportrange protocol=tcp"));
+        assert!(message.contains("bsk daemon start --foreground --port <port>"));
+    }
+
+    #[test]
+    fn default_port_bind_failure_without_a_windows_code_skips_the_win_nat_hint() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], super::super::DEFAULT_WS_PORT));
+        let message = bind_error_message(addr, &std::io::Error::from_raw_os_error(13));
+
+        assert!(!message.contains("netsh int ipv4 show excludedportrange protocol=tcp"));
+        assert!(message.contains("bsk daemon start --foreground --port <port>"));
+    }
+
+    #[test]
+    fn explicit_port_bind_failure_reports_the_plain_os_error() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 42800));
+        let message = bind_error_message(addr, &std::io::Error::from_raw_os_error(10048));
+
+        assert!(message.starts_with("bind WS server on 127.0.0.1:42800"));
+        assert!(!message.contains("default daemon port"));
+        assert!(!message.contains("netsh int ipv4 show excludedportrange protocol=tcp"));
+    }
+
+    #[test]
     fn origin_allowlist_rejects_local_web_pages() {
         assert!(!origin_allowed("http://localhost"));
     }
@@ -895,26 +905,45 @@ mod session_user_interrupt_tests {
     use crate::daemon::sessions::SessionId;
 
     #[test]
-    fn session_user_interrupt_payload_extracts_session_id() {
-        let payload = serde_json::json!({ "session_id": "sess-9" });
-        let sid = extract_session_id(&payload).expect("session id present");
-        assert_eq!(sid.0, "sess-9");
+    fn session_user_interrupt_payload_decodes_session_id() {
+        let ev = EventFrame::from_parts(
+            bsk_protocol::EventKind::SessionUserInterrupt,
+            serde_json::json!({ "session_id": "sess-9" }),
+        )
+        .expect("session id present");
+        assert!(matches!(ev, EventFrame::SessionUserInterrupt(ref i) if i.session_id == "sess-9"));
     }
 
     #[test]
-    fn session_user_interrupt_payload_missing_session_id_returns_none() {
-        let payload = serde_json::json!({});
-        assert!(extract_session_id(&payload).is_none());
+    fn session_user_interrupt_payload_missing_or_non_string_session_id_is_rejected() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({ "session_id": 42 }),
+        ] {
+            assert!(
+                EventFrame::from_parts(bsk_protocol::EventKind::SessionUserInterrupt, payload)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
-    fn session_user_interrupt_payload_empty_session_id_returns_none() {
-        assert!(extract_session_id(&serde_json::json!({"session_id": ""})).is_none());
-    }
-
-    #[test]
-    fn session_user_interrupt_payload_non_string_session_id_returns_none() {
-        assert!(extract_session_id(&serde_json::json!({"session_id": 42})).is_none());
+    fn session_user_interrupt_empty_session_id_is_ignored() {
+        let state = test_only_daemon_state();
+        let sid_a = SessionId("A".into());
+        let g_a = state
+            .tool_inflight
+            .register("a".into(), sid_a.clone())
+            .unwrap();
+        handle_session_user_interrupt(
+            &state,
+            &BrowserId("sender".into()),
+            &SessionUserInterruptEvent {
+                session_id: String::new(),
+            },
+        );
+        assert!(g_a.entry().cancel_reason().is_none());
+        assert!(!state.session_interrupts.try_consume(&sid_a));
     }
 
     #[test]
@@ -936,7 +965,9 @@ mod session_user_interrupt_tests {
         handle_session_user_interrupt(
             &state,
             &BrowserId("sender".into()),
-            &serde_json::json!({"session_id": "A"}),
+            &SessionUserInterruptEvent {
+                session_id: "A".into(),
+            },
         );
 
         assert_eq!(g_a.entry().cancel_reason(), Some(CancelReason::UserAborted));
@@ -952,7 +983,9 @@ mod session_user_interrupt_tests {
         handle_session_user_interrupt(
             &state,
             &BrowserId("sender".into()),
-            &serde_json::json!({"session_id": "A"}),
+            &SessionUserInterruptEvent {
+                session_id: "A".into(),
+            },
         );
 
         assert!(
@@ -978,7 +1011,13 @@ mod session_user_interrupt_tests {
             .register("rpc-1".into(), sid.clone())
             .unwrap();
 
-        handle_session_user_interrupt(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+        handle_session_user_interrupt(
+            &state,
+            &owner,
+            &SessionUserInterruptEvent {
+                session_id: sid.0.clone(),
+            },
+        );
 
         assert_eq!(
             guard.entry().cancel_reason(),
@@ -1001,7 +1040,13 @@ mod session_user_interrupt_tests {
             .register("rpc-1".into(), sid.clone())
             .unwrap();
 
-        handle_session_user_interrupt(&state, &attacker, &serde_json::json!({"session_id": sid.0}));
+        handle_session_user_interrupt(
+            &state,
+            &attacker,
+            &SessionUserInterruptEvent {
+                session_id: sid.0.clone(),
+            },
+        );
 
         assert!(
             guard.entry().cancel_reason().is_none(),
@@ -1022,7 +1067,15 @@ mod session_user_interrupt_tests {
             .reserve_id(owner.clone(), 8, || 0)
             .expect("reserved session id");
 
-        handle_session_window_closed(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+        handle_session_window_closed(
+            &state,
+            &owner,
+            &SessionWindowClosedEvent {
+                session_id: sid.0.clone(),
+                reason: None,
+                return_failures: Vec::new(),
+            },
+        );
 
         assert!(
             state.sessions.get(&sid).is_none(),
@@ -1040,7 +1093,15 @@ mod session_user_interrupt_tests {
             .reserve_id(owner.clone(), 8, || 0)
             .expect("reserved session id");
 
-        handle_session_window_closed(&state, &attacker, &serde_json::json!({"session_id": sid.0}));
+        handle_session_window_closed(
+            &state,
+            &attacker,
+            &SessionWindowClosedEvent {
+                session_id: sid.0.clone(),
+                reason: None,
+                return_failures: Vec::new(),
+            },
+        );
 
         assert!(
             state.sessions.get(&sid).is_some(),
@@ -1048,8 +1109,12 @@ mod session_user_interrupt_tests {
         );
     }
 
-    fn user_moved_tab_payload(sid: &SessionId) -> serde_json::Value {
-        serde_json::json!({ "session_id": sid.0, "reason": "user_moved_tab", "tab_id": 42 })
+    fn user_moved_tab_payload(sid: &SessionId) -> SessionEndedEvent {
+        SessionEndedEvent {
+            session_id: sid.0.clone(),
+            reason: bsk_protocol::SessionEndedReason::UserMovedTab,
+            tab_id: 42,
+        }
     }
 
     #[tokio::test]
@@ -1136,7 +1201,10 @@ mod session_user_interrupt_tests {
         assert!(!state.tool_queues.is_accepting(&sid));
         assert!(!state.session_interrupts.try_consume(&sid));
         let ended = state.sessions.end_info(&sid).unwrap();
-        assert_eq!(ended.reason, crate::rpc_reason::SESSION_USER_MOVED_TAB);
+        assert_eq!(
+            ended.reason,
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
+        );
 
         let Frame::Request(cancel) = rx.recv().await.unwrap() else {
             panic!("cancel expected")
@@ -1155,7 +1223,7 @@ mod session_user_interrupt_tests {
         assert_eq!(error.code, ErrorCode::UserAborted);
         assert_eq!(
             error.data.unwrap()["reason"],
-            crate::rpc_reason::SESSION_USER_MOVED_TAB
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
         );
 
         let later = state
@@ -1173,7 +1241,7 @@ mod session_user_interrupt_tests {
         assert_eq!(later.code, ErrorCode::NotFound);
         assert_eq!(
             later.data.unwrap()["reason"],
-            crate::rpc_reason::SESSION_USER_MOVED_TAB
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
         );
         handle_session_ended(&state, &owner, &user_moved_tab_payload(&sid));
         assert_eq!(
@@ -1197,12 +1265,25 @@ mod session_user_interrupt_tests {
             &BrowserId("foreign".into()),
             &user_moved_tab_payload(&sid),
         );
-        for payload in [
+        for raw in [
             serde_json::json!({ "session_id": sid.0, "reason": "unknown", "tab_id": 42 }),
-            serde_json::json!({ "session_id": sid.0, "reason": "user_moved_tab", "tab_id": 0 }),
             serde_json::json!({ "session_id": sid.0, "reason": "user_moved_tab" }),
         ] {
-            handle_session_ended(&state, &owner, &payload);
+            assert!(EventFrame::from_parts(bsk_protocol::EventKind::SessionEnded, raw).is_err());
+        }
+        for invalid in [
+            SessionEndedEvent {
+                session_id: sid.0.clone(),
+                reason: bsk_protocol::SessionEndedReason::UserMovedTab,
+                tab_id: 0,
+            },
+            SessionEndedEvent {
+                session_id: String::new(),
+                reason: bsk_protocol::SessionEndedReason::UserMovedTab,
+                tab_id: 42,
+            },
+        ] {
+            handle_session_ended(&state, &owner, &invalid);
         }
         assert!(state.sessions.get(&sid).is_some());
         assert!(state.sessions.end_info(&sid).is_none());

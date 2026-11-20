@@ -1,0 +1,224 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "anyOf": [
+    {
+      "properties": {
+        "directory": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retention_days": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/definitions/AuditRun"
+          },
+          "type": "array"
+        },
+        "total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "runs",
+        "total",
+        "enabled",
+        "error",
+        "directory",
+        "retention_days"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "events": {
+          "items": {
+            "$ref": "#/definitions/AuditEvent"
+          },
+          "type": "array"
+        },
+        "pending_operations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "run": {
+          "$ref": "#/definitions/AuditRun"
+        },
+        "total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run",
+        "events",
+        "total",
+        "pending_operations",
+        "error"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "directory": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "retention_days": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enabled",
+        "directory",
+        "retention_days"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "opened": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "opened"
+      ],
+      "type": "object"
+    }
+  ],
+  "definitions": {
+    "AuditEvent": {
+      "properties": {
+        "at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "data": true,
+        "kind": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "kind",
+        "data"
+      ],
+      "type": "object"
+    },
+    "AuditRun": {
+      "properties": {
+        "browser_id": {
+          "type": "string"
+        },
+        "errors": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operations": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "recorded_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "site": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "browser_id",
+        "session_id",
+        "started_at",
+        "recorded_at",
+        "updated_at",
+        "status",
+        "name",
+        "site",
+        "operations",
+        "errors",
+        "partial"
+      ],
+      "type": "object"
+    }
+  },
+  "title": "AuditRequestResult"
+}

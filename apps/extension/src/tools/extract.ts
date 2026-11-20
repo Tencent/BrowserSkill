@@ -1,5 +1,11 @@
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentGraph,
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  type FrameNodeHandle,
+  isStaleFrameHandleError,
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import { documentIdentity, type RuntimeReply, SERIALIZATION, unwrap } from "./dom-read-runtime";
@@ -8,13 +14,14 @@ import { fitExtractBudget, normalizeExtract } from "./extract/normalize";
 import type { CollectorOptions, ExtractParams, ExtractResult, RawCapture } from "./extract/types";
 import { ExtractionFailure, extractionFailure, validateExtract } from "./extract/validation";
 import {
+  type CdpDispatchGuard,
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
+  delegateCdpRunner,
   isRpcError,
   lookupSession,
   resolveCdpAccessibleTargetTab,
-  sendToCdpTarget,
+  sendToFrameHandle,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 import { isCaptureTerminalError, throwIfAborted } from "./vom/capture-abort";
@@ -48,7 +55,7 @@ function registry(ctx: SessionContext): Map<string, RetainedTarget> {
 }
 /** Preserve a discovery handle's tab before shared background preparation pins it. */
 export function extractTargetTab(ctx: SessionContext, targetId: string): number | undefined {
-  return registry(ctx).get(targetId)?.identity.target.tabId;
+  return registry(ctx).get(targetId)?.identity.tabId;
 }
 
 async function capture(
@@ -66,22 +73,17 @@ async function capture(
       node = await resolveVerifiedNode(cdp, identity, backendNodeId, signal);
       if (node.status !== "current") stale();
     }
-    const reply = await sendToCdpTarget<RuntimeReply>(
-      cdp,
-      identity.target,
-      "Runtime.callFunctionOn",
-      {
-        ...(node?.status === "current"
-          ? { objectId: node.objectId }
-          : { executionContextId: contextId }),
-        functionDeclaration: collectExtractDom.toString(),
-        arguments: [{ value: options }],
-        objectGroup: group,
-        ...(options.action === "discover"
-          ? { serializationOptions: SERIALIZATION }
-          : { returnByValue: true }),
-      },
-    );
+    const reply = await sendToFrameHandle<RuntimeReply>(cdp, identity, "Runtime.callFunctionOn", {
+      ...(node?.status === "current"
+        ? { objectId: node.objectId }
+        : { executionContextId: contextId }),
+      functionDeclaration: collectExtractDom.toString(),
+      arguments: [{ value: options }],
+      objectGroup: group,
+      ...(options.action === "discover"
+        ? { serializationOptions: SERIALIZATION }
+        : { returnByValue: true }),
+    });
     throwIfAborted(signal);
     const result = unwrap(reply) as RawCapture | undefined;
     if (!result || !Array.isArray(result.rows) || !Array.isArray(result.targets))
@@ -90,11 +92,11 @@ async function capture(
     if ((await verifyDocumentIdentity(cdp, identity, signal)) !== "current") stale();
     return result;
   } finally {
-    await sendToCdpTarget(cdp, identity.target, "Runtime.releaseObjectGroup", {
+    await sendToFrameHandle(cdp, identity, "Runtime.releaseObjectGroup", {
       objectGroup: group,
     }).catch(() => {});
     if (node?.status === "current")
-      await sendToCdpTarget(cdp, identity.target, "Runtime.releaseObjectGroup", {
+      await sendToFrameHandle(cdp, identity, "Runtime.releaseObjectGroup", {
         objectGroup: node.objectGroup,
       }).catch(() => {});
   }
@@ -122,8 +124,8 @@ function frameOwnerVisible(this: Element): boolean {
 
 async function frameVisible(
   cdp: CdpRunner,
-  graph: CdpFrameGraph,
-  frame: CdpFrame,
+  graph: FrameDocumentGraph,
+  frame: FrameDocumentInfo,
   attachmentId: string,
   deadline: number,
   signal?: AbortSignal,
@@ -136,12 +138,12 @@ async function frameVisible(
       throw new ExtractionFailure("extract_limit", "Extraction deadline exceeded");
     const parent = graph.frames.find((candidate) => candidate.frameId === frame.parentFrameId);
     if (!parent || frame.ownerBackendNodeId === undefined) stale();
-    const { identity } = await documentIdentity(cdp, parent, attachmentId, stale);
+    const { identity } = await documentIdentity(cdp, parent.handle, attachmentId, stale);
     const owner = await resolveVerifiedNode(cdp, identity, frame.ownerBackendNodeId, signal);
     if (owner.status !== "current") stale();
     try {
       const visible = unwrap(
-        await sendToCdpTarget<RuntimeReply>(cdp, parent.target, "Runtime.callFunctionOn", {
+        await sendToFrameHandle<RuntimeReply>(cdp, identity, "Runtime.callFunctionOn", {
           objectId: owner.objectId,
           functionDeclaration: frameOwnerVisible.toString(),
           returnByValue: true,
@@ -149,7 +151,7 @@ async function frameVisible(
       );
       if (visible !== true) return false;
     } finally {
-      await sendToCdpTarget(cdp, parent.target, "Runtime.releaseObjectGroup", {
+      await sendToFrameHandle(cdp, identity, "Runtime.releaseObjectGroup", {
         objectGroup: owner.objectGroup,
       }).catch(() => {});
     }
@@ -165,7 +167,7 @@ export interface ExtractDeps {
 export async function handleExtract(
   manager: SessionManager,
   params: ExtractParams,
-  deps: ExtractDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi },
+  deps: ExtractDeps,
   signal?: AbortSignal,
 ): Promise<ExtractResult | RpcError> {
   try {
@@ -177,83 +179,122 @@ export async function handleExtract(
     const saved = params.target_id ? retained.get(params.target_id) : undefined;
     if (
       params.target_id &&
-      (!saved || (params.tab_id !== undefined && params.tab_id !== saved.identity.target.tabId))
+      (!saved || (params.tab_id !== undefined && params.tab_id !== saved.identity.tabId))
     )
       stale();
     const tab = await resolveCdpAccessibleTargetTab(
       manager,
       ctx,
-      params.tab_id ?? saved?.identity.target.tabId,
+      params.tab_id ?? saved?.identity.tabId,
       deps.tabsApi,
       "extract",
     );
     if (isRpcError(tab)) return tab;
-    deps.cdp.trackSessionTab?.(ctx.sessionId, tab.tabId);
-    await deps.cdp.ensureAttachedToUrl?.(tab.tabId, tab.url);
+    deps.cdp.trackSessionTab(ctx.sessionId, tab.tabId);
+    await deps.cdp.ensureAttachedToUrl(tab.tabId, tab.url);
     throwIfAborted(signal);
-    const attachmentId = deps.cdp.getAttachmentId?.(tab.tabId);
+    const attachmentId = deps.cdp.getAttachmentId(tab.tabId);
     if (!attachmentId)
       return { code: "unsupported", message: "extract requires document identity support" };
     const check = () => {
       throwIfAborted(signal);
       if (
         manager.get(ctx.sessionId) !== ctx ||
-        deps.cdp.getAttachmentId?.(tab.tabId) !== attachmentId
+        deps.cdp.getAttachmentId(tab.tabId) !== attachmentId
       )
         stale();
     };
-    // Guard each native dispatch, including those in shared identity helpers.
-    const send = async <T>(target: CdpTarget, method: string, args?: object): Promise<T> => {
+    const guardFor = (method: string) => {
       if (method === "Runtime.releaseObjectGroup") {
-        if (deps.cdp.getAttachmentId?.(tab.tabId) !== attachmentId) return undefined as T;
-        return deps.cdp.sendGuarded
-          ? deps.cdp.sendGuarded<T>(target, method, args, { attachmentId })
-          : sendToCdpTarget<T>(deps.cdp, target, method, args);
+        if (deps.cdp.getAttachmentId(tab.tabId) !== attachmentId) return null;
+        return { attachmentId, allowReattach: false };
       }
       check();
-      return deps.cdp.sendGuarded
-        ? deps.cdp.sendGuarded<T>(target, method, args, { signal, attachmentId })
-        : sendToCdpTarget<T>(deps.cdp, target, method, args);
+      return { signal, attachmentId };
     };
-    const cdp: CdpRunner = {
-      send: <T>(tabId: number, method: string, args?: object) => send<T>({ tabId }, method, args),
-      sendToTarget: send,
-      getAttachmentId: (tabId) => deps.cdp.getAttachmentId?.(tabId),
+    const sendFrame = async <T>(
+      handle: FrameDocumentHandle | FrameNodeHandle,
+      method: string,
+      args?: object,
+      extraGuard?: CdpDispatchGuard,
+    ): Promise<T> => {
+      const guard = guardFor(method);
+      if (!guard) return {} as T;
+      return deps.cdp.sendToFrame<T>(handle, method, args, {
+        ...extraGuard,
+        ...guard,
+        signal: extraGuard?.signal ?? guard.signal,
+      });
     };
-    const graph = await deps.cdp.getFrameGraph?.(tab.tabId);
+    // Guard each native dispatch, including those in shared identity helpers.
+    const cdp = delegateCdpRunner(deps.cdp, {
+      resourceCleanup: undefined,
+      send: <T>(tabId: number, method: string, args?: object, sig?: AbortSignal): Promise<T> =>
+        sendFrame<T>(toRootFrameHandle(tabId), method, args, sig ? { signal: sig } : undefined),
+      sendToFrame: <T>(
+        handle: FrameDocumentHandle | FrameNodeHandle,
+        method: string,
+        args?: object,
+        extraGuard?: CdpDispatchGuard,
+      ): Promise<T> => sendFrame<T>(handle, method, args, extraGuard),
+    });
+    const graph = await deps.cdp.getFrameDocuments(tab.tabId, signal);
     check();
-    const root = graph?.frames.find((frame) => frame.frameId === graph.rootFrameId);
+    const root = graph.frames.find((frame) => frame.frameId === graph.rootFrameId);
     if (!root)
       return {
         code: "unsupported",
         message: "Could not establish the target document's frame identity",
       };
-    const rootDoc = await documentIdentity(cdp, root, attachmentId, stale);
+    const rootDoc = await documentIdentity(cdp, root.handle, attachmentId, stale);
     let selectedFrame = root;
     let backendNodeId: number | undefined;
     let expectedIdentity: DocumentIdentity | undefined;
     if (params.target_id) {
-      if (!saved || saved.identity.target.tabId !== tab.tabId) stale();
+      if (!saved || saved.identity.tabId !== tab.tabId) stale();
       expectedIdentity = saved.identity;
       backendNodeId = saved.backendNodeId;
-      const frame = graph!.frames.find((frame) => frame.frameId === saved.identity.frameId);
-      if (!frame || frame.target.sessionId !== saved.identity.target.sessionId) stale();
+      const frame = graph.frames.find(
+        (f) =>
+          f.frameId === saved.identity.frameId &&
+          (!saved.identity.loaderId || !f.loaderId || f.loaderId === saved.identity.loaderId),
+      );
+      if (!frame) stale();
       selectedFrame = frame;
     } else if (params.ref) {
       const ref = resolveSnapshotRef(ctx, params.ref, tab.tabId);
       if (isRpcError(ref)) return ref;
-      const frame = graph!.frames.find(
-        (frame) => frame.frameId === (ref.frameId ?? graph!.rootFrameId),
+      const frame = graph.frames.find(
+        (f) =>
+          f.frameId === (ref.frameId || graph.rootFrameId) &&
+          (!ref.loaderId || !f.loaderId || f.loaderId === ref.loaderId),
       );
-      if (!frame || frame.target.sessionId !== ref.cdpSessionId) stale();
+      if (!frame) stale();
+      if (ref.documentElementBackendNodeId !== undefined) {
+        expectedIdentity = {
+          attachmentId,
+          tabId: tab.tabId,
+          frameId: frame.frameId,
+          loaderId: frame.loaderId || ref.loaderId || "",
+          documentElementBackendNodeId: ref.documentElementBackendNodeId,
+        };
+      }
       selectedFrame = frame;
       backendNodeId = ref.backendNodeId;
     }
-    const frames =
-      options.action === "discover" && !options.selector
-        ? [root, ...graph!.frames.filter((frame) => frame.frameId !== root.frameId)].slice(0, 16)
-        : [selectedFrame];
+    const multiFrameSearch =
+      !params.ref &&
+      !params.target_id &&
+      (options.action === "discover" || Boolean(options.selector));
+    const frames = multiFrameSearch
+      ? [root, ...graph.frames.filter((frame) => frame.frameId !== root.frameId)].slice(0, 16)
+      : [selectedFrame];
     let output: ExtractResult | undefined;
+    let outputIdentity: DocumentIdentity | undefined;
+    let lastNotFoundError: ExtractionFailure | undefined;
+    let hiddenFrameError: ExtractionFailure | undefined;
+    let unavailableChildError: unknown;
+    const frameWarnings: string[] = [];
     const pendingTargets: [string, RetainedTarget][] = [];
     const started = performance.now();
     for (const frame of frames) {
@@ -264,14 +305,14 @@ export async function handleExtract(
         if (
           !(await frameVisible(
             cdp,
-            graph!,
+            graph,
             frame,
             attachmentId,
             started + options.timeout_ms,
             signal,
           ))
         ) {
-          if (options.action === "discover") continue;
+          if (multiFrameSearch) continue;
           throw new ExtractionFailure("extract_target_hidden", "The extraction frame is hidden");
         }
         const remaining = options.timeout_ms - (performance.now() - started);
@@ -280,7 +321,7 @@ export async function handleExtract(
         const current =
           frame.frameId === root.frameId
             ? rootDoc
-            : await documentIdentity(cdp, frame, attachmentId, stale);
+            : await documentIdentity(cdp, frame.handle, attachmentId, stale);
         if (
           expectedIdentity &&
           (await verifyDocumentIdentity(cdp, expectedIdentity, signal)) !== "current"
@@ -306,8 +347,16 @@ export async function handleExtract(
         };
         const normalized = normalizeExtract(raw, options, tab.tabId, source);
         if (options.action !== "discover") {
+          if (output) {
+            throw new ExtractionFailure(
+              "extract_target_ambiguous",
+              "The selector matched containers in multiple frames; use discover or a ref",
+            );
+          }
           output = normalized;
-          break;
+          outputIdentity = current.identity;
+          if (!multiFrameSearch || frames.length === 1) break;
+          continue;
         }
         if (!output) output = { ...normalized, targets: [] };
         output.warnings.push(...raw.warnings);
@@ -338,6 +387,25 @@ export async function handleExtract(
         }
       } catch (error) {
         if (
+          multiFrameSearch &&
+          !signal?.aborted &&
+          error instanceof ExtractionFailure &&
+          error.reason === "selector_not_found"
+        ) {
+          lastNotFoundError = error;
+          continue;
+        }
+        if (
+          multiFrameSearch &&
+          frames.length > 1 &&
+          !signal?.aborted &&
+          error instanceof ExtractionFailure &&
+          error.reason === "extract_target_hidden"
+        ) {
+          hiddenFrameError ??= error;
+          continue;
+        }
+        if (
           options.action === "discover" &&
           output &&
           !signal?.aborted &&
@@ -351,19 +419,27 @@ export async function handleExtract(
           break;
         }
         if (
-          options.action !== "discover" ||
+          !multiFrameSearch ||
           frame.frameId === root.frameId ||
+          error instanceof ExtractionFailure ||
           isCaptureTerminalError(error) ||
           signal?.aborted
         )
           throw error;
-        if (output) {
-          output.warnings.push(`frame_unavailable:${frame.frameId}`);
-          output.coverage.dataset_complete = "incomplete";
-        }
+        unavailableChildError ??= error;
+        frameWarnings.push(`frame_unavailable:${frame.frameId}`);
       }
     }
-    if (!output) throw new Error("No extraction result");
+    if (!output) {
+      if (hiddenFrameError) throw hiddenFrameError;
+      if (unavailableChildError && options.action !== "discover") throw unavailableChildError;
+      if (lastNotFoundError) throw lastNotFoundError;
+      throw new Error("No extraction result");
+    }
+    if (frameWarnings.length > 0) {
+      output.warnings.push(...frameWarnings);
+      output.coverage.dataset_complete = "incomplete";
+    }
     if (options.action === "discover") {
       output.targets!.sort((a, b) => Number(a.kind === "list") - Number(b.kind === "list"));
       if (output.targets!.length > 32) {
@@ -371,13 +447,13 @@ export async function handleExtract(
         output.coverage.truncated = true;
         output.coverage.stop_reason ??= "target_limit";
       }
-      if (graph!.frames.length > frames.length && !options.selector) {
+      if (graph.frames.length > frames.length) {
         output.coverage.truncated = true;
         output.coverage.stop_reason = "frame_limit";
       }
-      for (const frame of graph!.unavailableFrames ?? [])
+      for (const frame of graph.unavailableFrames ?? [])
         output.warnings.push(`frame_unavailable:${frame.frameId}`);
-      if (output.coverage.truncated || graph!.unavailableFrames?.length)
+      if (output.coverage.truncated || graph.unavailableFrames?.length)
         output.coverage.dataset_complete = "incomplete";
       while (
         output.targets!.length > 0 &&
@@ -390,6 +466,12 @@ export async function handleExtract(
       }
     }
     if ((await verifyDocumentIdentity(cdp, rootDoc.identity, signal)) !== "current") stale();
+    if (
+      outputIdentity &&
+      outputIdentity.frameId !== rootDoc.identity.frameId &&
+      (await verifyDocumentIdentity(cdp, outputIdentity, signal)) !== "current"
+    )
+      stale();
     check();
     output.warnings = [...new Set(output.warnings)];
     output = fitExtractBudget(output, options.max_bytes);
@@ -404,6 +486,13 @@ export async function handleExtract(
     if (signal?.aborted || (error instanceof Error && error.name === "AbortError"))
       return { code: "cancelled", message: "extract aborted" };
     if (error instanceof ExtractionFailure) return extractionFailure(error);
+    if (isStaleFrameHandleError(error))
+      return extractionFailure(
+        new ExtractionFailure(
+          "extract_target_stale",
+          "The extraction document or target changed; inspect it again",
+        ),
+      );
     return { code: "cdp_failed", message: error instanceof Error ? error.message : String(error) };
   }
 }

@@ -43,6 +43,7 @@ pub struct TabInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabListParams {
     #[serde(default)]
     pub scope: TabScope,
@@ -62,6 +63,7 @@ pub struct TabListResult {
 /// the requesting session's Agent Window (design §6 sandbox rule —
 /// agents never spawn tabs in user windows).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabCreateParams {
     pub session_id: String,
     /// Destination URL. Defaults to `chrome://newtab` when omitted.
@@ -91,9 +93,32 @@ pub struct TabCreateResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabCloseParams {
     pub tab_id: i64,
     pub session_id: String,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<super::ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<super::ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -106,6 +131,7 @@ pub struct TabCloseResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabSelectParams {
     pub tab_id: i64,
     pub session_id: String,
@@ -121,21 +147,11 @@ pub struct TabSelectResult {
 // tab_borrow (M8.2)
 // ---------------------------------------------------------------------------
 
-pub const BORROW_CONFIRMATION_TIMEOUT_PROTOCOL: &str =
-    crate::compatibility::Feature::BorrowConfirmationTimeout
-        .requirement()
-        .daemon;
-
-/// Earlier peers may silently ignore a custom confirmation wait.
-pub fn supports_borrow_confirmation_timeout(protocol: &str) -> bool {
-    crate::compatibility::Feature::BorrowConfirmationTimeout
-        .supports(crate::compatibility::Peer::Daemon, protocol)
-}
-
 /// Params for `tool.tab_borrow`. Moves a *user* tab into the
 /// requesting session's Agent Window, recording its original window /
 /// index so `tab_return` (or session_stop) can put it back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabBorrowParams {
     /// Maximum time to wait for user confirmation (default 60 seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,6 +176,7 @@ pub struct TabBorrowResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabReturnParams {
     pub tab_id: i64,
     pub session_id: String,

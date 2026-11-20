@@ -9,7 +9,7 @@ use clap::Args;
 
 use crate::cli::TOOL_IPC_TIMEOUT;
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Args)]
@@ -48,13 +48,22 @@ pub struct ObserveArgs {
     pub probe_hover: bool,
 }
 
-pub fn dispatch(args: ObserveArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+pub fn dispatch(
+    args: ObserveArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
-    run(info.sock_path, args, format)
+    run(info.sock_path, &op_ctx, args, format)
 }
 
-fn run(sock: PathBuf, args: ObserveArgs, format: Format) -> Result<(), CliError> {
+fn run(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: ObserveArgs,
+    format: Format,
+) -> Result<(), CliError> {
     let params = ObserveParams {
         cursor: args.cursor,
         session_id: args.session.unwrap_or_default(),
@@ -63,8 +72,12 @@ fn run(sock: PathBuf, args: ObserveArgs, format: Format) -> Result<(), CliError>
         max_tokens: args.max_tokens,
         debug_surfaces: args.debug_surfaces,
         probe_hover: args.probe_hover,
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
-    let reply: ObserveResult = call(sock, params)?;
+    let reply: ObserveResult = call(sock, ctx, params)?;
     match format {
         Format::Json => {
             let json = serde_json::to_string_pretty(&reply)
@@ -89,8 +102,12 @@ fn run(sock: PathBuf, args: ObserveArgs, format: Format) -> Result<(), CliError>
     Ok(())
 }
 
-fn call(sock: PathBuf, params: ObserveParams) -> Result<ObserveResult, CliError> {
-    crate::cli::business_rpc::call::<ObserveParams, ObserveResult>(
+fn call(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    params: ObserveParams,
+) -> Result<ObserveResult, CliError> {
+    ctx.call::<ObserveParams, ObserveResult>(
         sock,
         "observe",
         Method::ToolObserve,

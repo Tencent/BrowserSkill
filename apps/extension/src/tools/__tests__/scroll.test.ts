@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import { type FrameDocumentGraph, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import type { JavaScriptDialogInfo, ScrollToParams } from "@/transport/types";
 import type { ViewportRect } from "../geometry";
 import { handleScrollTo } from "../scroll";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 interface Call {
-  target: CdpTarget;
+  target: { tabId: number; sessionId?: string };
   method: string;
   params?: Record<string, unknown>;
   aborted: boolean;
@@ -24,19 +24,27 @@ async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
   const ctx = await manager.start("aa11");
   ctx.refStore.set("e3", 1234, {
     tabId: 4,
-    ...(frame !== "top" ? { frameId: "child" } : {}),
-    ...(frame === "oopif" ? { cdpSessionId: "child-session" } : {}),
+    ...(frame !== "top" ? { frameId: "child", loaderId: "child-loader" } : {}),
   });
   const abort = new AbortController();
-  const graph: CdpFrameGraph = {
+  const graph: FrameDocumentGraph = {
     rootFrameId: "main",
     frames: [
-      { frameId: "main", target: { tabId: 4 } },
       {
+        handle: toFrameDocumentHandle(4, { frameId: "main", loaderId: "" }),
+        frameId: "main",
+        loaderId: "",
+        processKey: "root",
+        isOutOfProcess: false,
+      },
+      {
+        handle: toFrameDocumentHandle(4, { frameId: "child", loaderId: "child-loader" }),
         frameId: "child",
+        loaderId: "child-loader",
         parentFrameId: "main",
         ownerBackendNodeId: 99,
-        target: { tabId: 4, ...(frame === "oopif" ? { sessionId: "child-session" } : {}) },
+        processKey: frame === "oopif" ? "oopif:child" : "root",
+        isOutOfProcess: frame === "oopif",
       },
     ],
   };
@@ -49,7 +57,11 @@ async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
     after: (_call: Call) => {},
     reply: (_call: Call): object | undefined => undefined,
   };
-  const send = async <T>(target: CdpTarget, method: string, params?: object): Promise<T> => {
+  const send = async <T>(
+    target: { tabId: number; sessionId?: string },
+    method: string,
+    params?: object,
+  ): Promise<T> => {
     const call = {
       target,
       method,
@@ -95,15 +107,31 @@ async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
     if (!(method in replies)) throw new Error(`unexpected CDP call ${method}`);
     return replies[method] as T;
   };
-  const cdp: CdpRunner = {
-    send: (tabId, method, params) => send({ tabId }, method, params),
-    sendToTarget: send,
-    getFrameGraph: vi.fn(async () => {
-      hooks.after({ target: { tabId: 4 }, method: "getFrameGraph", aborted: abort.signal.aborted });
-      return graph;
+  const getFrameDocuments = vi.fn(async () => {
+    hooks.after({
+      target: { tabId: 4 },
+      method: "getFrameDocuments",
+      aborted: abort.signal.aborted,
+    });
+    return graph;
+  });
+  const trackSessionTab = vi.fn();
+  const cdp = Object.assign(
+    createStubCdpRunner({
+      send: (tabId, method, params) => send({ tabId }, method, params),
+      sendToFrame: (handle, method, params) => {
+        const isChildOopif = handle.frameId === "child" && frame === "oopif";
+        return send(
+          { tabId: handle.tabId, ...(isChildOopif ? { sessionId: "child-session" } : {}) },
+          method,
+          params,
+        );
+      },
+      getFrameDocuments,
+      trackSessionTab,
     }),
-    trackSessionTab: vi.fn(),
-  };
+    { getFrameDocuments, trackSessionTab },
+  );
   const tabsApi = {
     get: vi.fn(async (id: number) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab),
     query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
@@ -165,7 +193,7 @@ describe("handleScrollTo", () => {
         .filter((call) => call.method === "DOM.scrollIntoViewIfNeeded")
         .map((call) => call.params!.backendNodeId),
     ).toEqual([99, 1234]);
-    expect(f.cdp.getFrameGraph).toHaveBeenCalledTimes(1);
+    expect(f.cdp.getFrameDocuments).toHaveBeenCalledTimes(1);
     if (frame === "oopif")
       expect(f.calls.find((call) => call.params?.backendNodeId === 1234)!.target.sessionId).toBe(
         "child-session",
@@ -221,7 +249,7 @@ describe("handleScrollTo", () => {
   });
 
   it.each([
-    "getFrameGraph",
+    "getFrameDocuments",
     "DOM.scrollIntoViewIfNeeded",
     "DOM.resolveNode",
     "Runtime.callFunctionOn",

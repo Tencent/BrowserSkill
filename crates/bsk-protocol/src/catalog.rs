@@ -7,10 +7,31 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{ErrorCode, EventKind, Method, RpcError, RpcErrorReason, method::MethodEffect};
+use crate::{
+    ErrorCode, EventFrame, EventKind, Method, RpcError, RpcErrorReason, method::MethodSpec,
+};
 
-pub const PROTOCOL_VERSION: &str = "1.9";
-pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
+pub const PROTOCOL_VERSION: &str = "2.0";
+pub const MIN_COMPATIBLE_PROTOCOL: &str = "2.0";
+pub const DEFAULT_DAEMON_PORT: u16 = 52800;
+pub const DEFAULT_DAEMON_WS_URL: &str = "ws://127.0.0.1:52800";
+pub const EXTENSION_CLIENT_ID: &str = "browser-skill-extension";
+pub const LOCAL_PAIRING_FRAGMENT_PREFIX: &str = "bsk-local.v1.";
+pub const REMOTE_AUTH_SUBPROTOCOL_PREFIX: &str = "bsk-auth.";
+pub const INSTANCE_ID_HEX_LENGTH: usize = 8;
+
+/// Returns whether `peer_protocol` satisfies the local protocol compatibility gate.
+pub fn is_protocol_compatible(peer_protocol: &str) -> bool {
+    !matches!(
+        crate::evaluate_handshake_compat(
+            peer_protocol,
+            None,
+            PROTOCOL_VERSION,
+            MIN_COMPATIBLE_PROTOCOL,
+        ),
+        crate::HandshakeCompat::Reject { .. }
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,31 +44,23 @@ pub enum MethodOwner {
 #[derive(Debug, Serialize)]
 pub struct MethodDescriptor {
     pub method: &'static str,
-    pub owner: MethodOwner,
-    pub effect: MethodEffect,
-    pub action_metadata: bool,
-    pub features: &'static [crate::compatibility::Feature],
     pub params: String,
     pub result: String,
+    #[serde(flatten)]
+    pub spec: &'static MethodSpec,
 }
 
 impl MethodDescriptor {
     pub fn new<P: JsonSchema, R: JsonSchema>(
         method: &'static str,
-        owner: MethodOwner,
-        effect: MethodEffect,
-        action_metadata: bool,
-        features: &'static [crate::compatibility::Feature],
+        spec: &'static MethodSpec,
         generator: &mut SchemaGenerator,
     ) -> Self {
         Self {
             method,
-            owner,
-            effect,
-            action_metadata,
-            features,
             params: register::<P>(generator),
             result: register::<R>(generator),
+            spec,
         }
     }
 }
@@ -87,35 +100,16 @@ fn describe(settings: SchemaSettings) -> (Vec<MethodDescriptor>, Value) {
     register::<RpcErrorReason>(&mut generator);
     register::<RpcError>(&mut generator);
     register::<EventKind>(&mut generator);
+    register::<EventFrame>(&mut generator);
     register::<crate::tools::ActionExpectation>(&mut generator);
     register::<crate::tools::ActionMetadata>(&mut generator);
     register::<crate::tools::PendingJavaScriptDialog>(&mut generator);
     register::<crate::tools::DialogHandleParams>(&mut generator);
     register::<crate::tools::OperationParams>(&mut generator);
-    register::<crate::tools::TraceV2>(&mut generator);
     register::<crate::tools::TraceV3>(&mut generator);
-    register::<crate::tools::StepV2>(&mut generator);
     register::<crate::tools::StepV3>(&mut generator);
-    register::<crate::tools::RecordedStep>(&mut generator);
-    let mut definitions = generator.take_definitions(false);
-    let metadata_properties = definitions
-        .get("ActionMetadata")
-        .and_then(|schema| schema.get("properties"))
-        .and_then(Value::as_object)
-        .expect("ActionMetadata properties")
-        .clone();
-    for descriptor in &methods {
-        if !descriptor.action_metadata {
-            continue;
-        }
-        let properties = definitions
-            .get_mut(&descriptor.params)
-            .and_then(Value::as_object_mut)
-            .and_then(|schema| schema.get_mut("properties"))
-            .and_then(Value::as_object_mut)
-            .unwrap_or_else(|| panic!("{} properties must be an object", descriptor.params));
-        properties.extend(metadata_properties.clone());
-    }
+    register::<crate::tools::VideoAction>(&mut generator);
+    let definitions = generator.take_definitions(false);
     (
         methods,
         json!({
@@ -136,18 +130,33 @@ pub fn export() -> Value {
         "min_compatible_protocol": MIN_COMPATIBLE_PROTOCOL,
         "methods": methods,
         "events": EventKind::ALL,
-        "feature_requirements": crate::compatibility::Feature::ALL.iter().map(|f| f.requirement()).collect::<Vec<_>>(),
         "constants": {
-            "TRACE_VERSION_V2": crate::tools::TRACE_VERSION_V2,
             "TRACE_VERSION_V3": crate::tools::TRACE_VERSION_V3,
             "VOM_FORMAT_VERSION": crate::tools::VOM_FORMAT_VERSION,
+            "DEFAULT_DAEMON_PORT": DEFAULT_DAEMON_PORT,
+            "DEFAULT_DAEMON_WS_URL": DEFAULT_DAEMON_WS_URL,
+            "EXTENSION_CLIENT_ID": EXTENSION_CLIENT_ID,
+            "LOCAL_PAIRING_FRAGMENT_PREFIX": LOCAL_PAIRING_FRAGMENT_PREFIX,
+            "REMOTE_AUTH_SUBPROTOCOL_PREFIX": REMOTE_AUTH_SUBPROTOCOL_PREFIX,
+            "LOCAL_AUTH_KDF_DOMAIN": crate::local_auth::LOCAL_AUTH_KDF_DOMAIN,
+            "INSTANCE_ID_HEX_LENGTH": INSTANCE_ID_HEX_LENGTH,
         },
         "debug_actions": crate::tools::DebugAction::ALL.iter().map(|action| json!({
             "action": action,
             "effect": action.effect(),
             "owner": action.owner(),
             "cooperation_guarded": action.cooperation_guarded(),
+            "wal_tracked": action.wal_tracked(),
+            "dialog_gated": action.dialog_gated(),
         })).collect::<Vec<_>>(),
+        "video_actions": crate::tools::VideoAction::ALL.iter().map(|action| json!({
+            "action": action,
+            "resumes_control": action.resumes_control(),
+            "interrupt_gated": action.interrupt_gated(),
+            "dialog_gated": action.dialog_gated(),
+            "uses_session_queue": action.uses_session_queue(),
+        })).collect::<Vec<_>>(),
+        "rpc_error_reasons": RpcErrorReason::ALL,
         "schema": input,
         "output_schema": output,
     })

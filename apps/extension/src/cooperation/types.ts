@@ -47,8 +47,21 @@ export interface MediaState {
   sources: { id: string; src: string; type: string; media: string }[];
 }
 
+/** One text node whose data was replaced while everything around it stayed. */
+export interface TextChange {
+  /** The frame's `textual` count once this batch was recorded. */
+  sequence: number;
+  /** Collector-local identity of the element holding the text. */
+  id: string;
+  /** How to find that element: its tag, with `#id` when it has one. */
+  label: string;
+  previous_value: string;
+  value: string;
+}
+
 export interface FrameState {
   document: string;
+  url?: string;
   /** Collector-local identity of the deep active element in this document. */
   focus?: string;
   /** True only for the ordinary document focus, without a specific recipient. */
@@ -56,6 +69,18 @@ export interface FrameState {
   media?: MediaState[];
   revision: number;
   structure: number;
+  /**
+   * How many of the `structure` batches only replaced visible text, each logged
+   * in `texts`. A frame whose `structure` and `textual` advanced by the same
+   * amount changed nothing else in its DOM.
+   */
+  textual?: number;
+  /** Bounded log of those replacements, oldest first. */
+  texts?: TextChange[];
+  /** `sequence` of the newest replacement dropped from `texts`; absent when none was. */
+  textFloor?: number;
+  /** False when a style that applies under the current focus may show or hide content. */
+  focusNeutral?: boolean;
   human: number;
   busy: boolean;
   /** A gesture may still become a click or edit. It has not revoked control. */
@@ -115,7 +140,8 @@ export interface CooperationParams {
   control_policy?: "auto" | "strict" | "target";
 }
 
-export const COOPERATION_READY = "cooperation.ready";
+export const COOPERATION_ARM_FRAME = "cooperation.arm_frame";
+export const COOPERATION_SUBFRAME_READY = "cooperation.subframe_ready";
 export const COOPERATION_MESSAGE = "cooperation.frame";
 export const COOPERATION_CONTROL = "cooperation.control";
 export const COOPERATION_READ = "cooperation.read";

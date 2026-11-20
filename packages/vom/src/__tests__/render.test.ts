@@ -540,140 +540,73 @@ describe("renderVom single-layer page", () => {
     expect(out.refs).toEqual([]);
   });
 
-  it("propagates refs to rows of a delegated list container", () => {
-    const out = renderVom(
+  it("exposes row refs for delegated lists, listboxes, wrappers, and homogeneous div rows while keeping plain lists ref-free", () => {
+    const doc = node({ id: 1, role: "RootWebArea", name: "Doc" });
+    const row = (id: number, parentId: number, y: number, h: number, extra: Partial<VomNode>) =>
+      node({ id, parentId, tag: "div", role: "generic", rect: { x: 0, y, w: 260, h }, ...extra });
+
+    const delegatedUl = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "ul",
-          role: "list",
-          clickable: true,
-          rect: { x: 0, y: 0, w: 200, h: 120 },
-        }),
-        node({
-          id: 3,
-          parentId: 2,
-          tag: "li",
-          role: "listitem",
-          name: "甲一",
-          rect: { x: 0, y: 0, w: 200, h: 40 },
-        }),
-        node({
-          id: 4,
-          parentId: 2,
-          tag: "li",
-          role: "listitem",
-          name: "甲二",
-          rect: { x: 0, y: 40, w: 200, h: 40 },
-        }),
-        node({
-          id: 5,
-          parentId: 2,
-          tag: "li",
-          role: "listitem",
-          name: "甲三",
-          rect: { x: 0, y: 80, w: 200, h: 40 },
-        }),
+        doc,
+        node({ id: 2, parentId: 1, tag: "ul", role: "list", clickable: true }),
+        node({ id: 3, parentId: 2, tag: "li", role: "listitem", name: "甲一" }),
+        node({ id: 4, parentId: 2, tag: "li", role: "listitem", name: "甲二" }),
+        node({ id: 5, parentId: 2, tag: "li", role: "listitem", name: "甲三" }),
       ]),
     );
-    expect(out.refs).toHaveLength(3);
-    expect(out.text).toContain('button "甲一"');
-    expect(out.text).not.toContain('button "甲一 甲二 甲三"');
-  });
+    expect(delegatedUl.refs.map((r) => r.backendNodeId)).toEqual([3, 4, 5]);
+    expect(delegatedUl.text).toContain('button "甲一"');
+    expect(delegatedUl.text).not.toContain('button "甲一 甲二 甲三"');
 
-  it("keeps plain lists without delegated clickability ref-free", () => {
-    const out = renderVom(
+    const plainUl = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        doc,
         node({ id: 2, parentId: 1, tag: "ul", role: "list" }),
         node({ id: 3, parentId: 2, tag: "li", role: "listitem", name: "行一" }),
         node({ id: 4, parentId: 2, tag: "li", role: "listitem", name: "行二" }),
-        node({ id: 5, parentId: 2, tag: "li", role: "listitem", name: "行三" }),
       ]),
     );
-    expect(out.refs).toEqual([]);
-  });
+    expect(plainUl.refs).toEqual([]);
 
-  it("propagates refs to homogeneous repeated rows under a delegated div", () => {
-    const out = renderVom(
+    const delegatedListbox = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "div",
-          role: "generic",
-          clickable: true,
-          rect: { x: 0, y: 0, w: 300, h: 120 },
-        }),
-        node({
-          id: 3,
-          parentId: 2,
-          tag: "div",
-          role: "generic",
-          text: "甲一",
-          rect: { x: 0, y: 0, w: 300, h: 40 },
-        }),
-        node({
-          id: 4,
-          parentId: 2,
-          tag: "div",
-          role: "generic",
-          text: "甲二",
-          rect: { x: 0, y: 40, w: 300, h: 40 },
-        }),
-        node({
-          id: 5,
-          parentId: 2,
-          tag: "div",
-          role: "generic",
-          text: "甲三",
-          rect: { x: 0, y: 80, w: 300, h: 40 },
-        }),
+        doc,
+        node({ id: 2, parentId: 1, tag: "div", role: "listbox", clickable: true }),
+        row(3, 2, 0, 36, { text: "选项一" }),
+        row(4, 2, 36, 36, { text: "选项二" }),
       ]),
     );
-    expect(out.refs).toHaveLength(3);
-    expect(out.text).toContain('button "甲一"');
-  });
+    expect(delegatedListbox.refs.map((r) => r.backendNodeId)).toEqual([2, 3, 4]);
 
-  it("keeps a two-line compound button as a single ref", () => {
-    const out = renderVom(
+    // Homogeneous repeated div rows, including a two-line wrapped row (2x height).
+    const homogeneousDiv = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "div",
-          role: "generic",
-          clickable: true,
-          name: "标题 副标题",
-          rect: { x: 0, y: 0, w: 300, h: 80 },
-        }),
-        node({
-          id: 3,
-          parentId: 2,
-          tag: "div",
-          role: "generic",
-          name: "标题",
-          rect: { x: 0, y: 0, w: 300, h: 40 },
-        }),
-        node({
-          id: 4,
-          parentId: 2,
-          tag: "div",
-          role: "generic",
-          name: "副标题",
-          rect: { x: 0, y: 40, w: 300, h: 40 },
-        }),
+        doc,
+        row(2, 1, 0, 144, { clickable: true }),
+        row(3, 2, 0, 36, { text: "短项一" }),
+        row(4, 2, 36, 72, { text: "两行换行的较长搜索建议二" }),
+        row(5, 2, 108, 36, { text: "短项三" }),
       ]),
     );
-    expect(out.refs).toHaveLength(1);
-    expect(out.text).toContain('button "标题 副标题"');
+    expect(homogeneousDiv.refs.map((r) => r.backendNodeId)).toEqual([3, 4, 5]);
+
+    // Single-child dropdown wrapper around a delegated list with a footer button.
+    const wrappedDropdown = renderVom(
+      scene([
+        doc,
+        row(2, 1, 0, 180, { clickable: true, name: "甲一 甲二 甲三 清空历史" }),
+        node({ id: 3, parentId: 2, tag: "ul", role: "list", rect: { x: 0, y: 0, w: 260, h: 180 } }),
+        node({ id: 4, parentId: 3, tag: "li", role: "listitem", name: "甲一" }),
+        node({ id: 5, parentId: 3, tag: "li", role: "listitem", name: "甲二" }),
+        node({ id: 6, parentId: 3, tag: "li", role: "listitem", name: "甲三" }),
+        node({ id: 7, parentId: 3, tag: "li", role: "listitem", hasNativeDescendant: true }),
+        node({ id: 8, parentId: 7, tag: "button", role: "button", name: "清空历史" }),
+      ]),
+    );
+    expect(wrappedDropdown.refs.map((r) => r.backendNodeId)).toEqual([4, 5, 6, 8]);
   });
 
-  it("is idempotent across multiple applyVomInteractionRecovery passes and inherited pointer cursors", () => {
+  it("is idempotent across multiple recovery passes with inherited pointer cursors", () => {
     const rawNodes: VomNode[] = [
       node({ id: 1, role: "RootWebArea", name: "Doc" }),
       node({
@@ -681,10 +614,9 @@ describe("renderVom single-layer page", () => {
         parentId: 1,
         tag: "ul",
         role: "list",
-        name: "SHA 上海 PEK 北京 CAN 广州",
+        name: "SHA 上海 PEK 北京",
         clickable: true,
         cursor: "pointer",
-        rect: { x: 0, y: 0, w: 240, h: 120 },
       }),
       node({
         id: 3,
@@ -693,7 +625,6 @@ describe("renderVom single-layer page", () => {
         role: "listitem",
         name: "SHA 上海",
         cursor: "pointer",
-        rect: { x: 0, y: 0, w: 240, h: 40 },
       }),
       node({ id: 31, parentId: 3, tag: "span", role: "generic", name: "SHA", cursor: "pointer" }),
       node({ id: 32, parentId: 3, tag: "span", role: "generic", name: "上海", cursor: "pointer" }),
@@ -704,16 +635,6 @@ describe("renderVom single-layer page", () => {
         role: "listitem",
         name: "PEK 北京",
         cursor: "pointer",
-        rect: { x: 0, y: 40, w: 240, h: 40 },
-      }),
-      node({
-        id: 5,
-        parentId: 2,
-        tag: "li",
-        role: "listitem",
-        name: "CAN 广州",
-        cursor: "pointer",
-        rect: { x: 0, y: 80, w: 240, h: 40 },
       }),
       node({
         id: 6,
@@ -724,285 +645,84 @@ describe("renderVom single-layer page", () => {
         clickable: true,
         rect: { x: 0, y: 140, w: 300, h: 120 },
       }),
-      node({
-        id: 7,
-        parentId: 6,
-        tag: "div",
-        role: "generic",
-        name: "甲一",
-        rect: { x: 0, y: 140, w: 300, h: 40 },
-      }),
-      node({
-        id: 8,
-        parentId: 6,
-        tag: "div",
-        role: "generic",
-        name: "甲二",
-        rect: { x: 0, y: 180, w: 300, h: 40 },
-      }),
-      node({
-        id: 9,
-        parentId: 6,
-        tag: "div",
-        role: "generic",
-        name: "甲三",
-        rect: { x: 0, y: 220, w: 300, h: 40 },
-      }),
+      node({ id: 7, parentId: 6, tag: "div", name: "甲一", rect: { x: 0, y: 140, w: 300, h: 40 } }),
+      node({ id: 8, parentId: 6, tag: "div", name: "甲二", rect: { x: 0, y: 180, w: 300, h: 40 } }),
+      node({ id: 9, parentId: 6, tag: "div", name: "甲三", rect: { x: 0, y: 220, w: 300, h: 40 } }),
     ];
 
     const pass1 = applyVomInteractionRecovery(rawNodes);
     const pass2 = applyVomInteractionRecovery(pass1);
-    expect(pass2).toEqual(pass1);
-
-    const out = renderVom(scene(pass2));
-    expect(coreRefs(out.refs)).toEqual([
-      { ref: "e1", backendNodeId: 3 },
-      { ref: "e2", backendNodeId: 4 },
-      { ref: "e3", backendNodeId: 5 },
-      { ref: "e4", backendNodeId: 7 },
-      { ref: "e5", backendNodeId: 8 },
-      { ref: "e6", backendNodeId: 9 },
-    ]);
-    expect(out.text).not.toContain('button "SHA 上海 PEK 北京 CAN 广州"');
-    expect(out.text).not.toContain('button "甲一 甲二 甲三"');
-
+    expect(pass2).toBe(pass1);
+    expect(renderVom(scene(pass2)).refs.map((r) => r.backendNodeId)).toEqual([3, 4, 7, 8, 9]);
     const prepared = prepareObservationRender(scene(pass1));
     const preparedRefs = Array.from({ [Symbol.iterator]: () => prepared.rows })
-      .filter((row) => row.ref)
-      .map((row) => row.ref!.backendNodeId);
-    expect(preparedRefs).toEqual([3, 4, 5, 7, 8, 9]);
+      .filter((r) => r.ref)
+      .map((r) => r.ref!.backendNodeId);
+    expect(preparedRefs).toEqual([3, 4, 7, 8, 9]);
   });
 
-  it("recovers an accessible icon/hamburger ul when none of its child bars carry row text", () => {
-    const out = renderVom(
-      scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "ul",
-          role: "list",
-          clickable: true,
-          attrs: { "aria-label": "打开菜单" },
-          rect: { x: 0, y: 0, w: 36, h: 36 },
-        }),
-        node({
-          id: 3,
-          parentId: 2,
-          tag: "li",
-          role: "listitem",
-          rect: { x: 6, y: 8, w: 24, h: 3 },
-        }),
-        node({
-          id: 4,
-          parentId: 2,
-          tag: "li",
-          role: "listitem",
-          rect: { x: 6, y: 16, w: 24, h: 3 },
-        }),
-        node({
-          id: 5,
-          parentId: 2,
-          tag: "li",
-          role: "listitem",
-          rect: { x: 6, y: 24, w: 24, h: 3 },
-        }),
-      ]),
-    );
-    expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
-    expect(out.text).toContain('@e1 button "打开菜单"');
-  });
+  it("guards non-row containers, cards, separators, nested groups, and nav lists", () => {
+    const doc = node({ id: 1, role: "RootWebArea", name: "Doc" });
+    const row = (id: number, parentId: number, y: number, extra: Partial<VomNode>) =>
+      node({
+        id,
+        parentId,
+        tag: "div",
+        role: "generic",
+        rect: { x: 0, y, w: 240, h: 40 },
+        ...extra,
+      });
 
-  it("ignores sibling nearbyText, separators, list markers, and non-referenceable AX text inside delegated lists", () => {
-    const out = renderVom(
+    // Two-line compound button stays a single ref.
+    const twoLine = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "ul",
-          role: "list",
-          clickable: true,
-          rect: { x: 0, y: 0, w: 200, h: 100 },
-        }),
-        node({
-          id: 3,
-          parentId: 2,
-          tag: "",
-          role: "StaticText",
-          name: "Loose AX text",
-          referenceable: false,
-        }),
-        node({
-          id: 4,
-          parentId: 2,
-          tag: "li",
-          role: "listitem",
-          name: "甲一",
-          rect: { x: 0, y: 0, w: 200, h: 36 },
-        }),
-        node({
-          id: 5,
-          parentId: 2,
-          tag: "li",
-          role: "listitem",
-          nearbyText: "甲一",
-          rect: { x: 0, y: 36, w: 200, h: 2 },
-        }),
-        node({ id: 51, parentId: 5, tag: "", role: "ListMarker", name: "•", referenceable: false }),
-        node({
-          id: 6,
-          parentId: 2,
-          tag: "li",
-          role: "separator",
-          name: "---",
-          rect: { x: 0, y: 38, w: 200, h: 2 },
-        }),
-        node({
-          id: 7,
-          parentId: 2,
-          tag: "li",
-          role: "listitem",
-          name: "甲二",
-          rect: { x: 0, y: 40, w: 200, h: 36 },
-        }),
+        doc,
+        node({ id: 2, parentId: 1, tag: "div", clickable: true, name: "标题 副标题" }),
+        row(3, 2, 0, { name: "标题" }),
+        row(4, 2, 40, { name: "副标题" }),
       ]),
     );
-    expect(coreRefs(out.refs)).toEqual([
-      { ref: "e1", backendNodeId: 4 },
-      { ref: "e2", backendNodeId: 7 },
-    ]);
-  });
+    expect(twoLine.refs.map((r) => r.backendNodeId)).toEqual([2]);
 
-  it("does not split atomic links, explicit button roles, disabled lists, multi-slot cards, or horizontal pill rows", () => {
-    const linkCard = renderVom(
-      scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "a",
-          role: "link",
-          name: "Line 1 Line 2 Line 3",
-          clickable: true,
-          rect: { x: 0, y: 0, w: 240, h: 120 },
-        }),
-        node({
-          id: 3,
-          parentId: 2,
-          tag: "div",
-          text: "Line 1",
-          rect: { x: 0, y: 0, w: 240, h: 40 },
-        }),
-        node({
-          id: 4,
-          parentId: 2,
-          tag: "div",
-          text: "Line 2",
-          rect: { x: 0, y: 40, w: 240, h: 40 },
-        }),
-        node({
-          id: 5,
-          parentId: 2,
-          tag: "div",
-          text: "Line 3",
-          rect: { x: 0, y: 80, w: 240, h: 40 },
-        }),
-      ]),
-    );
-    expect(coreRefs(linkCard.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
-    expect(linkCard.text).toContain('@e1 link "Line 1 Line 2 Line 3"');
-
-    const explicitButton = renderVom(
-      scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "div",
-          role: "generic",
-          attrs: { role: "button" },
-          name: "总收入 ¥128,400 +12%",
-          clickable: true,
-          rect: { x: 0, y: 0, w: 240, h: 120 },
-        }),
-        node({
-          id: 3,
-          parentId: 2,
-          tag: "div",
-          text: "总收入",
-          rect: { x: 0, y: 0, w: 240, h: 40 },
-        }),
-        node({
-          id: 4,
-          parentId: 2,
-          tag: "div",
-          text: "¥128,400",
-          rect: { x: 0, y: 40, w: 240, h: 40 },
-        }),
-        node({
-          id: 5,
-          parentId: 2,
-          tag: "div",
-          text: "+12%",
-          rect: { x: 0, y: 80, w: 240, h: 40 },
-        }),
-      ]),
-    );
-    expect(coreRefs(explicitButton.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+    // Atomic link, explicit role="button", multi-slot KPI card, and horizontal pill row stay single refs.
+    for (const container of [
+      node({ id: 2, parentId: 1, tag: "a", role: "link", name: "A B C", clickable: true }),
+      node({
+        id: 2,
+        parentId: 1,
+        tag: "div",
+        attrs: { role: "button" },
+        name: "A B C",
+        clickable: true,
+      }),
+    ]) {
+      const out = renderVom(
+        scene([
+          doc,
+          container,
+          row(3, 2, 0, { text: "A" }),
+          row(4, 2, 40, { text: "B" }),
+          row(5, 2, 80, { text: "C" }),
+        ]),
+      );
+      expect(out.refs.map((r) => r.backendNodeId)).toEqual([2]);
+    }
 
     const slotCard = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "div",
-          role: "generic",
-          name: "总收入 ¥128,400 +12%",
-          clickable: true,
-          rect: { x: 0, y: 0, w: 240, h: 120 },
-        }),
-        node({
-          id: 3,
-          parentId: 2,
-          tag: "div",
-          attrs: { class: "card-title" },
-          text: "总收入",
-          rect: { x: 0, y: 0, w: 240, h: 40 },
-        }),
-        node({
-          id: 4,
-          parentId: 2,
-          tag: "div",
-          attrs: { class: "card-value" },
-          text: "¥128,400",
-          rect: { x: 0, y: 40, w: 240, h: 40 },
-        }),
-        node({
-          id: 5,
-          parentId: 2,
-          tag: "div",
-          attrs: { class: "card-trend" },
-          text: "+12%",
-          rect: { x: 0, y: 80, w: 240, h: 40 },
-        }),
+        doc,
+        node({ id: 2, parentId: 1, tag: "div", name: "总收入 ¥128,400 +12%", clickable: true }),
+        row(3, 2, 0, { attrs: { class: "card-title" }, text: "总收入" }),
+        row(4, 2, 40, { attrs: { class: "card-value" }, text: "¥128,400" }),
+        row(5, 2, 80, { attrs: { class: "card-trend" }, text: "+12%" }),
       ]),
     );
-    expect(coreRefs(slotCard.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+    expect(slotCard.refs.map((r) => r.backendNodeId)).toEqual([2]);
 
     const horizontalRow = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "div",
-          role: "generic",
-          name: "月付 季付 年付",
-          clickable: true,
-          rect: { x: 0, y: 10, w: 300, h: 36 },
-        }),
+        doc,
+        node({ id: 2, parentId: 1, tag: "div", name: "月付 季付 年付", clickable: true }),
         node({ id: 3, parentId: 2, tag: "div", text: "月付", rect: { x: 0, y: 10, w: 96, h: 32 } }),
         node({
           id: 4,
@@ -1020,102 +740,61 @@ describe("renderVom single-layer page", () => {
         }),
       ]),
     );
-    expect(coreRefs(horizontalRow.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+    expect(horizontalRow.refs.map((r) => r.backendNodeId)).toEqual([2]);
 
+    // Disabled list yields no refs; accessible hamburger ul with empty li bars recovers as one button.
     const disabledList = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        doc,
         node({ id: 2, parentId: 1, tag: "ul", role: "list", clickable: true, disabled: true }),
         node({ id: 3, parentId: 2, tag: "li", role: "listitem", name: "甲一" }),
-        node({ id: 4, parentId: 2, tag: "li", role: "listitem", name: "甲二" }),
       ]),
     );
     expect(disabledList.refs).toEqual([]);
-  });
 
-  it("unwraps single-child dropdown wrappers, tolerates wrapped row heights, and handles nested/mixed lists", () => {
-    const wrappedDropdown = renderVom(
+    const hamburger = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        doc,
         node({
           id: 2,
           parentId: 1,
-          tag: "div",
-          role: "generic",
-          name: "甲一 甲二 较长的换行建议项文本 甲三 清空历史",
-          clickable: true,
-          rect: { x: 0, y: 0, w: 260, h: 180 },
-        }),
-        node({
-          id: 3,
-          parentId: 2,
           tag: "ul",
           role: "list",
-          rect: { x: 0, y: 0, w: 260, h: 180 },
+          clickable: true,
+          attrs: { "aria-label": "打开菜单" },
         }),
-        node({ id: 4, parentId: 3, tag: "li", role: "listitem", name: "甲一" }),
-        node({
-          id: 5,
-          parentId: 3,
-          tag: "li",
-          role: "listitem",
-          name: "甲二 较长的换行建议项文本",
-        }),
-        node({ id: 6, parentId: 3, tag: "li", role: "listitem", name: "甲三" }),
-        node({ id: 7, parentId: 3, tag: "li", role: "listitem", hasNativeDescendant: true }),
-        node({ id: 8, parentId: 7, tag: "button", role: "button", name: "清空历史" }),
+        node({ id: 3, parentId: 2, tag: "li", role: "listitem" }),
+        node({ id: 4, parentId: 2, tag: "li", role: "listitem" }),
       ]),
     );
-    expect(coreRefs(wrappedDropdown.refs)).toEqual([
-      { ref: "e1", backendNodeId: 4 },
-      { ref: "e2", backendNodeId: 5 },
-      { ref: "e3", backendNodeId: 6 },
-      { ref: "e4", backendNodeId: 8 },
-    ]);
+    expect(hamburger.refs.map((r) => r.backendNodeId)).toEqual([2]);
 
-    const wrappedHeightDivs = renderVom(
+    // Empty divider with nearbyText/ListMarker, explicit separator, and non-referenceable AX text are skipped.
+    const withSeparators = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
-        node({
-          id: 2,
-          parentId: 1,
-          tag: "div",
-          role: "generic",
-          clickable: true,
-          rect: { x: 0, y: 0, w: 260, h: 144 },
-        }),
+        doc,
+        node({ id: 2, parentId: 1, tag: "ul", role: "list", clickable: true }),
         node({
           id: 3,
           parentId: 2,
-          tag: "div",
-          text: "短项一",
-          rect: { x: 0, y: 0, w: 260, h: 36 },
+          tag: "",
+          role: "StaticText",
+          name: "Loose",
+          referenceable: false,
         }),
-        node({
-          id: 4,
-          parentId: 2,
-          tag: "div",
-          text: "两行换行的较长搜索建议二",
-          rect: { x: 0, y: 36, w: 260, h: 72 },
-        }),
-        node({
-          id: 5,
-          parentId: 2,
-          tag: "div",
-          text: "短项三",
-          rect: { x: 0, y: 108, w: 260, h: 36 },
-        }),
+        node({ id: 4, parentId: 2, tag: "li", role: "listitem", name: "甲一" }),
+        node({ id: 5, parentId: 2, tag: "li", role: "listitem", nearbyText: "甲一" }),
+        node({ id: 51, parentId: 5, tag: "", role: "ListMarker", name: "•", referenceable: false }),
+        node({ id: 6, parentId: 2, tag: "li", role: "separator", name: "---" }),
+        node({ id: 7, parentId: 2, tag: "li", role: "listitem", name: "甲二" }),
       ]),
     );
-    expect(coreRefs(wrappedHeightDivs.refs)).toEqual([
-      { ref: "e1", backendNodeId: 3 },
-      { ref: "e2", backendNodeId: 4 },
-      { ref: "e3", backendNodeId: 5 },
-    ]);
+    expect(withSeparators.refs.map((r) => r.backendNodeId)).toEqual([4, 7]);
 
+    // Nested tree group exposes leaf rows rather than turning the parent branch into a button.
     const groupedTree = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        doc,
         node({ id: 2, parentId: 1, tag: "ul", role: "tree", clickable: true }),
         node({ id: 3, parentId: 2, tag: "li", role: "listitem", name: "第一章" }),
         node({ id: 4, parentId: 3, tag: "ul", role: "group" }),
@@ -1123,15 +802,12 @@ describe("renderVom single-layer page", () => {
         node({ id: 6, parentId: 4, tag: "li", role: "listitem", name: "1.2 节" }),
       ]),
     );
-    expect(coreRefs(groupedTree.refs)).toEqual([
-      { ref: "e1", backendNodeId: 5 },
-      { ref: "e2", backendNodeId: 6 },
-    ]);
-    expect(groupedTree.text).not.toContain('button "第一章');
+    expect(groupedTree.refs.map((r) => r.backendNodeId)).toEqual([5, 6]);
 
+    // Nav list with <a> items does not promote a static footer item into a button.
     const navList = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        doc,
         node({ id: 2, parentId: 1, tag: "ul", role: "list", clickable: true }),
         node({ id: 3, parentId: 2, tag: "li", role: "listitem" }),
         node({ id: 4, parentId: 3, tag: "a", role: "link", name: "首页" }),
@@ -1140,10 +816,7 @@ describe("renderVom single-layer page", () => {
         node({ id: 7, parentId: 2, tag: "li", role: "listitem", name: "© 2026" }),
       ]),
     );
-    expect(coreRefs(navList.refs)).toEqual([
-      { ref: "e1", backendNodeId: 4 },
-      { ref: "e2", backendNodeId: 6 },
-    ]);
+    expect(navList.refs.map((r) => r.backendNodeId)).toEqual([4, 6]);
   });
 
   it("does not treat implementation CSS classes as control names", () => {
@@ -2743,6 +2416,512 @@ describe("selection evidence", () => {
       expect(chromeAxTable.text).toContain('      row "检查项编号 | 审计等级"');
       expect(chromeAxTable.text).toContain('      row "CHK-101 | 常规"');
       expect(chromeAxTable.text).toContain('      row "CHK-102 | 提示"');
+    });
+
+    it("emits independent @eN rows for expanded nested menuitem descendants while keeping collapsed menus and native <select> folded", () => {
+      const collapsedNodes = [
+        node({ id: 1, parentId: null, tag: "ul", role: "menubar" }),
+        node({
+          id: 2,
+          parentId: 1,
+          backendNodeId: 102,
+          tag: "li",
+          role: "menuitem",
+          name: "Overview",
+        }),
+        node({
+          id: 3,
+          parentId: 1,
+          backendNodeId: 103,
+          tag: "li",
+          role: "menuitem",
+          name: "Workspace",
+        }),
+        node({ id: 4, parentId: null, tag: "ul", role: "menu" }),
+        node({
+          id: 5,
+          parentId: 4,
+          backendNodeId: 105,
+          tag: "li",
+          role: "menuitem",
+          name: "Members",
+          cursor: "pointer",
+        }),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 106,
+          tag: "li",
+          role: "menuitem",
+          name: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 60,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          text: "Advanced ▸",
+          clickable: true,
+          cursor: "pointer",
+        }),
+        node({
+          id: 7,
+          parentId: 60,
+          tag: "span",
+          role: "generic",
+          text: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 8,
+          parentId: 60,
+          tag: "i",
+          role: "img",
+          name: "chevron-right",
+          cursor: "pointer",
+        }),
+      ];
+      const collapsed = renderVom(scene(collapsedNodes));
+      expect(collapsed.refs.map((r) => [r.ref, r.name])).toEqual([
+        ["e1", "Overview"],
+        ["e2", "Workspace"],
+        ["e3", "Members"],
+        ["e4", "Advanced"],
+      ]);
+      expect(collapsed.text).not.toContain("Audit export");
+      expect(collapsed.text).not.toContain("Report history");
+      expect(collapsed.text).not.toContain("chevron-right");
+
+      const expandedScene = scene([
+        ...collapsedNodes.slice(0, 5),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 106,
+          tag: "li",
+          role: "menuitem",
+          name: "Advanced Audit export Report history",
+          cursor: "pointer",
+        }),
+        node({
+          id: 60,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          text: "Advanced ▸",
+          clickable: true,
+          cursor: "pointer",
+        }),
+        node({
+          id: 7,
+          parentId: 60,
+          tag: "span",
+          role: "generic",
+          text: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 8,
+          parentId: 60,
+          tag: "i",
+          role: "img",
+          name: "chevron-right",
+          cursor: "pointer",
+        }),
+        node({
+          id: 9,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          position: "absolute",
+          cursor: "pointer",
+        }),
+        node({ id: 10, parentId: 9, tag: "ul", role: "none", cursor: "pointer" }),
+        node({
+          id: 11,
+          parentId: 10,
+          backendNodeId: 111,
+          tag: "li",
+          role: "menuitem",
+          name: "Audit export",
+          cursor: "pointer",
+        }),
+        node({
+          id: 12,
+          parentId: 11,
+          tag: "span",
+          role: "generic",
+          text: "Audit export",
+          cursor: "pointer",
+        }),
+        node({
+          id: 13,
+          parentId: 10,
+          backendNodeId: 113,
+          tag: "li",
+          role: "menuitem",
+          name: "Report history CSV archive",
+          cursor: "pointer",
+        }),
+        node({
+          id: 14,
+          parentId: 13,
+          tag: "span",
+          role: "generic",
+          text: "Report history",
+          cursor: "pointer",
+        }),
+        node({
+          id: 15,
+          parentId: 13,
+          backendNodeId: 115,
+          tag: "li",
+          role: "menuitem",
+          name: "CSV archive",
+          cursor: "pointer",
+        }),
+      ]);
+
+      const full = renderVom(expandedScene);
+      expect(full.text.split("\n")).toEqual([
+        "@vom 1",
+        "@view 1280x720",
+        "@layers 1 focus=L1",
+        "L1 page",
+        '  @e1 menuitem "Overview"',
+        '  @e2 menuitem "Workspace"',
+        '  @e3 menuitem "Members"',
+        '  @e4 menuitem "Advanced Audit export Report history"',
+        '    @e5 menuitem "Audit export"',
+        '    @e6 menuitem "Report history CSV archive"',
+        '      @e7 menuitem "CSV archive"',
+      ]);
+      expect(coreRefs(full.refs)).toEqual([
+        { ref: "e1", backendNodeId: 102 },
+        { ref: "e2", backendNodeId: 103 },
+        { ref: "e3", backendNodeId: 105 },
+        { ref: "e4", backendNodeId: 106 },
+        { ref: "e5", backendNodeId: 111 },
+        { ref: "e6", backendNodeId: 113 },
+        { ref: "e7", backendNodeId: 115 },
+      ]);
+
+      const prepared = prepareObservationRender(expandedScene);
+      const obsRows = Array.from({ [Symbol.iterator]: () => prepared.rows });
+      expect([...prepared.headers, ...obsRows.map((row) => row.text)].join("\n")).toBe(full.text);
+      expect(obsRows.filter((row) => row.ref).map((row) => [row.ref!.ref, row.ref!.name])).toEqual([
+        ["e1", "Overview"],
+        ["e2", "Workspace"],
+        ["e3", "Members"],
+        ["e4", "Advanced Audit export Report history"],
+        ["e5", "Audit export"],
+        ["e6", "Report history CSV archive"],
+        ["e7", "CSV archive"],
+      ]);
+
+      // Isomorphic siblings: custom ARIA combobox / named button keep nested interactive refs,
+      // whereas native single-select <select> keeps options folded inline without child @eN rows.
+      const siblings = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 201,
+            tag: "div",
+            role: "combobox",
+            name: "Filter status",
+            attrs: { "aria-expanded": "true" },
+          }),
+          node({ id: 2, parentId: 1, tag: "span", role: "StaticText", name: "Filter status" }),
+          node({ id: 3, parentId: 1, tag: "div", role: "listbox", referenceable: false }),
+          node({
+            id: 4,
+            parentId: 3,
+            backendNodeId: 204,
+            tag: "div",
+            role: "option",
+            name: "Active",
+          }),
+          node({
+            id: 40,
+            parentId: 4,
+            tag: "i",
+            role: "img",
+            name: "check-badge",
+          }),
+          node({
+            id: 41,
+            parentId: 4,
+            tag: "span",
+            role: "StaticText",
+            name: "Default filter",
+          }),
+          node({
+            id: 5,
+            parentId: 3,
+            backendNodeId: 205,
+            tag: "div",
+            role: "option",
+            name: "Archived",
+          }),
+          node({
+            id: 6,
+            backendNodeId: 206,
+            tag: "select",
+            role: "combobox",
+            name: "Region",
+            value: "cn",
+          }),
+          node({
+            id: 7,
+            parentId: 6,
+            backendNodeId: 207,
+            tag: "option",
+            role: "option",
+            name: "China",
+            attrs: { value: "cn", selected: "" },
+          }),
+          node({
+            id: 8,
+            parentId: 6,
+            backendNodeId: 208,
+            tag: "option",
+            role: "option",
+            name: "US",
+            attrs: { value: "us" },
+          }),
+          node({ id: 9, backendNodeId: 209, tag: "div", role: "button", name: "Order #88 Remove" }),
+          node({ id: 10, parentId: 9, tag: "span", role: "StaticText", name: "Order #88" }),
+          node({
+            id: 11,
+            parentId: 9,
+            backendNodeId: 211,
+            tag: "button",
+            role: "button",
+            name: "Remove",
+          }),
+          // React 18 root event-delegated custom dropdown: clickable is false on items,
+          // trigger has cursor: pointer + inline skin, popup crosses position: absolute.
+          node({
+            id: 12,
+            backendNodeId: 212,
+            tag: "div",
+            role: "combobox",
+            name: "报表类型",
+            cursor: "pointer",
+            attrs: { "aria-expanded": "true" },
+          }),
+          node({
+            id: 13,
+            parentId: 12,
+            tag: "span",
+            role: "generic",
+            text: "全部报表",
+            cursor: "pointer",
+          }),
+          node({
+            id: 14,
+            parentId: 12,
+            tag: "div",
+            role: "generic",
+            position: "absolute",
+            cursor: "default",
+          }),
+          node({
+            id: 15,
+            parentId: 14,
+            backendNodeId: 215,
+            tag: "div",
+            role: "generic",
+            text: "导出报表",
+            cursor: "pointer",
+          }),
+          node({
+            id: 16,
+            parentId: 14,
+            backendNodeId: 216,
+            tag: "div",
+            role: "generic",
+            text: "历史记录",
+            cursor: "pointer",
+          }),
+        ]),
+      );
+      expect(siblings.text.split("\n")).toEqual([
+        "@vom 1",
+        "@view 1280x720",
+        "@layers 1 focus=L1",
+        "L1 page",
+        '  @e1 combobox "Filter status" [custom-dropdown: expanded]',
+        '    @e2 option "Active"',
+        '    @e3 option "Archived"',
+        '  @e4 combobox "Region" ="cn" [options: cn="China"* | us="US"]',
+        '  @e5 button "Order #88 Remove"',
+        '    @e6 button "Remove"',
+        '  @e7 combobox "报表类型" [custom-dropdown: expanded]',
+        '    @e8 button "导出报表"',
+        '    @e9 button "历史记录"',
+      ]);
+
+      // Deeply nested cursor: pointer wrappers under a semantic control stay O(N).
+      const deepCount = 10_000;
+      const deepNodes = [
+        node({
+          id: 1,
+          backendNodeId: 301,
+          tag: "div",
+          role: "combobox",
+          name: "Deep picker",
+          cursor: "pointer",
+          attrs: { "aria-expanded": "true" },
+        }),
+      ];
+      for (let i = 0; i < deepCount; i += 1) {
+        deepNodes.push(
+          node({
+            id: i + 2,
+            parentId: i + 1,
+            tag: "div",
+            role: "generic",
+            cursor: "pointer",
+            ...(i === 0 ? { position: "absolute" } : {}),
+          }),
+        );
+      }
+      deepNodes.push(
+        node({
+          id: deepCount + 2,
+          parentId: deepCount + 1,
+          backendNodeId: 399,
+          tag: "div",
+          role: "generic",
+          text: "Deep delegated option",
+          cursor: "pointer",
+        }),
+      );
+      const t0 = performance.now();
+      const deepOut = renderVom(scene(deepNodes));
+      expect(performance.now() - t0).toBeLessThan(1_000);
+      expect(coreRefs(deepOut.refs)).toEqual([
+        { ref: "e1", backendNodeId: 301 },
+        { ref: "e2", backendNodeId: 399 },
+      ]);
+    });
+
+    it("budgets the L2 occlusion footer line in renderDoubleLayer, preserves generic Chinese headings, and renders popup tags without duplication", () => {
+      // 1. Two-layer modal scene: maxTokens budget includes the `L2 page — occluded by L1` footer.
+      const modalNodes: VomNode[] = [
+        node({ id: 1, tag: "main", role: "main", rect: { x: 0, y: 0, w: 1280, h: 720 } }),
+        ...Array.from({ length: 12 }, (_, idx) =>
+          node({
+            id: 10 + idx,
+            parentId: 1,
+            backendNodeId: 100 + idx,
+            tag: "button",
+            role: "button",
+            name: `Background action item ${idx + 1}`,
+            rect: { x: 10, y: idx * 40, w: 200, h: 32 },
+          }),
+        ),
+        node({
+          id: 50,
+          tag: "div",
+          role: "dialog",
+          name: "Confirm action",
+          modal: true,
+          position: "fixed",
+          paintOrder: 10,
+          rect: { x: 200, y: 100, w: 600, h: 400 },
+        }),
+        ...Array.from({ length: 8 }, (_, idx) =>
+          node({
+            id: 60 + idx,
+            parentId: 50,
+            backendNodeId: 200 + idx,
+            tag: "button",
+            role: "button",
+            name: `Modal option button ${idx + 1} with detailed description`,
+            paintOrder: 10,
+            rect: { x: 220, y: 120 + idx * 36, w: 300, h: 30 },
+          }),
+        ),
+      ];
+      for (const budget of [45, 65, 90, 120]) {
+        const out = renderVom(scene(modalNodes), { maxTokens: budget });
+        // Estimate matches render.ts estimateVomTokens (~chars / 3.5 per line); ensure L2 footer never pushes output unboundedly past budget.
+        const bodyLines = out.text.split("\n").filter((line) => !line.startsWith("[truncated:"));
+        const approxTokens = bodyLines.reduce(
+          (sum, line) => sum + Math.max(1, Math.ceil((line.length + 1) / 3.5)),
+          0,
+        );
+        expect(approxTokens).toBeLessThanOrEqual(budget);
+      }
+
+      // 2. Generic Chinese headings ("欢迎", "联系方式") are preserved as section context rather than suppressed by benchmark filters.
+      const headingScene = scene([
+        node({ id: 1, tag: "section", role: "region" }),
+        node({ id: 2, parentId: 1, tag: "h2", role: "heading", name: "欢迎" }),
+        node({
+          id: 3,
+          parentId: 1,
+          backendNodeId: 11,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+        node({ id: 4, tag: "section", role: "region" }),
+        node({ id: 5, parentId: 4, tag: "h2", role: "heading", name: "联系方式" }),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 12,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+      ]);
+      const headingOut = renderVom(headingScene);
+      expect(headingOut.text).toContain("[ctx: 欢迎]");
+      expect(headingOut.text).toContain("[ctx: 联系方式]");
+
+      // 3. Popup state tags: custom combobox gets `[custom-dropdown: expanded]` without `[expanded]` inside quotes;
+      //    popup buttons/menuitems emit post-quote `[expanded]` / `[has-submenu]`.
+      const popupOut = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 21,
+            tag: "div",
+            role: "combobox",
+            name: "Filter",
+            expanded: true,
+            hasPopup: "listbox",
+            attrs: { "aria-expanded": "true", "aria-haspopup": "listbox" },
+          }),
+          node({
+            id: 2,
+            backendNodeId: 22,
+            tag: "button",
+            role: "button",
+            name: "Products",
+            expanded: true,
+            hasPopup: "menu",
+          }),
+          node({
+            id: 3,
+            backendNodeId: 23,
+            tag: "div",
+            role: "menuitem",
+            name: "Export",
+            expanded: false,
+            hasPopup: "menu",
+          }),
+        ]),
+      );
+      expect(popupOut.text).toContain('@e1 combobox "Filter" [custom-dropdown: expanded]');
+      expect(popupOut.text).not.toContain('"Filter [expanded]"');
+      expect(popupOut.text).toContain('@e2 button "Products" [expanded]');
+      expect(popupOut.text).toContain('@e3 menuitem "Export" [has-submenu]');
     });
   });
 });

@@ -120,6 +120,8 @@
   },
   "required": [
     "image_base64",
+    "width",
+    "height",
     "format",
     "tab_id"
   ],

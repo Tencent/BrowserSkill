@@ -10,7 +10,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::JavaScriptDialogInfo;
+use super::{ActionExpectation, JavaScriptDialogInfo};
 
 /// Page-lifecycle checkpoint a navigation should wait on.
 ///
@@ -35,6 +35,7 @@ pub enum WaitUntil {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NavigateParams {
     pub session_id: String,
     pub url: String,
@@ -50,6 +51,28 @@ pub struct NavigateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u32>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 /// Outcome of a navigation. `reached` is the lifecycle name the
@@ -77,6 +100,7 @@ pub struct NavigateResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NavigateBackParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,6 +110,28 @@ pub struct NavigateBackParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u32>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -103,6 +149,7 @@ pub struct NavigateBackResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NavigateForwardParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +159,28 @@ pub struct NavigateForwardParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u32>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -133,6 +202,7 @@ pub struct NavigateForwardResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReloadParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +215,28 @@ pub struct ReloadParams {
     /// When `true`, bypass the HTTP cache (CDP `Page.reload(ignoreCache=true)`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hard: Option<bool>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -196,6 +288,10 @@ mod tests {
             tab_id: None,
             wait_until: Some(WaitUntil::Load),
             timeout_ms: Some(30_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert!(v.get("tab_id").is_none());

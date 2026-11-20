@@ -1,7 +1,15 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "description": "Parameters for `tool.snapshot` — produce an indented accessibility\ntree for one tab plus a fresh `@e<N>` ref-store on the extension\nside (design §4 / §7).",
   "properties": {
+    "context_id": {
+      "description": "Optional cooperation context validated by the extension without renewing control.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "max_depth": {
       "description": "Cap the depth of the rendered tree (defense against very deep\npages). Implementation-defined default; agents typically use\n`Some(16)` for \"browse and read\" prompts.",
       "format": "uint32",

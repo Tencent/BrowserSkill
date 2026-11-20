@@ -1,11 +1,11 @@
 // @vitest-environment node
-// Opt in with BSK_WINDOW_CHROME; the browser, profile and extension are isolated.
+// Opt in with BSK_TEST_CHROME; the browser, profile and extension are isolated.
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner, ChromeTabsApi } from "../shared";
+import { type CdpRunner, ChromeTabsApi, createStubCdpRunner } from "../shared";
 import { handleWindowResize, type WindowResizeApi } from "../window";
 
 type Send = <T = Record<string, unknown>>(
@@ -24,7 +24,7 @@ async function poll<T>(read: () => Promise<T | undefined | false>): Promise<T> {
   throw new Error("Window resize browser fixture timed out");
 }
 
-describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("window resize in a real browser", () => {
   it("verifies active-tab resizes, zoom rounding and pinned viewports", async () => {
     const extension = await mkdtemp(path.join(tmpdir(), "bsk-resize-extension-"));
     await writeFile(
@@ -54,7 +54,7 @@ describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser
       );
       await withChrome(
         {
-          executable: process.env.BSK_WINDOW_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           extensionPath: extension,
@@ -123,12 +123,12 @@ describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser
             get: (id) => evaluate(`chrome.tabs.get(${id})`),
             query: (query) => evaluate(`chrome.tabs.query(${JSON.stringify(query)})`),
           };
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: (id, method, params) =>
               evaluate(
                 `chrome.debugger.sendCommand({tabId:${id}},${JSON.stringify(method)},${JSON.stringify(params ?? {})})`,
               ),
-          };
+          });
           const manager = new SessionManager({
             agentWindow: {
               create: async () => ({ windowId, initialTabIds: [tabId] }),

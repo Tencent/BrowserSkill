@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { type FrameDocumentGraph, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleRead } from "../read";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { collectDomRead } from "./collector";
 import type { ReadParams } from "./types";
 import { validateRead } from "./validation";
@@ -66,6 +67,8 @@ describe("declarative DOM reads", () => {
         ],
       }).items[0],
     ).toMatchObject({ values: { x: null, attr: null }, redacted: ["x", "attr"] });
+    document.body.innerHTML = '<div data-bsk-overlay-host><div id="row">overlay-ui</div></div>';
+    expect(collect().items[0]).toMatchObject({ values: { text: null }, redacted: ["text"] });
   });
   it("does not quietly redirect a detached node to a replacement", () => {
     const node = document.querySelector("#row")!;
@@ -119,15 +122,31 @@ async function fixture() {
     }
     throw new Error(method);
   });
-  const cdp: CdpRunner = {
-    send: send as CdpRunner["send"],
-    getAttachmentId: () => state.attachment,
-    ensureAttachedToUrl: vi.fn(async () => {}),
-    getFrameGraph: vi.fn(async () => ({
+  const ensureAttachedToUrl = vi.fn(async () => {});
+  const getFrameDocuments = vi.fn(
+    async (): Promise<FrameDocumentGraph> => ({
       rootFrameId: "root",
-      frames: [{ frameId: "root", target: { tabId: 7 }, url: tab.url }],
-    })),
-  };
+      frames: [
+        {
+          handle: toFrameDocumentHandle(7, { frameId: "root", loaderId: "" }),
+          frameId: "root",
+          loaderId: "",
+          url: tab.url,
+          processKey: "root",
+          isOutOfProcess: false,
+        },
+      ],
+    }),
+  );
+  const cdp = Object.assign(
+    createStubCdpRunner({
+      send: send as CdpRunner["send"],
+      getAttachmentId: () => state.attachment,
+      ensureAttachedToUrl,
+      getFrameDocuments,
+    }),
+    { ensureAttachedToUrl, getFrameDocuments },
+  );
   const run = (patch: object = {}, signal?: AbortSignal) =>
     handleRead(
       manager,
@@ -156,10 +175,18 @@ describe("DOM read identity and lifecycle", () => {
     });
     const store = h.manager.get("s")!.refStore;
     if (frame === "child") {
-      store.set("e1", 2, { tabId: 7, frameId: "child", cdpSessionId: "child-session" });
-      vi.mocked(h.cdp.getFrameGraph!).mockResolvedValue({
+      store.set("e1", 2, { tabId: 7, frameId: "child", loaderId: "child-loader" });
+      vi.mocked(h.cdp.getFrameDocuments).mockResolvedValue({
         rootFrameId: "root",
-        frames: [{ frameId: "child", target: { tabId: 7, sessionId: "child-session" } }],
+        frames: [
+          {
+            handle: toFrameDocumentHandle(7, { frameId: "child", loaderId: "child-loader" }),
+            frameId: "child",
+            loaderId: "child-loader",
+            processKey: "oopif:child",
+            isOutOfProcess: true,
+          },
+        ],
       });
     }
     const size = store.size();
@@ -173,11 +200,11 @@ describe("DOM read identity and lifecycle", () => {
   });
   it("does not collect or depend on unrelated child renderers for a main-document read", async () => {
     const h = await fixture();
-    vi.mocked(h.cdp.getFrameGraph!).mockRejectedValue(
+    vi.mocked(h.cdp.getFrameDocuments).mockRejectedValue(
       new Error("unrelated OOPIF cannot be observed"),
     );
     expect(await h.run()).toMatchObject({ scope: "current_dom" });
-    expect(h.cdp.getFrameGraph).not.toHaveBeenCalled();
+    expect(h.cdp.getFrameDocuments).not.toHaveBeenCalled();
   });
   it("rejects invalid read capabilities before touching CDP", async () => {
     const h = await fixture();

@@ -120,7 +120,7 @@ pub(crate) fn remove_browser(state: &DaemonState, client: &BrowserClient) {
     {
         state.purge_sessions_of_browser(
             &client.id,
-            crate::rpc_reason::BROWSER_DISCONNECTED,
+            bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
             "purged session on browser authorization change",
         );
     }
@@ -206,7 +206,10 @@ mod tests {
     };
 
     fn activate(local: &LocalAuth) -> String {
-        local.store.pair(52800, None).unwrap();
+        local
+            .store
+            .pair(crate::daemon::DEFAULT_WS_PORT, None)
+            .unwrap();
         let id = local.store.devices()[0].device_id.clone();
         let txn = store::random();
         local
@@ -252,7 +255,7 @@ mod tests {
             browser_name: "Chrome".into(),
             browser_version: "130".into(),
             extension_version: "0.4.0".into(),
-            extension_protocol_version: "1.3".into(),
+            extension_protocol_version: "2.0".into(),
             label: String::new(),
             sink: BrowserSink { tx },
             pending: Mutex::new(Pending::default()),
