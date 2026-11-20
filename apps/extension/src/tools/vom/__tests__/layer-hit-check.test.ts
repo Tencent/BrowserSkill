@@ -116,7 +116,7 @@ describe("markHitThroughLayers", () => {
   });
 
   // Known ceiling, pinned so a change to it is a decision: a cover with a cut-out
-  // (a tour spotlight) is released whole once one folded node is reached.
+  // is released whole once one folded node is reached.
   it("releases a cover with a cut-out whole, covered nodes included", async () => {
     const button = (id: number, name: string, y: number) =>
       node(id, { tag: "button", role: "button", name, rect: { x: 10, y, w: 80, h: 30 } });
