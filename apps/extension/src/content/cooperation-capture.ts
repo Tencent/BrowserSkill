@@ -96,6 +96,8 @@ export function attachCooperationCapture() {
   let editingTarget: Element | undefined;
   let inputSource: { target: EventTarget | null; agent: boolean; before?: string } | undefined;
   let insertTarget: Element | null | undefined;
+  let scriptedClick = false;
+  let scriptedEditTarget: EventTarget | null | undefined;
   const fields = new Map<Element, FieldChange>();
   const sampledValues = new WeakMap<Element, string>();
   const ids = new WeakMap<object, string>();
@@ -111,6 +113,17 @@ export function attachCooperationCapture() {
   let eventTimer: ReturnType<typeof setTimeout> | undefined;
   let inputTimer: ReturnType<typeof setTimeout> | undefined;
   let scrollTimer: ReturnType<typeof setTimeout> | undefined;
+  let scriptedTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearScripted = () => {
+    clearTimeout(scriptedTimer);
+    scriptedTimer = undefined;
+    scriptedClick = false;
+    scriptedEditTarget = undefined;
+  };
+  const scheduleScriptedClear = () => {
+    clearTimeout(scriptedTimer);
+    scriptedTimer = setTimeout(clearScripted, 0);
+  };
   const formerPasswords = new WeakSet<Element>();
   const markFormerPasswords = (records: MutationRecord[]) => {
     for (const r of records) {
@@ -800,7 +813,46 @@ export function attachCooperationCapture() {
         }
       }
       state.revision++;
-      if (event.isTrusted && !agent && value !== undefined && value !== previous) {
+      const scriptedActivation =
+        scriptedClick &&
+        !inputSource &&
+        eventAgent !== false &&
+        pointer?.agent !== false &&
+        target instanceof HTMLInputElement &&
+        (target.type === "checkbox" || target.type === "radio");
+      // Programmatic `document.execCommand(...)` on editable fields dispatches a
+      // trusted `InputEvent("input")` with no preceding `beforeinput`, key, pointer,
+      // wheel, drop, or IME composition. Real user edits in Chromium always emit at
+      // least one of those originating events first.
+      const scriptedExecCommand =
+        event.isTrusted &&
+        event.type === "input" &&
+        typeof InputEvent !== "undefined" &&
+        event instanceof InputEvent &&
+        editable(target) &&
+        !inputSource &&
+        eventAgent === undefined &&
+        pointer === undefined &&
+        !composing;
+      if (scriptedExecCommand) {
+        scriptedEditTarget = target;
+        scheduleScriptedClear();
+      }
+      const scriptedEditCommit =
+        event.type === "change" &&
+        scriptedEditTarget === target &&
+        !inputSource &&
+        eventAgent !== false &&
+        pointer?.agent !== false;
+      if (
+        event.isTrusted &&
+        !agent &&
+        !scriptedActivation &&
+        !scriptedExecCommand &&
+        !scriptedEditCommit &&
+        value !== undefined &&
+        value !== previous
+      ) {
         editingTarget = editable(target) ? (target as Element) : undefined;
         state.editing = !!editingTarget;
         if (pointer && !pointer.agent) {
@@ -821,7 +873,26 @@ export function attachCooperationCapture() {
       } else schedule();
       return;
     }
-    if (!event.isTrusted) return;
+    if (!event.isTrusted) {
+      // Programmatic `checkbox.click()` / `radio.click()` / `label.click()` fires
+      // an untrusted click whose default activation synchronously emits trusted
+      // `input`/`change` events without any human gesture.
+      if (event.type === "click" && eventAgent !== false && pointer?.agent !== false) {
+        scriptedClick = true;
+        scheduleScriptedClear();
+      }
+      return;
+    }
+    if (
+      event.type === "pointerdown" ||
+      event.type === "keydown" ||
+      event.type === "beforeinput" ||
+      event.type === "wheel" ||
+      event.type === "drop" ||
+      event.type === "compositionstart" ||
+      event.type === "click"
+    )
+      clearScripted();
     if (event.type === "dragend" || event.type === "drop") {
       if (event.type === "drop") {
         eventAgent = dragAgent;
@@ -1003,15 +1074,16 @@ export function attachCooperationCapture() {
     if (started) publish();
   };
   const onWindowBlur = () => {
+    if (!enabled) return;
+    clearScripted();
     if (
-      !enabled ||
-      (!pointer &&
-        !composing &&
-        !dragging &&
-        !state.editing &&
-        keys.size === 0 &&
-        !eventAgent &&
-        !inputSource)
+      !pointer &&
+      !composing &&
+      !dragging &&
+      !state.editing &&
+      keys.size === 0 &&
+      !eventAgent &&
+      !inputSource
     )
       return;
     clearTimeout(focusTimer);
@@ -1093,6 +1165,7 @@ export function attachCooperationCapture() {
         expectation = undefined;
         insertTarget = undefined;
         inputSource = undefined;
+        clearScripted();
       }
       lease = message.lease;
       enabled = true;
@@ -1114,6 +1187,7 @@ export function attachCooperationCapture() {
       clearTimeout(eventTimer);
       clearTimeout(inputTimer);
       clearTimeout(scrollTimer);
+      clearScripted();
       observer.disconnect();
       roots.clear();
       fields.clear();
@@ -1199,6 +1273,7 @@ export function attachCooperationCapture() {
     clearTimeout(eventTimer);
     clearTimeout(inputTimer);
     clearTimeout(scrollTimer);
+    clearScripted();
     observer.disconnect();
     roots.clear();
     chrome.runtime?.onMessage?.removeListener(onMessage);

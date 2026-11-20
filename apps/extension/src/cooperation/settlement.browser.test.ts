@@ -1324,3 +1324,379 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
   },
   150000,
 );
+
+it.skipIf(!process.env.BSK_TEST_CHROME)(
+  "keeps scripted evaluate edits/clicks out of human intervention, reports hidden targets before RPC timeout, and lets tab management escape failed-load agent tabs",
+  async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "bsk-eval-coop-"));
+    const executable = path.resolve(process.env.BSK_TEST_CLI ?? defaultCli);
+    const fixtureHome = path.join(directory, "user");
+    const env = {
+      ...process.env,
+      HOME: fixtureHome,
+      USERPROFILE: fixtureHome,
+      KIMI_CODE_HOME: path.join(fixtureHome, ".kimi-code"),
+      HERMES_HOME: path.join(fixtureHome, ".hermes"),
+      DSH_HOME: path.join(fixtureHome, ".dsh"),
+      CODEX_HOME: path.join(fixtureHome, ".codex"),
+      BSK_HOME: path.join(directory, "state"),
+      BSK_AUTO_START: "0",
+      BSK_AUTO_UPDATE: "off",
+    };
+    for (const key of [
+      "BSK_SESSION",
+      "BSK_SCOPE",
+      "CLAUDE_CODE_AGENT_ID",
+      "CODEX_THREAD_ID",
+      "ANTIGRAVITY_CONVERSATION_ID",
+      "CURSOR_TRACE_ID",
+      "DSH_SESSION_ID",
+    ]) {
+      delete (env as NodeJS.ProcessEnv)[key];
+    }
+
+    const daemon = spawn(executable, ["daemon", "start", "--foreground", "--port", "0"], {
+      env,
+      stdio: "ignore",
+    });
+
+    const closed = createServer();
+    await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+    const closedPort = (closed.address() as { port: number }).port;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+
+    const server = createServer((request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      if (request.url?.startsWith("/healthy")) {
+        response.end("<!doctype html><title>Healthy</title><h1>Healthy Recovery Tab</h1>");
+        return;
+      }
+      response.end(`<!doctype html>
+        <title>Editor Regression</title>
+        <input id="title" aria-label="Title" value="">
+        <div id="editor" contenteditable="true" style="min-height:40px;border:1px solid #ccc"><p>Initial</p></div>
+        <label id="agree-label"><input id="agree-cb" type="checkbox" style="display:none"><span>Agree terms</span></label>
+        <input id="visible-cb" type="checkbox" aria-label="Visible check">
+        <input id="opt-radio" type="radio" name="orig" aria-label="Original">
+        <a id="broken-link" href="http://127.0.0.1:${closedPort}/">Open dead page</a>
+        <script>
+          document.getElementById('title').addEventListener('input', (e) => {
+            const el = e.target;
+            if (el.value !== el.value.trim()) el.value = el.value.trim();
+          });
+        </script>`);
+    });
+
+    const runCli = async (...args: string[]) => {
+      try {
+        const { stdout } = await promisify(execFile)(executable, [...args, "--json"], {
+          env,
+          timeout: 45000,
+        });
+        return { exitCode: 0, body: JSON.parse(stdout) };
+      } catch (error) {
+        const failed = error as { code?: number; stdout?: string };
+        if (failed.stdout) {
+          return { exitCode: failed.code ?? 1, body: JSON.parse(failed.stdout) };
+        }
+        throw error;
+      }
+    };
+
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const serverPort = (server.address() as { port: number }).port;
+      const baseUrl = `http://127.0.0.1:${serverPort}`;
+      let wsPort = 0;
+      await expect
+        .poll(
+          async () => {
+            try {
+              wsPort = JSON.parse(
+                await readFile(path.join(env.BSK_HOME, "daemon.json"), "utf8"),
+              ).ws_port;
+              return wsPort;
+            } catch {
+              return 0;
+            }
+          },
+          { timeout: 15000 },
+        )
+        .toBeGreaterThan(0);
+
+      const { copyPairingExtension, pairLocalBrowser } = await import(
+        new URL("../../../../evals/browser/local-pairing.mjs", import.meta.url).href
+      );
+      const distPath = fileURLToPath(new URL("../../dist/chrome-mv3", import.meta.url));
+      const extension = await copyPairingExtension(
+        distPath,
+        path.join(directory, "extension"),
+        wsPort,
+      );
+      const manifestPath = path.join(extension, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.name = "BrowserSkill scripted input & failed-load tabs regression";
+      await writeFile(manifestPath, JSON.stringify(manifest));
+
+      const { withChrome } = await import(
+        new URL(
+          "../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+          import.meta.url,
+        ).href
+      );
+
+      await withChrome(
+        {
+          executable: process.env.BSK_TEST_CHROME,
+          extensionPath: extension,
+          extensionViaCdp: process.env.BSK_TEST_LOAD_CDP === "1",
+          deviceScale: 1,
+          zoom: 1,
+        },
+        async (send: BrowserSend) => {
+          const worker = await attachVideoBackground(send, manifest.name);
+          await pairLocalBrowser(send, { executable, env, worker });
+          await expect
+            .poll(async () => (await runCli("browsers")).body.length, { timeout: 15000 })
+            .toBeGreaterThan(0);
+
+          const started = await runCli("session", "start");
+          expect(started.exitCode).toBe(0);
+          const session = started.body.session_id as string;
+          const scope = ["--session", session];
+
+          try {
+            const nav = await runCli("navigate", `${baseUrl}/`, ...scope);
+            expect(nav.exitCode, JSON.stringify(nav)).toBe(0);
+            const failedTabId = nav.body.tab_id as number;
+
+            // 1. `bsk evaluate` calling `document.execCommand` on contenteditable/input
+            // and `.click()` on checkbox/label/radio must NOT trigger false `human_intervention`.
+            let synced = await runCli("sync", ...scope);
+            expect(synced.exitCode, JSON.stringify(synced)).toBe(0);
+
+            const evalEditor = await runCli(
+              "evaluate",
+              `(() => {
+                const ed = document.getElementById('editor');
+                ed.focus();
+                document.execCommand('selectAll', false, null);
+                document.execCommand('delete', false, null);
+                document.execCommand('insertHTML', false, '<p>Body</p><p>Slot</p>');
+                return ed.querySelectorAll('p').length;
+              })()`,
+              "--context",
+              synced.body.context_id,
+              "--observation",
+              synced.body.observation_id,
+              ...scope,
+            );
+            expect(evalEditor.exitCode, JSON.stringify(evalEditor)).toBe(0);
+            expect(evalEditor.body).toMatchObject({ ok: true, value: 2 });
+            expect((await runCli("ledger", "status", ...scope)).body.frozen).toBe(false);
+
+            synced = await runCli("sync", ...scope);
+            expect(synced.exitCode, JSON.stringify(synced)).toBe(0);
+            const evalControls = await runCli(
+              "evaluate",
+              `(() => {
+                const title = document.getElementById('title');
+                title.focus();
+                document.execCommand('insertText', false, '  Draft  ');
+                const cb = document.getElementById('agree-cb');
+                cb.click();
+                const radio = document.getElementById('opt-radio');
+                radio.click();
+                return { title: title.value, checked: cb.checked, radio: radio.checked };
+              })()`,
+              "--context",
+              synced.body.context_id,
+              "--observation",
+              synced.body.observation_id,
+              ...scope,
+            );
+            expect(evalControls.exitCode, JSON.stringify(evalControls)).toBe(0);
+            expect(evalControls.body).toMatchObject({
+              ok: true,
+              value: { title: "Draft", checked: true, radio: true },
+            });
+            expect((await runCli("ledger", "status", ...scope)).body.frozen).toBe(false);
+
+            synced = await runCli("sync", ...scope);
+            expect(synced.exitCode, JSON.stringify(synced)).toBe(0);
+            const evalLabel = await runCli(
+              "evaluate",
+              `(() => {
+                document.getElementById('agree-label').click();
+                return document.getElementById('agree-cb').checked;
+              })()`,
+              "--context",
+              synced.body.context_id,
+              "--observation",
+              synced.body.observation_id,
+              ...scope,
+            );
+            expect(evalLabel.exitCode, JSON.stringify(evalLabel)).toBe(0);
+            expect(evalLabel.body).toMatchObject({ ok: true, value: false });
+            expect((await runCli("ledger", "status", ...scope)).body.frozen).toBe(false);
+
+            // 2. Genuine human interaction (unarmed native click on checkbox and native typing)
+            // must STILL be detected as human intervention.
+            const { targetInfos } = (await send("Target.getTargets")) as {
+              targetInfos: { targetId: string; type: string; url: string }[];
+            };
+            const pageTarget = targetInfos.find(
+              (target) => target.type === "page" && target.url === `${baseUrl}/`,
+            );
+            expect(pageTarget).toBeDefined();
+            const { sessionId: humanSession } = (await send("Target.attachToTarget", {
+              targetId: pageTarget!.targetId,
+              flatten: true,
+            })) as { sessionId: string };
+            try {
+              await send("Page.bringToFront", {}, humanSession);
+              const cbPoint = (await send(
+                "Runtime.evaluate",
+                {
+                  expression:
+                    "(() => { const r = document.getElementById('visible-cb').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()",
+                  returnByValue: true,
+                },
+                humanSession,
+              )) as { result: { value: { x: number; y: number } } };
+              await send(
+                "Input.dispatchMouseEvent",
+                { type: "mousePressed", button: "left", clickCount: 1, ...cbPoint.result.value },
+                humanSession,
+              );
+              await send(
+                "Input.dispatchMouseEvent",
+                { type: "mouseReleased", button: "left", clickCount: 1, ...cbPoint.result.value },
+                humanSession,
+              );
+              const blockedByHumanClick = await runCli(
+                "evaluate",
+                "1 + 1",
+                "--unverified",
+                ...scope,
+              );
+              expect(blockedByHumanClick.exitCode).not.toBe(0);
+              expect(blockedByHumanClick.body.data?.reason).toBe("human_intervention");
+
+              await new Promise((resolve) => setTimeout(resolve, 2200));
+              synced = await runCli("sync", ...scope);
+              expect(synced.exitCode, JSON.stringify(synced)).toBe(0);
+
+              await send(
+                "Runtime.evaluate",
+                { expression: "document.getElementById('editor').focus()" },
+                humanSession,
+              );
+              await send(
+                "Input.dispatchKeyEvent",
+                { type: "keyDown", key: "z", text: "z", unmodifiedText: "z" },
+                humanSession,
+              );
+              await send("Input.dispatchKeyEvent", { type: "keyUp", key: "z" }, humanSession);
+              const blockedByHumanTyping = await runCli(
+                "evaluate",
+                "1 + 1",
+                "--unverified",
+                ...scope,
+              );
+              expect(blockedByHumanTyping.exitCode).not.toBe(0);
+              expect(blockedByHumanTyping.body.data?.reason).toBe("human_intervention");
+            } finally {
+              await send("Target.detachFromTarget", { sessionId: humanSession });
+            }
+
+            // Blur editing & wait past quiet window, then sync back to agent control.
+            await new Promise((resolve) => setTimeout(resolve, 3200));
+            synced = await runCli("sync", ...scope);
+            expect(synced.exitCode, JSON.stringify(synced)).toBe(0);
+
+            // 3. Clicking a permanently hidden target (`#agree-cb`) returns structured
+            // `target_hidden` within the bounded default readiness window (5s) and before
+            // explicit `--timeout` instead of losing the race to Daemon's RPC timeout.
+            const defaultHiddenStart = Date.now();
+            const defaultHidden = await runCli("click", "#agree-cb", ...scope);
+            const defaultHiddenElapsed = Date.now() - defaultHiddenStart;
+            expect(defaultHidden.exitCode).not.toBe(0);
+            expect(defaultHiddenElapsed).toBeLessThan(12000);
+            expect(defaultHidden.body.code).toBe("timeout");
+            expect(defaultHidden.body.data).toMatchObject({
+              reason: "target_hidden",
+              effect_state: "none",
+            });
+            expect((await runCli("ledger", "status", ...scope)).body.frozen).toBe(false);
+
+            const explicitHidden = await runCli(
+              "click",
+              "#agree-cb",
+              "--timeout",
+              "1500ms",
+              ...scope,
+            );
+            expect(explicitHidden.exitCode).not.toBe(0);
+            expect(explicitHidden.body.code).toBe("timeout");
+            expect(explicitHidden.body.data).toMatchObject({
+              reason: "target_hidden",
+              effect_state: "none",
+            });
+
+            // 4. An agent-created tab stuck on a settled `page_load_failed` error page
+            // must not deadlock `tab create`, `tab select`, or `tab close`.
+            const clickedBroken = await runCli("click", "#broken-link", ...scope);
+            expect(clickedBroken.exitCode, JSON.stringify(clickedBroken)).toBe(0);
+            await expect
+              .poll(
+                async () => {
+                  const targets = (await send("Target.getTargets")) as {
+                    targetInfos: { type: string; url: string }[];
+                  };
+                  return targets.targetInfos.some(
+                    (info) =>
+                      info.type === "page" &&
+                      (info.url.includes("chromewebdata") || info.url.includes(`:${closedPort}/`)),
+                  );
+                },
+                { timeout: 10000 },
+              )
+              .toBe(true);
+            await new Promise((resolve) => setTimeout(resolve, 150));
+
+            const created = await runCli("tab", "create", "--url", `${baseUrl}/healthy`, ...scope);
+            expect(created.exitCode, JSON.stringify(created)).toBe(0);
+            const healthyTabId = created.body.tab_id as number;
+            expect(healthyTabId).not.toBe(failedTabId);
+
+            const healthySync = await runCli("sync", "--tab-id", String(healthyTabId), ...scope);
+            expect(healthySync.exitCode, JSON.stringify(healthySync)).toBe(0);
+            expect(healthySync.body.vom).toContain("Healthy Recovery Tab");
+
+            const selectedFailed = await runCli("tab", "select", String(failedTabId), ...scope);
+            expect(selectedFailed.exitCode, JSON.stringify(selectedFailed)).toBe(0);
+
+            const selectedHealthy = await runCli("tab", "select", String(healthyTabId), ...scope);
+            expect(selectedHealthy.exitCode, JSON.stringify(selectedHealthy)).toBe(0);
+
+            const closedFailed = await runCli("tab", "close", String(failedTabId), ...scope);
+            expect(closedFailed.exitCode, JSON.stringify(closedFailed)).toBe(0);
+          } finally {
+            await runCli("session", "stop", session).catch(() => {});
+          }
+        },
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (daemon.exitCode === null && daemon.signalCode === null) {
+        const exited = once(daemon, "exit");
+        daemon.kill();
+        await exited;
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  120000,
+);
