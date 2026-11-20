@@ -43,10 +43,10 @@ pub fn latest_log_file() -> Result<Option<PathBuf>> {
         if !name.starts_with("daemon.log") {
             continue;
         }
-        if let Some((cur, _)) = &best {
-            if name <= *cur {
-                continue;
-            }
+        if let Some((cur, _)) = &best
+            && name <= *cur
+        {
+            continue;
         }
         best = Some((name, entry.path()));
     }
@@ -155,11 +155,11 @@ fn follow_file<W: Write>(path: &Path, mut offset: u64, w: &mut W) -> Result<()> 
     let mut current = path.to_path_buf();
     loop {
         std::thread::sleep(Duration::from_millis(200));
-        if let Ok(Some(latest)) = latest_log_file() {
-            if latest != current {
-                current = latest;
-                offset = 0;
-            }
+        if let Ok(Some(latest)) = latest_log_file()
+            && latest != current
+        {
+            current = latest;
+            offset = 0;
         }
         let file = match File::open(&current) {
             Ok(f) => f,
