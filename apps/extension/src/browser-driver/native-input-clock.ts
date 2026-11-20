@@ -88,7 +88,7 @@ export class NativeInputClock {
   private pending?: Promise<void>;
   private revision = 0;
 
-  constructor(private readonly sample: () => Promise<NativeClockSample[]>) {}
+  constructor(private readonly sample: () => Promise<NativeClockSample[] | null>) {}
 
   invalidate(): void {
     this.revision++;
@@ -114,10 +114,17 @@ export class NativeInputClock {
         throw error;
       }
       const samples = await this.sample();
-      if (samples.length < 3) {
+      if (samples !== null && samples.length < 3) {
         throw new NativeInputClockError("Native clock probes were incomplete");
       }
       try {
+        if (samples === null) {
+          if (this.revision !== revision || !sameClock(reference, reading())) {
+            throw new NativeInputClockError("The browser's native input clock is not stable");
+          }
+          this.calibration = { offset: 0, reference };
+          return;
+        }
         let earliest = -Infinity;
         let latest = Infinity;
         for (const sample of samples) {

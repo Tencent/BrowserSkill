@@ -31,7 +31,7 @@ import {
 } from "@/lib/recording/step-buffer";
 import { RecordingTabCoordinator, type TabActivation } from "@/lib/recording/tab-coordinator";
 import type { RecordingDraftStep } from "@/lib/recording/types";
-import { ensureOverlayInjected } from "@/lib/runtime-content-scripts";
+import { ensureOverlayInjected, sendTabMessageBounded } from "@/lib/runtime-content-scripts";
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
 import { EXTENSION_VERSION } from "@/transport/handshake";
 import type {
@@ -316,7 +316,7 @@ function getDefaultDeps(): RecordDeps {
   if (!defaultDeps) {
     defaultDeps = {
       tabsApi: chromeTabsApi,
-      sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
+      sendToTab: (tabId, msg) => sendTabMessageBounded(tabId, msg),
       frameCoordinator: recordFrameCoordinator,
     };
   }

@@ -14,9 +14,11 @@ import {
   chromeTabsApi,
   isRpcError,
   type PinnedSelectorTarget,
+  readReportedTimeoutMs,
   resolveTargetTab,
   sessionCdpRunner,
   withPinnedSelectorTargets,
+  withReportedTimeoutMs,
 } from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
 import { AccessibilityLease } from "@/tools/vom/capture-coordinator";
@@ -71,6 +73,7 @@ interface Context {
   epoch: number;
   frameEpoch: number;
   refs: number;
+  documentRevision: number;
   frames: Frames;
   evidence?: ObservationEvidence;
   activityCursor: number;
@@ -106,6 +109,8 @@ interface TabState {
   interruption?: AbortController;
   /** Ordinary input revocation must not discard an already accepted download receipt. */
   completion?: AbortController;
+  onActionRouteChange?: (url?: string) => boolean;
+  routeUrl?: string;
   unavailable: boolean;
   /** Frames that did not answer the collection that made this tab unavailable. */
   unresponsive?: FrameIdentity[];
@@ -146,19 +151,33 @@ export interface CooperationDeps {
     lease: string,
     repairs: FrameRepairs,
     hidden: HiddenFrames,
+    replyTimeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<CooperationFrames>;
   resumeFrames(
     tabId: number,
     lease: string,
     repairs: FrameRepairs,
     hidden: HiddenFrames,
+    replyTimeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<void>;
   releaseFrames?(tabId: number, lease: string): Promise<void>;
   changed(tabId: number): void;
   sessionActivity?(sessionId: string, idleProtected: boolean): void;
   now?: () => number;
 }
+const DEFAULT_FRAME_REPLY_MS = 3_000;
+const MAX_FRAME_REPLY_MS = 25_000;
 const QUIET_MS = 2_000;
+/**
+ * Default wait budget for transient target readiness (`target_hidden`,
+ * `target_disabled`, `target_readonly`) when callers omit `timeout_ms`.
+ * Kept well below the daemon's 30s default tool RPC timeout so permanently
+ * hidden/disabled targets return a structured readiness error instead of
+ * losing the race to a generic transport timeout.
+ */
+const DEFAULT_TARGET_READINESS_TIMEOUT_MS = 5_000;
 /** Idle gap after which a fresh `cooperate sync`/`enable` automatically resumes a paused or editing tab. */
 const IDLE_RESUME_MS = 3_000;
 /** Upper bound on nodes whose self-changing text the default check tolerates. */
@@ -211,6 +230,18 @@ function isUnobservableInitialTab(tab: { url?: string; pendingUrl?: string }): b
   if (!tab.pendingUrl) return true;
   const pending = normalizeInitialTabUrl(tab.pendingUrl);
   return !!pending && UNOBSERVABLE_INITIAL_TAB_URLS.has(pending);
+}
+
+function routePathnameKey(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = new URL(raw);
+    if (!["http:", "https:", "file:"].includes(parsed.protocol)) return undefined;
+    const hashRoute = /^#!?\/[^?]*/.exec(parsed.hash)?.[0] ?? "";
+    return `${parsed.origin}${parsed.pathname}${hashRoute}`;
+  } catch {
+    return undefined;
+  }
 }
 
 function sameFrames(
@@ -309,7 +340,7 @@ function withUnresponsiveFrames(
         ? {}
         : {
             recovery:
-              "Use cooperate wait, then cooperate sync; a busy frame can recover. If the same frame keeps failing, use read-only commands such as get-html or snapshot, or stop the session, which also returns borrowed tabs. Never replay an uncertain submission.",
+              "Use cooperate wait, then cooperate sync; a busy frame can recover. If the same frame keeps failing, navigate or reload to leave the page, use read-only commands such as get-html or snapshot, or stop the session, which also returns borrowed tabs. Never replay an uncertain submission.",
           }),
     },
   };
@@ -478,7 +509,7 @@ export class CooperationController implements ControlAuthority {
     if (!isInitialBlank(tab)) state.bootstrap = false;
     if (state.bootstrap) return;
     try {
-      await this.refresh(state);
+      await this.refresh(state, undefined, true);
     } catch {
       // A loading/inaccessible frame remains guarded; wait/sync retries collection.
     }
@@ -577,6 +608,7 @@ export class CooperationController implements ControlAuthority {
     input?: InputExpectation,
     method?: string,
     deadline = Date.now() + 25000,
+    replyTimeoutMs?: number,
   ) {
     // A press or a cancelled edit can finish without transferring control.
     // Wait at the dispatch boundary, retaining the action and its context.
@@ -588,7 +620,7 @@ export class CooperationController implements ControlAuthority {
     const authorityRevision = state.authorityRevision;
     const epoch = state.epoch;
     const inputDeadline = Math.min(deadline, Date.now() + 25000);
-    await this.refresh(state, input);
+    await this.refresh(state, input, false, replyTimeoutMs, signal);
     let waited = false;
     while (
       !state.held &&
@@ -614,7 +646,7 @@ export class CooperationController implements ControlAuthority {
         setTimeout(resolve, Math.min(25, inputDeadline - Date.now())),
       );
       signal.throwIfAborted();
-      await this.refresh(state);
+      await this.refresh(state, undefined, false, replyTimeoutMs, signal);
       waited = true;
     }
     if (waited && input) {
@@ -627,7 +659,7 @@ export class CooperationController implements ControlAuthority {
         state.authorityRevision === authorityRevision &&
         state.epoch === epoch
       )
-        await this.refresh(state, input);
+        await this.refresh(state, input, false, replyTimeoutMs, signal);
     }
   }
   private changed(state: TabState) {
@@ -655,6 +687,15 @@ export class CooperationController implements ControlAuthority {
       state.authorityRevision++;
       state.epoch++;
       state.context = undefined;
+    }
+    if (
+      frameId === 0 &&
+      sameDocument &&
+      old?.url !== undefined &&
+      frame.url !== undefined &&
+      old.url !== frame.url
+    ) {
+      this.handleRootRouteChange(state, frame.url);
     }
     // New or late documents can revoke control, but only collection establishes
     // the current frame. Repeated notifications cannot revoke a newer decision.
@@ -689,8 +730,40 @@ export class CooperationController implements ControlAuthority {
     state.accessibilityLease.markNeedsEnable();
     state.epoch++;
     state.context = undefined;
+    state.routeUrl = undefined;
     state.unavailable = true;
     state.unresponsive = undefined;
+    this.changed(state);
+  }
+  private handleRootRouteChange(state: TabState, url?: string): boolean {
+    const root = state.frames.get(0);
+    const previousUrl = root?.url ?? state.routeUrl;
+    if (url !== undefined) {
+      state.routeUrl = url;
+      if (root && root.url !== url) {
+        state.frames = new Map(state.frames).set(0, { ...root, url });
+      }
+    }
+    const targetPolicy = this.deps.sessions.get(state.sessionId)?.controlPolicy === "target";
+    const previousKey = routePathnameKey(previousUrl);
+    const nextKey = routePathnameKey(url);
+    const samePathnameRoute =
+      targetPolicy && previousKey !== undefined && nextKey !== undefined && previousKey === nextKey;
+    if (state.baseline) state.baseline.consumed = true;
+    if (state.onActionRouteChange?.(url)) return true;
+    if (samePathnameRoute) return true;
+    this.deps.sessions.invalidateTabRefs(state.tabId);
+    state.epoch++;
+    state.context = undefined;
+    return false;
+  }
+  invalidateRoute(tabId: number, url?: string) {
+    const state = this.tabs.get(tabId);
+    if (!state) {
+      this.deps.sessions.invalidateTabRefs(tabId);
+      return;
+    }
+    if (this.handleRootRouteChange(state, url)) return;
     this.changed(state);
   }
   invalidateChildFrames(tabId: number) {
@@ -752,29 +825,64 @@ export class CooperationController implements ControlAuthority {
     for (const sessionId of this.defaultTabs.keys())
       if (!this.deps.sessions.has(sessionId)) this.release(sessionId);
   }
-  private async refresh(state: TabState, input?: InputExpectation): Promise<Frames> {
+  private async refresh(
+    state: TabState,
+    input?: InputExpectation,
+    nonOwner = false,
+    replyTimeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<Frames> {
     const live = () =>
       this.tabs.get(state.tabId) === state && this.deps.sessions.has(state.sessionId);
     if (!live()) throw new Error("Shared-tab control has ended");
     let frames: Frames;
     try {
-      const collection = await this.deps.readFrames(
-        state.tabId,
-        input,
-        state.lease,
-        state.frameRepairs,
-        state.hiddenFrames,
-      );
+      const clampedTimeoutMs =
+        replyTimeoutMs !== undefined &&
+        replyTimeoutMs > 0 &&
+        replyTimeoutMs !== DEFAULT_FRAME_REPLY_MS
+          ? Math.min(replyTimeoutMs, MAX_FRAME_REPLY_MS)
+          : undefined;
+      const collection = signal
+        ? await this.deps.readFrames(
+            state.tabId,
+            input,
+            state.lease,
+            state.frameRepairs,
+            state.hiddenFrames,
+            clampedTimeoutMs ?? DEFAULT_FRAME_REPLY_MS,
+            signal,
+          )
+        : clampedTimeoutMs !== undefined
+          ? await this.deps.readFrames(
+              state.tabId,
+              input,
+              state.lease,
+              state.frameRepairs,
+              state.hiddenFrames,
+              clampedTimeoutMs,
+            )
+          : await this.deps.readFrames(
+              state.tabId,
+              input,
+              state.lease,
+              state.frameRepairs,
+              state.hiddenFrames,
+            );
       frames = collection.frames;
       if (!live()) throw new Error("Shared-tab control ended during collection");
       if (!frames.size || !frames.has(0))
         throw new Error("Page interaction coverage is unavailable");
       state.frameGaps = collection.gaps;
     } catch (error) {
-      state.unavailable = true;
-      state.unresponsive = error instanceof FrameUnresponsiveError ? error.frames : undefined;
-      state.context = undefined;
-      this.changed(state);
+      if (!nonOwner || !state.working) {
+        state.unavailable = true;
+        state.unresponsive = error instanceof FrameUnresponsiveError ? error.frames : undefined;
+        if (!nonOwner || this.deps.sessions.get(state.sessionId)?.controlPolicy !== "target") {
+          state.context = undefined;
+        }
+        this.changed(state);
+      }
       throw error;
     }
     const authorityRevision = state.authorityRevision;
@@ -799,14 +907,26 @@ export class CooperationController implements ControlAuthority {
       state.frameEpoch++;
       state.accessibilityLease.markNeedsEnable();
     }
-    const mainDocumentChanged =
-      documentsChanged && state.frames.get(0)?.document !== frames.get(0)?.document;
+    const oldRoot = state.frames.get(0);
+    const nextRoot = frames.get(0);
+    const mainDocumentChanged = documentsChanged && oldRoot?.document !== nextRoot?.document;
     // Child documents revoke observation evidence through frameEpoch, rather
     // than control itself. An unverified script still needs the same main
     // document and uninterrupted authority, but does not use that evidence.
     if (state.authorityRevision !== authorityRevision || mainDocumentChanged) {
       state.epoch++;
       state.context = undefined;
+      state.routeUrl = nextRoot?.url;
+    } else if (
+      oldRoot !== undefined &&
+      nextRoot !== undefined &&
+      oldRoot.url !== undefined &&
+      nextRoot.url !== undefined &&
+      oldRoot.url !== nextRoot.url
+    ) {
+      this.handleRootRouteChange(state, nextRoot.url);
+    } else if (nextRoot?.url !== undefined && state.routeUrl === undefined) {
+      state.routeUrl = nextRoot.url;
     }
     for (const [id, frame] of frames) this.remember(state, id, frame);
     state.frames = frames;
@@ -869,9 +989,33 @@ export class CooperationController implements ControlAuthority {
     try {
       if (params.action === "enable")
         await cdp.releaseBackgroundExecution?.(session.sessionId, state.tabId);
+      const rawTimeoutMs =
+        typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms)
+          ? params.timeout_ms
+          : params.action === "wait"
+            ? 15000
+            : undefined;
+      const requestedTimeoutMs =
+        rawTimeoutMs !== undefined
+          ? Math.min(Math.max(rawTimeoutMs, 0), MAX_FRAME_REPLY_MS)
+          : undefined;
+      const commandDeadline =
+        requestedTimeoutMs !== undefined ? commandEnteredAt + requestedTimeoutMs : undefined;
+      const remainingReplyMs = () =>
+        commandDeadline !== undefined
+          ? Math.max(DEFAULT_FRAME_REPLY_MS, commandDeadline - this.now())
+          : undefined;
       const refresh = async () => {
         try {
-          await this.refresh(state);
+          await this.refresh(
+            state,
+            undefined,
+            state.working,
+            requestedTimeoutMs !== undefined && requestedTimeoutMs > DEFAULT_FRAME_REPLY_MS
+              ? remainingReplyMs()
+              : undefined,
+            signal,
+          );
         } catch (error) {
           if (
             params.action !== "wait" ||
@@ -880,13 +1024,13 @@ export class CooperationController implements ControlAuthority {
             error instanceof FrameCollectionError
           )
             throw error;
-          state.unavailable = true;
+          if (!state.working) state.unavailable = true;
         }
       };
       await refresh();
       if (params.action === "wait") {
-        const timeout = Math.min(Math.max(params.timeout_ms ?? 15000, 0), 25000);
-        const deadline = this.now() + timeout;
+        const timeout = requestedTimeoutMs ?? 15000;
+        const deadline = commandEnteredAt + timeout;
         while (
           (state.unavailable ||
             state.held ||
@@ -967,12 +1111,15 @@ export class CooperationController implements ControlAuthority {
           (frame) => frame.fieldsComplete !== false,
         );
         const sameBudget = baseline !== undefined && baseline.maxTokens === params.max_tokens;
+        const sameRootUrl = baseline?.frames.get(0)?.url === before.get(0)?.url;
         const comparable =
           baseline &&
           sameBudget &&
           baseline.frameEpoch === frameEpoch &&
+          sameRootUrl &&
           fieldsComplete &&
           baseline.refs === session.refStore.revision &&
+          baseline.documentRevision === session.refStore.documentRevision(state.tabId) &&
           sameMedia(baseline.frames, before);
         const exact =
           comparable &&
@@ -991,11 +1138,12 @@ export class CooperationController implements ControlAuthority {
           ? undefined
           : !baseline
             ? "no_previous_observation"
-            : baseline.frameEpoch !== frameEpoch
+            : baseline.frameEpoch !== frameEpoch || !sameRootUrl
               ? "frame_replaced"
               : !fieldsComplete
                 ? "fields_incomplete"
-                : baseline.refs !== session.refStore.revision
+                : baseline.refs !== session.refStore.revision ||
+                    baseline.documentRevision !== session.refStore.documentRevision(state.tabId)
                   ? "refs_replaced"
                   : !sameMedia(baseline.frames, before)
                     ? "media_changed"
@@ -1038,7 +1186,15 @@ export class CooperationController implements ControlAuthority {
               signal,
             );
         if (observation && isRpcError(observation)) return observation;
-        const after = await this.refresh(state);
+        const after = await this.refresh(
+          state,
+          undefined,
+          false,
+          requestedTimeoutMs !== undefined && requestedTimeoutMs > DEFAULT_FRAME_REPLY_MS
+            ? remainingReplyMs()
+            : undefined,
+          signal,
+        );
         if (state.stopped) return stopped();
         // A full target snapshot can publish main-document control during child
         // navigation. Its strict observation remains bound to the pre-capture frames.
@@ -1073,6 +1229,7 @@ export class CooperationController implements ControlAuthority {
           epoch,
           frameEpoch,
           refs: session.refStore.revision,
+          documentRevision: session.refStore.documentRevision(state.tabId),
           frames: before,
           evidence,
           activityCursor: state.activitySequence,
@@ -1101,6 +1258,7 @@ export class CooperationController implements ControlAuthority {
         };
         state.context = context;
         state.baseline = context;
+        state.routeUrl = after.get(0)?.url ?? target.url;
         // The agent has now observed the refused change; tolerate it from here on.
         if (state.learned) {
           const pages = documents(before);
@@ -1186,9 +1344,11 @@ export class CooperationController implements ControlAuthority {
     } catch (error) {
       if (state.stopped) return stopped();
       if (signal.aborted) return { code: "cancelled", message: "Cooperation wait cancelled" };
-      state.unavailable = true;
-      state.context = undefined;
-      if (this.tabs.get(state.tabId) === state) this.changed(state);
+      if (!state.working) {
+        state.unavailable = true;
+        state.context = undefined;
+        if (this.tabs.get(state.tabId) === state) this.changed(state);
+      }
       if (error instanceof FrameCollectionError) return error.toRpcError();
       return withUnresponsiveFrames(
         failure(error instanceof Error ? error.message : String(error)),
@@ -1204,10 +1364,13 @@ export class CooperationController implements ControlAuthority {
     signal: AbortSignal,
     invoke: (cdp: T) => Promise<unknown>,
     epoch = state.epoch,
+    allowFailedPageRecovery = false,
+    allowPendingUrlRecovery = false,
   ): Promise<unknown> {
     if (state.working) return failure("Another operation is settling on this tab");
     let sent = false;
     let revoked: string | undefined;
+    let navTimedOutOrFailed = true;
     const assert = () => {
       signal.throwIfAborted();
       if (
@@ -1229,7 +1392,8 @@ export class CooperationController implements ControlAuthority {
             const session = this.deps.sessions.get(state.sessionId);
             const allowedBlank = state.bootstrap
               ? isInitialBlank(tab)
-              : isUnobservableInitialTab(tab);
+              : isUnobservableInitialTab(tab) ||
+                (allowFailedPageRecovery && (allowPendingUrlRecovery || !tab.pendingUrl));
             if (!session || tab.windowId !== session.agentWindowId || !allowedBlank)
               throw new Error(
                 (revoked = "The initial task tab changed; synchronize before acting"),
@@ -1247,6 +1411,10 @@ export class CooperationController implements ControlAuthority {
           },
         }),
       );
+      navTimedOutOrFailed =
+        Boolean(revoked) ||
+        isRpcError(result) ||
+        (result as { reached?: unknown } | undefined)?.reached === "timeout";
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted)
         return {
@@ -1289,7 +1457,17 @@ export class CooperationController implements ControlAuthority {
       if (sent && method === "tool.window_resize") this.clearWindowObservations(state.sessionId);
       if (sent) state.lastAgentActivity = this.now();
       state.working = false;
-      if (method === "tool.navigate") await this.observeTab(state.tabId);
+      if (
+        ["tool.navigate", "tool.reload", "tool.navigate_back", "tool.navigate_forward"].includes(
+          method,
+        )
+      ) {
+        if (navTimedOutOrFailed || signal.aborted) {
+          void this.observeTab(state.tabId);
+        } else {
+          await this.observeTab(state.tabId);
+        }
+      }
       this.changed(state);
     }
   }
@@ -1306,6 +1484,33 @@ export class CooperationController implements ControlAuthority {
       return false;
     const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
     return !!tab && isUnobservableInitialTab(tab);
+  }
+  private async unobservableFailedRootLoad(state: TabState, error: unknown): Promise<boolean> {
+    if (
+      !(error instanceof FrameCollectionError) ||
+      error.reason !== "page_load_failed" ||
+      error.frames.length === 0 ||
+      error.frames.some((frame) => frame.frame_id !== 0)
+    )
+      return false;
+    const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
+    return !!tab && !tab.pendingUrl;
+  }
+  private async unrecoverableNavigationSource(state: TabState, error: unknown): Promise<boolean> {
+    if (await this.unobservableFailedRootLoad(state, error)) return true;
+    if (error instanceof FrameUnresponsiveError && error.frames.length > 0) {
+      const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
+      return !!tab;
+    }
+    if (
+      error instanceof FrameCollectionError &&
+      error.reason === "frame_unobservable" &&
+      error.frames.length > 0
+    ) {
+      const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
+      return !!tab && !tab.pendingUrl;
+    }
+    return false;
   }
   /**
    * Returning a borrowed tab that is stuck on a browser-restricted page or a
@@ -1389,10 +1594,16 @@ export class CooperationController implements ControlAuthority {
           try {
             await this.prepareFrames(state, signal);
           } catch (error) {
-            // A blank page offers no human input to miss. A borrowed one has no
-            // collector, and refusing here would also block returning it.
+            // A blank page or an owned (non-borrowed) agent tab stuck on a settled
+            // failed-load error page offers no live document or human input to miss.
+            // Borrowed user tabs remain gated except when returning that tab itself.
+            const failedAgentTab =
+              isAgentControlledTab(session, state.tabId) &&
+              !session.borrowedTabs.has(state.tabId) &&
+              (await this.unobservableFailedRootLoad(state, error));
             if (
               !(await this.unobservableBlank(state, error)) &&
+              !failedAgentTab &&
               !(await this.unobservableReturnTarget(session, state, returningTabId, error))
             )
               throw error;
@@ -1643,6 +1854,21 @@ export class CooperationController implements ControlAuthority {
       req.params = { ...params, tab_id: params.tab_id ?? this.defaultTabs.get(session.sessionId) };
       return invoke(guardedRunner(cdp));
     }
+    const isNavigationAction = [
+      "tool.navigate",
+      "tool.reload",
+      "tool.navigate_back",
+      "tool.navigate_forward",
+    ].includes(req.method);
+    const invalidControlContext = () =>
+      targetPolicy
+        ? actionError(
+            "control_context_invalid",
+            "This control context is no longer valid for this session and tab",
+            "control",
+            "Synchronize the intended tab after control is returned, inspect the current state and decide again.",
+          )
+        : failure("This context belongs to a different or superseded observation");
     const bound = params.context_id
       ? [...this.tabs.values()].find(
           (state) =>
@@ -1652,16 +1878,10 @@ export class CooperationController implements ControlAuthority {
       : undefined;
     if (
       params.context_id &&
-      (!bound || (params.tab_id !== undefined && params.tab_id !== bound.tabId))
+      ((bound && params.tab_id !== undefined && params.tab_id !== bound.tabId) ||
+        (!bound && !(isNavigationAction && targetPolicy)))
     )
-      return targetPolicy
-        ? actionError(
-            "control_context_invalid",
-            "This control context is no longer valid for this session and tab",
-            "control",
-            "Synchronize the intended tab after control is returned, inspect the current state and decide again.",
-          )
-        : failure("This context belongs to a different or superseded observation");
+      return invalidControlContext();
     const target = await resolveTargetTab(
       this.deps.sessions,
       session,
@@ -1703,7 +1923,7 @@ export class CooperationController implements ControlAuthority {
             "Omit the old context to inspect current data; synchronize and reconsider before further input.",
           );
         try {
-          await this.refresh(state);
+          await this.refresh(state, undefined, true);
         } catch (error) {
           // No read has been dispatched. Preserve permanent frame diagnostics;
           // ordinary loading failures have already revoked the supplied context.
@@ -1794,13 +2014,16 @@ export class CooperationController implements ControlAuthority {
       const node = lookupSnapshotRef(session, ref, target.tabId);
       return rootFrameId !== undefined && node?.frameId === rootFrameId;
     };
+    const mainDocumentResolved = (node?: ResolvedActionTarget) => {
+      if (!node) return true;
+      const frameId = node.frameId || node.handle?.frameId;
+      return !frameId || (rootFrameId !== undefined && frameId === rootFrameId);
+    };
     const mainDocumentTarget = (node?: DragTarget) =>
       node?.ref ? mainDocumentRef(node.ref) : !!node?.selector;
-    // Selectors are main-document only. Refs must prove their frame, including
-    // both drag endpoints and any refs whose facts authorize the action. A
-    // script runs in the main document, so only its stated facts can involve
-    // another frame.
-    const mainDocumentAction =
+    // Refs prove their frame up front; selectors optimistically pass pre-resolution
+    // checks for main-document targets and re-verify frame scope once resolved.
+    let mainDocumentAction =
       targeted &&
       (scopedScript ||
         (mainDocumentTarget(primaryTarget) &&
@@ -1955,11 +2178,11 @@ export class CooperationController implements ControlAuthority {
       if (!completed && state.epoch !== epoch)
         return "The observed page or control state changed; synchronize";
     };
-    const assert = () => {
+    const assert = (completing = false) => {
       signal.throwIfAborted();
       if (checkFailure) throw new ActionCheckError(checkFailure);
       const reason =
-        interruption() ??
+        interruption(completing) ??
         (detachedByHandler ? "The observed page or control state changed; synchronize" : undefined);
       if (reason) {
         if (!targetPolicy && context && state.context === context) state.context = undefined;
@@ -1968,6 +2191,13 @@ export class CooperationController implements ControlAuthority {
         throw new Error((revoked = reason));
       }
     };
+    const actionReplyTimeoutMs =
+      !isNavigationAction &&
+      typeof params.timeout_ms === "number" &&
+      Number.isFinite(params.timeout_ms) &&
+      params.timeout_ms > DEFAULT_FRAME_REPLY_MS
+        ? Math.min(params.timeout_ms, MAX_FRAME_REPLY_MS)
+        : undefined;
     const verifyEvidence = async () => {
       if (!context || !verifiedFrames) throw new Error((revoked = "Synchronize before acting"));
       if (sameFrames(verifiedFrames, state.frames, "revision")) return;
@@ -1992,7 +2222,7 @@ export class CooperationController implements ControlAuthority {
           evidence = observationEvidence(scene);
         },
       });
-      await this.refresh(state);
+      await this.refresh(state, undefined, false, actionReplyTimeoutMs, signal);
       assert();
       // A refusal always requires a fresh sync; the refused context cannot retry.
       const consumeRefused = () => {
@@ -2229,7 +2459,25 @@ export class CooperationController implements ControlAuthority {
                 effect_state: "none",
               },
             };
+    let initialRouteKey = routePathnameKey(state.frames.get(0)?.url ?? target.url);
+    let actionRouteChanged = false;
+    let deferRouteInvalidation = false;
+    const onActionRouteChange = (nextUrl?: string) => {
+      actionRouteChanged = true;
+      if (!sent) return false;
+      if (
+        !targeted ||
+        !initialRouteKey ||
+        !nextUrl ||
+        routePathnameKey(nextUrl) !== initialRouteKey
+      ) {
+        deferRouteInvalidation = true;
+      }
+      return true;
+    };
     let fallbackBootstrap = false;
+    let failedLoadRecovery = false;
+    let unresponsiveSourceRecovery = false;
     let restoreStrictObservation = false;
     const maybeRestoreObservation = (effect: string) => {
       if (
@@ -2240,6 +2488,7 @@ export class CooperationController implements ControlAuthority {
         !preparationSent &&
         !detachedByHandler &&
         !postRefreshFailed &&
+        !actionRouteChanged &&
         !revoked &&
         checkFailure?.data?.reason !== "observation_changed" &&
         !state.stopped &&
@@ -2252,8 +2501,22 @@ export class CooperationController implements ControlAuthority {
         this.changed(state);
       }
     };
+    const entryReplyTimeoutMs =
+      isNavigationAction &&
+      params.expect === undefined &&
+      params.observation_id === undefined &&
+      !params.depends_on?.length &&
+      typeof params.timeout_ms === "number" &&
+      Number.isFinite(params.timeout_ms) &&
+      params.timeout_ms > 0 &&
+      params.timeout_ms < DEFAULT_FRAME_REPLY_MS * 2
+        ? Math.max(200, Math.floor(params.timeout_ms / 2))
+        : actionReplyTimeoutMs;
+    const runEnteredAt = Date.now();
     try {
-      await this.refresh(state);
+      await this.refresh(state, undefined, false, entryReplyTimeoutMs, signal);
+      if (params.context_id && !bound) return invalidControlContext();
+      initialRouteKey = routePathnameKey(state.frames.get(0)?.url ?? target.url);
       assert();
       if (
         !mainDocumentAction &&
@@ -2315,6 +2578,10 @@ export class CooperationController implements ControlAuthority {
         destinationTarget = resolved;
         if (params.target.selector) pinSelector(params.target.selector, resolved);
       }
+      if (!mainDocumentResolved(actionTarget) || !mainDocumentResolved(destinationTarget)) {
+        mainDocumentAction = false;
+        assert();
+      }
       if (params.depends_on !== undefined) {
         if (
           !Array.isArray(params.depends_on) ||
@@ -2348,7 +2615,18 @@ export class CooperationController implements ControlAuthority {
       }
       // Wait only before execution, and only for transient element readiness.
       // Business facts, missing nodes and ambiguous selectors fail immediately.
-      const deadline = Date.now() + (params.timeout_ms ?? 30_000);
+      // Cap the pre-execution readiness poll at `DEFAULT_TARGET_READINESS_TIMEOUT_MS`
+      // (and below the caller's transport timeout with a short reply margin) so
+      // permanently hidden/disabled/readonly controls return structured readiness
+      // diagnostics instead of hanging for 30s/2m and losing the race to the
+      // daemon's RPC timeout.
+      const deadline = runEnteredAt + (params.timeout_ms ?? 30_000);
+      const transportBudgetMs =
+        params.timeout_ms === undefined
+          ? DEFAULT_TARGET_READINESS_TIMEOUT_MS
+          : Math.max(0, params.timeout_ms - Math.min(500, Math.floor(params.timeout_ms / 4)));
+      const readinessDeadline =
+        runEnteredAt + Math.min(DEFAULT_TARGET_READINESS_TIMEOUT_MS, transportBudgetMs);
       while (true) {
         try {
           await verifyDecision();
@@ -2362,11 +2640,13 @@ export class CooperationController implements ControlAuthority {
             )
           )
             throw error;
-          if (Date.now() >= deadline) {
+          if (Date.now() >= readinessDeadline) {
             checkFailure = { ...error.rpcError, code: "timeout" };
             throw new ActionCheckError(checkFailure);
           }
-          await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.max(0, Math.min(50, readinessDeadline - Date.now()))),
+          );
           // Push events revoke control while waiting. The dispatch guard still
           // refreshes every frame before any effect, including missed events.
           checkFailure = undefined;
@@ -2381,6 +2661,17 @@ export class CooperationController implements ControlAuthority {
         restoreStrictObservation = true;
       }
       this.changed(state);
+      state.onActionRouteChange = onActionRouteChange;
+      const boundObjectCompletion = (
+        input: InputExpectation | undefined,
+        method: string | undefined,
+        stepParams?: Record<string, unknown>,
+      ) =>
+        nativeInputStarted &&
+        input === undefined &&
+        !script &&
+        ((method === "Runtime.callFunctionOn" && typeof stepParams?.objectId === "string") ||
+          method === "DOM.getBoxModel");
       const actionCdp =
         pinnedSelectors.size > 0 ? withPinnedSelectorTargets(cdp, pinnedSelectors) : cdp;
       const result = await invoke(
@@ -2389,16 +2680,27 @@ export class CooperationController implements ControlAuthority {
             checkFailure = error.toRpcError();
           },
           scriptedEffect: req.method === "tool.evaluate",
-          prepare: async (input, method) => {
-            assert();
-            if (targeted && isInternalActionStep(input, method, req.method === "tool.evaluate")) {
+          prepare: async (input, method, stepParams) => {
+            const completing = boundObjectCompletion(input, method, stepParams);
+            assert(completing);
+            if (
+              (targeted || completing) &&
+              isInternalActionStep(input, method, req.method === "tool.evaluate")
+            ) {
               if (!nativeInputStarted && primaryEffect(method ?? "") && expectations.length > 0) {
                 await verifyExpectations();
               }
               return;
             }
-            await this.prepareFrames(state, operationSignal, input, method, deadline);
-            assert();
+            await this.prepareFrames(
+              state,
+              operationSignal,
+              input,
+              method,
+              deadline,
+              actionReplyTimeoutMs,
+            );
+            assert(completing);
             if (
               input?.type === "pointerdown" &&
               Number.isFinite(input.x) &&
@@ -2433,8 +2735,8 @@ export class CooperationController implements ControlAuthority {
               await clear;
             }
           },
-          dispatch: (startsInput, method) => {
-            assert();
+          dispatch: (startsInput, method, stepParams) => {
+            assert(!startsInput && boundObjectCompletion(undefined, method, stepParams));
             sent = true;
             if (!startsInput && PREPARATION_METHODS.has(method)) {
               preparationSent = true;
@@ -2453,7 +2755,7 @@ export class CooperationController implements ControlAuthority {
             }
           },
           beginDomMutation: async () => {
-            await this.refresh(state);
+            await this.refresh(state, undefined, false, actionReplyTimeoutMs, operationSignal);
             assert();
             if (targeted) {
               if (!nativeInputStarted && expectations.length > 0) {
@@ -2515,8 +2817,15 @@ export class CooperationController implements ControlAuthority {
         (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
       if (["tool.evaluate", "tool.upload"].includes(req.method)) {
         const intact = !state.unavailable && state.epoch === epoch;
+        const postActionReplyTimeoutMs =
+          actionReplyTimeoutMs !== undefined
+            ? Math.max(
+                DEFAULT_FRAME_REPLY_MS,
+                Math.min(actionReplyTimeoutMs, deadline - Date.now()),
+              )
+            : undefined;
         try {
-          await this.refresh(state);
+          await this.refresh(state, undefined, false, postActionReplyTimeoutMs, signal);
         } catch (error) {
           if (!completed && !(isRpcError(result) && intact)) throw error;
           // A new frame may not yet expose its collector. Retain the completed
@@ -2542,9 +2851,19 @@ export class CooperationController implements ControlAuthority {
           },
         };
       }
+      const navigationAction = [
+        "tool.navigate",
+        "tool.navigate_back",
+        "tool.navigate_forward",
+        "tool.reload",
+      ].includes(req.method);
+      const handlerDiagnosedError =
+        !revoked &&
+        isRpcError(result) &&
+        (navigationAction || typeof result.data?.reason === "string");
       const reason =
         revoked ??
-        interruption(completed || postRefreshFailed) ??
+        interruption(completed || postRefreshFailed || handlerDiagnosedError) ??
         (!completed && !isRpcError(result) && detachedByHandler
           ? "The observed page or control state changed; synchronize"
           : undefined);
@@ -2555,7 +2874,14 @@ export class CooperationController implements ControlAuthority {
       }
       if (isRpcError(result)) {
         const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
-        if (targetPolicy && (effect !== "none" || detachedByHandler || postRefreshFailed))
+        if (
+          targetPolicy &&
+          (effect !== "none" ||
+            detachedByHandler ||
+            postRefreshFailed ||
+            state.unavailable ||
+            state.epoch !== epoch)
+        )
           state.context = undefined;
         else maybeRestoreObservation(effect);
         return {
@@ -2590,11 +2916,34 @@ export class CooperationController implements ControlAuthority {
           },
         };
       }
-      if (
+      const failedAgentTabClose =
         !sent &&
-        policy.bootstrapAllowed &&
-        !params.context_id &&
-        (await this.unobservableBlank(state, error))
+        req.method === "tool.tab_close" &&
+        isAgentControlledTab(session, state.tabId) &&
+        !session.borrowedTabs.has(state.tabId) &&
+        (!params.context_id || targetPolicy || bound !== undefined) &&
+        !state.held &&
+        !this.humanActive(state) &&
+        (await this.unobservableFailedRootLoad(state, error));
+      failedLoadRecovery =
+        failedAgentTabClose ||
+        (!sent &&
+          isNavigationAction &&
+          (!params.context_id || targetPolicy || bound !== undefined) &&
+          !state.held &&
+          !this.humanActive(state) &&
+          (await this.unrecoverableNavigationSource(state, error)));
+      unresponsiveSourceRecovery =
+        failedLoadRecovery &&
+        !failedAgentTabClose &&
+        error instanceof FrameUnresponsiveError &&
+        error.frames.length > 0;
+      if (
+        failedLoadRecovery ||
+        (!sent &&
+          policy.bootstrapAllowed &&
+          !params.context_id &&
+          (await this.unobservableBlank(state, error)))
       ) {
         if (state.stopped) return stopped("none");
         if (signal.aborted)
@@ -2610,10 +2959,29 @@ export class CooperationController implements ControlAuthority {
         )
           return {
             code: "invalid_params",
-            message:
-              "The initial blank tab has no observed content; omit expect, observation_id and depends_on or synchronize first",
+            message: failedLoadRecovery
+              ? failedAgentTabClose
+                ? "This tab is on a failed-load error page with no observed content; omit expect, observation_id and depends_on to close it"
+                : "This tab has no responsive or observable document; omit expect, observation_id and depends_on to recover with navigate, reload, navigate_back or navigate_forward"
+              : "The initial blank tab has no observed content; omit expect, observation_id and depends_on or synchronize first",
             data: { phase: "precondition", effect_state: "none" },
           };
+        const refreshElapsedMs = Date.now() - runEnteredAt;
+        if (failedLoadRecovery && isNavigationAction && refreshElapsedMs > 0) {
+          const baseTimeoutMs =
+            typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms)
+              ? params.timeout_ms
+              : req.method === "tool.navigate"
+                ? 30_000
+                : 15_000;
+          req.params = withReportedTimeoutMs(
+            {
+              ...(req.params as object),
+              timeout_ms: Math.max(1, baseTimeoutMs - refreshElapsedMs),
+            },
+            readReportedTimeoutMs(req.params) ?? baseTimeoutMs,
+          );
+        }
         fallbackBootstrap = true;
       } else {
         if (error instanceof ActionCheckError) checkFailure = error.rpcError;
@@ -2624,6 +2992,14 @@ export class CooperationController implements ControlAuthority {
       }
     } finally {
       finished = true;
+      if (state.onActionRouteChange === onActionRouteChange) {
+        state.onActionRouteChange = undefined;
+      }
+      if (deferRouteInvalidation && this.tabs.get(state.tabId) === state) {
+        this.deps.sessions.invalidateTabRefs(state.tabId);
+        state.epoch++;
+        state.context = undefined;
+      }
       if (sent && req.method === "tool.window_resize")
         this.clearWindowObservations(state.sessionId);
       if (sent) state.lastAgentActivity = this.now();
@@ -2633,7 +3009,16 @@ export class CooperationController implements ControlAuthority {
       this.changed(state);
     }
     return fallbackBootstrap
-      ? this.bootstrap(state, req.method, cdp, signal, invoke, epoch)
+      ? this.bootstrap(
+          state,
+          req.method,
+          cdp,
+          signal,
+          invoke,
+          epoch,
+          failedLoadRecovery,
+          unresponsiveSourceRecovery,
+        )
       : undefined;
   }
 }

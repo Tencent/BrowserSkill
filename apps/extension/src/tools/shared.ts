@@ -12,6 +12,7 @@ export type { CdpDispatchGuard };
 
 import {
   type FrameDocumentGraph,
+  type FrameDocumentGraphOptions,
   type FrameDocumentHandle,
   type FrameNodeHandle,
   StaleFrameHandleError,
@@ -63,7 +64,7 @@ export interface ResolvedTargetTab {
   pendingUrl?: string;
 }
 
-export type { DialogCursor };
+export type { DialogCursor, FrameDocumentGraphOptions };
 
 /**
  * Typed CDP driver surface every tool handler uses. Backed by `ChromiumCdp`
@@ -104,7 +105,11 @@ export interface CdpRunner {
     guard?: CdpDispatchGuard,
   ): Promise<T>;
   getMainFrameHandle(tabId: number, signal?: AbortSignal): Promise<FrameDocumentHandle>;
-  getFrameDocuments(tabId: number, signal?: AbortSignal): Promise<FrameDocumentGraph>;
+  getFrameDocuments(
+    tabId: number,
+    signal?: AbortSignal,
+    options?: FrameDocumentGraphOptions,
+  ): Promise<FrameDocumentGraph>;
   isEventFromFrame(source: TabEventSource, handle: FrameDocumentHandle): boolean;
   hasOwnFrameTarget(tabId: number, frameId: string, parentFrameId?: string): boolean;
   recordFrameDocumentElement(
@@ -388,6 +393,7 @@ export function createStubCdpRunner<T extends CdpRunnerStubOverrides>(
       this: unknown,
       tabId: number,
       signal?: AbortSignal,
+      _options?: FrameDocumentGraphOptions,
     ): Promise<FrameDocumentGraph> {
       const self = resolveSelf(this);
       signal?.throwIfAborted();
@@ -1091,4 +1097,17 @@ export function enforceToolTargetScope(
 ): RpcError | null {
   if (effect === "passive_read" && !ctx.remote) return null;
   return enforceAgentWindow(ctx, target, toolName);
+}
+
+const reportedTimeoutMsByParams = new WeakMap<object, number>();
+
+export function withReportedTimeoutMs<T extends object>(params: T, reportedTimeoutMs: number): T {
+  reportedTimeoutMsByParams.set(params, reportedTimeoutMs);
+  return params;
+}
+
+export function readReportedTimeoutMs(params: unknown): number | undefined {
+  return params !== null && typeof params === "object"
+    ? reportedTimeoutMsByParams.get(params)
+    : undefined;
 }

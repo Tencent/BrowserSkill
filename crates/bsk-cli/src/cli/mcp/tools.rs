@@ -1151,7 +1151,9 @@ async fn session(
                         wait_budget_ms,
                         "committed",
                         |_, method, params, meta| {
-                            rpc(&aux_ctx, method, params, meta, TOOL_IPC_TIMEOUT)
+                            let ipc_timeout =
+                                cooperate::cooperate_rpc_ipc_timeout(&method, &params);
+                            rpc(&aux_ctx, method, params, meta, ipc_timeout)
                         },
                         std::thread::sleep,
                     )
@@ -1301,7 +1303,9 @@ async fn session(
                             wait_budget_ms,
                             "none",
                             |_, method, params, meta| {
-                                rpc(&aux_ctx, method, params, meta, TOOL_IPC_TIMEOUT)
+                                let ipc_timeout =
+                                    cooperate::cooperate_rpc_ipc_timeout(&method, &params);
+                                rpc(&aux_ctx, method, params, meta, ipc_timeout)
                             },
                             std::thread::sleep,
                         )
@@ -1318,27 +1322,31 @@ async fn session(
                     max_tokens: args.max_tokens,
                 };
                 if args.settle.unwrap_or(false) {
-                    let wait_ms = args.timeout_ms;
+                    let budget = args.timeout_ms.map(Duration::from_millis);
                     link.blocking_envelope(move |rpc| {
                         let mut latest_meta = None;
-                        let val = cooperate::settle::run(|mode| {
+                        let val = cooperate::settle::run_bounded(budget, |mode, rem| {
+                            let rem_ms = rem.map(|d| d.as_nanos().div_ceil(1_000_000) as u64);
                             let mut current = params.clone();
+                            current.action = mode;
                             if matches!(mode, CooperateAction::Wait) {
                                 current.control_policy = None;
-                                current.timeout_ms = Some(wait_ms.unwrap_or(1000));
+                                current.timeout_ms = Some(rem_ms.unwrap_or(1000).min(25_000));
+                            } else if let Some(ms) = rem_ms {
+                                current.timeout_ms = Some(ms.min(25_000));
                             }
                             let is_sync = matches!(mode, CooperateAction::Sync);
-                            current.action = mode;
                             let meta = crate::ipc_client::IpcRequestMeta {
                                 return_scope_meta: is_sync,
                                 ..Default::default()
                             };
+                            let ipc_timeout = cooperate::cooperate_ipc_timeout(current.timeout_ms);
                             let (val, resp_meta) = rpc(
                                 &aux_ctx,
                                 Method::ToolCooperate,
                                 serde_json::to_value(current).unwrap_or_default(),
                                 meta,
-                                TOOL_IPC_TIMEOUT,
+                                ipc_timeout,
                             )?;
                             if is_sync {
                                 latest_meta = resp_meta.scope_meta;
@@ -1353,13 +1361,14 @@ async fn session(
                         return_scope_meta: syncing,
                         ..Default::default()
                     };
+                    let ipc_timeout = cooperate::cooperate_ipc_timeout(params.timeout_ms);
                     let (val, resp_meta) = link
                         .rpc_envelope(
                             &ctx,
                             Method::ToolCooperate,
                             serde_json::to_value(params).unwrap_or_default(),
                             meta,
-                            TOOL_IPC_TIMEOUT,
+                            ipc_timeout,
                         )
                         .await?;
                     (val, resp_meta.scope_meta)
@@ -1438,7 +1447,7 @@ struct PageArgs {
     /// wait_for_element: observed ref such as @e3.
     #[serde(rename = "ref")]
     ref_: Option<String>,
-    /// wait_for_element: main-document CSS selector.
+    /// wait_for_element: CSS selector (main document and accessible iframes).
     selector: Option<String>,
     /// wait_for_element: state to wait for. Default visible.
     state: Option<ElementState>,
@@ -2103,13 +2112,14 @@ struct InteractArgs {
     scope: Option<String>,
     /// Task tab; defaults to the session's current task tab.
     tab_id: Option<i64>,
-    /// Action fields with protocol names. Targets: ref (observed @eN) or selector (main-document
-    /// CSS). click: button, click_count, modifiers. fill: value, clear_before. select: values.
-    /// press: key (Enter, a, Ctrl+A), modifiers, hold_ms. evaluate: expression, unverified (last
-    /// resort; not with observation, expect or depends_on). wheel: delta_x, delta_y. drag: source
-    /// and target ({ref} or {selector}) or delta ({x, y}), mode, hold_ms. upload: files (array of
-    /// paths), optional mode (input|drop). download: out path, optional overwrite. All accept
-    /// timeout_ms.
+    /// Action fields with protocol names. Targets: ref (observed @eN) or selector (CSS in the
+    /// main document or accessible iframes). click: button, click_count, modifiers. fill: value,
+    /// clear_before. select: values. press: key (Enter, a, Ctrl+A), modifiers, hold_ms. evaluate:
+    /// expression, unverified (last resort; not with observation, expect or depends_on). wheel:
+    /// delta_x, delta_y. drag: source and target ({ref} or {selector}) or delta ({x, y}), mode,
+    /// hold_ms. upload: files (array of paths), optional mode (input|drop; prefer the observed @eN
+    /// ref of the visible upload button/trigger, or target input[type=file] directly via selector
+    /// even when hidden). download: out path, optional overwrite. All accept timeout_ms.
     #[serde(default)]
     params: Map<String, Value>,
     /// context_id from the latest sync. Required for actions on tabs under shared control.
@@ -2126,8 +2136,8 @@ struct InteractArgs {
     /// After the action, wait for until_visible (if given) and return the synchronized state in
     /// the same call, as `bsk step` does. Not available for focus, blur, evaluate, upload or download.
     sync_after: Option<bool>,
-    /// Main-document CSS selector expected to become visible after the action. Implies
-    /// sync_after.
+    /// CSS selector (main document and accessible iframes) expected to become visible after the
+    /// action. Implies sync_after.
     until_visible: Option<String>,
     /// Readiness budget for until_visible, 1-25000 ms. Default 5000.
     wait_timeout_ms: Option<u32>,
@@ -2751,7 +2761,8 @@ struct PlanArgs {
     context: Option<String>,
     /// observation_id from the latest sync. Required when the first step is untargeted.
     observation: Option<String>,
-    /// Main-document CSS selector expected to become visible after the last step.
+    /// CSS selector (main document and accessible iframes) expected to become visible after the
+    /// last step.
     until_visible: Option<String>,
     /// Readiness budget for until_visible, 1-25000 ms. Default 5000.
     wait_timeout_ms: Option<u32>,

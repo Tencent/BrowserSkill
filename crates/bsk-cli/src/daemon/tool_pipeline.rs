@@ -255,6 +255,76 @@ async fn reconcile_completed_tool_rpc(
             .record_tab_transition(&tab.session_id, &tab.method, &tab.req_params, value);
     }
     if let Some((method, params)) = &plan.logged {
+        if let Some(sid) = params
+            .get("session_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            let req_tab_id = params.get("tab_id").and_then(Value::as_i64);
+            let req_ctx = params
+                .get("context_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty());
+            match body {
+                ResponseBody::Ok(val)
+                    if matches!(
+                        method,
+                        Method::ToolNavigate
+                            | Method::ToolReload
+                            | Method::ToolNavigateBack
+                            | Method::ToolNavigateForward
+                    ) =>
+                {
+                    let tid = val.get("tab_id").and_then(Value::as_i64).or(req_tab_id);
+                    state
+                        .scopes
+                        .clear_implicit_tab_context(&SessionId(sid.to_owned()), tid, None);
+                }
+                ResponseBody::Err(err) => {
+                    let effect = err
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("effect_state"))
+                        .and_then(Value::as_str);
+                    let reason = err
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("reason"))
+                        .and_then(Value::as_str);
+                    let tid = err
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("tab_id"))
+                        .and_then(Value::as_i64)
+                        .or(req_tab_id);
+                    if effect == Some("unknown")
+                        || matches!(reason, Some("page_load_failed" | "frame_unobservable"))
+                    {
+                        state.scopes.clear_implicit_tab_context(
+                            &SessionId(sid.to_owned()),
+                            tid,
+                            None,
+                        );
+                    } else if matches!(
+                        reason,
+                        Some(
+                            "control_context_invalid"
+                                | "document_changed"
+                                | "human_intervention"
+                                | "control_held"
+                                | "cooperation_sync_required"
+                        )
+                    ) {
+                        state.scopes.clear_implicit_tab_context(
+                            &SessionId(sid.to_owned()),
+                            tid,
+                            req_ctx,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
         let hydrated_body;
         let body_for_log = if *method == Method::ToolCooperate
             && let ResponseBody::Ok(val) = body
@@ -1347,7 +1417,17 @@ pub(super) fn tool_dispatch_transport_timeout(
         if parsed.timeout_ms.is_some_and(|ms| ms > 25_000) {
             return Err(invalid_params("cooperation wait is bounded to 25000ms"));
         }
-        return Ok(DEFAULT_TOOL_TIMEOUT);
+        let timeout = match parsed.action {
+            bsk_protocol::tools::CooperateAction::Sync
+            | bsk_protocol::tools::CooperateAction::Enable => {
+                parsed.timeout_ms.map_or(DEFAULT_TOOL_TIMEOUT, |ms| {
+                    DEFAULT_TOOL_TIMEOUT
+                        .max(Duration::from_millis(ms).saturating_add(Duration::from_secs(20)))
+                })
+            }
+            _ => DEFAULT_TOOL_TIMEOUT,
+        };
+        return Ok(timeout);
     }
     let policy = super::tool_policy::execution_policy(method);
     if policy.deadline == super::tool_policy::Deadline::BorrowConfirmation {

@@ -55,9 +55,11 @@ export class RecordingObservationRuntime {
             check(handle.tabId);
             return input.cdp.sendToFrame(handle, method, params, options);
           },
-          getFrameDocuments: async (tabId, signal) => {
+          getFrameDocuments: async (tabId, signal, options) => {
             check(tabId);
-            return input.cdp.getFrameDocuments(tabId, signal);
+            return options !== undefined
+              ? input.cdp.getFrameDocuments(tabId, signal, options)
+              : input.cdp.getFrameDocuments(tabId, signal);
           },
           getMainFrameHandle: async (tabId, signal) => {
             check(tabId);

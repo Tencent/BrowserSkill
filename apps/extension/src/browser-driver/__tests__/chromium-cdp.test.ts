@@ -1723,16 +1723,20 @@ describe("document-bound references", () => {
     await cdp.ensureAttached(4);
     onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: "root" });
     expect(changed).not.toHaveBeenCalled();
-    for (const method of ["Page.frameNavigated", "Page.documentOpened", "DOM.documentUpdated"]) {
+    for (const method of ["Page.frameNavigated", "Page.documentOpened"]) {
       onEvent.fire({ tabId: 4 }, method, { frame: { id: "root" } });
       expect(changed).toHaveBeenLastCalledWith(4);
     }
-    expect(changed).toHaveBeenCalledTimes(3);
+    expect(changed).toHaveBeenCalledTimes(2);
+    // In Chromium, same-process child iframe navigations/srcdoc mounts emit
+    // parameterless `DOM.documentUpdated` on the main target; that must not
+    // masquerade as a root document replacement.
+    onEvent.fire({ tabId: 4 }, "DOM.documentUpdated", {});
     onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: "child" });
     onEvent.fire({ tabId: 4, sessionId: "child-session" }, "Page.navigatedWithinDocument", {
       frameId: "root",
     });
-    expect(changed).toHaveBeenCalledTimes(3);
+    expect(changed).toHaveBeenCalledTimes(2);
     // Every route event revokes, including away and back before the next observation.
     onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", {
       frameId: "root",
@@ -1742,12 +1746,43 @@ describe("document-bound references", () => {
       frameId: "root",
       url: "https://site.test/",
     });
-    expect(changed).toHaveBeenCalledTimes(5);
+    expect(changed).toHaveBeenCalledTimes(4);
     await cdp.detach(4);
-    expect(changed).toHaveBeenCalledTimes(6);
+    expect(changed).toHaveBeenCalledTimes(5);
     await cdp.ensureAttached(4);
     onDetach.fire({ tabId: 4 }, "target_closed");
-    expect(changed).toHaveBeenCalledTimes(7);
+    expect(changed).toHaveBeenCalledTimes(6);
+    cdp.dispose();
+  });
+
+  it("routes root Page.navigatedWithinDocument to onRouteChanged when provided without firing onDocumentChanged", async () => {
+    const { api, onEvent } = fakeApi();
+    const docChanged = vi.fn();
+    const routeChanged = vi.fn();
+    const cdp = new ChromiumCdp(api, {
+      onDocumentChanged: docChanged,
+      onRouteChanged: routeChanged,
+    });
+    await cdp.ensureAttached(4);
+    onEvent.fire({ tabId: 4 }, "Page.frameNavigated", {
+      frame: { id: "root", loaderId: "loader-1", url: "https://site.test/" },
+    });
+    expect(docChanged).toHaveBeenCalledExactlyOnceWith(4);
+    expect(routeChanged).not.toHaveBeenCalled();
+    docChanged.mockClear();
+
+    onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", {
+      frameId: "child",
+      url: "https://site.test/child#2",
+    });
+    expect(routeChanged).not.toHaveBeenCalled();
+
+    onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", {
+      frameId: "root",
+      url: "https://site.test/?q=shoes#top",
+    });
+    expect(routeChanged).toHaveBeenCalledExactlyOnceWith(4, "https://site.test/?q=shoes#top");
+    expect(docChanged).not.toHaveBeenCalled();
     cdp.dispose();
   });
 
@@ -2982,6 +3017,7 @@ describe("idle soft-detach and immediate close/return detach", () => {
     vi.useFakeTimers();
     const { api, onEvent } = fakeApi();
     let attachGeneration = 0;
+    let rootUrl = "https://host.test/";
     let childADocElemBackendNodeId = 201;
     let childBState: { present: boolean; loaderId: string; url: string } = {
       present: true,
@@ -3025,7 +3061,7 @@ describe("idle soft-detach and immediate close/return detach", () => {
         if (!target.sessionId) {
           return {
             frameTree: {
-              frame: { id: "root", loaderId: "root-loader-1", url: "https://host.test/" },
+              frame: { id: "root", loaderId: "root-loader-1", url: rootUrl },
               childFrames: [
                 { frame: { id: "child-a", parentId: "root", url: "https://oopif-a.test/pay" } },
                 ...(childBState.present
@@ -3082,7 +3118,7 @@ describe("idle soft-detach and immediate close/return detach", () => {
         return {
           root: {
             backendNodeId: 1,
-            documentURL: "https://host.test/",
+            documentURL: rootUrl,
             children: [{ nodeType: 1, backendNodeId: 101 }],
           },
         };
@@ -3095,11 +3131,13 @@ describe("idle soft-detach and immediate close/return detach", () => {
 
     const refs = new RefStore();
     const docChanged = vi.fn((tabId: number) => refs.invalidateTab(tabId));
+    const routeChanged = vi.fn();
     const childInvalidated = vi.fn((tabId: number, staleFrameIds: ReadonlySet<string>) => {
       refs.invalidateChildFrames(tabId, staleFrameIds);
     });
     const cdp = new ChromiumCdp(api, {
       onDocumentChanged: docChanged,
+      onRouteChanged: routeChanged,
       onChildFramesInvalidated: childInvalidated,
       idleDetachMs: DEFAULT_IDLE_DETACH_MS,
     });
@@ -3159,9 +3197,11 @@ describe("idle soft-detach and immediate close/return detach", () => {
       expect(childInvalidated).not.toHaveBeenCalled();
       expect(refs.revision).toBe(initialRevision);
 
-      // Soft-detach #2 -> `child-a` gets `s3-a` (unchanged), `child-b` navigates (`child-b-loader-2`).
+      // Soft-detach #2 -> root updates `?q=shoes` in-place, `child-a` gets `s3-a` (unchanged),
+      // `child-b` navigates (`child-b-loader-2`). Both `onRouteChanged` and child reconciliation run!
       await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
       expect(cdp.isAttached(53)).toBe(false);
+      rootUrl = "https://host.test/?q=shoes";
       childBState = {
         present: true,
         loaderId: "child-b-loader-2",
@@ -3177,6 +3217,7 @@ describe("idle soft-detach and immediate close/return detach", () => {
       expect((await resolveGen3).routedSessionId).toBe("s3-a");
 
       expect(docChanged).not.toHaveBeenCalled();
+      expect(routeChanged).toHaveBeenCalledExactlyOnceWith(53, "https://host.test/?q=shoes");
       expect(childInvalidated).toHaveBeenCalledExactlyOnceWith(53, new Set(["child-b"]));
       // Main ref `@e1` and unchanged OOPIF ref `@e2` remain valid; navigated OOPIF `@e3` is invalidated!
       expect(refs.resolve("e1", { tabId: 53 })).toBe(10);
@@ -3542,6 +3583,89 @@ describe("idle soft-detach and immediate close/return detach", () => {
           objectGroup: "bsk-test-group",
         },
       );
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("supports fast selector frame graphs: skips owners, skips idle quiet wait, and bounds child OOPIF tree timeouts", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    const { api, onEvent } = fakeApi();
+    let ownerCalls = 0;
+    let finishHung!: (value: object) => void;
+    let hungReads = 0;
+    vi.mocked(api.sendCommand).mockImplementation(async (target, method) => {
+      if (method === "DOM.getFrameOwner") {
+        ownerCalls += 1;
+        return { backendNodeId: 100 };
+      }
+      if (method === "Page.getFrameTree") {
+        if (target.sessionId === "hung-session") {
+          hungReads += 1;
+          if (hungReads === 1) {
+            return new Promise((resolve) => {
+              finishHung = resolve;
+            });
+          }
+          return { frameTree: { frame: { id: "hung-frame", loaderId: "hung-loader" } } };
+        }
+        return {
+          frameTree: {
+            frame: { id: "main", loaderId: "main-loader" },
+            childFrames: [
+              { frame: { id: "same-frame", parentId: "main", loaderId: "same-loader" } },
+              { frame: { id: "hung-frame", parentId: "main", loaderId: "hung-loader" } },
+            ],
+          },
+        };
+      }
+      return {};
+    });
+
+    const cdp = new ChromiumCdp(api);
+    try {
+      await cdp.ensureAttached(4);
+      onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", {
+        sessionId: "hung-session",
+        targetInfo: { type: "iframe", targetId: "hung-frame" },
+      });
+
+      // 1) First call enables discovery, waits for child OOPIF only up to childReadTimeoutMs (1500ms, not 10s),
+      //    omits hung-frame cleanly, and skips DOM.getFrameOwner when includeOwners is false.
+      const first = cdp.getFrameDocuments(4, undefined, {
+        includeOwners: false,
+        childReadTimeoutMs: 1_500,
+        skipQuietWaitWhenIdle: true,
+      });
+      await vi.advanceTimersByTimeAsync(1_600);
+      const g1 = await first;
+      expect(g1.frames.map((f) => f.frameId)).toEqual(["main", "same-frame"]);
+      expect(g1.unavailableFrames?.map((f) => f.frameId)).toEqual(["hung-frame"]);
+      expect(ownerCalls).toBe(0);
+      expect(hungReads).toBe(1);
+
+      // 2) Second idle call skips the 20ms quiet delay and rejects hung-session in 0ms via CdpReadGate.
+      const g2 = await cdp.getFrameDocuments(4, undefined, {
+        includeOwners: false,
+        childReadTimeoutMs: 1_500,
+        skipQuietWaitWhenIdle: true,
+      });
+      expect(g2.frames.map((f) => f.frameId)).toEqual(["main", "same-frame"]);
+      expect(ownerCalls).toBe(0);
+      expect(hungReads).toBe(1);
+
+      // 3) Once the late reply settles, the OOPIF recovers automatically.
+      finishHung({ frameTree: { frame: { id: "hung-frame", loaderId: "hung-loader" } } });
+      await vi.advanceTimersByTimeAsync(0);
+      const g3 = await cdp.getFrameDocuments(4, undefined, {
+        includeOwners: false,
+        childReadTimeoutMs: 1_500,
+        skipQuietWaitWhenIdle: true,
+      });
+      expect(g3.frames.map((f) => f.frameId)).toEqual(["main", "same-frame", "hung-frame"]);
+      expect(hungReads).toBe(2);
     } finally {
       cdp.dispose();
     }

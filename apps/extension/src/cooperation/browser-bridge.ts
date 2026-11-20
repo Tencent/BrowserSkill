@@ -1,4 +1,4 @@
-import { injectCooperationAllFrames } from "@/lib/runtime-content-scripts";
+import { executeScriptBounded, injectCooperationAllFrames } from "@/lib/runtime-content-scripts";
 import type { SessionManager } from "@/session-manager/manager";
 import { CooperationController } from "./controller";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
@@ -29,6 +29,7 @@ function validFrame(value: unknown): value is FrameState {
   const f = value as FrameState;
   return (
     typeof f.document === "string" &&
+    (f.url === undefined || typeof f.url === "string") &&
     Number.isSafeInteger(f.revision) &&
     Number.isSafeInteger(f.structure) &&
     Number.isSafeInteger(f.human) &&
@@ -61,75 +62,112 @@ function frameIdentity(frame: chrome.webNavigation.GetAllFrameResultDetails): Fr
   return { frame_id: frame.frameId, url };
 }
 
-async function readFrame(
+interface RunningFrameRead {
+  readonly frame: chrome.webNavigation.GetAllFrameResultDetails;
+  readonly promise: Promise<readonly [number, FrameState]>;
+  settled(): boolean;
+  fulfilled(): boolean;
+  cancelAsUnresponsive(): void;
+}
+
+function startFrameRead(
   tabId: number,
   frame: chrome.webNavigation.GetAllFrameResultDetails,
   message: { kind: string; lease: string; input?: InputExpectation },
   repairs: FrameRepairs,
-): Promise<FrameState> {
+  timeoutMs = FRAME_REPLY_TIMEOUT_MS,
+  signal?: AbortSignal,
+): RunningFrameRead {
   const { kind } = message;
+  const effectiveTimeoutMs = Math.max(1, timeoutMs);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active = true;
-  try {
-    const request = () => chrome.tabs.sendMessage(tabId, message, { documentId: frame.documentId });
-    const value = await Promise.race([
-      (async () => {
-        let first: unknown;
-        try {
-          first = await request();
-        } catch (error) {
-          if (!active || !missingReceiver(error)) throw error;
-          // Repair only a missing listener, never timeouts or navigation
-          // failures. Cleanup must not install a new collector after release.
-          if (kind === COOPERATION_DISABLE)
-            throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
-          let repair = repairs.get(frame.documentId);
-          if (!repair) {
-            repair = chrome.scripting
-              .executeScript({
-                target: { tabId, documentIds: [frame.documentId] },
-                files: ["content-scripts/cooperation.js"],
-                injectImmediately: true,
-              })
-              .then(() => {});
-            repairs.set(frame.documentId, repair);
-          }
-          try {
-            await repair;
-          } catch {
-            throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
-          }
-          if (!active) return undefined;
+  let isSettled = false;
+  let isFulfilled = false;
+  let rejectUnresponsive: ((reason: unknown) => void) | undefined;
+  let onAbort: (() => void) | undefined;
+  const promise = (async (): Promise<readonly [number, FrameState]> => {
+    try {
+      signal?.throwIfAborted();
+      const request = () =>
+        chrome.tabs.sendMessage(tabId, message, { documentId: frame.documentId });
+      const value = await Promise.race([
+        (async () => {
+          let first: unknown;
           try {
             first = await request();
           } catch (error) {
-            if (!missingReceiver(error)) throw error;
-            throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
+            if (!active || !missingReceiver(error)) throw error;
+            // Repair only a missing listener, never timeouts or navigation
+            // failures. Cleanup must not install a new collector after release.
+            if (kind === COOPERATION_DISABLE)
+              throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
+            let repair = repairs.get(frame.documentId);
+            if (!repair) {
+              repair = chrome.scripting
+                .executeScript({
+                  target: { tabId, documentIds: [frame.documentId] },
+                  files: ["content-scripts/cooperation.js"],
+                  injectImmediately: true,
+                })
+                .then(() => {});
+              repairs.set(frame.documentId, repair);
+            }
+            try {
+              await repair;
+            } catch {
+              throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
+            }
+            if (!active) return undefined;
+            try {
+              first = await request();
+            } catch (error) {
+              if (!missingReceiver(error)) throw error;
+              throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
+            }
           }
-        }
-        if (first !== undefined || ![COOPERATION_READ, COOPERATION_ARM].includes(kind))
-          return first;
-        // A renderer can transiently return an empty reply. Retry only this
-        // state read, on the same document and lease, within the same deadline.
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        return active ? request() : undefined;
-      })(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new FrameUnresponsiveError([frameIdentity(frame)])),
-          FRAME_REPLY_TIMEOUT_MS,
+          if (first !== undefined || ![COOPERATION_READ, COOPERATION_ARM].includes(kind))
+            return first;
+          // A renderer can transiently return an empty reply. Retry only this
+          // state read, on the same document and lease, within the same deadline.
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          return active ? request() : undefined;
+        })(),
+        new Promise<never>((_, reject) => {
+          rejectUnresponsive = reject;
+          timer = setTimeout(
+            () => reject(new FrameUnresponsiveError([frameIdentity(frame)])),
+            effectiveTimeoutMs,
+          );
+          if (signal) {
+            onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+            if (signal.aborted) onAbort();
+            else signal.addEventListener("abort", onAbort, { once: true });
+          }
+        }),
+      ]);
+      if (!validFrame(value))
+        throw new Error(
+          `Interaction collection is unavailable in frame ${frame.frameId} (${value === undefined ? "no reply" : "invalid state"})`,
         );
-      }),
-    ]);
-    if (!validFrame(value))
-      throw new Error(
-        `Interaction collection is unavailable in frame ${frame.frameId} (${value === undefined ? "no reply" : "invalid state"})`,
-      );
-    return value;
-  } finally {
-    active = false;
-    clearTimeout(timer);
-  }
+      isFulfilled = true;
+      return [frame.frameId, value] as const;
+    } finally {
+      isSettled = true;
+      active = false;
+      clearTimeout(timer);
+      if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+    }
+  })();
+  return {
+    frame,
+    promise,
+    settled: () => isSettled,
+    fulfilled: () => isFulfilled,
+    cancelAsUnresponsive: () => {
+      rejectUnresponsive?.(new FrameUnresponsiveError([frameIdentity(frame)]));
+    },
+  };
 }
 
 export async function collectCooperationFrames(
@@ -140,7 +178,11 @@ export async function collectCooperationFrames(
   repairs: FrameRepairs = new Map(),
   hidden: HiddenFrames = new Set(),
   replacementPass = false,
+  replyTimeoutMs = FRAME_REPLY_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<CooperationFrames> {
+  signal?.throwIfAborted();
+  const startedAt = Date.now();
   const frames = await chrome.webNavigation.getAllFrames({ tabId });
   const documents = new Set(frames?.map((frame) => frame.documentId));
   for (const documentId of repairs.keys())
@@ -172,42 +214,140 @@ export async function collectCooperationFrames(
     : new Set<number>();
   for (const frame of remembered) if (!skipped.has(frame.frameId)) hidden.delete(frame.documentId);
   const targets = live.filter((frame) => !skipped.has(frame.frameId));
-  const results = await Promise.allSettled(
-    targets.map(async (frame) => {
-      return [
-        frame.frameId,
-        await readFrame(tabId, frame, { kind, input, lease }, repairs),
-      ] as const;
-    }),
+  const reads = targets.map((frame) =>
+    startFrameRead(tabId, frame, { kind, input, lease }, repairs, replyTimeoutMs, signal),
   );
+  const earlyConcealed = new Set<number>();
+  let earlyProbeTimer: ReturnType<typeof setTimeout> | undefined;
+  if (replyTimeoutMs > FRAME_REPLY_TIMEOUT_MS && kind !== COOPERATION_DISABLE && reads.length > 1) {
+    let windowElapsed = false;
+    let probing = false;
+    let recheckNeeded = false;
+    const readById = new Map(reads.map((read) => [read.frame.frameId, read]));
+    const maybeRetireHiddenPending = () => {
+      if (!windowElapsed || signal?.aborted) return;
+      if (probing) {
+        recheckNeeded = true;
+        return;
+      }
+      const pending = reads.filter((read) => !read.settled());
+      if (!pending.length || pending.some((read) => read.frame.frameId === 0)) return;
+      const pendingIds = new Set(pending.map((read) => read.frame.frameId));
+      const candidates = pending.filter((read) => {
+        const parentId = read.frame.parentFrameId;
+        if (skipped.has(parentId) || earlyConcealed.has(parentId)) return true;
+        if (pendingIds.has(parentId)) return true;
+        const parentRead = readById.get(parentId);
+        return parentRead ? parentRead.fulfilled() : false;
+      });
+      if (!candidates.length) return;
+      probing = true;
+      void provenHiddenFrames(
+        tabId,
+        frames,
+        candidates.map((read) => read.frame),
+        new Set([...skipped, ...earlyConcealed]),
+      )
+        .then((proven) => {
+          for (const read of candidates) {
+            if (!read.settled() && proven.has(read.frame.frameId)) {
+              earlyConcealed.add(read.frame.frameId);
+              read.cancelAsUnresponsive();
+            }
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          probing = false;
+          if (recheckNeeded) {
+            recheckNeeded = false;
+            maybeRetireHiddenPending();
+          }
+        });
+    };
+    earlyProbeTimer = setTimeout(() => {
+      windowElapsed = true;
+      maybeRetireHiddenPending();
+    }, FRAME_REPLY_TIMEOUT_MS);
+    for (const read of reads) {
+      void read.promise.then(maybeRetireHiddenPending, maybeRetireHiddenPending);
+    }
+  }
+  let results: PromiseSettledResult<readonly [number, FrameState]>[];
+  try {
+    results = await Promise.allSettled(reads.map((read) => read.promise));
+  } finally {
+    clearTimeout(earlyProbeTimer);
+  }
+  signal?.throwIfAborted();
   const failed = targets.filter((_frame, i) => results[i].status === "rejected");
-  if (failed.length && !replacementPass && kind !== COOPERATION_DISABLE) {
-    // A document-addressed message can race a child navigation after inventory.
-    // Recollect once only when every failed document is provably retired. Never
-    // hide an active unobservable document, a root replacement or further churn.
+  if (
+    failed.length &&
+    !replacementPass &&
+    kind !== COOPERATION_DISABLE &&
+    !failed.some((old) => old.frameId === 0)
+  ) {
+    // A document-addressed message can race a child navigation after inventory,
+    // including on pages that also carry a hidden unobservable subframe.
+    // Recollect once only when every failed child document is either provably
+    // retired or provably hidden in the current inventory.
     const current = await chrome.webNavigation.getAllFrames({ tabId });
     if (
-      current?.find((frame) => frame.frameId === 0)?.documentId ===
-        frames.find((frame) => frame.frameId === 0)?.documentId &&
-      failed.every(
-        (old) =>
-          old.frameId !== 0 &&
-          !current?.some(
-            (frame) =>
-              frame.documentId === old.documentId &&
-              !frame.errorOccurred &&
-              (!frame.documentLifecycle || frame.documentLifecycle === "active"),
-          ),
-      )
-    )
-      return collectCooperationFrames(tabId, kind, lease, input, repairs, hidden, true);
+      current &&
+      current.find((frame) => frame.frameId === 0)?.documentId ===
+        frames.find((frame) => frame.frameId === 0)?.documentId
+    ) {
+      const stillActive = failed.filter((old) =>
+        current.some(
+          (frame) =>
+            frame.documentId === old.documentId &&
+            !frame.errorOccurred &&
+            (!frame.documentLifecycle || frame.documentLifecycle === "active"),
+        ),
+      );
+      if (stillActive.length < failed.length) {
+        const concealedActive = stillActive.length
+          ? await provenHiddenFrames(tabId, current, stillActive, skipped)
+          : new Set<number>();
+        if (stillActive.every((old) => concealedActive.has(old.frameId))) {
+          for (const old of stillActive) hidden.add(old.documentId);
+          const remainingMs = Math.max(
+            FRAME_REPLY_TIMEOUT_MS,
+            replyTimeoutMs - (Date.now() - startedAt),
+          );
+          return collectCooperationFrames(
+            tabId,
+            kind,
+            lease,
+            input,
+            repairs,
+            hidden,
+            true,
+            remainingMs,
+            signal,
+          );
+        }
+      }
+    }
   }
   // People cannot point at or type into a hidden child document, so only such a
   // document may stay uncollected. A failed main page or displayed frame still fails.
-  const concealed =
-    failed.length && kind !== COOPERATION_DISABLE && !failed.some((frame) => frame.frameId === 0)
-      ? await provenHiddenFrames(tabId, frames, failed, skipped)
-      : new Set<number>();
+  const concealed = new Set<number>(earlyConcealed);
+  const unconfirmedFailed = failed.filter((frame) => !earlyConcealed.has(frame.frameId));
+  if (
+    unconfirmedFailed.length &&
+    kind !== COOPERATION_DISABLE &&
+    !failed.some((frame) => frame.frameId === 0)
+  ) {
+    for (const id of await provenHiddenFrames(
+      tabId,
+      frames,
+      unconfirmedFailed,
+      new Set([...skipped, ...earlyConcealed]),
+    )) {
+      concealed.add(id);
+    }
+  }
   for (const frame of live)
     if (skipped.has(frame.frameId) || concealed.has(frame.frameId)) {
       hidden.add(frame.documentId);
@@ -234,6 +374,21 @@ export async function collectCooperationFrames(
   };
 }
 
+const ARM_FRAME_TIMEOUT = Symbol("arm_frame_timeout");
+
+function sendArmFrameBounded(
+  tabId: number,
+  target: { documentId: string } | { frameId: number },
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    chrome.tabs.sendMessage(tabId, { kind: COOPERATION_ARM_FRAME }, target),
+    new Promise<typeof ARM_FRAME_TIMEOUT>((resolve) => {
+      timer = setTimeout(() => resolve(ARM_FRAME_TIMEOUT), FRAME_REPLY_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 export function attachCooperation(
   sessions: SessionManager,
   changed: (tabId: number) => void,
@@ -246,7 +401,7 @@ export function attachCooperation(
     sessions,
     changed,
     sessionActivity,
-    readFrames: (tabId, input, lease, repairs, hidden) =>
+    readFrames: (tabId, input, lease, repairs, hidden, replyTimeoutMs, signal) =>
       collectCooperationFrames(
         tabId,
         input ? COOPERATION_ARM : COOPERATION_READ,
@@ -254,15 +409,29 @@ export function attachCooperation(
         input,
         repairs,
         hidden,
+        false,
+        replyTimeoutMs,
+        signal,
       ),
-    resumeFrames: async (tabId, lease, repairs, hidden) => {
-      await collectCooperationFrames(tabId, COOPERATION_RESUME, lease, undefined, repairs, hidden);
+    resumeFrames: async (tabId, lease, repairs, hidden, replyTimeoutMs, signal) => {
+      await collectCooperationFrames(
+        tabId,
+        COOPERATION_RESUME,
+        lease,
+        undefined,
+        repairs,
+        hidden,
+        false,
+        replyTimeoutMs,
+        signal,
+      );
     },
     releaseFrames: async (tabId, lease) => {
       await collectCooperationFrames(tabId, COOPERATION_DISABLE, lease);
     },
   });
   const subframeNeedsInject = new Set<number>();
+  const pendingArms = new Map<number, Set<Promise<void>>>();
   const observeTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const clearObserveTimer = (tabId: number) => {
     const existing = observeTimers.get(tabId);
@@ -281,6 +450,11 @@ export function attachCooperation(
         const shouldInject = subframeNeedsInject.delete(tabId);
         if (!sessions.findControllingSession?.(tabId)) return;
         void (async () => {
+          const arms = pendingArms.get(tabId);
+          if (arms?.size) {
+            await Promise.allSettled([...arms]);
+            if (!sessions.findControllingSession?.(tabId)) return;
+          }
           if (shouldInject) {
             await injectCooperationAllFrames(tabId);
             if (!sessions.findControllingSession?.(tabId)) return;
@@ -297,38 +471,32 @@ export function attachCooperation(
     const target = details.documentId
       ? { documentId: details.documentId }
       : { frameId: details.frameId };
-    void (async () => {
+    let arms = pendingArms.get(details.tabId);
+    if (!arms) {
+      arms = new Set();
+      pendingArms.set(details.tabId, arms);
+    }
+    const armTask = (async () => {
       try {
-        const ack = await chrome.tabs.sendMessage(
-          details.tabId,
-          { kind: COOPERATION_ARM_FRAME },
-          target,
-        );
-        if (
-          ack === undefined &&
-          details.documentId &&
-          typeof chrome.scripting?.executeScript === "function"
-        ) {
-          await chrome.scripting.executeScript({
-            target: { tabId: details.tabId, documentIds: [details.documentId] },
-            files: ["content-scripts/cooperation.js"],
-            injectImmediately: true,
-          });
-          await chrome.tabs.sendMessage(details.tabId, { kind: COOPERATION_ARM_FRAME }, target);
+        let needsInject = false;
+        try {
+          const ack = await sendArmFrameBounded(details.tabId, target);
+          needsInject = ack === undefined;
+        } catch (error) {
+          needsInject = missingReceiver(error);
         }
-      } catch (error) {
         if (
-          missingReceiver(error) &&
+          needsInject &&
           details.documentId &&
           typeof chrome.scripting?.executeScript === "function"
         ) {
           try {
-            await chrome.scripting.executeScript({
+            const injected = await executeScriptBounded({
               target: { tabId: details.tabId, documentIds: [details.documentId] },
               files: ["content-scripts/cooperation.js"],
               injectImmediately: true,
             });
-            await chrome.tabs.sendMessage(details.tabId, { kind: COOPERATION_ARM_FRAME }, target);
+            if (injected) await sendArmFrameBounded(details.tabId, target);
           } catch {
             // Restricted or replaced documents are handled during frame collection.
           }
@@ -342,6 +510,12 @@ export function attachCooperation(
         }
       }
     })();
+    arms.add(armTask);
+    void armTask.finally(() => {
+      const tracked = pendingArms.get(details.tabId);
+      tracked?.delete(armTask);
+      if (tracked?.size === 0) pendingArms.delete(details.tabId);
+    });
     scheduleObserveTab(details.tabId);
   };
 
@@ -378,11 +552,13 @@ export function attachCooperation(
   chrome.tabs.onRemoved.addListener((tabId) => {
     clearObserveTimer(tabId);
     subframeNeedsInject.delete(tabId);
+    pendingArms.delete(tabId);
     controller.releaseTab(tabId);
   });
   chrome.tabs.onDetached.addListener((tabId) => {
     clearObserveTimer(tabId);
     subframeNeedsInject.delete(tabId);
+    pendingArms.delete(tabId);
     controller.detachTab(tabId);
   });
   return controller;

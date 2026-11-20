@@ -13,9 +13,13 @@ import type { InputExpectation } from "./types";
 
 interface ActionGuard {
   onInputClockError?: (error: NativeInputClockError) => void;
-  prepare?: (input?: InputExpectation, method?: string) => Promise<void>;
+  prepare?: (
+    input?: InputExpectation,
+    method?: string,
+    params?: Record<string, unknown>,
+  ) => Promise<void>;
   finishInput?: (input: InputExpectation) => Promise<void>;
-  dispatch?: (startsInput: boolean, method: string) => void;
+  dispatch?: (startsInput: boolean, method: string, params?: Record<string, unknown>) => void;
   verifyPointerTarget?: CdpRunner["verifyPointerTarget"];
   beginDomMutation?: CdpRunner["beginDomMutation"];
   detach?: CdpRunner["detach"];
@@ -157,6 +161,7 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
         dispatch?.(
           !!input || method === "Input.insertText" || method === "DOM.setFileInputFiles" || drag,
           method,
+          p,
         );
       if (!attachments.has(tabId)) attachments.set(tabId, cdp.getAttachmentId(tabId));
       guard?.onDispatch?.();
@@ -183,7 +188,7 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
         params = { ...params, timestamp: timing?.nativeTimestamp ?? input.timestamp / 1000 };
       }
       // Geometry must be sampled after a browsing gesture has settled, too.
-      if ((effect && !release) || method === "DOM.getBoxModel") await prepare?.(input, method);
+      if ((effect && !release) || method === "DOM.getBoxModel") await prepare?.(input, method, p);
       return await sendNative();
     } catch (error) {
       if (error instanceof NativeInputClockError) {

@@ -1,5 +1,8 @@
+import type { FrameDocumentGraphOptions } from "./frame-handles";
+
 export {
   type FrameDocumentGraph,
+  type FrameDocumentGraphOptions,
   type FrameDocumentHandle,
   type FrameDocumentInfo,
   type FrameNodeHandle,
@@ -33,6 +36,8 @@ export interface CdpFrameGraph {
   /** Unavailable subtrees are excluded from routing, but remain visible as gaps. */
   unavailableFrames?: CdpFrame[];
 }
+
+export type CdpFrameGraphOptions = FrameDocumentGraphOptions;
 
 export function omitFrameSubtrees(
   graph: CdpFrameGraph,
