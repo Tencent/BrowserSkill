@@ -756,6 +756,61 @@ fn protocol<T: DeserializeOwned + Serialize>(
     step::typed::<T>(&Value::Object(object)).map_err(|err| invalid(format!("{err:#}")))
 }
 
+/// The protocol's shared evidence fields ([`ActionMetadata`]) as `(protocol field, MCP
+/// argument)`. Tools take them as top-level arguments and send them in the caller context.
+const EVIDENCE_FIELDS: [(&str, &str); 4] = [
+    ("context_id", "context"),
+    ("observation_id", "observation"),
+    ("depends_on", "depends_on"),
+    ("expect", "expect"),
+];
+
+/// Where each protocol method that accepts full action evidence is reached over MCP, and
+/// the evidence arguments that tool leaves out on purpose. A method or field added to the
+/// protocol fails `evidence_arguments_follow_the_protocol` until it is listed here.
+#[cfg(test)]
+const EVIDENCE_SURFACES: &[(Method, &str, &[&str])] = &[
+    (Method::ToolNavigate, "bsk_page", &[]),
+    (Method::ToolNavigateBack, "bsk_page", &[]),
+    (Method::ToolNavigateForward, "bsk_page", &[]),
+    (Method::ToolReload, "bsk_page", &[]),
+    (Method::ToolClick, "bsk_interact", &[]),
+    (Method::ToolHover, "bsk_interact", &[]),
+    (Method::ToolDrag, "bsk_interact", &[]),
+    (Method::ToolWheel, "bsk_interact", &[]),
+    (Method::ToolScrollTo, "bsk_interact", &[]),
+    (Method::ToolFocus, "bsk_interact", &[]),
+    (Method::ToolBlur, "bsk_interact", &[]),
+    (Method::ToolFill, "bsk_interact", &[]),
+    (Method::ToolPress, "bsk_interact", &[]),
+    (Method::ToolSelect, "bsk_interact", &[]),
+    (Method::ToolUpload, "bsk_interact", &[]),
+    (Method::ToolDownload, "bsk_interact", &[]),
+    (Method::ToolEvaluate, "bsk_interact", &[]),
+    (Method::ToolTabClose, "bsk_tabs", &[]),
+    (Method::ToolWindowResize, "bsk_assist", &[]),
+    (Method::ToolEmulate, "bsk_assist", &[]),
+    (Method::ToolDebug, "bsk_debug", &[]),
+    // Inspection stays a passive read: it binds to a tab with context and never
+    // consumes an observation or checks facts, also for hover probes and full pages.
+    (
+        Method::ToolObserve,
+        "bsk_inspect",
+        &["observation", "depends_on", "expect"],
+    ),
+    (
+        Method::ToolScreenshotFullPage,
+        "bsk_inspect",
+        &["observation", "depends_on", "expect"],
+    ),
+];
+
+/// Top-level arguments that never belong to the protocol params of an action.
+fn caller_args(scope: &'static str) -> [&'static str; 5] {
+    let [context, observation, depends_on, expect] = EVIDENCE_FIELDS.map(|(_, arg)| arg);
+    [scope, context, observation, depends_on, expect]
+}
+
 /// Build a request-scoped [`ClientContext`] after checking pre-dispatch evidence invariants.
 fn build_ctx(
     conn_scope: Option<&str>,
@@ -1459,6 +1514,12 @@ struct PageArgs {
     context: Option<String>,
     /// observation_id from the latest sync, when the action requires it.
     observation: Option<String>,
+    /// navigate, back, forward, reload: literal facts checked immediately before the action,
+    /// at most 16. Example: [{"target":"@e3","field":"text","equals":"Save"}].
+    expect: Option<Vec<ActionExpectation>>,
+    /// navigate, back, forward, reload, strict policy only: observed refs or selectors
+    /// covering the decision regions.
+    depends_on: Option<Vec<String>>,
 }
 
 async fn page(
@@ -1468,7 +1529,8 @@ async fn page(
     args: PageArgs,
     arguments: &Value,
 ) -> Result<Reply, CliError> {
-    if matches!(args.action, PageAction::WaitMs) {
+    let action = args.action;
+    if matches!(action, PageAction::WaitMs) {
         only(arguments, "wait_ms", &["duration_ms", "scope"])?;
         let duration_ms = args
             .duration_ms
@@ -1480,11 +1542,31 @@ async fn page(
         let value = link.rpc(&ctx, Method::ToolWaitMs, params, timeout).await?;
         return Ok(Reply::json(value));
     }
+    let (ctx, method, params) = page_prepare(conn_scope, args, arguments)?;
+    let link = connect(daemon, control).await?;
+    let timeout = timeout_of(&params, 30_000);
+    let value = link.rpc(&ctx, method, params, timeout).await?;
+    let is_error = matches!(
+        action,
+        PageAction::Navigate | PageAction::Back | PageAction::Forward | PageAction::Reload
+    ) && value["reached"] == "timeout";
+    Ok(Reply {
+        is_error,
+        ..Reply::json(value)
+    })
+}
+
+/// Validate a page action other than wait_ms completely before connecting to the daemon.
+fn page_prepare(
+    conn_scope: Option<&str>,
+    args: PageArgs,
+    arguments: &Value,
+) -> Result<(ClientContext, Method, Value), CliError> {
     if let Some(ms) = args.timeout_ms {
         orchestration::validate_positive_timeout_ms(u64::from(ms)).map_err(invalid)?;
     }
     let session = args.session.as_deref().unwrap_or("");
-    let meta = ["scope", "context", "observation"];
+    let meta = caller_args("scope");
     let load = ("wait_until", json!("load"));
     let (method, params) = match args.action {
         PageAction::Navigate => (
@@ -1549,21 +1631,11 @@ async fn page(
         args.scope.as_deref(),
         args.context,
         args.observation,
-        None,
-        None,
+        args.expect,
+        args.depends_on,
     )?;
     ctx.validate_action_metadata(&method, Some(&params))?;
-    let link = connect(daemon, control).await?;
-    let timeout = timeout_of(&params, 30_000);
-    let value = link.rpc(&ctx, method, params, timeout).await?;
-    let is_error = matches!(
-        args.action,
-        PageAction::Navigate | PageAction::Back | PageAction::Forward | PageAction::Reload
-    ) && value["reached"] == "timeout";
-    Ok(Reply {
-        is_error,
-        ..Reply::json(value)
-    })
+    Ok((ctx, method, params))
 }
 
 // ---------------------------------------------------------------------------
@@ -2865,6 +2937,10 @@ struct TabsArgs {
     context: Option<String>,
     /// close: observation_id from the latest sync, when the action requires it.
     observation: Option<String>,
+    /// close: literal facts checked immediately before the action, at most 16.
+    expect: Option<Vec<ActionExpectation>>,
+    /// close, strict policy only: observed refs or selectors covering the decision regions.
+    depends_on: Option<Vec<String>>,
 }
 
 async fn tabs(
@@ -2874,7 +2950,7 @@ async fn tabs(
     args: TabsArgs,
     arguments: &Value,
 ) -> Result<Reply, CliError> {
-    let meta = ["caller_scope", "context", "observation"];
+    let meta = caller_args("caller_scope");
     let session = args.session.as_deref().unwrap_or("");
     let mut timeout = TOOL_IPC_TIMEOUT;
     let (method, params) = match args.action {
@@ -2918,8 +2994,8 @@ async fn tabs(
         args.caller_scope.as_deref(),
         args.context,
         args.observation,
-        None,
-        None,
+        args.expect,
+        args.depends_on,
     )?;
     ctx.validate_action_metadata(&method, Some(&params))?;
     let link = connect(daemon, control).await?;
@@ -2977,6 +3053,11 @@ struct AssistArgs {
     /// resize, emulate: context and observation explicitly returned by the latest sync.
     context: Option<String>,
     observation: Option<String>,
+    /// resize, emulate: literal facts checked immediately before the action, at most 16.
+    expect: Option<Vec<ActionExpectation>>,
+    /// resize, emulate, strict policy only: observed refs or selectors covering the decision
+    /// regions.
+    depends_on: Option<Vec<String>>,
     /// request_help, dialog_status: task tab; defaults to the session's current task tab.
     tab_id: Option<i64>,
     /// request_help: what the user should do, for example sign in or solve a CAPTCHA.
@@ -3016,8 +3097,8 @@ async fn assist(
         args.scope.as_deref(),
         args.context.clone(),
         args.observation.clone(),
-        None,
-        None,
+        args.expect.clone(),
+        args.depends_on.clone(),
     )?;
     let (method, params, timeout) = match args.action {
         AssistAction::Resize => {
@@ -3031,6 +3112,8 @@ async fn assist(
                     "height",
                     "context",
                     "observation",
+                    "expect",
+                    "depends_on",
                 ],
             )?;
             let width = args.width.ok_or_else(|| invalid("width is required"))?;
@@ -3066,6 +3149,8 @@ async fn assist(
                     "off",
                     "context",
                     "observation",
+                    "expect",
+                    "depends_on",
                 ],
             )?;
             for size in [args.width, args.height].into_iter().flatten() {
@@ -4221,6 +4306,190 @@ mod tests {
             assert!(input_schema.get("$schema").is_none());
             assert!(input_schema.get("title").is_none());
         }
+    }
+
+    fn schema_fields<T: JsonSchema>() -> Vec<String> {
+        let mut fields: Vec<String> = input_schema::<T>()["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        fields.sort();
+        fields
+    }
+
+    #[test]
+    fn evidence_arguments_follow_the_protocol() {
+        let sorted = |mut names: Vec<String>| {
+            names.sort();
+            names
+        };
+        assert_eq!(
+            schema_fields::<bsk_protocol::tools::ActionMetadata>(),
+            sorted(
+                EVIDENCE_FIELDS
+                    .iter()
+                    .map(|(field, _)| (*field).to_owned())
+                    .collect()
+            ),
+            "EVIDENCE_FIELDS must name every shared evidence field of the protocol"
+        );
+        let wire = |methods: Vec<&Method>| {
+            sorted(methods.iter().map(|m| m.wire_name().to_owned()).collect())
+        };
+        assert_eq!(
+            wire(
+                Method::ALL
+                    .iter()
+                    .filter(|method| method.accepts_action_metadata())
+                    .collect()
+            ),
+            wire(
+                EVIDENCE_SURFACES
+                    .iter()
+                    .map(|(method, ..)| method)
+                    .collect()
+            ),
+            "every method that accepts full action evidence needs one row in EVIDENCE_SURFACES"
+        );
+        let definitions = definitions();
+        for (method, tool, omitted) in EVIDENCE_SURFACES {
+            let properties = &definitions.iter().find(|def| def["name"] == *tool).unwrap()["inputSchema"]
+                ["properties"];
+            for (_, arg) in EVIDENCE_FIELDS {
+                assert_eq!(
+                    properties.get(arg).is_some(),
+                    !omitted.contains(&arg),
+                    "{tool} and {arg} for {}",
+                    method.wire_name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn page_navigation_sends_expect_and_depends_on_on_the_wire() {
+        let expect = json!([{"target": "h1", "field": "text", "equals": "Example Domain"}]);
+        let input = json!({
+            "action": "navigate", "session": "s1", "url": "https://example.com",
+            "context": "ctx-1", "expect": expect, "depends_on": ["h1"],
+        });
+        let (ctx, method, params) = page_prepare(None, parse(&input).unwrap(), &input).unwrap();
+        assert_eq!(method, Method::ToolNavigate);
+        let wire = ctx.prepare_params(&method, Some(params)).unwrap().unwrap();
+        assert_eq!(wire["context_id"], "ctx-1");
+        assert_eq!(wire["expect"], expect);
+        assert_eq!(wire["depends_on"], json!(["h1"]));
+        // The merged request is exactly the protocol type, as the CLI sends it.
+        let typed: NavigateParams = serde_json::from_value(wire).unwrap();
+        assert_eq!(typed.url, "https://example.com");
+        assert_eq!(typed.expect.map(|conditions| conditions.len()), Some(1));
+
+        for action in ["back", "forward", "reload"] {
+            let input = json!({"action": action, "session": "s1", "expect": expect});
+            let (ctx, method, params) = page_prepare(None, parse(&input).unwrap(), &input).unwrap();
+            let wire = ctx.prepare_params(&method, Some(params)).unwrap().unwrap();
+            assert_eq!(wire["expect"], expect, "{action}");
+        }
+
+        // A wait is not a guarded action: the evidence is refused, never dropped.
+        let wait = json!({
+            "action": "wait_for_element", "session": "s1", "selector": "h1", "expect": expect,
+        });
+        let error = page_prepare(None, parse(&wait).unwrap(), &wait)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("do not apply to tool.wait_for_element"),
+            "{error}"
+        );
+        let unknown = json!({
+            "action": "navigate", "url": "https://example.com",
+            "expect": [{"target": "h1", "field": "color", "equals": "red"}],
+        });
+        assert!(parse::<PageArgs>(&unknown).is_err());
+    }
+
+    #[test]
+    fn interact_params_description_names_the_protocol_fields() {
+        use bsk_protocol::tools::{
+            ClickParams, DragParams, FillParams, HoverParams, PressParams, ScrollToParams,
+            SelectParams, WheelParams,
+        };
+        // Shared by every action, or taken as top-level arguments.
+        const COMMON: &[&str] = &[
+            "session_id",
+            "tab_id",
+            "ref",
+            "selector",
+            "timeout_ms",
+            "context_id",
+            "observation_id",
+            "depends_on",
+            "expect",
+        ];
+        // Protocol fields the description leaves out on purpose, to keep the tool short.
+        // A new protocol field fails this test until it is described or listed here.
+        const UNDESCRIBED: &[&str] = &[
+            "click.capture_id",
+            "click.image_x",
+            "click.image_y",
+            "hover.settle_ms",
+            "drag.duration_ms",
+            "evaluate.await_promise",
+            "evaluate.return_by_value",
+            "download.browser_relative_dir",
+            "download.max_byte_size",
+        ];
+        let schema = input_schema::<InteractArgs>();
+        let description = schema["properties"]["params"]["description"]
+            .as_str()
+            .unwrap();
+        let described = |field: &str| {
+            description
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|word| word == field)
+        };
+        let mut listed = 0;
+        for (action, fields) in [
+            ("click", schema_fields::<ClickParams>()),
+            ("press", schema_fields::<PressParams>()),
+            ("fill", schema_fields::<FillParams>()),
+            ("hover", schema_fields::<HoverParams>()),
+            ("select", schema_fields::<SelectParams>()),
+            ("drag", schema_fields::<DragParams>()),
+            ("scroll_to", schema_fields::<ScrollToParams>()),
+            ("wheel", schema_fields::<WheelParams>()),
+            ("focus", schema_fields::<FocusParams>()),
+            ("blur", schema_fields::<BlurParams>()),
+            ("evaluate", schema_fields::<EvaluateParams>()),
+            ("upload", schema_fields::<UploadParams>()),
+            ("download", schema_fields::<DownloadParams>()),
+        ] {
+            for field in fields.iter().filter(|f| !COMMON.contains(&f.as_str())) {
+                let key = format!("{action}.{field}");
+                if UNDESCRIBED.contains(&key.as_str()) {
+                    listed += 1;
+                    assert!(
+                        !described(field),
+                        "{key} is described; drop it from UNDESCRIBED"
+                    );
+                } else {
+                    assert!(
+                        described(field),
+                        "bsk_interact.params does not describe {key}: describe it or list it in UNDESCRIBED"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            listed,
+            UNDESCRIBED.len(),
+            "UNDESCRIBED names a field the protocol lacks"
+        );
     }
 
     #[test]

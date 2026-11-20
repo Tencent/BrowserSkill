@@ -712,6 +712,141 @@ async fn start_real_daemon(home: &std::path::Path) -> (Child, DaemonInfo) {
     (daemon, info)
 }
 
+/// Navigation and interaction take the same pre-dispatch evidence over the CLI and over
+/// real stdio MCP. No daemon runs here: a call that passes validation fails later, at the
+/// daemon connection, and a refused call fails with `invalid_params` before that.
+#[tokio::test]
+async fn mcp_and_cli_accept_the_same_action_evidence() {
+    let home = tempfile::tempdir().unwrap();
+    let mut mcp = McpClient::spawn(home.path()).await;
+
+    let listed = mcp.rpc("tools/list", json!({})).await;
+    let properties = |tool: &str| {
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|def| def["name"] == tool)
+            .unwrap_or_else(|| panic!("{tool} is not listed"))["inputSchema"]["properties"]
+            .clone()
+    };
+    for tool in ["bsk_page", "bsk_interact"] {
+        for argument in ["context", "observation", "expect", "depends_on"] {
+            assert!(
+                properties(tool)[argument].is_object(),
+                "{tool} does not list {argument}"
+            );
+        }
+    }
+    // The domain tool stays a short entry point, not a copy of every protocol type.
+    assert_eq!(properties("bsk_interact")["params"]["type"], "object");
+
+    let expect = json!([{"target": "h1", "field": "text", "equals": "Example Domain"}]);
+    let expect_arg = expect.to_string();
+    let bad_expect = json!([{"target": "h1", "field": "color", "equals": "red"}]);
+    let bad_expect_arg = bad_expect.to_string();
+
+    let accepted = [
+        (
+            "bsk_page",
+            json!({"action": "navigate", "url": "https://example.com", "expect": expect}),
+            vec![
+                "navigate",
+                "https://example.com",
+                "--expect",
+                expect_arg.as_str(),
+            ],
+        ),
+        (
+            "bsk_interact",
+            json!({
+                "action": "click",
+                "params": {"ref": "@e1", "click_count": 2},
+                "expect": expect,
+            }),
+            vec![
+                "click",
+                "@e1",
+                "--click-count",
+                "2",
+                "--expect",
+                expect_arg.as_str(),
+            ],
+        ),
+        (
+            "bsk_tabs",
+            json!({"action": "close", "tab_id": 3, "expect": expect}),
+            vec!["tab", "close", "3", "--expect", expect_arg.as_str()],
+        ),
+    ];
+    let refused = [
+        (
+            "bsk_page",
+            json!({"action": "navigate", "url": "https://example.com", "expect": bad_expect}),
+            vec![
+                "navigate",
+                "https://example.com",
+                "--expect",
+                bad_expect_arg.as_str(),
+            ],
+        ),
+        (
+            "bsk_page",
+            json!({"action": "wait_for_element", "selector": "h1", "expect": expect}),
+            vec![
+                "wait-for-element",
+                "--selector",
+                "h1",
+                "--expect",
+                expect_arg.as_str(),
+            ],
+        ),
+        (
+            "bsk_interact",
+            json!({"action": "click", "params": {"ref": "@e1", "buton": "left"}}),
+            vec!["click", "@e1", "--buton", "left"],
+        ),
+    ];
+
+    let cli = |args: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_bsk"))
+            .args(args)
+            .env("BSK_HOME", home.path())
+            .env("BSK_AUTO_START", "0")
+            .env("BSK_AUTO_UPDATE", "off")
+            .env_remove("BSK_SESSION")
+            .env_remove("BSK_SCOPE")
+            .output()
+            .expect("run bsk");
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    for (tool, arguments, cli_args) in &accepted {
+        let (is_error, body) = mcp.call_tool_raw(tool, arguments.clone()).await;
+        assert!(is_error, "{tool} cannot succeed without a daemon: {body}");
+        assert_ne!(body["code"], "invalid_params", "{tool} refused {arguments}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("daemon"),
+            "{tool} should reach the daemon connection: {body}"
+        );
+        let (code, stderr) = cli(cli_args);
+        assert_eq!(code, Some(2), "bsk {cli_args:?}: {stderr}");
+        assert!(stderr.contains("daemon"), "bsk {cli_args:?}: {stderr}");
+    }
+    for (tool, arguments, cli_args) in &refused {
+        let body = mcp.call_err(tool, arguments.clone()).await;
+        assert_eq!(body["code"], "invalid_params", "{tool} {arguments}: {body}");
+        let (code, stderr) = cli(cli_args);
+        assert_eq!(code, Some(1), "bsk {cli_args:?}: {stderr}");
+    }
+}
+
 #[tokio::test]
 async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
     let home = crate::support::short_tempdir();

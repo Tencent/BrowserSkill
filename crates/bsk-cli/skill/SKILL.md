@@ -21,7 +21,7 @@ description: Automate Chromium via bsk CLI or MCP.
 
 ## MCP
 
-Full parity: `bsk_session`, `bsk_page`, `bsk_inspect`, `bsk_interact`, `bsk_plan`, `bsk_tabs`, `bsk_assist`, `bsk_ledger`, `bsk_debug`, `bsk_video`, `bsk_record`.
+Same commands as tools: `bsk_session`, `bsk_page`, `bsk_inspect`, `bsk_interact`, `bsk_plan`, `bsk_tabs`, `bsk_assist`, `bsk_ledger`, `bsk_debug`, `bsk_video`, `bsk_record`. `--context`, `--observation`, `--expect` and `--depends-on` are the `context`, `observation`, `expect` and `depends_on` arguments; `bsk_inspect` takes `context` only.
 
 ## References
 
