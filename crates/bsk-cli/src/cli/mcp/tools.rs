@@ -2185,11 +2185,13 @@ struct InteractArgs {
     /// Task tab; defaults to the session's current task tab.
     tab_id: Option<i64>,
     /// Action fields with protocol names. Targets: ref (observed @eN) or selector (CSS in the
-    /// main document or accessible iframes). click: button, click_count, modifiers. fill: value,
-    /// clear_before. select: values. press: key (Enter, a, Ctrl+A), modifiers, hold_ms. evaluate:
-    /// expression, unverified (last resort; not with observation, expect or depends_on). wheel:
-    /// delta_x, delta_y. drag: source and target ({ref} or {selector}) or delta ({x, y}), mode,
-    /// hold_ms. upload: files (array of paths), optional mode (input|drop; prefer the observed @eN
+    /// main document or accessible iframes). click: button, click_count, modifiers; a point
+    /// in a visual ref's screenshot is ref with capture_id, image_x and image_y. fill: value,
+    /// clear_before. select: values. press: key (Enter, a, Ctrl+A), modifiers, hold_ms. hover:
+    /// settle_ms. evaluate: expression, await_promise (default true), unverified (last resort;
+    /// not with observation, expect or depends_on). wheel: delta_x, delta_y. drag: source and
+    /// target ({ref} or {selector}) or delta ({x, y}), mode, hold_ms, duration_ms.
+    /// upload: files (array of paths), optional mode (input|drop; prefer the observed @eN
     /// ref of the visible upload button/trigger, or target input[type=file] directly via selector
     /// even when hidden). download: out path, optional overwrite. All accept timeout_ms.
     #[serde(default)]
@@ -4431,15 +4433,10 @@ mod tests {
             "depends_on",
             "expect",
         ];
-        // Protocol fields the description leaves out on purpose, to keep the tool short.
-        // A new protocol field fails this test until it is described or listed here.
+        // Protocol fields a caller never sets: the daemon fills the download ones in, and a
+        // result that is not returned by value cannot be read. A new protocol field fails
+        // this test until it is described or listed here.
         const UNDESCRIBED: &[&str] = &[
-            "click.capture_id",
-            "click.image_x",
-            "click.image_y",
-            "hover.settle_ms",
-            "drag.duration_ms",
-            "evaluate.await_promise",
             "evaluate.return_by_value",
             "download.browser_relative_dir",
             "download.max_byte_size",
