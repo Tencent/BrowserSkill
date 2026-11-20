@@ -91,6 +91,8 @@ export interface SessionStartOptions {
   size?: { width: number; height: number };
   /** Background by default; true explicitly opens the window in front. */
   focused?: boolean;
+  /** Start background Agent Windows minimized when unfocused. */
+  minimized?: boolean;
   /** Cancellation for the transactional Agent Window startup sequence. */
   signal?: AbortSignal;
 }

@@ -10,6 +10,7 @@ describe("automation settings", () => {
     vi.spyOn(interactionPreferences, "get").mockReturnValue({
       confirmTabBorrow: true,
       requestHelpEnabled: true,
+      openAgentWindowMinimized: false,
     });
     vi.spyOn(interactionPreferences, "subscribe").mockReturnValue(() => {});
     vi.spyOn(interactionPreferences, "set").mockResolvedValue();
@@ -21,21 +22,23 @@ describe("automation settings", () => {
 
   it("keeps explanations in labelled info tooltips without changing a preference on click", async () => {
     render(<InteractionSettings />);
-    for (const name of ["借用标签页确认说明", "人工协助说明"]) {
+    for (const [name, scopeKey] of [
+      ["借用标签页确认说明", "popup.interaction.scope"],
+      ["人工协助说明", "popup.interaction.scope"],
+      ["最小化打开 Agent 窗口说明", "popup.interaction.openAgentWindowMinimizedScope"],
+    ] as const) {
       const info = screen.getByRole("button", { name });
       const tooltip = document.getElementById(info.getAttribute("aria-describedby")!);
       expect(tooltip?.getAttribute("role")).toBe("tooltip");
-      expect(tooltip?.textContent).toContain(
-        i18n.t("popup.interaction.scope", { ns: "extension" }),
-      );
+      expect(tooltip?.textContent).toContain(i18n.t(scopeKey, { ns: "extension" }));
       fireEvent.click(info);
     }
     expect(interactionPreferences.set).not.toHaveBeenCalled();
-    expect(screen.getAllByRole("tooltip")).toHaveLength(2);
+    expect(screen.getAllByRole("tooltip")).toHaveLength(3);
     expect(document.querySelector('[data-slot="popup-interaction-settings"] > p')).toBeNull();
   });
 
-  it("saves borrowing and help independently without another confirmation", async () => {
+  it("saves borrowing, help, and minimized window preferences independently without another confirmation", async () => {
     render(<InteractionSettings />);
     const borrow = screen.getByRole("switch", { name: "借用标签页前确认" });
     await waitFor(() => expect((borrow as HTMLButtonElement).disabled).toBe(false));
@@ -44,6 +47,7 @@ describe("automation settings", () => {
       expect(interactionPreferences.set).toHaveBeenCalledWith({
         confirmTabBorrow: false,
         requestHelpEnabled: true,
+        openAgentWindowMinimized: false,
       }),
     );
     const help = screen.getByRole("switch", { name: "允许请求人工协助" });
@@ -53,6 +57,17 @@ describe("automation settings", () => {
       expect(interactionPreferences.set).toHaveBeenCalledWith({
         confirmTabBorrow: true,
         requestHelpEnabled: false,
+        openAgentWindowMinimized: false,
+      }),
+    );
+    const minimized = screen.getByRole("switch", { name: "最小化打开 Agent 窗口" });
+    await waitFor(() => expect((minimized as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(minimized);
+    await waitFor(() =>
+      expect(interactionPreferences.set).toHaveBeenCalledWith({
+        confirmTabBorrow: true,
+        requestHelpEnabled: true,
+        openAgentWindowMinimized: true,
       }),
     );
   });

@@ -129,16 +129,19 @@ export async function handleSessionStart(
   }
   try {
     await deps.preferences?.readyOrFallback();
+    const prefs = deps.preferences?.get() ?? DEFAULT_INTERACTION_PREFERENCES;
+    const minimized = !params.focused && prefs.openAgentWindowMinimized;
     const ctx = await manager.start(params.session_id, {
       controller: params.controller ?? undefined,
       incognito: params.incognito,
       size: sizeOrErr,
       focused: params.focused,
+      ...(minimized ? { minimized: true } : {}),
       signal: deps.signal,
     });
     return {
       agent_window_id: ctx.agentWindowId,
-      interaction: interactionPolicy(deps.preferences?.get() ?? DEFAULT_INTERACTION_PREFERENCES),
+      interaction: interactionPolicy(prefs),
     };
   } catch (err) {
     if (err instanceof SessionStartCleanupError) {

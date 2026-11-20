@@ -112,7 +112,11 @@
       "readFailed": "No se pudieron cargar los ajustes. Vuelve a abrir la extensión.",
       "writeFailed": "No se pudo guardar. Tus ajustes no han cambiado. Inténtalo de nuevo.",
       "confirmTabBorrowInfoLabel": "Acerca de la confirmación para tomar prestadas pestañas",
-      "requestHelpEnabledInfoLabel": "Acerca de las solicitudes de ayuda humana"
+      "requestHelpEnabledInfoLabel": "Acerca de las solicitudes de ayuda humana",
+      "openAgentWindowMinimized": "Abrir ventanas del agente minimizadas",
+      "openAgentWindowMinimizedHint": "Si está activado, las nuevas ventanas del agente en segundo plano se crean directamente minimizadas en lugar de aparecer en pantalla. Si está desactivado, se abren como ventanas normales sin foco.",
+      "openAgentWindowMinimizedScope": "Se guarda automáticamente para este perfil del navegador. Se aplica a las nuevas ventanas del agente en segundo plano; las sesiones explícitas en primer plano y la grabación de acciones siguen abriéndose visiblemente.",
+      "openAgentWindowMinimizedInfoLabel": "Acerca de abrir ventanas del agente minimizadas"
     },
     "remoteLocal": "Cambiar a local",
     "remotePairing": "Enlace de emparejamiento",

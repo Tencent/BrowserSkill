@@ -133,6 +133,63 @@ describe("chromeAgentWindowApi.create", () => {
     });
   });
 
+  it("creates unsized background Agent Windows directly in the minimized state when requested", async () => {
+    await chromeAgentWindowApi.create(AGENT_WINDOW_HOME, { minimized: true });
+
+    expect(create).toHaveBeenCalledWith({
+      type: "normal",
+      focused: false,
+      state: "minimized",
+      incognito: false,
+      url: AGENT_WINDOW_HOME,
+    });
+  });
+
+  it("keeps explicitly focused Agent Windows visible even when minimized is requested", async () => {
+    await chromeAgentWindowApi.create(AGENT_WINDOW_HOME, { focused: true, minimized: true });
+
+    expect(create).toHaveBeenCalledWith({
+      type: "normal",
+      focused: true,
+      incognito: false,
+      url: AGENT_WINDOW_HOME,
+    });
+  });
+
+  it("minimizes sized background Agent Windows immediately after creation and rolls back on update failure", async () => {
+    const update = vi.fn().mockResolvedValue({ id: 100, state: "minimized" });
+    const remove = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("chrome", {
+      windows: { create, update, remove },
+      extension: { isAllowedIncognitoAccess },
+    });
+
+    await chromeAgentWindowApi.create(AGENT_WINDOW_HOME, {
+      size: { width: 1280, height: 800 },
+      minimized: true,
+    });
+
+    expect(create).toHaveBeenCalledWith({
+      type: "normal",
+      focused: false,
+      incognito: false,
+      url: AGENT_WINDOW_HOME,
+      width: 1280,
+      height: 800,
+    });
+    expect(update).toHaveBeenCalledWith(100, { state: "minimized" });
+    expect(remove).not.toHaveBeenCalled();
+
+    update.mockRejectedValueOnce(new Error("minimize failed"));
+    await expect(
+      chromeAgentWindowApi.create(AGENT_WINDOW_HOME, {
+        size: { width: 1280, height: 800 },
+        minimized: true,
+      }),
+    ).rejects.toThrow("minimize failed");
+    expect(remove).toHaveBeenCalledWith(100);
+  });
+
   it("checks permission before opening an incognito window", async () => {
     isAllowedIncognitoAccess.mockResolvedValue(true);
     create.mockResolvedValue({ id: 100, incognito: true, tabs: [{ id: 7 }] });

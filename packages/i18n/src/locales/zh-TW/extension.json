@@ -112,7 +112,11 @@
       "readFailed": "無法讀取自動化設定，請重新開啟擴充功能。",
       "writeFailed": "儲存失敗，設定未變更，請再試一次。",
       "confirmTabBorrowInfoLabel": "借用分頁確認說明",
-      "requestHelpEnabledInfoLabel": "人工協助說明"
+      "requestHelpEnabledInfoLabel": "人工協助說明",
+      "openAgentWindowMinimized": "最小化開啟 Agent 視窗",
+      "openAgentWindowMinimizedHint": "開啟時，新建的背景 Agent 視窗直接以最小化狀態建立，不在畫面上閃出視窗；關閉時，以一般背景視窗開啟。",
+      "openAgentWindowMinimizedScope": "自動儲存至目前瀏覽器設定檔，對新建的背景 Agent 視窗生效；明確以前景開啟的工作階段與操作錄製仍會正常顯示視窗。",
+      "openAgentWindowMinimizedInfoLabel": "最小化開啟 Agent 視窗說明"
     },
     "remoteLocal": "切換至本機",
     "remotePairing": "配對連結",

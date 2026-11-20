@@ -46,29 +46,37 @@ export function InteractionSettings() {
       data-slot="popup-interaction-settings"
     >
       <h2 className="text-sm font-medium">{t("popup.interaction.title")}</h2>
-      {(["confirmTabBorrow", "requestHelpEnabled"] as const).map((key) => (
-        <div className="relative flex items-center justify-between gap-2" key={key}>
-          <span className="flex min-w-0 items-center gap-1">
-            <label
-              className="text-[13px] font-normal leading-5 text-foreground/85"
-              htmlFor={`interaction-${key}`}
-            >
-              {t(`popup.interaction.${key}`)}
-            </label>
-            <SettingInfo label={t(`popup.interaction.${key}InfoLabel`)}>
-              {t(`popup.interaction.${key}Hint`)}
-              <span className="mt-1 block">{t("popup.interaction.scope")}</span>
-            </SettingInfo>
-          </span>
-          <Switch
-            id={`interaction-${key}`}
-            checked={preferences[key]}
-            disabled={!loaded || saving}
-            onCheckedChange={(value) => void update(key, value)}
-            aria-label={t(`popup.interaction.${key}`)}
-          />
-        </div>
-      ))}
+      {(["confirmTabBorrow", "requestHelpEnabled", "openAgentWindowMinimized"] as const).map(
+        (key) => (
+          <div className="relative flex items-center justify-between gap-2" key={key}>
+            <span className="flex min-w-0 items-center gap-1">
+              <label
+                className="text-[13px] font-normal leading-5 text-foreground/85"
+                htmlFor={`interaction-${key}`}
+              >
+                {t(`popup.interaction.${key}`)}
+              </label>
+              <SettingInfo label={t(`popup.interaction.${key}InfoLabel`)}>
+                {t(`popup.interaction.${key}Hint`)}
+                <span className="mt-1 block">
+                  {t(
+                    key === "openAgentWindowMinimized"
+                      ? "popup.interaction.openAgentWindowMinimizedScope"
+                      : "popup.interaction.scope",
+                  )}
+                </span>
+              </SettingInfo>
+            </span>
+            <Switch
+              id={`interaction-${key}`}
+              checked={preferences[key]}
+              disabled={!loaded || saving}
+              onCheckedChange={(value) => void update(key, value)}
+              aria-label={t(`popup.interaction.${key}`)}
+            />
+          </div>
+        ),
+      )}
       {error && (
         <p role="alert" className="text-xs text-destructive">
           {t(`popup.interaction.${error}Failed`)}

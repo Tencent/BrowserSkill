@@ -112,7 +112,11 @@
       "readFailed": "Could not load settings. Reopen the extension.",
       "writeFailed": "Could not save. Your settings have not changed. Try again.",
       "confirmTabBorrowInfoLabel": "About tab borrowing confirmation",
-      "requestHelpEnabledInfoLabel": "About human help requests"
+      "requestHelpEnabledInfoLabel": "About human help requests",
+      "openAgentWindowMinimized": "Open Agent Windows minimized",
+      "openAgentWindowMinimizedHint": "When on, new background Agent Windows start minimized instead of appearing on screen. When off, they open as normal unfocused windows.",
+      "openAgentWindowMinimizedScope": "Saved automatically for this browser profile. Applies to new background Agent Windows; explicit foreground sessions and action recording still open visibly.",
+      "openAgentWindowMinimizedInfoLabel": "About opening Agent Windows minimized"
     },
     "remoteLocal": "Switch to local",
     "remotePairing": "Pairing link",

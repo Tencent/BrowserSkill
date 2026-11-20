@@ -4,12 +4,14 @@ import { defaultStorage, type StorageBackend } from "./instance-id";
 export interface InteractionPreferences {
   confirmTabBorrow: boolean;
   requestHelpEnabled: boolean;
+  openAgentWindowMinimized: boolean;
 }
 
 export const INTERACTION_STORAGE_KEY = "bsk_interaction_preferences";
 export const DEFAULT_INTERACTION_PREFERENCES: InteractionPreferences = {
   confirmTabBorrow: true,
   requestHelpEnabled: true,
+  openAgentWindowMinimized: false,
 };
 
 export function normalizeInteractionPreferences(value: unknown): InteractionPreferences {
@@ -17,10 +19,13 @@ export function normalizeInteractionPreferences(value: unknown): InteractionPref
   return {
     confirmTabBorrow: prefs?.confirmTabBorrow !== false,
     requestHelpEnabled: prefs?.requestHelpEnabled !== false,
+    openAgentWindowMinimized: prefs?.openAgentWindowMinimized === true,
   };
 }
 
-export function interactionPolicy(preferences: InteractionPreferences): InteractionPolicy {
+export function interactionPolicy(
+  preferences: Pick<InteractionPreferences, "confirmTabBorrow" | "requestHelpEnabled">,
+): InteractionPolicy {
   return {
     borrow_confirmation: preferences.confirmTabBorrow ? "always" : "never",
     request_help: preferences.requestHelpEnabled ? "enabled" : "disabled",
@@ -53,7 +58,8 @@ export class InteractionPreferenceStore {
     this.revision += 1;
     if (
       next.confirmTabBorrow === this.value.confirmTabBorrow &&
-      next.requestHelpEnabled === this.value.requestHelpEnabled
+      next.requestHelpEnabled === this.value.requestHelpEnabled &&
+      next.openAgentWindowMinimized === this.value.openAgentWindowMinimized
     )
       return;
     this.value = next;

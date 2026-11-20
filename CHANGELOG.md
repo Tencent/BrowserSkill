@@ -19,6 +19,11 @@ determines which versions can connect.
   subagent scope in `ImplicitScopeRegistry`, and MCP `bsk_session(action="start")`
   now accepts `agent_name`, `project`, and `controller_color` controller identity
   labels matching `bsk session start` (#731).
+- Added an **Open Agent Windows minimized** preference under popup Automation
+  settings (`bsk_interaction_preferences.openAgentWindowMinimized`, off by
+  default) so background Agent Windows can start directly in the minimized state
+  without flashing a normal window frame on screen, while keeping explicit
+  foreground sessions (`--focus`) and action recording visible ([#649](https://github.com/Tencent/BrowserSkill/issues/649)).
 
 ### Changed
 

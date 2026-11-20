@@ -34,6 +34,8 @@ export interface AgentWindowCreateOptions {
   size?: { width: number; height: number };
   /** Background by default; explicit viewing and human help may take focus. */
   focused?: boolean;
+  /** Start background Agent Windows minimized so they never paint a normal frame. */
+  minimized?: boolean;
   /** Use Chrome's shared incognito browsing session. */
   incognito?: boolean;
   /** Live or initializing Agent Windows that must never donate a seed tab. */
@@ -59,6 +61,7 @@ export const chromeAgentWindowApi: AgentWindowApi = {
       );
     }
     const focused = opts.focused ?? false;
+    const minimized = !focused && Boolean(opts.minimized);
     const incognito = opts.incognito ?? false;
     const size = opts.size ? { width: opts.size.width, height: opts.size.height } : {};
     // On Linux/X11, `chrome.windows.create({ focused: false, url })` runs `Navigate()`
@@ -89,9 +92,13 @@ export const chromeAgentWindowApi: AgentWindowApi = {
     }
     let win: chrome.windows.Window | undefined;
     try {
+      // Chromium rejects combining `state: "minimized"` with `width`/`height` on
+      // `windows.create`. Create unsized background windows directly minimized, and
+      // transition sized background windows immediately after creation.
       win = await chrome.windows.create({
         type: "normal",
         focused,
+        ...(minimized && !opts.size ? { state: "minimized" } : {}),
         incognito,
         ...(seedTabId !== undefined ? { tabId: seedTabId } : { url }),
         ...size,
@@ -104,6 +111,14 @@ export const chromeAgentWindowApi: AgentWindowApi = {
         await chrome.tabs?.remove?.(seedTabId).catch(() => {});
       }
       throw err;
+    }
+    if (minimized && opts.size && typeof chrome.windows.update === "function") {
+      try {
+        await chrome.windows.update(win.id, { state: "minimized" });
+      } catch (err) {
+        await chrome.windows.remove?.(win.id).catch(() => {});
+        throw err;
+      }
     }
     const tabIds = (win.tabs ?? []).flatMap((tab) => (typeof tab.id === "number" ? [tab.id] : []));
     return {
