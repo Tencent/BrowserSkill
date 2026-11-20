@@ -228,8 +228,8 @@ fn base_definitions() -> Vec<Value> {
             "bsk_debug",
             "Network and runtime debugger",
             "Capture, inspect, analyze and replay network/runtime debug evidence, or manage \
-             request rules. Passing rule/replay actions respects target control; replay protects \
-             decision facts via context/expect/observation and is gated if a native dialog is pending.",
+             request rules. Replay and rule mutations (rule_add, rule_enable, rule_disable, \
+             rule_remove) accept cooperation metadata. A pending native dialog blocks replay.",
             Hints {
                 destructive: true,
                 ..Hints::default()
@@ -3350,13 +3350,13 @@ struct DebugMcpArgs {
     command_id: Option<String>,
     /// export: write portable recording JSON to this new file path and return path + byte count.
     output: Option<PathBuf>,
-    /// replay: context_id from latest sync.
+    /// context_id from the latest sync for replay or a rule mutation.
     context: Option<String>,
-    /// replay: observation_id from latest sync.
+    /// observation_id from the latest sync for replay or a rule mutation.
     observation: Option<String>,
-    /// replay: pre-dispatch expectations checked immediately before replay.
+    /// Page conditions checked immediately before replay or a rule mutation.
     expect: Option<Vec<ActionExpectation>>,
-    /// replay: strict-policy dependency targets.
+    /// Observed targets that replay or a rule mutation depends on under strict policy.
     depends_on: Option<Vec<String>>,
 }
 
