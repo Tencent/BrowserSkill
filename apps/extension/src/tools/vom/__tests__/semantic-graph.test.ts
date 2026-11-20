@@ -1,4 +1,4 @@
-import { isVomReferenceNode, renderVom } from "@browser-skill/vom";
+import { isVomReferenceNode, prepareObservationRender, renderVom } from "@browser-skill/vom";
 import { describe, expect, it } from "vitest";
 import { rootProcessBoundary, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import type { CapturedNode } from "../capture";
@@ -1307,4 +1307,57 @@ it("excludes style/script/noscript/template subtrees from DOM label and sibling 
   expect(rendered).not.toContain("tpl");
   expect(rendered).not.toContain("initInput");
   expect(rendered).toContain('button "工具栏2"');
+});
+
+it("exposes delegated row refs idempotently across semantic structure and render passes (#695)", () => {
+  const box = (x: number, y: number, w: number, h: number) => ({ x, y, w, h });
+  const scene = buildSemanticVomScene({
+    viewport: { width: 800, height: 600 },
+    rootFrameId: "main",
+    documents: [
+      document(
+        "main",
+        [],
+        [
+          dom(1, null, "body"),
+          // Delegated homogeneous div rows
+          { ...dom(10, 1, "div", { id: "a" }), clickable: true, rect: box(0, 0, 240, 108) },
+          { ...dom(11, 10, "div", {}, "甲一"), rect: box(0, 0, 240, 36) },
+          { ...dom(12, 10, "div", {}, "甲二"), rect: box(0, 36, 240, 36) },
+          { ...dom(13, 10, "div", {}, "甲三"), rect: box(0, 72, 240, 36) },
+          // Delegated ul with empty divider (must not inherit nearbyText)
+          { ...dom(20, 1, "ul", { id: "b" }), clickable: true, rect: box(0, 120, 240, 80) },
+          { ...dom(21, 20, "li", {}, "乙一"), rect: box(0, 120, 240, 36) },
+          { ...dom(24, 20, "li", { class: "divider" }), rect: box(0, 156, 240, 4) },
+          { ...dom(22, 20, "li", {}, "乙二"), rect: box(0, 160, 240, 36) },
+          // Plain ul stays ref-free
+          dom(30, 1, "ul", { id: "c" }),
+          dom(31, 30, "li", {}, "丙一"),
+          dom(32, 30, "li", {}, "丙二"),
+          // Two-line compound button stays a single ref
+          { ...dom(40, 1, "div", { id: "d" }), clickable: true, rect: box(0, 220, 240, 72) },
+          { ...dom(41, 40, "div", {}, "标题"), rect: box(0, 220, 240, 36) },
+          { ...dom(42, 40, "div", {}, "副标题"), rect: box(0, 256, 240, 36) },
+          // Single-child dropdown wrapper around ul + footer button
+          { ...dom(50, 1, "div", { id: "e" }), clickable: true, rect: box(0, 310, 240, 120) },
+          { ...dom(51, 50, "ul"), rect: box(0, 310, 240, 120) },
+          { ...dom(52, 51, "li", {}, "历史一"), rect: box(0, 310, 240, 36) },
+          { ...dom(53, 51, "li", {}, "历史二"), rect: box(0, 346, 240, 36) },
+          { ...dom(54, 51, "li"), rect: box(0, 382, 240, 36) },
+          { ...dom(55, 54, "button", {}, "清空历史"), rect: box(0, 382, 120, 32) },
+        ],
+      ),
+    ],
+  });
+
+  const expectedIds = [11, 12, 13, 21, 22, 40, 52, 53, 55];
+  const rendered = renderVom(scene);
+  expect(rendered.refs.map((r) => r.backendNodeId)).toEqual(expectedIds);
+  expect(rendered.text).not.toContain('button "甲一 甲二 甲三"');
+
+  const prepared = prepareObservationRender(scene);
+  const preparedIds = Array.from({ [Symbol.iterator]: () => prepared.rows })
+    .filter((r) => r.ref)
+    .map((r) => r.ref!.backendNodeId);
+  expect(preparedIds).toEqual(expectedIds);
 });

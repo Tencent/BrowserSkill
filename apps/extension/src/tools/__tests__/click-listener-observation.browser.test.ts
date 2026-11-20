@@ -383,6 +383,105 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("click listener observations", () 
         expect(await evaluate("document.querySelector('#delegated-receipt').textContent")).toBe(
           "export",
         );
+
+        // Delegated list/div containers (#695): expose individual row refs while keeping
+        // plain lists ref-free and compound/multi-slot cards as single buttons.
+        await evaluate(`
+          document.body.innerHTML = \`
+            <style>
+              #a { cursor: pointer; width: 240px; }
+              #a .item { cursor: auto; padding: 6px; }
+              #a2 { cursor: pointer; width: 240px; }
+              #a2 .item, #b .item { padding: 6px; }
+              #b { cursor: pointer; width: 240px; }
+              #b .item { cursor: pointer; }
+              #dropdown { cursor: pointer; width: 240px; }
+              #dropdown li { cursor: auto; padding: 6px; list-style: none; }
+              #dropdown li.divider { height: 2px; padding: 0; }
+              #card, #kpi { cursor: pointer; width: 240px; margin-top: 8px; }
+              #card div, #kpi div { cursor: auto; padding: 4px; }
+            </style>
+            <div id="a"><div class="item">甲一</div><div class="item">甲二</div><div class="item">甲三</div></div>
+            <div id="a2"><div class="item">继一</div><div class="item">继二</div><div class="item">继三</div></div>
+            <div id="b"><div class="item">乙一</div><div class="item">乙二</div><div class="item">乙三</div></div>
+            <ul id="c"><li>行一</li><li>行二</li><li>行三</li></ul>
+            <div id="dropdown">
+              <ul>
+                <li>历史一</li>
+                <li class="divider"></li>
+                <li>历史二</li>
+                <li><button id="clear">清空历史</button></li>
+              </ul>
+            </div>
+            <div id="card"><div>标题</div><div>副标题</div></div>
+            <div id="kpi">
+              <div class="card-title">总收入</div>
+              <div class="card-value">¥128,400</div>
+              <div class="card-trend">+12%</div>
+            </div>
+            <output id="row-receipt">None</output>
+          \`;
+          window.rowHits = [];
+          for (const id of ["a", "a2", "b", "dropdown", "card", "kpi"]) {
+            document.getElementById(id).addEventListener("click", (e) => {
+              const targetText = e.target.textContent.trim();
+              window.rowHits.push({ container: id, text: targetText, trusted: e.isTrusted });
+              document.getElementById("row-receipt").textContent = id + ":" + targetText;
+            });
+          }
+        `);
+        const rowsObs = await handleObserve(manager, params, deps);
+        const rowsSnap = await handleSnapshot(manager, params, deps);
+        if (!("text" in rowsObs) || !("text" in rowsSnap)) {
+          throw new Error(JSON.stringify({ rowsObs, rowsSnap }));
+        }
+        for (const text of [rowsObs.text, rowsSnap.text]) {
+          const expectedRows = [
+            "甲一",
+            "甲二",
+            "甲三",
+            "继一",
+            "继二",
+            "继三",
+            "乙一",
+            "乙二",
+            "乙三",
+            "历史一",
+            "历史二",
+            "清空历史",
+            "标题 副标题",
+            "总收入 ¥128,400 +12%",
+          ];
+          const refs = expectedRows.map((label) => {
+            const found = buttonRef(text, label);
+            expect(found, `${label}\n${text}`).toBeDefined();
+            return found;
+          });
+          expect(new Set(refs).size, text).toBe(expectedRows.length);
+          expect(text.match(/@e\d+/g) ?? [], text).toHaveLength(expectedRows.length);
+          for (const forbidden of [
+            "甲一 甲二 甲三",
+            "行一",
+            "行二",
+            "行三",
+            "标题",
+            "副标题",
+            "总收入",
+          ]) {
+            expect(buttonRef(text, forbidden), `${forbidden}\n${text}`).toBeUndefined();
+          }
+        }
+        expect(
+          await handleClick(manager, { ...params, ref: buttonRef(rowsObs.text, "甲二") }, deps),
+        ).not.toHaveProperty("code");
+        expect(await evaluate("document.querySelector('#row-receipt').textContent")).toBe("a:甲二");
+
+        expect(
+          await handleClick(manager, { ...params, ref: buttonRef(rowsObs.text, "历史二") }, deps),
+        ).not.toHaveProperty("code");
+        expect(await evaluate("document.querySelector('#row-receipt').textContent")).toBe(
+          "dropdown:历史二",
+        );
       },
     );
   }, 30_000);
