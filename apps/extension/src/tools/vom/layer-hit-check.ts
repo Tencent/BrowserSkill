@@ -66,6 +66,9 @@ export async function markHitThroughLayers(
           return probe(node, { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 }).catch(() => false);
         }),
       );
+      // ponytail: one reached sample releases the whole candidate, so a cover with
+      // a cut-out also lists what it still covers. Folding per node needs a hit
+      // test for every folded node; do that if such covers show up on real pages.
       if (!reached.includes(true)) return;
       blocker.node.hitThrough = true;
     }

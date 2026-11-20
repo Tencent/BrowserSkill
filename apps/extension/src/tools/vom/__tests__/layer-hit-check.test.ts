@@ -114,4 +114,25 @@ describe("markHitThroughLayers", () => {
     expect(probed).toEqual([3]);
     expect(scene.nodes[1].hitThrough).toBeUndefined();
   });
+
+  // Known ceiling, pinned so a change to it is a decision: a cover with a cut-out
+  // (a tour spotlight) is released whole once one folded node is reached.
+  it("releases a cover with a cut-out whole, covered nodes included", async () => {
+    const button = (id: number, name: string, y: number) =>
+      node(id, { tag: "button", role: "button", name, rect: { x: 10, y, w: 80, h: 30 } });
+    const scene: VomScene = {
+      viewport: { width: 1000, height: 800 },
+      nodes: [
+        button(1, "In the cut-out", 10),
+        button(2, "Still covered", 400),
+        node(3, { position: "fixed", paintOrder: 5 }),
+      ],
+    };
+    expect(render(structuredClone(scene))).toContain("L1 mask cover=100%");
+    await markHitThroughLayers(scene, async (target) => target.id === 1);
+    expect(scene.nodes[2].hitThrough).toBe(true);
+    const text = render(scene);
+    expect(text).toMatch(/@e\d+ button "In the cut-out"/);
+    expect(text).toMatch(/@e\d+ button "Still covered"/);
+  });
 });
