@@ -757,7 +757,9 @@ export function startRecordCapture(
       return;
     }
 
-    const fillable = fillableFromTarget(target);
+    const fillable = fillableFromTarget(
+      target instanceof Element ? (resolveClickableElement(target) ?? target) : target,
+    );
     if (fillable) {
       emitHoverCandidateBeforeAction(fillable);
       ensureFillSession(fillable);
