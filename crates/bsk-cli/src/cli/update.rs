@@ -425,16 +425,16 @@ fn install_candidate_with_client(
     }
     // Stopping a daemon this process could not start again (inside a host
     // Job that forbids breakaway) would leave none: check before stopping.
-    if let Some(daemon) = running.as_ref() {
-        if let Err(err) = crate::daemon::start::check_independent_start(&target) {
-            tracing::warn!(error = %format_args!("{err:#}"), "leaving the running daemon alone");
-            record.succeed(None);
-            installed.discard();
-            return Ok(DaemonRestart::LeftRunning {
-                pid: daemon.pid,
-                reason: format!("{err:#}"),
-            });
-        }
+    if let Some(daemon) = running.as_ref()
+        && let Err(err) = crate::daemon::start::check_independent_start(&target)
+    {
+        tracing::warn!(error = %format_args!("{err:#}"), "leaving the running daemon alone");
+        record.succeed(None);
+        installed.discard();
+        return Ok(DaemonRestart::LeftRunning {
+            pid: daemon.pid,
+            reason: format!("{err:#}"),
+        });
     }
     let daemon_was_running = match restart_daemon
         .then(crate::daemon::start::stop_if_running)

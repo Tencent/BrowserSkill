@@ -50,6 +50,17 @@ jobs:
       - run: python3 evals/browser/skills/browserskill-release-test/scripts/test_release_audit.py
       - run: node --test scripts/render-version-json.test.mjs
 
+  rust-msrv:
+    name: Check minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check the locked workspace with its declared minimum Rust version
+        run: |
+          msrv=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["rust-version"])')
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+          cargo +"$msrv" check --workspace --all-targets --locked
+
   rust:
     name: Rust fmt, clippy, tests
     runs-on: ubuntu-latest

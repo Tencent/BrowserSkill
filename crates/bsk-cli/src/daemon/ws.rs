@@ -39,10 +39,11 @@ use super::state::{DaemonState, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVE
 pub(super) fn origin_allowed(origin: &str) -> bool {
     // MV3 extension ids are 32 a–p characters per Chrome spec.
     let prefix = "chrome-extension://";
-    if let Some(rest) = origin.strip_prefix(prefix) {
-        if rest.len() == 32 && rest.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
-            return true;
-        }
+    if let Some(rest) = origin.strip_prefix(prefix)
+        && rest.len() == 32
+        && rest.bytes().all(|b| (b'a'..=b'p').contains(&b))
+    {
+        return true;
     }
     false
 }

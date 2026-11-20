@@ -30,9 +30,7 @@ impl DaemonLock {
 impl Drop for DaemonLock {
     fn drop(&mut self) {
         // Best-effort: unlock then close. Kernel would do this anyway.
-        // Use fs2::FileExt explicitly so we don't accidentally pull in
-        // the std::fs::FileExt method stabilised in 1.89 (our MSRV is
-        // 1.85).
+        // Keep using fs2 explicitly across Rust versions with an inherent File::unlock.
         let _ = <std::fs::File as fs2::FileExt>::unlock(&self.file);
     }
 }
