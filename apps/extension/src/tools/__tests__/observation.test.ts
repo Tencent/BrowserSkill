@@ -489,6 +489,55 @@ describe("handleScreenshot", () => {
     );
     expect(res).toMatchObject({ code: "cdp_failed", message: /capture refused/ });
   });
+
+  it("captures a visible ref on an unborrowed user tab without scrolling it", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, { tabId: 9 });
+    const { cdp, sent } = makeFakeCdp({
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 9 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 9, windowId: 200, active: true }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.tab_id).toBe(9);
+    expect(res.image_base64).toBe(TINY_PNG);
+    expect(sent.some((c) => c.method === "DOM.scrollIntoViewIfNeeded")).toBe(false);
+  });
+
+  it("refuses off-screen ref screenshot on an unborrowed user tab without scrolling", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, { tabId: 9 });
+    const { cdp, sent } = makeFakeCdp({
+      "DOM.getContentQuads": () => ({ quads: [[10, 2000, 110, 2000, 110, 2040, 10, 2040]] }),
+    });
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 9 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 9, windowId: 200, active: true }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "element_not_visible" },
+    });
+    expect(sent.some((c) => c.method === "DOM.scrollIntoViewIfNeeded")).toBe(false);
+    expect(sent.some((c) => c.method === "Page.captureScreenshot")).toBe(false);
+  });
 });
 
 describe("handleScreenshot overlay suppression", () => {

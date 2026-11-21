@@ -39,6 +39,8 @@ export async function waitBounded<T>(
       signal.addEventListener("abort", onAbort, { once: true });
     }
   });
+  void promise.catch(() => {});
+  void boundary.catch(() => {});
   try {
     return await Promise.race([promise, boundary]);
   } finally {
