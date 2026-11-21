@@ -317,6 +317,7 @@ jobs:
         run: >-
           node scripts/run-browser-tests.mjs
           src/tools/__tests__/download-effect-state.browser.test.ts
+          src/tools/__tests__/evaluate-abort.browser.test.ts
           src/tools/__tests__/click.browser.test.ts
           src/tools/__tests__/click-listener-observation.browser.test.ts
           src/tools/__tests__/dom-multiclick.browser.test.ts
