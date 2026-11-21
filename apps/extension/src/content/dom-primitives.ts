@@ -208,29 +208,46 @@ const NON_OVERLAY_ELEMENT_FILTER: NodeFilter = {
   },
 };
 
-export function visitShadowRoots(
+export function scanSubtreeForShadowRootsAndSubframes(
   target: Node,
   onRoot: (root: Document | ShadowRoot) => void,
   visited = new Set<Node>(),
-): void {
-  if (visited.has(target) || isExtensionOverlayNode(target)) return;
+): boolean {
+  if (visited.has(target) || isExtensionOverlayNode(target)) return false;
   visited.add(target);
   const doc = target.ownerDocument ?? document;
+  let foundSubframe = false;
   if (target.nodeType === Node.DOCUMENT_NODE || target instanceof ShadowRoot) {
     onRoot(target as Document | ShadowRoot);
   } else if (target instanceof Element) {
+    if (SUBFRAME_OWNER_TAGS.has(target.localName)) foundSubframe = true;
     const nested = uncheckedElementShadowRoot(target);
-    if (nested) visitShadowRoots(nested, onRoot, visited);
+    if (nested && scanSubtreeForShadowRootsAndSubframes(nested, onRoot, visited)) {
+      foundSubframe = true;
+    }
   } else {
-    return;
+    return false;
   }
   const walker = doc.createTreeWalker(target, NodeFilter.SHOW_ELEMENT, NON_OVERLAY_ELEMENT_FILTER);
   for (let current = walker.nextNode(); current; current = walker.nextNode()) {
     if (visited.has(current)) continue;
     visited.add(current);
-    const nested = uncheckedElementShadowRoot(current as Element);
-    if (nested) visitShadowRoots(nested, onRoot, visited);
+    const element = current as Element;
+    if (SUBFRAME_OWNER_TAGS.has(element.localName)) foundSubframe = true;
+    const nested = uncheckedElementShadowRoot(element);
+    if (nested && scanSubtreeForShadowRootsAndSubframes(nested, onRoot, visited)) {
+      foundSubframe = true;
+    }
   }
+  return foundSubframe;
+}
+
+export function visitShadowRoots(
+  target: Node,
+  onRoot: (root: Document | ShadowRoot) => void,
+  visited = new Set<Node>(),
+): void {
+  scanSubtreeForShadowRootsAndSubframes(target, onRoot, visited);
 }
 
 function subtreeHasSubframeElement(root: Element | ShadowRoot, visited: Set<Node>): boolean {

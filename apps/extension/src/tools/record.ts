@@ -592,6 +592,7 @@ async function rearmRecording(
       if (deps.frameCoordinator) {
         const frameStarted = await deps.frameCoordinator.armTab(recording.requestId, targetTabId);
         if (!frameStarted) throw new Error("recording document did not start");
+        if (isFinishing()) return false;
       }
       recording.armedTabIds.add(targetTabId);
       await sendRecordStartWithAck(targetTabId, startMsg, deps.sendToTab, isFinishing);
@@ -793,12 +794,16 @@ export function attachRecordQueryListener(deps: RecordDeps = getDefaultDeps()): 
     }
     void (async () => {
       const recording = await findRecordingForTab(tabId, deps);
-      if (!recording) {
+      if (!recording || isRecordingFinishing(recording)) {
         sendResponse({ active: false });
         return;
       }
       const activation = sender.tab?.active ? recording.tabs.noteActivation(tabId) : undefined;
-      await rearmRecording(recording, tabId, deps, activation);
+      const rearmed = await rearmRecording(recording, tabId, deps, activation);
+      if (!rearmed || isRecordingFinishing(recording) || !recording.isTabAllowed(tabId)) {
+        sendResponse({ active: false });
+        return;
+      }
       sendResponse({
         active: true,
         requestId: recording.requestId,
@@ -985,17 +990,24 @@ export async function handleRecordStart(
   await notifyActiveRecordingsChanged();
 
   const abortPending = async (notifyContent: boolean) => {
+    if (!recordingEntry.settled) {
+      recordingEntry.settled = true;
+      recordingEntry.rejectFinish(new Error("record_start aborted"));
+    }
     recordingEntry.observation?.cancel();
     deps.frameCoordinator?.cancel(requestId);
     if (recordings.get(params.session_id) === recordingEntry) {
       recordings.delete(params.session_id);
     }
+    await clearRearmTimersForRecording(recordingEntry, deps);
     releaseBrowserObservationListenersIfIdle();
     await notifyActiveRecordingsChanged();
-    if (notifyContent) {
-      armedTabIds.delete(target.tabId);
+    const cancelTabs = new Set<number>(armedTabIds);
+    if (notifyContent) cancelTabs.add(target.tabId);
+    armedTabIds.clear();
+    for (const tabId of cancelTabs) {
       try {
-        await deps.sendToTab(target.tabId, {
+        await deps.sendToTab(tabId, {
           type: RECORD_CANCEL,
           requestId,
         });
@@ -1003,11 +1015,15 @@ export async function handleRecordStart(
         // Content may never have received RECORD_START.
       }
     }
-    if (deps.bypassOverlay && bypassedTabIds.delete(target.tabId)) {
-      try {
-        await deps.bypassOverlay(target.tabId, false);
-      } catch {
-        // Ignore cleanup errors.
+    if (deps.bypassOverlay && bypassedTabIds.size > 0) {
+      const bypassed = [...bypassedTabIds];
+      bypassedTabIds.clear();
+      for (const tabId of bypassed) {
+        try {
+          await deps.bypassOverlay(tabId, false);
+        } catch {
+          // Ignore cleanup errors.
+        }
       }
     }
   };

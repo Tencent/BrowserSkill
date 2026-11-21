@@ -68,6 +68,70 @@ describe("HelpRequestOverlay", () => {
     expect(refreshRects).toHaveBeenCalledTimes(1);
   });
 
+  it("does not poll or query refreshRects on scroll when there are no cross-frame rects", async () => {
+    vi.useFakeTimers();
+    try {
+      const refreshRects = vi.fn(async () => []);
+      renderOverlay(
+        baseRequest({
+          selectors: [],
+          rects: [],
+          refreshRects,
+        }),
+      );
+
+      for (let i = 0; i < 10; i++) window.dispatchEvent(new Event("scroll"));
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(refreshRects).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("throttles rapid scroll bursts instead of firing unthrottled cross-frame rect queries", async () => {
+    vi.useFakeTimers();
+    try {
+      const refreshRects = vi.fn(async () => [{ top: 80, left: 90, width: 140, height: 60 }]);
+      renderOverlay(
+        baseRequest({
+          rects: [{ top: 30, left: 40, width: 120, height: 50 }],
+          refreshRects,
+        }),
+      );
+
+      for (let i = 0; i < 20; i++) window.dispatchEvent(new Event("scroll"));
+      expect(refreshRects).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(150);
+      expect(refreshRects).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers highlight boxes on scroll when hasDynamicRects is true even if initial rects were offscreen", async () => {
+    const refreshRects = vi.fn(async () => [{ top: 75, left: 85, width: 150, height: 55 }]);
+    const { container } = renderOverlay(
+      baseRequest({
+        selectors: [],
+        rects: [],
+        hasDynamicRects: true,
+        refreshRects,
+      }),
+    );
+
+    expect(container.querySelector("[data-slot='help-highlight']")).toBeNull();
+    window.dispatchEvent(new Event("scroll"));
+
+    await waitFor(() => {
+      const highlight = container.querySelector<HTMLElement>("[data-slot='help-highlight']");
+      expect(highlight?.style.top).toBe("75px");
+      expect(highlight?.style.left).toBe("85px");
+    });
+    expect(refreshRects).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the inactive render stable", () => {
     const { container, rerender } = renderOverlay(null);
 
