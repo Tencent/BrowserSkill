@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { type CdpRunner, cdpRunnerForFrame, createStubCdpRunner } from "../../shared";
+import type { CapturedNode } from "../capture-types";
 import { enrichFormControlStates } from "../form-capture";
 import { decodeDocument } from "../snapshot";
 
@@ -105,7 +106,7 @@ async function decodeControls(snap: ReturnType<typeof snapshot>) {
 }
 
 describe("form state identity", () => {
-  it("keeps native checked state separate from values before and after form enrichment", async () => {
+  it("keeps native checked state separate from explicit values and omits synthetic 'on' on unchecked checkboxes", async () => {
     const { cdp, nodes } = await fakeCdp(
       [
         [
@@ -117,19 +118,28 @@ describe("form state identity", () => {
       ],
       () =>
         reply([
-          [10, state("on")],
-          [11, state("subscribe")],
-          [12, state("choice")],
+          [
+            10,
+            {
+              defaultValue: "",
+              checked: false,
+              placeholder: "",
+              state: "empty",
+              sensitive: false,
+            },
+          ],
+          [11, { ...state("subscribe"), checked: true }],
+          [12, { ...state("choice"), checked: true }],
           [13, state("on")],
         ]),
     );
     const read = () =>
-      nodes[0].filter((n) => n.tag === "input").map((n) => [n.formValue, n.checked]);
+      nodes[0].filter((n) => n.tag === "input").map((n) => [n.formValue, n.checked, n.formState]);
     const expected = [
-      ["on", false],
-      ["subscribe", true],
-      ["choice", true],
-      ["on", undefined],
+      [undefined, false, "empty"],
+      ["subscribe", true, "filled"],
+      ["choice", true, "filled"],
+      ["on", undefined, "filled"],
     ];
     expect(read()).toEqual(expected);
     await enrichFormControlStates(cdp, 7, nodes);
@@ -517,4 +527,159 @@ it("keeps fallback owner reads with identical backend ids scoped to their OOPIF 
     );
   }
   expect(send).not.toHaveBeenCalled();
+});
+
+it("inspects Open Shadow DOM form controls, marks untouched <select> as default, and keeps unchecked checkboxes empty without synthetic 'on'", async () => {
+  const doc = document.implementation.createHTMLDocument("shadow-select-checkbox");
+  doc.body.innerHTML = `
+    <form id="f">
+      <select id="101"><option value="us">United States</option><option value="uk">United Kingdom</option></select>
+      <select id="102"><option value="a">A</option><option value="b" selected>B</option></select>
+      <select id="103"><option value="">Choose...</option><option value="x">X</option></select>
+      <input id="104" type="checkbox" />
+      <input id="105" type="checkbox" checked />
+      <input id="106" type="checkbox" value="newsletter" />
+      <div id="host"></div>
+    </form>
+  `;
+  const selectChanged = doc.getElementById("102") as HTMLSelectElement;
+  selectChanged.value = "a";
+  const host = doc.getElementById("host") as HTMLDivElement;
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML = `<input id="107" type="text" value="" /><div id="nested"></div>`;
+  const shadowInput = shadow.getElementById("107") as HTMLInputElement;
+  shadowInput.value = "shadow-typed";
+  const nestedHost = shadow.getElementById("nested") as HTMLDivElement;
+  const nestedShadow = nestedHost.attachShadow({ mode: "open" });
+  nestedShadow.innerHTML = `<select id="108"><option value="en">English</option><option value="zh">Chinese</option></select>`;
+
+  const capturedNodes: CapturedNode[] = [
+    {
+      backendNodeId: 101,
+      parentBackendNodeId: 1,
+      tag: "select",
+      attrs: {},
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+    {
+      backendNodeId: 102,
+      parentBackendNodeId: 1,
+      tag: "select",
+      attrs: {},
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+    {
+      backendNodeId: 103,
+      parentBackendNodeId: 1,
+      tag: "select",
+      attrs: {},
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+    {
+      backendNodeId: 104,
+      parentBackendNodeId: 1,
+      tag: "input",
+      attrs: { type: "checkbox" },
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+      formValue: "on",
+      checked: false,
+    },
+    {
+      backendNodeId: 105,
+      parentBackendNodeId: 1,
+      tag: "input",
+      attrs: { type: "checkbox", checked: "" },
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+      checked: true,
+    },
+    {
+      backendNodeId: 106,
+      parentBackendNodeId: 1,
+      tag: "input",
+      attrs: { type: "checkbox", value: "newsletter" },
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+      checked: false,
+    },
+    {
+      backendNodeId: 107,
+      parentBackendNodeId: 1,
+      tag: "input",
+      attrs: { type: "text" },
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+    {
+      backendNodeId: 108,
+      parentBackendNodeId: 1,
+      tag: "select",
+      attrs: {},
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+  ];
+
+  const cdp = createStubCdpRunner({
+    send: vi.fn(async (_tabId, method, params) => {
+      if (method === "Runtime.evaluate") {
+        const entries = new Function(
+          "document",
+          `return ${(params as { expression: string }).expression}`,
+        )(doc) as Array<[HTMLElement, string]>;
+        return reply(entries.map(([el, json]) => [Number(el.id), JSON.parse(json)]));
+      }
+      return {};
+    }) as CdpRunner["send"],
+  });
+
+  await enrichFormControlStates(cdp, 7, [capturedNodes]);
+
+  const byId = new Map(capturedNodes.map((n) => [n.backendNodeId, n]));
+  expect(byId.get(101)).toMatchObject({
+    formState: "default",
+    formValue: "us",
+    formDefaultValue: "us",
+  });
+  expect(byId.get(102)).toMatchObject({
+    formState: "filled",
+    formValue: "a",
+    formDefaultValue: "b",
+  });
+  expect(byId.get(103)).toMatchObject({ formState: "empty", formValue: "" });
+  expect(byId.get(104)).toMatchObject({ formState: "empty", checked: false });
+  expect(byId.get(104)?.formValue).toBeUndefined();
+  expect(byId.get(105)).toMatchObject({ formState: "default", checked: true });
+  expect(byId.get(105)?.formValue).toBeUndefined();
+  expect(byId.get(106)).toMatchObject({
+    formState: "empty",
+    checked: false,
+    formValue: "newsletter",
+  });
+  expect(byId.get(107)).toMatchObject({ formState: "filled", formValue: "shadow-typed" });
+  expect(byId.get(108)).toMatchObject({
+    formState: "default",
+    formValue: "en",
+    formDefaultValue: "en",
+  });
 });

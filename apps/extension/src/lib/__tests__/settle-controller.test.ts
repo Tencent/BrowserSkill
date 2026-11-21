@@ -18,9 +18,11 @@ describe("SettleController", () => {
   it("aborts superseded capture work and lands the prior action on the next origin", async () => {
     vi.useFakeTimers();
     const cdp: CdpRunner = createStubCdpRunner({
-      send: vi.fn(async () => ({
-        result: { value: { idleMs: 1_000, readyState: "complete" } },
-      })) as unknown as CdpRunner["send"],
+      send: vi.fn(async (_tabId: number, method: string) => {
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+        return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
+      }) as unknown as CdpRunner["send"],
     });
     const tabsApi: ChromeTabsApi = {
       get: vi.fn(async () => ({ id: 7, url: OBSERVATION.url }) as chrome.tabs.Tab),
@@ -65,9 +67,11 @@ describe("SettleController", () => {
   it("does not consume a newer redirect while reading the prior landing URL", async () => {
     vi.useFakeTimers();
     const cdp: CdpRunner = createStubCdpRunner({
-      send: vi.fn(async () => ({
-        result: { value: { idleMs: 1_000, readyState: "complete" } },
-      })) as unknown as CdpRunner["send"],
+      send: vi.fn(async (_tabId: number, method: string) => {
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+        return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
+      }) as unknown as CdpRunner["send"],
     });
     let resolveFirstTab!: (tab: chrome.tabs.Tab) => void;
     const firstTab = new Promise<chrome.tabs.Tab>((resolve) => {

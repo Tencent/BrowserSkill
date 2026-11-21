@@ -116,16 +116,28 @@ export function inspectVomLine(line: string): VomLineMetadata {
   const trimmed = line.replace(/^ +/, "");
   const indent = line.length - trimmed.length;
   if (trimmed.startsWith("@context ")) {
-    const body = trimmed.slice("@context ".length);
+    const bodyOffset = indent + "@context ".length;
+    const body = line.slice(bodyOffset);
     const spaceAt = body.indexOf(" ");
     const role = spaceAt >= 0 ? body.slice(0, spaceAt) : body;
+    const quotedOffset = spaceAt >= 0 ? bodyOffset + spaceAt + 1 : undefined;
     const quoted =
-      spaceAt >= 0 ? readLeadingJsonEscapedContent(body.slice(spaceAt + 1)) : undefined;
+      quotedOffset !== undefined
+        ? readLeadingJsonEscapedContent(line.slice(quotedOffset))
+        : undefined;
+    const hasPlainQuoted = quoted !== undefined && quoted.rest.length === 0;
     return {
       indent,
       kind: "context",
       ...(role ? { role } : {}),
-      ...(quoted && quoted.rest.length === 0 ? { escapedName: quoted.escaped } : {}),
+      ...(hasPlainQuoted && quotedOffset !== undefined
+        ? {
+            escapedName: quoted.escaped,
+            nameStart: quotedOffset + 1,
+            nameEnd: quotedOffset + 1 + quoted.escaped.length,
+          }
+        : {}),
+      ...(quotedOffset !== undefined ? { contentStart: quotedOffset } : {}),
       plainNamedNode: false,
       silentlyTruncatesLabel: true,
     };
@@ -148,51 +160,73 @@ export function inspectVomLine(line: string): VomLineMetadata {
     return { indent, kind: "layer", plainNamedNode: false, silentlyTruncatesLabel: false };
   }
   if (trimmed.startsWith("[§ active:")) {
-    return { indent, kind: "active-scope", plainNamedNode: false, silentlyTruncatesLabel: false };
+    return {
+      indent,
+      kind: "active-scope",
+      contentStart: indent + "[§ active:".length,
+      plainNamedNode: false,
+      silentlyTruncatesLabel: false,
+    };
   }
 
-  let rest = trimmed;
+  let cursor = indent;
   let ref: string | undefined;
-  if (rest.startsWith("@e")) {
-    const spaceAt = rest.indexOf(" ");
-    if (spaceAt > 2) {
-      const digits = rest.slice(2, spaceAt);
+  if (line.startsWith("@e", cursor)) {
+    const spaceAt = line.indexOf(" ", cursor);
+    if (spaceAt > cursor + 2) {
+      const digits = line.slice(cursor + 2, spaceAt);
       if (/^\d+$/.test(digits)) {
         ref = `e${digits}`;
-        rest = rest.slice(spaceAt + 1);
+        cursor = spaceAt + 1;
       }
     }
   }
-  const roleMatch = /^[A-Za-z][\w-]*/.exec(rest);
+  const roleMatch = /^[A-Za-z][\w-]*/.exec(line.slice(cursor));
   if (!roleMatch) {
-    return { indent, kind: "node", plainNamedNode: false, silentlyTruncatesLabel: false };
+    return {
+      indent,
+      kind: "node",
+      ...(indent < line.length ? { contentStart: indent } : {}),
+      plainNamedNode: false,
+      silentlyTruncatesLabel: false,
+    };
   }
   const role = roleMatch[0];
-  rest = rest.slice(role.length);
+  cursor += role.length;
   let hadPreNameAnnotation = false;
   for (const hint of PRE_NAME_DRAG_HINTS) {
-    if (rest.startsWith(hint)) {
+    if (line.startsWith(hint, cursor)) {
       hadPreNameAnnotation = true;
-      rest = rest.slice(hint.length);
+      cursor += hint.length;
       break;
     }
   }
+  const contentStart = cursor < line.length ? cursor : undefined;
   let escapedName: string | undefined;
-  if (rest.startsWith(' "')) {
-    const parsed = readLeadingJsonEscapedContent(rest.slice(1));
+  let nameStart: number | undefined;
+  let nameEnd: number | undefined;
+  let trailingOffset = cursor;
+  if (line.startsWith(' "', cursor)) {
+    const parsed = readLeadingJsonEscapedContent(line.slice(cursor + 1));
     if (parsed) {
       escapedName = parsed.escaped;
-      rest = parsed.rest;
+      nameStart = cursor + 2;
+      nameEnd = nameStart + parsed.escaped.length;
+      trailingOffset = nameEnd + 1;
     }
   }
   const plainNamedNode =
-    ref === undefined && !hadPreNameAnnotation && escapedName !== undefined && rest.length === 0;
+    ref === undefined &&
+    !hadPreNameAnnotation &&
+    escapedName !== undefined &&
+    trailingOffset === line.length;
   return {
     indent,
     kind: "node",
     ...(ref ? { ref } : {}),
     role,
-    ...(escapedName !== undefined ? { escapedName } : {}),
+    ...(escapedName !== undefined ? { escapedName, nameStart, nameEnd } : {}),
+    ...(contentStart !== undefined ? { contentStart } : {}),
     plainNamedNode,
     silentlyTruncatesLabel: role === "canvas",
   };
@@ -1127,14 +1161,20 @@ function renderNodeLine(
   }
   const placeholder = cleaned(node.placeholder);
   if (placeholder) line += ` placeholder=${JSON.stringify(placeholder)}`;
+  const suppressSyntheticCheckableValue =
+    node.checked !== undefined &&
+    rawValue === "on" &&
+    !Object.prototype.hasOwnProperty.call(node.attrs ?? {}, "value");
+  const effectiveValue = suppressSyntheticCheckableValue ? undefined : rawValue;
   const hasValue =
-    rawValue !== undefined || node.inputState === "filled" || node.inputState === "default";
+    effectiveValue !== undefined ||
+    (node.checked === undefined && (node.inputState === "filled" || node.inputState === "default"));
   const value =
     node.sensitive || redactValues
       ? hasValue
         ? SENSITIVE_MASK
         : undefined
-      : rawValue?.slice(0, MAX_VALUE_LENGTH);
+      : effectiveValue?.slice(0, MAX_VALUE_LENGTH);
   if (value !== undefined) line += ` =${JSON.stringify(value)}`;
 
   if (isNativeSelect && !node.sensitive && !redactValues) {
@@ -1410,10 +1450,13 @@ function* renderTreeRows(
     };
     const scope = state.scopeMap.get(node.id);
     if (scope?.lines.length) {
-      yield { text: `${"  ".repeat(depth + 1)}[§ active: ${scope.label}]` };
+      yield {
+        frameId: node.frameId,
+        text: `${"  ".repeat(depth + 1)}[§ active: ${scope.label}]`,
+      };
       for (const text of scope.lines.slice(0, MAX_SCOPE_LINES)) {
         const clean = cleaned(text);
-        if (clean) yield { text: `${"  ".repeat(depth + 2)}${clean}` };
+        if (clean) yield { frameId: node.frameId, text: `${"  ".repeat(depth + 2)}${clean}` };
       }
     }
 

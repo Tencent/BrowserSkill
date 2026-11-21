@@ -3,6 +3,7 @@ import { rootEventSource, type TabEventSource } from "@/browser-driver/frame-han
 import {
   RECORD_CANCEL,
   RECORD_FINISH,
+  RECORD_QUERY,
   RECORD_START,
   RECORD_STEP,
   RECORD_STOP,
@@ -13,6 +14,7 @@ import { EXTENSION_VERSION } from "@/transport/handshake";
 import type { RecordStopResult, TraceV3 } from "@/transport/types";
 import {
   attachRecordFinishListener,
+  attachRecordQueryListener,
   attachRecordStepListener,
   handleRecordStart as rawHandleRecordStart,
   handleRecordStop as rawHandleRecordStop,
@@ -146,6 +148,7 @@ function makeFakeCdp(
     "Page.getFrameTree": () => ({
       frameTree: { frame: { id: "frame-1", loaderId: "loader-before" } },
     }),
+    "Page.createIsolatedWorld": () => ({ executionContextId: 1 }),
     "Page.navigate": () => {
       for (const listener of [...events]) {
         listener(rootEventSource(TAB_ID), "Page.lifecycleEvent", {
@@ -161,7 +164,8 @@ function makeFakeCdp(
     }),
     "Runtime.evaluate": (params: unknown) => {
       const expression = String((params as { expression?: string })?.expression ?? "");
-      if (!expression.includes("__bskRecordQuiet")) return { result: { value: "complete" } };
+      if (expression.includes("tokens.delete")) return { result: { value: true } };
+      if (!expression.includes("bsk.record.quiet")) return { result: { value: "complete" } };
       const idleMs = Date.now() >= busyUntil ? LONG_IDLE_MS : 0;
       return { result: { value: { idleMs, readyState: "complete" } } };
     },
@@ -1910,5 +1914,127 @@ describe("recorded user steps reach the exported trace", () => {
       ),
     ).toBe(true);
     expect(bypassOverlay).toHaveBeenCalledWith(99, false);
+  });
+
+  it("replies { active: false } to RECORD_QUERY when recording is winding down or rearm fails", async () => {
+    const { runtimeOnMessage } = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeTabsApi();
+    let releaseStop!: () => void;
+    const sendToTab = vi.fn(async (_tabId: number, message: { type?: string }) => {
+      if (message.type === RECORD_STOP) {
+        await new Promise<void>((resolve) => {
+          releaseStop = resolve;
+        });
+      }
+      return { ok: true };
+    });
+    const cdp = makeFakeCdp();
+    const detachQuery = attachRecordQueryListener({ tabsApi, sendToTab, cdp });
+
+    try {
+      const started = await handleRecordStart(manager, RECORD_START_V3, {
+        tabsApi,
+        sendToTab,
+        cdp,
+      });
+      expect("code" in started).toBe(false);
+
+      // Begin stopping so `recording.finishAttempt` is in progress (winding down).
+      const stopping = handleRecordStop(
+        manager,
+        { session_id: "abcd" },
+        {
+          tabsApi,
+          sendToTab,
+          cdp,
+        },
+      );
+      await vi.waitFor(() => expect(releaseStop).toBeTypeOf("function"));
+
+      const queryReply = vi.fn();
+      runtimeOnMessage.emit(
+        { type: RECORD_QUERY },
+        { tab: { id: TAB_ID, active: true } as chrome.tabs.Tab } as chrome.runtime.MessageSender,
+        queryReply,
+      );
+      await vi.waitFor(() => expect(queryReply).toHaveBeenCalledWith({ active: false }));
+
+      releaseStop();
+      const stopped = await stopping;
+      expect("code" in stopped).toBe(false);
+    } finally {
+      detachQuery();
+    }
+  });
+
+  it("retires provisional recording and cancels tabs recovered via RECORD_QUERY when startup aborts", async () => {
+    const { runtimeOnMessage } = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeTabsApi();
+    const abort = new AbortController();
+    let releaseNav!: () => void;
+    const sendToTab = vi.fn(async () => ({ ok: true }));
+    const baseCdp = makeFakeCdp();
+    const cdp = {
+      ...baseCdp,
+      send: vi.fn(async (tabId: number, method: string, params?: Record<string, unknown>) => {
+        if (method === "Page.navigate") {
+          await new Promise<void>((resolve) => {
+            releaseNav = resolve;
+          });
+          return { frameId: "f1" };
+        }
+        return baseCdp.send(tabId, method, params);
+      }) as typeof baseCdp.send,
+    };
+    const detachQuery = attachRecordQueryListener({ tabsApi, sendToTab, cdp });
+
+    try {
+      const starting = handleRecordStart(manager, RECORD_START_V3, {
+        tabsApi,
+        sendToTab,
+        cdp,
+        signal: abort.signal,
+      });
+      await vi.waitFor(() => expect(releaseNav).toBeTypeOf("function"));
+
+      // Destination page queries while startup navigation is still pending and mounts the overlay.
+      const queryReply = vi.fn();
+      runtimeOnMessage.emit(
+        { type: RECORD_QUERY },
+        { tab: { id: TAB_ID, active: true } as chrome.tabs.Tab } as chrome.runtime.MessageSender,
+        queryReply,
+      );
+      await vi.waitFor(() =>
+        expect(queryReply).toHaveBeenCalledWith(
+          expect.objectContaining({ active: true, requestId: expect.any(String) }),
+        ),
+      );
+      const recoveredRequestId = queryReply.mock.calls[0]?.[0]?.requestId as string;
+
+      // Startup is cancelled before navigation finishes.
+      abort.abort();
+      releaseNav();
+      const result = await starting;
+      expect(result).toMatchObject({ code: "cancelled" });
+
+      // The provisional recording must send RECORD_CANCEL to the tab that mounted via RECORD_QUERY.
+      expect(sendToTab).toHaveBeenCalledWith(TAB_ID, {
+        type: RECORD_CANCEL,
+        requestId: recoveredRequestId,
+      });
+
+      // Subsequent RECORD_QUERY sees no active recording.
+      const afterReply = vi.fn();
+      runtimeOnMessage.emit(
+        { type: RECORD_QUERY },
+        { tab: { id: TAB_ID, active: true } as chrome.tabs.Tab } as chrome.runtime.MessageSender,
+        afterReply,
+      );
+      await vi.waitFor(() => expect(afterReply).toHaveBeenCalledWith({ active: false }));
+    } finally {
+      detachQuery();
+    }
   });
 });

@@ -164,11 +164,79 @@ function sensitive(node: SemanticGraphNode, axProps: ExtractedAxProps | undefine
   return SENSITIVE_INPUT_TYPES.has(axProps?.inputType ?? "");
 }
 
+function selectInputStateFromDom(
+  node: SemanticGraphNode,
+  sourceValue: string | undefined,
+  graph: SemanticGraph,
+  indexes: ResolveIndexes,
+): VomNode["inputState"] | undefined {
+  const options: Array<{
+    value: string;
+    selected: boolean;
+    defaultSelected: boolean;
+    disabled: boolean;
+  }> = [];
+  const visit = (childIds: readonly SemanticNodeId[] | undefined, groupDisabled = false): void => {
+    if (!childIds) return;
+    for (const childId of childIds) {
+      const child = graph.nodes.get(childId);
+      if (!child || child.excluded) continue;
+      const cTag = child.dom?.tag.toLowerCase() ?? "";
+      const cAttrs = child.dom?.attrs ?? {};
+      if (cTag === "optgroup") {
+        visit(
+          indexes.domChildren.get(childId),
+          groupDisabled || Object.prototype.hasOwnProperty.call(cAttrs, "disabled"),
+        );
+        continue;
+      }
+      if (cTag !== "option") continue;
+      const value = Object.prototype.hasOwnProperty.call(cAttrs, "value")
+        ? cAttrs.value
+        : (clean(child.dom?.textContent) ?? "");
+      const defaultSelected = Object.prototype.hasOwnProperty.call(cAttrs, "selected");
+      const selected =
+        child.dom?.checked !== undefined
+          ? child.dom.checked
+          : sourceValue !== undefined
+            ? value === sourceValue
+            : defaultSelected;
+      options.push({
+        value,
+        selected,
+        defaultSelected,
+        disabled: groupDisabled || Object.prototype.hasOwnProperty.call(cAttrs, "disabled"),
+      });
+    }
+  };
+  visit(indexes.domChildren.get(node.id));
+  if (options.length === 0) return undefined;
+  const multiple = Object.prototype.hasOwnProperty.call(node.dom?.attrs ?? {}, "multiple");
+  if (multiple) {
+    const selectedCount = options.filter((opt) => opt.selected).length;
+    if (selectedCount === 0) return "empty";
+    return options.every((opt) => opt.selected === opt.defaultSelected) ? "default" : "filled";
+  }
+  const selectedOpt = options.find((opt) => opt.selected);
+  if (!selectedOpt || selectedOpt.value === "") return "empty";
+  let defaultOpt: (typeof options)[number] | undefined;
+  for (const opt of options) {
+    if (opt.defaultSelected) defaultOpt = opt;
+  }
+  const size = Number.parseInt(node.dom?.attrs.size ?? "", 10);
+  if (!defaultOpt && !(Number.isFinite(size) && size > 1)) {
+    defaultOpt = options.find((opt) => !opt.disabled) ?? options[0];
+  }
+  return defaultOpt && selectedOpt === defaultOpt ? "default" : "filled";
+}
+
 function inputState(
   node: SemanticGraphNode,
   role: string | undefined,
   value: string | undefined,
   isSensitive: boolean,
+  graph?: SemanticGraph,
+  indexes?: ResolveIndexes,
 ): VomNode["inputState"] {
   if (node.dom?.formState) {
     return isSensitive && node.dom.formState === "default" ? "filled" : node.dom.formState;
@@ -176,6 +244,10 @@ function inputState(
   const tag = node.dom?.tag.toLowerCase() ?? "";
   if (!FORM_TAGS.has(tag) && !["textbox", "searchbox"].includes(role ?? "")) return undefined;
   if (isSensitive) return value ? "filled" : "empty";
+  if (tag === "select" && graph && indexes) {
+    const selectState = selectInputStateFromDom(node, value, graph, indexes);
+    if (selectState) return selectState;
+  }
   if (node.dom?.formValue !== undefined) {
     if (node.dom.formValue === "") return "empty";
     return node.dom.formValue === (node.dom.formDefaultValue ?? "") ? "default" : "filled";
@@ -1098,7 +1170,7 @@ export function resolveSemanticGraph(
           }
         : {}),
       ...(rowAnchor ? { rowAnchor } : {}),
-      inputState: inputState(node, role, sourceValue, isSensitive),
+      inputState: inputState(node, role, sourceValue, isSensitive, graph, indexes),
       sensitive: isSensitive,
       // An available AX result is authoritative, including ignored/nonmodal nodes.
       modal: node.ax
