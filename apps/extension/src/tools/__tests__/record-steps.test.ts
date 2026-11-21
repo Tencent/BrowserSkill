@@ -1206,6 +1206,7 @@ describe("recorded user steps reach the exported trace", () => {
         await stopReleased;
         return false;
       }),
+      cleanup: vi.fn(async () => {}),
       cancel: vi.fn(),
     };
     const deps = { tabsApi, sendToTab, cdp: makeFakeCdp(), frameCoordinator };
@@ -1541,6 +1542,7 @@ describe("recorded user steps reach the exported trace", () => {
         }),
       ),
       stop: vi.fn(async () => true),
+      cleanup: vi.fn(async () => {}),
       cancel: vi.fn(),
     };
     const deps = { tabsApi, sendToTab, cdp: makeFakeCdp(), frameCoordinator };
@@ -1582,6 +1584,7 @@ describe("recorded user steps reach the exported trace", () => {
       armTab: vi.fn(async () => true),
       sourceFor: vi.fn(() => null),
       stop: vi.fn(async () => false),
+      cleanup: vi.fn(async () => {}),
       cancel: vi.fn(),
     };
     const deps = {

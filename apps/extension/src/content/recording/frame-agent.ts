@@ -26,6 +26,7 @@ interface ActiveFrameRecording {
   capture: RecordCaptureController;
   marker: RecordingDocumentMarker;
   subframeObserver: MutationObserver;
+  stopped: boolean;
 }
 
 const RECORD_FRAME_REGISTER_TIMEOUT_MS = 5_000;
@@ -38,7 +39,11 @@ export class RecordFrameAgent {
   async start(
     message: RecordFrameStartMessage,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
-    if (this.#active?.requestId === message.requestId) return { ok: true };
+    if (this.#active?.requestId === message.requestId) {
+      return this.#active.stopped
+        ? { ok: false, error: "recording document is stopping" }
+        : { ok: true };
+    }
     if (this.#disposed) return { ok: false, error: "recording document is disposed" };
     if (this.#startPromise) {
       await this.#startPromise;
@@ -57,16 +62,27 @@ export class RecordFrameAgent {
   cancel(requestId: string): void {
     const active = this.#active;
     if (!active || active.requestId !== requestId) return;
-    active.subframeObserver.disconnect();
-    active.capture.dispose();
-    active.marker.restore();
-    active.port.disconnect();
-    this.#active = null;
+    this.#teardown(active, true);
   }
 
   dispose(): void {
     this.#disposed = true;
     if (this.#active) this.cancel(this.#active.requestId);
+  }
+
+  #teardown(active: ActiveFrameRecording, disconnectPort: boolean): void {
+    if (this.#active !== active) return;
+    this.#active = null;
+    active.subframeObserver.disconnect();
+    active.capture.dispose();
+    active.marker.restore();
+    if (disconnectPort) {
+      try {
+        active.port.disconnect();
+      } catch {
+        // Ignore already-closed ports.
+      }
+    }
   }
 
   async #start(
@@ -155,31 +171,34 @@ export class RecordFrameAgent {
       capture,
       marker,
       subframeObserver,
+      stopped: false,
     };
     this.#active = active;
     port.onMessage.addListener((raw: unknown) => {
       const command = raw as Partial<RecordFramePortMessage>;
       if (command.type === "stop" && command.requestId === active.requestId) {
         void this.#stop(active, command.commandId);
+      } else if (command.type === "cleanup" && command.requestId === active.requestId) {
+        this.#cleanup(active);
       } else if (command.type === "cancel" && command.requestId === active.requestId) {
         this.cancel(active.requestId);
       }
     });
     port.onDisconnect.addListener(() => {
-      if (this.#active !== active) return;
-      active.subframeObserver.disconnect();
-      active.capture.dispose();
-      active.marker.restore();
-      this.#active = null;
+      this.#teardown(active, false);
     });
     return { ok: true };
   }
 
   async #stop(active: ActiveFrameRecording, commandId: string | undefined): Promise<void> {
     if (!commandId || this.#active !== active) return;
+    active.stopped = true;
     active.subframeObserver.disconnect();
-    active.capture.dispose();
+    // Stop event capture and commit any dirty fill, but preserve password
+    // redaction markers and document identity until trailing VOM capture ends.
+    active.capture.stop();
     const succeeded = await active.delivery.flush();
+    if (this.#active !== active) return;
     try {
       active.port.postMessage({
         type: "stopped",
@@ -189,12 +208,26 @@ export class RecordFrameAgent {
         ...(succeeded ? {} : { error: "failed to deliver one or more recorded steps" }),
       } satisfies RecordFramePortMessage);
     } catch {
-      return;
+      // Disconnected ports are cleaned up by `onDisconnect`.
     }
-    if (!succeeded || this.#active !== active) return;
-    active.marker.restore();
-    this.#active = null;
-    active.port.disconnect();
+  }
+
+  #cleanup(active: ActiveFrameRecording): void {
+    if (this.#active !== active) return;
+    this.#teardown(active, false);
+    try {
+      active.port.postMessage({
+        type: "cleaned",
+        requestId: active.requestId,
+      } satisfies RecordFramePortMessage);
+    } catch {
+      // Ignore already-closed ports.
+    }
+    try {
+      active.port.disconnect();
+    } catch {
+      // Ignore already-closed ports.
+    }
   }
 }
 

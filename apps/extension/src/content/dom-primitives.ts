@@ -6,6 +6,26 @@ import {
 import { isOverlayHostElementName, OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 
 export const INTERNAL_BSK_ATTR_PREFIX = "data-bsk-";
+const FORMER_PASSWORDS_SYMBOL = Symbol.for("bsk.former_passwords");
+
+function sharedFormerPasswords(): WeakSet<Element> {
+  const scope = globalThis as unknown as Record<symbol, WeakSet<Element> | undefined>;
+  let set = scope[FORMER_PASSWORDS_SYMBOL];
+  if (!set) {
+    set = new WeakSet<Element>();
+    scope[FORMER_PASSWORDS_SYMBOL] = set;
+  }
+  return set;
+}
+
+/**
+ * Remembers an element that was previously `type="password"` in the extension's
+ * isolated world so sibling scripts (e.g. cooperation) keep masking it after
+ * recording cleanup removes the DOM attribute.
+ */
+export function rememberFormerPassword(element: Element): void {
+  sharedFormerPasswords().add(element);
+}
 
 export function primaryEventTarget(event: Event): EventTarget | null {
   return event.composedPath()[0] ?? event.target;
@@ -147,7 +167,22 @@ export function isInternalBskMutation(record: MutationRecord): boolean {
 export function isPasswordTypeMutation(
   record: MutationRecord,
 ): record is MutationRecord & { target: Element } {
-  return record.oldValue?.toLowerCase() === "password" && record.target instanceof Element;
+  return (
+    record.type === "attributes" &&
+    record.attributeName?.toLowerCase() === "type" &&
+    record.oldValue?.toLowerCase() === "password" &&
+    record.target instanceof Element &&
+    !isExtensionOverlayNode(record.target)
+  );
+}
+
+export function isNodeInsideShadowHost(node: Node, host: Element): boolean {
+  let root = node.getRootNode();
+  while (root instanceof ShadowRoot) {
+    if (root.host === host) return true;
+    root = root.host.getRootNode();
+  }
+  return false;
 }
 
 export function isSensitiveFormField(
@@ -158,6 +193,7 @@ export function isSensitiveFormField(
     (target instanceof HTMLInputElement && target.type.toLowerCase() === "password") ||
     target.hasAttribute(RECORD_PASSWORD_ATTRIBUTE) ||
     Boolean(formerPasswords?.has(target)) ||
+    sharedFormerPasswords().has(target) ||
     sensitiveAutocomplete(target.getAttribute("autocomplete"))
   );
 }
@@ -171,6 +207,31 @@ const NON_OVERLAY_ELEMENT_FILTER: NodeFilter = {
       : NodeFilter.FILTER_ACCEPT;
   },
 };
+
+export function visitShadowRoots(
+  target: Node,
+  onRoot: (root: Document | ShadowRoot) => void,
+  visited = new Set<Node>(),
+): void {
+  if (visited.has(target) || isExtensionOverlayNode(target)) return;
+  visited.add(target);
+  const doc = target.ownerDocument ?? document;
+  if (target.nodeType === Node.DOCUMENT_NODE || target instanceof ShadowRoot) {
+    onRoot(target as Document | ShadowRoot);
+  } else if (target instanceof Element) {
+    const nested = uncheckedElementShadowRoot(target);
+    if (nested) visitShadowRoots(nested, onRoot, visited);
+  } else {
+    return;
+  }
+  const walker = doc.createTreeWalker(target, NodeFilter.SHOW_ELEMENT, NON_OVERLAY_ELEMENT_FILTER);
+  for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const nested = uncheckedElementShadowRoot(current as Element);
+    if (nested) visitShadowRoots(nested, onRoot, visited);
+  }
+}
 
 function subtreeHasSubframeElement(root: Element | ShadowRoot, visited: Set<Node>): boolean {
   if (visited.has(root)) return false;

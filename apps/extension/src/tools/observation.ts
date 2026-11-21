@@ -963,6 +963,7 @@ export interface CaptureVomObservationOptions extends VomOptions {
   skipRender?: boolean;
   conditionalSurfaceProbe?: boolean;
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  redactUnverifiedAxValues?: boolean;
   signal?: AbortSignal;
 }
 
@@ -1035,7 +1036,10 @@ async function buildVomObservation(
       : NO_HOVER_PROBES;
   throwIfAborted(options.signal, "observation");
   const structured = normalizeSemanticStructure(
-    resolveSemanticGraph(semanticGraph, { supplementalNames: hoverProbes.tooltipNames }),
+    resolveSemanticGraph(semanticGraph, {
+      supplementalNames: hoverProbes.tooltipNames,
+      ...(options.redactUnverifiedAxValues ? { redactUnverifiedAxValues: true } : {}),
+    }),
   );
   const scene = projectSemanticGraph(structured);
   const decoratedScene = attachCapturedSceneAnnotations(

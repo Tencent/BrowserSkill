@@ -1052,6 +1052,9 @@ it("ignores internal data-bsk-* attributes and browser-skill-overlay mutations a
     editing: false,
   });
   expect(afterOverlay.fields).toEqual([expect.objectContaining({ label: "Search", value: "ok" })]);
+  // Removing the recording DOM attribute after cleanup must not re-expose the secret field to cooperation.
+  secret.removeAttribute("data-bsk-record-password");
+  expect(read()!.fields).toEqual([expect.objectContaining({ label: "Search", value: "ok" })]);
   overlayHost.remove();
   document.documentElement.removeAttribute("data-bsk-record-document");
 });

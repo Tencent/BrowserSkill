@@ -377,6 +377,7 @@ describe("ToolDispatcher", () => {
       armTab: vi.fn(async () => true),
       sourceFor: vi.fn(() => null),
       stop: vi.fn(async () => true),
+      cleanup: vi.fn(async () => {}),
       cancel: vi.fn(),
     };
     const sendToTab = vi.fn(async () => ({ ok: true }));
@@ -416,6 +417,7 @@ describe("ToolDispatcher", () => {
     await vi.waitFor(() => expect(sent).toHaveLength(2));
 
     expect(frameCoordinator.stop).toHaveBeenCalledOnce();
+    expect(frameCoordinator.cleanup).toHaveBeenCalledOnce();
     expect(sent[1]).toMatchObject({ id: "r-2", result: { trace: { steps: [] } } });
   });
 
@@ -2693,6 +2695,7 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       armTab: vi.fn(async () => true),
       sourceFor: vi.fn(() => null),
       stop: vi.fn(async () => true),
+      cleanup: vi.fn(async () => {}),
       cancel: vi.fn(),
     };
     setBrowserObservationAttachForTests(
