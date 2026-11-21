@@ -28,6 +28,7 @@ export const REQUESTED_STYLES = [
   "overflow-y",
   "width",
   "height",
+  "z-index",
 ] as const;
 export const VISUAL_STYLES = [
   ...REQUESTED_STYLES,
@@ -107,6 +108,14 @@ export function snapshotFrameId(document: SnapshotDocument, strings: string[]): 
 export interface SnapshotReply {
   strings?: string[];
   documents?: SnapshotDocument[];
+}
+
+function parseZIndex(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) return undefined;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 function isSensitiveFormControl(node: Pick<CapturedNode, "tag" | "attrs">): boolean {
@@ -313,6 +322,8 @@ export async function decodeDocument(
     );
     if (sensitive && "value" in attrs) delete attrs.value;
 
+    const zIndex = parseZIndex(styles?.["z-index"]);
+
     nodes.push({
       backendNodeId,
       nodeType: dn.nodeType?.[n],
@@ -325,6 +336,7 @@ export async function decodeDocument(
       attrs,
       layout,
       paintOrder: li === undefined ? 0 : (dl?.paintOrders?.[li] ?? 0),
+      ...(zIndex !== undefined ? { zIndex } : {}),
       position: styles?.position || "static",
       pointerEvents: styles?.["pointer-events"] || "auto",
       cursor: styles?.cursor || "auto",

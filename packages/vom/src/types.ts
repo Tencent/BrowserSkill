@@ -57,6 +57,8 @@ export interface VomNode {
   tag: string;
   rect: Rect | null;
   paintOrder: number;
+  /** Parsed integer CSS `z-index` when explicitly set (absent for `auto`). */
+  zIndex?: number;
   position: string;
   pointerEvents: string;
   cursor?: string;

@@ -231,6 +231,7 @@ interface ResolveIndexes {
   hasExcludedAxTextDescendant: (nodeId: SemanticNodeId) => boolean;
   hasNativeDescendant: (nodeId: SemanticNodeId) => boolean;
   isOrInsideNative: (nodeId: SemanticNodeId) => boolean;
+  inNegativeStackingContext: (nodeId: SemanticNodeId) => boolean;
   selfOrEnclosingLabel: (nodeId: SemanticNodeId) => SemanticNodeId | undefined;
 }
 
@@ -484,6 +485,33 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     return value;
   };
 
+  const negativeStackingMemo = new Map<SemanticNodeId, boolean>();
+  const visitingNegativeStacking = new Set<SemanticNodeId>();
+  const inNegativeStackingContext = (nodeId: SemanticNodeId): boolean => {
+    const cached = negativeStackingMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (visitingNegativeStacking.has(nodeId)) return false;
+    visitingNegativeStacking.add(nodeId);
+    const node = graph.nodes.get(nodeId);
+    let value = false;
+    if (node) {
+      const ownNegative =
+        node.dom !== undefined &&
+        node.dom.position !== "static" &&
+        node.dom.zIndex !== undefined &&
+        node.dom.zIndex < 0;
+      if (ownNegative) {
+        value = true;
+      } else if (node.domParentId) {
+        const parent = graph.nodes.get(node.domParentId);
+        value = parent?.frameId === node.frameId && inNegativeStackingContext(node.domParentId);
+      }
+    }
+    visitingNegativeStacking.delete(nodeId);
+    negativeStackingMemo.set(nodeId, value);
+    return value;
+  };
+
   const enclosingLabelMemo = new Map<SemanticNodeId, SemanticNodeId | undefined>();
   const visitingLabel = new Set<SemanticNodeId>();
   const selfOrEnclosingLabel = (nodeId: SemanticNodeId): SemanticNodeId | undefined => {
@@ -516,6 +544,7 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     hasExcludedAxTextDescendant,
     hasNativeDescendant,
     isOrInsideNative,
+    inNegativeStackingContext,
     selfOrEnclosingLabel,
   };
 }
@@ -1025,10 +1054,17 @@ export function resolveSemanticGraph(
         node.dom?.clickable === true ||
         node.dom?.cursor === "pointer");
     const rowAnchor = mayBeReferenced ? resolveRowAnchor(node) : undefined;
+    const resolvedZIndex =
+      node.dom?.zIndex !== undefined && node.dom.zIndex < 0
+        ? node.dom.zIndex
+        : node.dom && node.dom.position !== "static" && indexes.inNegativeStackingContext(node.id)
+          ? -1
+          : node.dom?.zIndex;
     const vom: ResolvedSemanticNode["vom"] = {
       tag,
       rect: node.dom?.rect ?? null,
       paintOrder: node.dom?.paintOrder ?? 0,
+      ...(resolvedZIndex !== undefined ? { zIndex: resolvedZIndex } : {}),
       position: node.dom?.position || "static",
       pointerEvents: node.dom?.pointerEvents || "auto",
       ...(node.dom?.cursor ? { cursor: node.dom.cursor } : {}),
