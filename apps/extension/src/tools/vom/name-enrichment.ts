@@ -19,6 +19,10 @@ const MAX_CACHE_ENTRIES = 500;
 const FORM_CONTROL_TAGS = new Set(["input", "select", "textarea"]);
 
 interface TooltipCacheEntry {
+  tabId: number;
+  frameId: string;
+  loaderId: string;
+  url: string;
   /** `null` records "probed, revealed no tooltip" so the miss is not re-paid. */
   name: string | null;
   expiresAt: number;
@@ -38,11 +42,105 @@ export interface TooltipNameProbeOptions {
 
 const tooltipCache = new Map<string, TooltipCacheEntry>();
 
+let attachedLifecycleCleanup: (() => void) | undefined;
+
+function detachLifecycleListenersIfEmpty(): void {
+  if (tooltipCache.size > 0 || !attachedLifecycleCleanup) return;
+  const cleanup = attachedLifecycleCleanup;
+  attachedLifecycleCleanup = undefined;
+  cleanup();
+}
+
+function ensureLifecycleListeners(): void {
+  if (attachedLifecycleCleanup || tooltipCache.size === 0) return;
+  const tabsRemoved = globalThis.chrome?.tabs?.onRemoved;
+  const tabsReplaced = globalThis.chrome?.tabs?.onReplaced;
+  const navCommitted = globalThis.chrome?.webNavigation?.onCommitted;
+  if (!tabsRemoved && !tabsReplaced && !navCommitted) return;
+
+  const onTabRemoved = (tabId: number) => {
+    evictTooltipCacheForTab(tabId);
+  };
+  const onTabReplaced = (_addedTabId: number, removedTabId: number) => {
+    evictTooltipCacheForTab(removedTabId);
+  };
+  const onNavCommitted = (details: { tabId: number; frameId: number }) => {
+    if (details.frameId === 0) {
+      evictTooltipCacheForTab(details.tabId);
+    }
+  };
+
+  tabsRemoved?.addListener(onTabRemoved);
+  tabsReplaced?.addListener(onTabReplaced);
+  navCommitted?.addListener(onNavCommitted);
+  attachedLifecycleCleanup = () => {
+    tabsRemoved?.removeListener(onTabRemoved);
+    tabsReplaced?.removeListener(onTabReplaced);
+    navCommitted?.removeListener(onNavCommitted);
+  };
+}
+
+export function evictTooltipCacheForTab(tabId: number): void {
+  for (const [key, entry] of tooltipCache) {
+    if (entry.tabId === tabId) tooltipCache.delete(key);
+  }
+  detachLifecycleListenersIfEmpty();
+}
+
+export function clearTooltipCache(): void {
+  tooltipCache.clear();
+  detachLifecycleListenersIfEmpty();
+}
+
+function documentLoaderId<T extends FrameOwnedAxNode>(document: FrameDocument<T>): string {
+  return document.loaderId || document.handle.loaderId || "";
+}
+
 function cacheKey<T extends FrameOwnedAxNode>(
   document: FrameDocument<T>,
   backendNodeId: number,
-): string {
-  return `${document.handle.tabId}\u0000${document.frameId}\u0000${document.url ?? ""}\u0000${backendNodeId}`;
+): string | undefined {
+  const loaderId = documentLoaderId(document);
+  if (!loaderId) return undefined;
+  return `${document.handle.tabId}\u0000${document.frameId}\u0000${loaderId}\u0000${document.url ?? ""}\u0000${backendNodeId}`;
+}
+
+function evictStaleDocuments<T extends FrameOwnedAxNode>(documents: FrameDocument<T>[]): void {
+  if (tooltipCache.size === 0) return;
+  const now = Date.now();
+  const activeByTabFrame = new Map<
+    string,
+    { tabId: number; loaderId: string; url: string; isRoot: boolean }
+  >();
+  for (const document of documents) {
+    const loaderId = documentLoaderId(document);
+    if (!loaderId) continue;
+    activeByTabFrame.set(`${document.handle.tabId}\u0000${document.frameId}`, {
+      tabId: document.handle.tabId,
+      loaderId,
+      url: document.url ?? "",
+      isRoot: !document.parentFrameId,
+    });
+  }
+  const navigatedTabs = new Set<number>();
+  for (const [key, entry] of tooltipCache) {
+    if (entry.expiresAt <= now) {
+      tooltipCache.delete(key);
+      continue;
+    }
+    const active = activeByTabFrame.get(`${entry.tabId}\u0000${entry.frameId}`);
+    if (!active) continue;
+    if (active.loaderId !== entry.loaderId || active.url !== entry.url) {
+      tooltipCache.delete(key);
+      if (active.isRoot && active.loaderId !== entry.loaderId) {
+        navigatedTabs.add(active.tabId);
+      }
+    }
+  }
+  for (const tabId of navigatedTabs) {
+    evictTooltipCacheForTab(tabId);
+  }
+  detachLifecycleListenersIfEmpty();
 }
 
 /** Returns the cache entry, or `undefined` when this control was never probed. */
@@ -51,10 +149,12 @@ function cachedEntry<T extends FrameOwnedAxNode>(
   backendNodeId: number,
 ): TooltipCacheEntry | undefined {
   const key = cacheKey(document, backendNodeId);
+  if (!key) return undefined;
   const entry = tooltipCache.get(key);
   if (!entry) return undefined;
   if (entry.expiresAt <= Date.now()) {
     tooltipCache.delete(key);
+    detachLifecycleListenersIfEmpty();
     return undefined;
   }
   return entry;
@@ -65,14 +165,21 @@ function storeName<T extends FrameOwnedAxNode>(
   backendNodeId: number,
   name: string | null,
 ): void {
+  const key = cacheKey(document, backendNodeId);
+  if (!key) return;
   if (tooltipCache.size >= MAX_CACHE_ENTRIES) {
     const oldest = tooltipCache.keys().next().value;
     if (oldest !== undefined) tooltipCache.delete(oldest);
   }
-  tooltipCache.set(cacheKey(document, backendNodeId), {
+  tooltipCache.set(key, {
+    tabId: document.handle.tabId,
+    frameId: document.frameId,
+    loaderId: documentLoaderId(document),
+    url: document.url ?? "",
     name,
     expiresAt: Date.now() + (name === null ? MISS_CACHE_TTL_MS : CACHE_TTL_MS),
   });
+  ensureLifecycleListeners();
 }
 
 function tooltipCollectorFunction(): string {
@@ -230,6 +337,7 @@ export async function probeTooltipNames<T extends FrameOwnedAxNode>(
   graph: ResolvedSemanticGraph,
   options: TooltipNameProbeOptions = {},
 ): Promise<Map<string, string>> {
+  evictStaleDocuments(documents);
   const names = new Map<string, string>();
   const pending: TooltipCandidate<T>[] = [];
   for (const candidate of candidates(documents, graph)) {

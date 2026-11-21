@@ -156,6 +156,61 @@ describe("explicit action conditions", () => {
   });
 
   it.each([
+    { html: '<button role="switch" aria-checked="true">Dark</button>', expected: true },
+    { html: '<button role="switch" aria-checked="false">Dark</button>', expected: false },
+    { html: '<div role="checkbox" aria-checked="true">Agree</div>', expected: true },
+    { html: '<div role="radio" aria-checked="true">Pro</div>', expected: true },
+  ])("checks ARIA checked state for $html", async ({ html, expected }) => {
+    const f = fixture(html);
+    expect(
+      await checkExpectations(f.cdp, session, tab, [
+        { target: "@e1", field: "checked", equals: expected },
+      ]),
+    ).toBeUndefined();
+    expect(
+      await checkExpectations(f.cdp, session, tab, [
+        { target: "@e1", field: "checked", equals: !expected },
+      ]),
+    ).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "precondition_failed", expected: !expected, actual: expected },
+    });
+  });
+
+  it("does not treat aria-checked=mixed as true or false", async () => {
+    const f = fixture('<div role="checkbox" aria-checked="mixed">Select all</div>');
+    for (const expected of [true, false]) {
+      expect(
+        await checkExpectations(f.cdp, session, tab, [
+          { target: "@e1", field: "checked", equals: expected },
+        ]),
+      ).toMatchObject({
+        code: "permission_denied",
+        data: { reason: "precondition_failed", expected, actual: null },
+      });
+    }
+  });
+
+  it("strips excluded script/style/overlay descendants from expect(field: text) matching read", async () => {
+    const f = fixture(
+      '<div><script type="application/json">{"csrf":"tok"}</script><style>.x{color:red}</style><span>Order #42</span></div>',
+    );
+    expect(
+      await checkExpectations(f.cdp, session, tab, [
+        { target: "@e1", field: "text", equals: "Order #42" },
+      ]),
+    ).toBeUndefined();
+    expect(
+      await checkExpectations(f.cdp, session, tab, [
+        { target: "@e1", field: "text", equals: "Wrong" },
+      ]),
+    ).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "precondition_failed", actual: "Order #42" },
+    });
+  });
+
+  it.each([
     "detached",
     "unresolved",
   ])("does not interpret a %s precondition target as a missing attribute", async (kind) => {

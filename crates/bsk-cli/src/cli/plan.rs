@@ -5,9 +5,9 @@
 //! the target and `expect` immediately before every input. It is not a transaction:
 //! the first step that does not complete ends the plan, and nothing is retried.
 use super::{
-    GlobalFlags, TOOL_IPC_TIMEOUT, business_rpc, cooperate, ensure_daemon,
+    GlobalFlags, business_rpc, cooperate, ensure_daemon,
     error::{CliError, Format},
-    step,
+    orchestration, step,
 };
 use anyhow::{Context, ensure};
 use bsk_protocol::{
@@ -103,6 +103,7 @@ pub(crate) struct Plan {
     pub(crate) until_visible: Option<String>,
     pub(crate) wait_timeout_ms: u32,
     pub(crate) max_tokens: Option<u32>,
+    pub(crate) hydrate_cache: bool,
     pub(crate) budget: Duration,
 }
 
@@ -148,6 +149,7 @@ impl Plan {
             until_visible: None,
             wait_timeout_ms: DEFAULT_WAIT_MS as u32,
             max_tokens: None,
+            hydrate_cache: true,
             budget: BUDGET,
         })
     }
@@ -209,13 +211,14 @@ fn prepare_step(session: &str, step: &Value) -> anyhow::Result<Step> {
         let conditions = parse_expectations(&expect.to_string()).map_err(anyhow::Error::msg)?;
         params["expect"] = serde_json::to_value(conditions)?;
     }
+    let timeout = orchestration::tool_ipc_timeout(&method, &params);
     Ok(Step {
         action,
         method,
         params,
         strict,
         wait: false,
-        timeout: TOOL_IPC_TIMEOUT,
+        timeout,
     })
 }
 
@@ -237,13 +240,14 @@ fn wait_step(
         .or_insert_with(|| Value::from("visible"));
     let params = step::typed::<WaitForElementParams>(&Value::Object(fields))?;
     step::target(&params, true)?;
+    let timeout = orchestration::tool_ipc_timeout(&Method::ToolWaitForElement, &params);
     Ok(Step {
         action,
         method: Method::ToolWaitForElement,
         params,
         strict: false,
         wait: true,
-        timeout: Duration::from_millis(timeout_ms + 5000),
+        timeout,
     })
 }
 
@@ -394,14 +398,11 @@ pub(crate) fn run_with_meta(
         reply["not_run"] = (index + 1..not_run).collect::<Vec<_>>().into();
     }
     let final_session = pinned_session.as_deref().unwrap_or(&plan.session);
-    let need_post_meta = pinned_session.is_none();
-    let mut plain_call = |method: Method, params: Value, timeout: Duration| {
-        let want_meta = need_post_meta && method == Method::ToolCooperate;
-        call(method, params, timeout, want_meta).map(|(val, _)| val)
-    };
-    if finished
-        && let Some(selector) = &plan.until_visible
-        && step::await_ready(
+    if finished && let Some(selector) = &plan.until_visible {
+        let mut plain_call = |method: Method, params: Value, timeout: Duration| {
+            call(method, params, timeout, false).map(|(val, _)| val)
+        };
+        if step::await_ready(
             final_session,
             tab,
             selector,
@@ -409,19 +410,22 @@ pub(crate) fn run_with_meta(
             &mut reply,
             &mut exit,
             &mut plain_call,
-        )
-    {
-        read_after = false;
+        ) {
+            read_after = false;
+        }
     }
     if read_after {
-        step::post_sync(
-            final_session,
-            cooperate::Policy::Auto,
-            tab,
-            plan.max_tokens,
+        step::post_sync_with_meta(
+            step::PostSyncOptions {
+                session: final_session,
+                policy: cooperate::Policy::Auto,
+                tab,
+                max_tokens: plan.max_tokens,
+                hydrate_cache: plan.hydrate_cache,
+            },
             &mut reply,
             &mut exit,
-            &mut plain_call,
+            &mut call,
         );
     }
     reply["ok"] = (exit == 0).into();
@@ -451,6 +455,7 @@ fn prepare(args: &PlanArgs, flags: &GlobalFlags) -> anyhow::Result<Plan> {
     plan.until_visible = args.until_visible.clone();
     plan.wait_timeout_ms = args.wait_timeout_ms;
     plan.max_tokens = args.max_tokens;
+    plan.hydrate_cache = args.baseline.is_none();
     Ok(plan)
 }
 

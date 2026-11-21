@@ -522,7 +522,9 @@ export async function withInputReady<T extends object>(
       data: {
         ...result.data,
         effect_state: inputSent ? "unknown" : "none",
-        ...(inputSent && result.data?.reason !== "input_paint_unconfirmed"
+        ...(inputSent &&
+        result.data?.reason !== "input_paint_unconfirmed" &&
+        result.data?.reason !== "file_drop_failed"
           ? { reason: "input_outcome_unknown" as const }
           : {}),
       },

@@ -262,4 +262,44 @@ describe("RecordFrameAgent", () => {
       dispose();
     }
   });
+
+  it("scans added DOM subtrees in a single pass without calling querySelectorAll('*')", async () => {
+    const harness = portHarness();
+    vi.stubGlobal("chrome", {
+      runtime: {
+        connect: vi.fn(() => harness.port),
+        sendMessage: vi.fn(),
+      },
+    });
+    const elQsaSpy = vi.spyOn(Element.prototype, "querySelectorAll");
+    const docQsaSpy = vi.spyOn(Document.prototype, "querySelectorAll");
+    const agent = new RecordFrameAgent();
+    try {
+      await expect(
+        agent.start({ type: RECORD_FRAME_START, requestId: "rec-no-qsa", startedAtMs: 10 }),
+      ).resolves.toEqual({ ok: true });
+      harness.outbound.length = 0;
+
+      const wrapper = document.createElement("div");
+      for (let i = 0; i < 20; i++) {
+        wrapper.appendChild(document.createElement("span"));
+      }
+      wrapper.appendChild(document.createElement("iframe"));
+      document.body.appendChild(wrapper);
+
+      await vi.waitFor(() =>
+        expect(harness.outbound).toEqual([
+          {
+            type: "subframe_added",
+            requestId: "rec-no-qsa",
+            producerId: expect.any(String),
+          },
+        ]),
+      );
+      expect(elQsaSpy.mock.calls.filter(([sel]) => sel === "*")).toHaveLength(0);
+      expect(docQsaSpy.mock.calls.filter(([sel]) => sel === "*")).toHaveLength(0);
+    } finally {
+      agent.dispose();
+    }
+  });
 });

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use bsk_protocol::system::{BrowserStatusEntry, SessionStatusEntry};
 use bsk_protocol::tools::ClickParams;
-use bsk_protocol::{ErrorCode, RpcError, RpcErrorReason};
+use bsk_protocol::{ErrorCode, Method, RpcError, RpcErrorReason};
 use serde_json::{Value, json};
 use tokio::time::{Instant, timeout, timeout_at};
 
@@ -159,6 +159,29 @@ pub fn validate_sync_timeout_ms(
         return Err("timeout_ms must be 1..=25000 without --wait-for/--wait-not".into());
     }
     Ok(timeout_ms as u32)
+}
+
+/// Compute a dynamic client-side IPC timeout from `method` and `params`
+/// (`timeout_ms` + transport/daemon grace) so slow operations and navigations
+/// are never severed prematurely before the daemon's own deadline settles.
+pub fn tool_ipc_timeout(method: &Method, params: &Value) -> Duration {
+    if *method == Method::ToolCooperate {
+        return super::cooperate::cooperate_ipc_timeout(
+            params.get("timeout_ms").and_then(Value::as_u64),
+        );
+    }
+    let default_ms: u32 = match method {
+        Method::ToolScreenshotFullPage => 120_000,
+        Method::ToolRequestHelp => 300_000,
+        Method::ToolWaitForElement => 10_000,
+        Method::ToolNavigateBack | Method::ToolNavigateForward | Method::ToolReload => 15_000,
+        _ => 30_000,
+    };
+    let ms = params
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .map_or(default_ms, |ms| u32::try_from(ms).unwrap_or(u32::MAX));
+    super::business_rpc::ipc_timeout(ms)
 }
 
 /// Resolve the `browser_instance_id` owning `session_id` from `session.list`.
@@ -421,6 +444,30 @@ mod tests {
         assert_eq!(reply["observation"]["tab_id"], 7);
         assert_eq!(reply["observation"]["url"], "https://example.test/app");
         assert_eq!(reply["observation"]["title"], "App");
+    }
+
+    #[test]
+    fn tool_ipc_timeout_tracks_method_defaults_and_param_timeout() {
+        assert_eq!(
+            tool_ipc_timeout(&Method::ToolNavigate, &json!({"timeout_ms": 60_000})),
+            Duration::from_secs(75)
+        );
+        assert_eq!(
+            tool_ipc_timeout(&Method::ToolClick, &json!({"timeout_ms": 30_000})),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            tool_ipc_timeout(&Method::ToolWaitForElement, &json!({})),
+            Duration::from_secs(25)
+        );
+        assert_eq!(
+            tool_ipc_timeout(&Method::ToolScreenshotFullPage, &json!({})),
+            Duration::from_secs(135)
+        );
+        assert_eq!(
+            tool_ipc_timeout(&Method::ToolCooperate, &json!({"timeout_ms": 60_000})),
+            Duration::from_secs(85)
+        );
     }
 
     #[tokio::test]

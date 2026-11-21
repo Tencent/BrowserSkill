@@ -169,10 +169,20 @@ async function captureElementScreenshot(
   tabId: number,
   handle: FrameNodeHandle,
   signal?: AbortSignal,
+  scrollIntoView = true,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   if (signal?.aborted) return cancelled("screenshot");
-  const geometry = await resolveNodeGeometry(cdp, tabId, handle, { scrollIntoView: true });
-  if (isRpcError(geometry)) return geometry;
+  const geometry = await resolveNodeGeometry(cdp, tabId, handle, { scrollIntoView });
+  if (isRpcError(geometry)) {
+    if (!scrollIntoView && geometry.code === "permission_denied") {
+      return rpcError(
+        "permission_denied",
+        "element_not_visible",
+        "element is not visible in the current viewport; unborrowed user tabs are not scrolled for screenshot --ref (borrow the tab first to capture off-screen elements)",
+      );
+    }
+    return geometry;
+  }
   if (signal?.aborted) return cancelled("screenshot");
   const rect = geometry.topBounds;
   const clip = screenshotPageRect(rect, geometry.topViewport);
@@ -314,9 +324,16 @@ export async function handleScreenshot(
       await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
       if (signal?.aborted) return cancelled("screenshot");
       const verifiedEntry = lookupRefTarget(ctx, ref, target.tabId);
-      if (verifiedEntry?.kind !== "visual-region") {
-        const missing = resolveSnapshotRef(ctx, ref, target.tabId);
-        if (isRpcError(missing)) return missing;
+      if (verifiedEntry !== entry) {
+        if (!verifiedEntry) {
+          const missing = resolveSnapshotRef(ctx, ref, target.tabId);
+          if (isRpcError(missing)) return missing;
+        }
+        return rpcError(
+          "not_found",
+          "visual_target_changed",
+          "visual ref changed during attachment; observe again before requesting a screenshot",
+        );
       }
       const hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
       const captured = await withAuraCompositorKeepalive(
@@ -357,7 +374,21 @@ export async function handleScreenshot(
     if (signal?.aborted) return cancelled("screenshot");
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;
+    if (
+      node.backendNodeId !== initialNode.backendNodeId ||
+      node.frameId !== initialNode.frameId ||
+      node.handle.loaderId !== initialNode.handle.loaderId
+    ) {
+      return rpcError(
+        "not_found",
+        "ref_not_found",
+        `Ref @${node.refKey} changed during attachment; observe again before requesting a screenshot`,
+      );
+    }
     const cdp = deps.cdp;
+    // passive_read must not mutate scroll position on unborrowed user tabs.
+    const allowScrollIntoView =
+      isAgentControlledTab(ctx, target.tabId) && target.windowId === ctx.agentWindowId;
     const hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
     const captured = await withAuraCompositorKeepalive(
       cdp,
@@ -367,7 +398,8 @@ export async function handleScreenshot(
       () =>
         withExtensionOverlayHidden(
           target.tabId,
-          () => captureElementScreenshot(cdp, target.tabId, node.handle, signal),
+          () =>
+            captureElementScreenshot(cdp, target.tabId, node.handle, signal, allowScrollIntoView),
           deps.sendToTab,
         ),
     );
@@ -471,32 +503,151 @@ const ACTIVE_SCOPE_MAX_BLOCKS = 8;
 const ACTIVE_SCOPE_MAX_LINES = 40;
 const ACTIVE_SCOPE_MAX_LINE_LENGTH = 160;
 const ACTIVE_SCOPE_MAX_TOTAL_CHARS = 8_000;
-const ACTIVE_SCOPE_SKIP_TAGS = new Set(["script", "style", "noscript", "template"]);
+const ACTIVE_SCOPE_SKIP_TAGS = new Set([
+  "script",
+  "style",
+  "noscript",
+  "template",
+  "textarea",
+  "select",
+]);
+const SCOPE_INLINE_DISPLAY_NONE_RE = /(?:^|;)\s*display\s*:\s*none(?:\s*!important)?\s*(?:;|$)/i;
+const SCOPE_INLINE_VISIBILITY_HIDDEN_RE =
+  /(?:^|;)\s*visibility\s*:\s*(?:hidden|collapse)(?:\s*!important)?\s*(?:;|$)/i;
+const SCOPE_INLINE_VISIBILITY_VISIBLE_RE =
+  /(?:^|;)\s*visibility\s*:\s*visible(?:\s*!important)?\s*(?:;|$)/i;
+const SCOPE_INLINE_OPACITY_RE = /(?:^|;)\s*opacity\s*:\s*([+-]?\d*\.?\d+)/i;
 
-function buildCapturedChildren(capturedNodes: CapturedNode[]): Map<number, CapturedNode[]> {
-  const children = new Map<number, CapturedNode[]>();
-  for (const node of capturedNodes) {
-    if (node.parentBackendNodeId === null) continue;
-    const siblings = children.get(node.parentBackendNodeId);
-    if (siblings) siblings.push(node);
-    else children.set(node.parentBackendNodeId, [node]);
-  }
-  return children;
+interface ScopeCapturedNode extends CapturedNode {
+  layout?: { styles?: Readonly<Record<string, string>> };
+}
+
+function sceneFrameBackendKey(frameId: string, backendNodeId: number): string {
+  return `${frameId}\u0000${backendNodeId}`;
+}
+
+function sceneFrameDomIdKey(frameId: string, treeScope: string, domId: string): string {
+  return `${frameId}\u0000${treeScope}\u0000${domId}`;
 }
 
 interface VomNodeDomSignals {
-  capturedByBackendId: Map<number, CapturedNode>;
-  childrenByParentId: Map<number, CapturedNode[]>;
+  capturedByFrameBackendId: Map<string, CapturedNode>;
+  childrenByFrameParentId: Map<string, CapturedNode[]>;
+  treeScopeByFrameBackendId: Map<string, string>;
+  panelByScopeDomId: Map<string, CapturedNode>;
+  panelByFrameDomId: Map<string, CapturedNode>;
 }
 
-function capturedOnlySignals(capturedNodes: CapturedNode[]): VomNodeDomSignals {
-  const capturedByBackendId = new Map<number, CapturedNode>();
-  for (const node of capturedNodes) {
-    capturedByBackendId.set(node.backendNodeId, node);
+function capturedSignalsForDocuments(
+  documents: VomFrameDocument[],
+  fallbackRootNodes: CapturedNode[],
+  rootFrameId: string,
+): VomNodeDomSignals {
+  const capturedByFrameBackendId = new Map<string, CapturedNode>();
+  const childrenByFrameParentId = new Map<string, CapturedNode[]>();
+  const indexedNodes: Array<{ frameId: string; node: CapturedNode }> = [];
+
+  const indexFrameNodes = (defaultFrameId: string, nodes: CapturedNode[]) => {
+    for (const node of nodes) {
+      const frameId = node.frameId ?? defaultFrameId;
+      capturedByFrameBackendId.set(sceneFrameBackendKey(frameId, node.backendNodeId), node);
+      if (node.parentBackendNodeId !== null) {
+        const parentKey = sceneFrameBackendKey(frameId, node.parentBackendNodeId);
+        const siblings = childrenByFrameParentId.get(parentKey);
+        if (siblings) siblings.push(node);
+        else childrenByFrameParentId.set(parentKey, [node]);
+      }
+      indexedNodes.push({ frameId, node });
+    }
+  };
+
+  let sawRoot = false;
+  for (const document of documents) {
+    if (document.frameId === rootFrameId) sawRoot = true;
+    indexFrameNodes(document.frameId, document.domNodes);
   }
+  if (!sawRoot && fallbackRootNodes.length > 0) {
+    indexFrameNodes(rootFrameId, fallbackRootNodes);
+  }
+
+  // Scope `id` lookup per DOM tree root (document vs each ShadowRoot) so repeated
+  // Web Components reusing the same `id` in separate shadow trees do not collide.
+  // In real Chrome DOMSnapshot, shadow children point directly at their host via
+  // `parentBackendNodeId` and carry `shadowRootType` (`"open"`/`"closed"`/`"user-agent"`),
+  // whereas light-DOM slotted nodes have `shadowRootType === undefined`.
+  const treeScopeByFrameBackendId = new Map<string, string>();
+  const resolveTreeScope = (frameId: string, node: CapturedNode): string => {
+    const startKey = sceneFrameBackendKey(frameId, node.backendNodeId);
+    const cached = treeScopeByFrameBackendId.get(startKey);
+    if (cached !== undefined) return cached;
+    const inShadow = Boolean(node.shadowRootType);
+    const sameLayerPath: string[] = [];
+    const visiting = new Set<string>();
+    let current: CapturedNode | undefined = node;
+    let scope = "doc";
+    while (current) {
+      const key = sceneFrameBackendKey(frameId, current.backendNodeId);
+      const currentInShadow = Boolean(current.shadowRootType);
+      if (currentInShadow === inShadow) {
+        const hit = treeScopeByFrameBackendId.get(key);
+        if (hit !== undefined) {
+          scope = hit;
+          break;
+        }
+        sameLayerPath.push(key);
+      }
+      if (visiting.has(key)) {
+        scope = "doc";
+        break;
+      }
+      visiting.add(key);
+      if (normalizeTag(current.tag) === "#document-fragment") {
+        scope = `shadow:${current.backendNodeId}`;
+        break;
+      }
+      if (current.parentBackendNodeId === null) {
+        scope = "doc";
+        break;
+      }
+      const parent = capturedByFrameBackendId.get(
+        sceneFrameBackendKey(frameId, current.parentBackendNodeId),
+      );
+      if (!parent) {
+        scope = `root:${current.parentBackendNodeId}`;
+        break;
+      }
+      if (inShadow && currentInShadow && !parent.shadowRootType) {
+        scope = `shadow-host:${parent.backendNodeId}`;
+        break;
+      }
+      current = parent;
+    }
+    for (const key of sameLayerPath) treeScopeByFrameBackendId.set(key, scope);
+    return scope;
+  };
+
+  const panelByScopeDomId = new Map<string, CapturedNode>();
+  const panelByFrameDomId = new Map<string, CapturedNode>();
+  for (const { frameId, node } of indexedNodes) {
+    const scope = resolveTreeScope(frameId, node);
+    const domId = node.attrs.id;
+    if (!domId) continue;
+    const scopedKey = sceneFrameDomIdKey(frameId, scope, domId);
+    if (!panelByScopeDomId.has(scopedKey)) {
+      panelByScopeDomId.set(scopedKey, node);
+    }
+    const frameKey = sceneFrameDomIdKey(frameId, "", domId);
+    if (!panelByFrameDomId.has(frameKey)) {
+      panelByFrameDomId.set(frameKey, node);
+    }
+  }
+
   return {
-    capturedByBackendId,
-    childrenByParentId: buildCapturedChildren(capturedNodes),
+    capturedByFrameBackendId,
+    childrenByFrameParentId,
+    treeScopeByFrameBackendId,
+    panelByScopeDomId,
+    panelByFrameDomId,
   };
 }
 
@@ -522,43 +673,111 @@ function normalizedVomRole(node: VomNode): string {
   return node.role?.toLowerCase() ?? "";
 }
 
+function scopeNodeHidesSubtree(node: ScopeCapturedNode): boolean {
+  const styles = node.layout?.styles;
+  if (styles) {
+    if (styles.display?.toLowerCase() === "none") return true;
+    if (styles.opacity !== undefined && styles.opacity !== "1") {
+      const op = Number.parseFloat(styles.opacity);
+      if (Number.isFinite(op) && op < 0.05) return true;
+    }
+    return false;
+  }
+  if (node.rendered === undefined) {
+    if (Object.prototype.hasOwnProperty.call(node.attrs, "hidden")) return true;
+    const inlineStyle = node.attrs.style;
+    if (inlineStyle) {
+      if (SCOPE_INLINE_DISPLAY_NONE_RE.test(inlineStyle)) return true;
+      const opMatch = SCOPE_INLINE_OPACITY_RE.exec(inlineStyle);
+      if (opMatch) {
+        const op = Number.parseFloat(opMatch[1]);
+        if (Number.isFinite(op) && op < 0.05) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function scopeNodeVisibility(
+  node: ScopeCapturedNode,
+  inheritedVisibilityHidden: boolean,
+): { hideOwn: boolean; nextInheritedHidden: boolean } {
+  const styles = node.layout?.styles;
+  if (styles?.visibility) {
+    const vis = styles.visibility.toLowerCase();
+    const hidden = vis === "hidden" || vis === "collapse";
+    return { hideOwn: hidden || node.rendered === false, nextInheritedHidden: hidden };
+  }
+  if (node.rendered === false) {
+    return { hideOwn: true, nextInheritedHidden: inheritedVisibilityHidden };
+  }
+  const inlineStyle = node.attrs.style;
+  if (node.rendered === undefined && inlineStyle) {
+    if (SCOPE_INLINE_VISIBILITY_VISIBLE_RE.test(inlineStyle)) {
+      return { hideOwn: false, nextInheritedHidden: false };
+    }
+    if (SCOPE_INLINE_VISIBILITY_HIDDEN_RE.test(inlineStyle)) {
+      return { hideOwn: true, nextInheritedHidden: true };
+    }
+  }
+  return { hideOwn: inheritedVisibilityHidden, nextInheritedHidden: inheritedVisibilityHidden };
+}
+
 function collectScopeLines(
   root: CapturedNode,
   triggerLabel: string,
-  childrenByParentId: Map<number, CapturedNode[]>,
+  childrenByFrameParentId: Map<string, CapturedNode[]>,
+  frameId: string,
 ): string[] {
   const lines: string[] = [];
   const seen = new Set<string>();
+  const visited = new Set<number>();
   const triggerKey = normalizeProbeKey(triggerLabel);
-  const stack = [root];
+  const stack: Array<{ node: ScopeCapturedNode; visibilityHidden: boolean }> = [
+    { node: root, visibilityHidden: false },
+  ];
   while (stack.length > 0 && lines.length < ACTIVE_SCOPE_MAX_LINES) {
-    const node = stack.shift() as CapturedNode;
+    const entry = stack.shift()!;
+    const node = entry.node;
+    if (visited.has(node.backendNodeId)) continue;
+    visited.add(node.backendNodeId);
     const tag = normalizeTag(node.tag);
     if (ACTIVE_SCOPE_SKIP_TAGS.has(tag)) continue;
-    if ((node.attrs.type ?? "").toLowerCase() === "password") continue;
-
-    const text = cleanAttr(node.textContent);
-    const key = normalizeProbeKey(text);
-    if (text && key !== triggerKey && !seen.has(key)) {
-      seen.add(key);
-      lines.push(
-        text.length > ACTIVE_SCOPE_MAX_LINE_LENGTH
-          ? text.slice(0, ACTIVE_SCOPE_MAX_LINE_LENGTH)
-          : text,
-      );
+    if (
+      (node.attrs.type ?? "").toLowerCase() === "password" ||
+      Object.prototype.hasOwnProperty.call(node.attrs, "data-bsk-record-password")
+    ) {
+      continue;
     }
-    stack.push(...(childrenByParentId.get(node.backendNodeId) ?? []));
+    if (scopeNodeHidesSubtree(node)) continue;
+
+    const { hideOwn, nextInheritedHidden } = scopeNodeVisibility(node, entry.visibilityHidden);
+    if (!hideOwn) {
+      const text = cleanAttr(node.textContent);
+      const key = normalizeProbeKey(text);
+      if (text && key !== triggerKey && !seen.has(key)) {
+        seen.add(key);
+        lines.push(
+          text.length > ACTIVE_SCOPE_MAX_LINE_LENGTH
+            ? text.slice(0, ACTIVE_SCOPE_MAX_LINE_LENGTH)
+            : text,
+        );
+      }
+    }
+    for (const child of childrenByFrameParentId.get(
+      sceneFrameBackendKey(frameId, node.backendNodeId),
+    ) ?? []) {
+      stack.push({ node: child, visibilityHidden: nextInheritedHidden });
+    }
   }
   return lines;
 }
 
-function buildActiveScopeBlocks(nodes: VomNode[], signals: VomNodeDomSignals): ActiveScopeBlock[] {
-  const panelByDomId = new Map<string, CapturedNode>();
-  for (const capturedNode of signals.capturedByBackendId.values()) {
-    const domId = capturedNode.attrs.id;
-    if (domId) panelByDomId.set(domId, capturedNode);
-  }
-
+function buildActiveScopeBlocks(
+  nodes: VomNode[],
+  signals: VomNodeDomSignals,
+  rootFrameId: string,
+): ActiveScopeBlock[] {
   const blocks: ActiveScopeBlock[] = [];
   let totalChars = 0;
   for (const node of nodes) {
@@ -568,11 +787,19 @@ function buildActiveScopeBlocks(nodes: VomNode[], signals: VomNodeDomSignals): A
       cleanAttr(node.name) ?? cleanAttr(node.text) ?? cleanAttr(node.attrs?.["aria-label"]);
     if (!label) continue;
 
+    const frameId = node.frameId ?? rootFrameId;
+    const triggerScope =
+      node.backendNodeId === undefined
+        ? undefined
+        : signals.treeScopeByFrameBackendId.get(sceneFrameBackendKey(frameId, node.backendNodeId));
     const lines: string[] = [];
     for (const controlId of controlledIds(node.attrs ?? {})) {
-      const panel = panelByDomId.get(controlId);
+      const panel =
+        triggerScope !== undefined
+          ? signals.panelByScopeDomId.get(sceneFrameDomIdKey(frameId, triggerScope, controlId))
+          : signals.panelByFrameDomId.get(sceneFrameDomIdKey(frameId, "", controlId));
       if (!panel) continue;
-      lines.push(...collectScopeLines(panel, label, signals.childrenByParentId));
+      lines.push(...collectScopeLines(panel, label, signals.childrenByFrameParentId, frameId));
       if (lines.length >= ACTIVE_SCOPE_MAX_LINES) break;
     }
 
@@ -600,27 +827,41 @@ function buildActiveScopeBlocks(nodes: VomNode[], signals: VomNodeDomSignals): A
 
 function buildConditionalSurfaces(
   nodes: VomNode[],
-  captured: CapturedSceneInput,
+  signals: VomNodeDomSignals,
+  rootFrameId: string,
   probes: CapturedSurfaceProbe[],
 ): CondSurface[] {
   if (probes.length === 0) return [];
 
   const surfaces: CondSurface[] = [];
   const recoveredNodes = applyVomInteractionRecovery(nodes);
-  const signals = capturedOnlySignals(captured.nodes);
-  const used = new Set<number>();
+  const renderedByFrameBackendId = new Map<string, VomNode>();
+  for (const node of recoveredNodes) {
+    if (node.backendNodeId === undefined) continue;
+    renderedByFrameBackendId.set(
+      sceneFrameBackendKey(node.frameId ?? rootFrameId, node.backendNodeId),
+      node,
+    );
+  }
+  const usedTriggers = new Set<string>();
+  const usedTargets = new Set<number>();
   for (const probe of probes) {
-    if (probe.subItems.length === 0 || used.has(probe.triggerBackendNodeId)) continue;
+    const probeFrameId = probe.triggerFrameId ?? rootFrameId;
+    const triggerKey = sceneFrameBackendKey(probeFrameId, probe.triggerBackendNodeId);
+    if (probe.subItems.length === 0 || usedTriggers.has(triggerKey)) continue;
     const match = findSurfaceTriggerNode(
+      probeFrameId,
       probe.triggerBackendNodeId,
       recoveredNodes,
+      renderedByFrameBackendId,
       signals,
+      rootFrameId,
       probe.triggerPoint,
     );
     if (!match) continue;
-    if (used.has(match.id)) continue;
-    used.add(probe.triggerBackendNodeId);
-    used.add(match.id);
+    if (usedTargets.has(match.id)) continue;
+    usedTriggers.add(triggerKey);
+    usedTargets.add(match.id);
     surfaces.push({
       triggerId: match.id,
       triggerAction: probe.triggerAction,
@@ -631,57 +872,82 @@ function buildConditionalSurfaces(
 }
 
 function findSurfaceTriggerNode(
+  probeFrameId: string,
   triggerBackendNodeId: number,
   nodes: VomNode[],
+  renderedByFrameBackendId: Map<string, VomNode>,
   signals: VomNodeDomSignals,
+  rootFrameId: string,
   triggerPoint?: { x: number; y: number },
 ): VomNode | undefined {
-  const renderedById = new Map(nodes.map((node) => [node.id, node]));
-  const renderedByBackendId = new Map(
-    nodes.flatMap((node) =>
-      node.backendNodeId === undefined ? [] : ([[node.backendNodeId, node]] as const),
-    ),
+  const exact = renderedByFrameBackendId.get(
+    sceneFrameBackendKey(probeFrameId, triggerBackendNodeId),
   );
-  const exact =
-    renderedByBackendId.get(triggerBackendNodeId) ?? renderedById.get(triggerBackendNodeId);
   if (exact && isSurfaceAttachableNode(exact)) return exact;
 
   const isCapturedDescendant = (backendNodeId: number): boolean => {
-    let current = signals.capturedByBackendId.get(backendNodeId);
+    let current = signals.capturedByFrameBackendId.get(
+      sceneFrameBackendKey(probeFrameId, backendNodeId),
+    );
     const seen = new Set<number>();
     while (current?.parentBackendNodeId !== null && current?.parentBackendNodeId !== undefined) {
       if (current.parentBackendNodeId === triggerBackendNodeId) return true;
       if (seen.has(current.parentBackendNodeId)) break;
       seen.add(current.parentBackendNodeId);
-      current = signals.capturedByBackendId.get(current.parentBackendNodeId);
+      current = signals.capturedByFrameBackendId.get(
+        sceneFrameBackendKey(probeFrameId, current.parentBackendNodeId),
+      );
     }
     return false;
   };
   const domDescendant = nodes.find(
     (node) =>
+      (node.frameId ?? rootFrameId) === probeFrameId &&
       isSurfaceAttachableNode(node) &&
       node.backendNodeId !== undefined &&
       isCapturedDescendant(node.backendNodeId),
   );
   if (domDescendant) return domDescendant;
 
-  const queue = [...(signals.childrenByParentId.get(triggerBackendNodeId) ?? [])];
+  const queue = [
+    ...(signals.childrenByFrameParentId.get(
+      sceneFrameBackendKey(probeFrameId, triggerBackendNodeId),
+    ) ?? []),
+  ];
+  const visitedChildren = new Set<number>();
   while (queue.length > 0) {
     const child = queue.shift() as CapturedNode;
-    const rendered = renderedByBackendId.get(child.backendNodeId);
+    if (visitedChildren.has(child.backendNodeId)) continue;
+    visitedChildren.add(child.backendNodeId);
+    const rendered = renderedByFrameBackendId.get(
+      sceneFrameBackendKey(probeFrameId, child.backendNodeId),
+    );
     if (rendered && isSurfaceAttachableNode(rendered)) return rendered;
-    queue.push(...(signals.childrenByParentId.get(child.backendNodeId) ?? []));
+    queue.push(
+      ...(signals.childrenByFrameParentId.get(
+        sceneFrameBackendKey(probeFrameId, child.backendNodeId),
+      ) ?? []),
+    );
   }
 
-  let current = signals.capturedByBackendId.get(triggerBackendNodeId);
+  let current = signals.capturedByFrameBackendId.get(
+    sceneFrameBackendKey(probeFrameId, triggerBackendNodeId),
+  );
+  const visitedAncestors = new Set<number>();
   while (current?.parentBackendNodeId !== null && current?.parentBackendNodeId !== undefined) {
-    const parent = renderedByBackendId.get(current.parentBackendNodeId);
+    if (visitedAncestors.has(current.parentBackendNodeId)) break;
+    visitedAncestors.add(current.parentBackendNodeId);
+    const parent = renderedByFrameBackendId.get(
+      sceneFrameBackendKey(probeFrameId, current.parentBackendNodeId),
+    );
     if (parent && isSurfaceAttachableNode(parent)) return parent;
-    current = signals.capturedByBackendId.get(current.parentBackendNodeId);
+    current = signals.capturedByFrameBackendId.get(
+      sceneFrameBackendKey(probeFrameId, current.parentBackendNodeId),
+    );
   }
 
   if (triggerPoint) {
-    return findSurfaceNodeByPoint(triggerPoint, nodes, signals);
+    return findSurfaceNodeByPoint(probeFrameId, triggerPoint, nodes, signals, rootFrameId);
   }
 
   return undefined;
@@ -692,18 +958,23 @@ function isSurfaceAttachableNode(node: VomNode): boolean {
 }
 
 function findSurfaceNodeByPoint(
+  probeFrameId: string,
   point: { x: number; y: number },
   nodes: VomNode[],
   signals: VomNodeDomSignals,
+  rootFrameId: string,
 ): VomNode | undefined {
   let best: { node: VomNode; score: number } | undefined;
   for (const node of nodes) {
+    if ((node.frameId ?? rootFrameId) !== probeFrameId) continue;
     if (!isSurfaceAttachableNode(node)) continue;
     const rect =
       node.rect ??
       (node.backendNodeId === undefined
         ? undefined
-        : signals.capturedByBackendId.get(node.backendNodeId)?.rect);
+        : signals.capturedByFrameBackendId.get(
+            sceneFrameBackendKey(probeFrameId, node.backendNodeId),
+          )?.rect);
     if (!rect) continue;
     const contains =
       point.x >= rect.x &&
@@ -754,10 +1025,10 @@ function attachCapturedSceneAnnotations(
   if (surfaceProbes.length === 0 && !scene.nodes.some(isActiveScopeTrigger)) {
     return { ...scene };
   }
-  const rootDocument = documents.find((document) => document.frameId === scene.rootFrameId);
-  const signals = capturedOnlySignals(rootDocument?.domNodes ?? captured.nodes);
-  const activeScopeBlocks = buildActiveScopeBlocks(scene.nodes, signals);
-  const surfaces = buildConditionalSurfaces(scene.nodes, captured, surfaceProbes);
+  const rootFrameId = scene.rootFrameId ?? captured.rootFrameId ?? documents[0]?.frameId ?? "root";
+  const signals = capturedSignalsForDocuments(documents, captured.nodes, rootFrameId);
+  const activeScopeBlocks = buildActiveScopeBlocks(scene.nodes, signals, rootFrameId);
+  const surfaces = buildConditionalSurfaces(scene.nodes, signals, rootFrameId, surfaceProbes);
   return {
     ...scene,
     ...(surfaces.length > 0 ? { surfaces } : {}),

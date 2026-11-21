@@ -84,6 +84,8 @@ export class WSTransport implements Transport {
   setUrl(url: string): boolean {
     if (url === this.url) return false;
     this.url = url;
+    this.resetAuthenticationBackoff();
+    this.reconnectAttempt = 0;
     return true;
   }
 
@@ -121,6 +123,7 @@ export class WSTransport implements Transport {
 
   async disconnect(): Promise<void> {
     this.explicitlyClosed = true;
+    this.resetAuthenticationBackoff();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -205,7 +208,8 @@ export class WSTransport implements Transport {
       const connected = () => {
         if (!this.isCurrentSocket(socket, generation)) return;
         if (socket.readyState !== 1) {
-          failed(new Error("Connection closed during authentication"));
+          this.endAuthentication();
+          this.handleClose(socket, generation, {});
           return;
         }
         this.endAuthentication();

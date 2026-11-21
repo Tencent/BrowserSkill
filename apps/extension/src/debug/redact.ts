@@ -154,6 +154,37 @@ function redactJson(text: string, bounds: { truncated: boolean }): string {
   return parts.join("");
 }
 
+const JSON_PREFIX =
+  /^\s*(?:\{\s*(?:"|\})|\[\s*(?:[\[{"\]]|(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[\s,\]]|$)))/;
+
+type NdjsonResult = { kind: "ok"; text: string } | { kind: "malformed" } | { kind: "not_ndjson" };
+
+function redactNdjson(text: string, bounds: { truncated: boolean }): NdjsonResult {
+  const parts = text.split(/(\r?\n)/);
+  let parsedCount = 0;
+  const out: string[] = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    const line = parts[i] ?? "";
+    const sep = parts[i + 1] ?? "";
+    if (!line.trim()) {
+      out.push(line, sep);
+      continue;
+    }
+    const hasRecordSep = line.startsWith("\u001e");
+    const record = hasRecordSep ? line.slice(1) : line;
+    if (!/^\s*[\[{]/.test(record)) {
+      return parsedCount > 0 ? { kind: "malformed" } : { kind: "not_ndjson" };
+    }
+    try {
+      out.push(hasRecordSep ? "\u001e" : "", redactJson(record, bounds), sep);
+      parsedCount += 1;
+    } catch {
+      return parsedCount > 0 ? { kind: "malformed" } : { kind: "not_ndjson" };
+    }
+  }
+  return parsedCount > 0 ? { kind: "ok", text: out.join("") } : { kind: "not_ndjson" };
+}
+
 export function redactBody(
   text: string,
   mime: string,
@@ -165,16 +196,29 @@ export function redactBody(
   reason?: "unparsed_json";
 } {
   const truncated = text.length > BODY_CHARS;
-  // Structured payloads must be redacted before truncation. Refuse oversized JSON
-  // rather than retaining a prefix that may contain a cut-off secret value.
-  if (truncated && /json|x-www-form-urlencoded/i.test(mime)) {
+  const isJsonMime = /(?:^|\/|\+)json(?:$|[;\s])/i.test(mime);
+  const isNdjsonMime = /(?:^|\/|\+)(?:x-)?(?:ndjson|jsonl|json-seq|jsonlines)(?:$|[;\s])/i.test(
+    mime,
+  );
+  const isHtmlMime = /html/i.test(mime);
+  const isFormMime = /x-www-form-urlencoded/i.test(mime);
+  const isCodeOrMarkupMime = /(?:javascript|ecmascript|css|xml)/i.test(mime);
+  // Structured payloads must be redacted before truncation. Refuse oversized JSON,
+  // NDJSON, forms, and text/plain bodies with a valid JSON prefix rather than
+  // retaining a prefix that may contain an unredacted secret field.
+  if (
+    truncated &&
+    (isJsonMime ||
+      isNdjsonMime ||
+      isFormMime ||
+      (!isHtmlMime && !isCodeOrMarkupMime && JSON_PREFIX.test(text)))
+  ) {
     return { text: "", redacted: true, truncated: true, replay_safe: false };
   }
-  let result: string;
+  let result: string | undefined;
   const bounds = { truncated: false };
-  if (/json/i.test(mime) || /^[\s]*[\[{]/.test(text)) {
+  if (isJsonMime) {
     try {
-      if (truncated) return { text: "", redacted: true, truncated: true, replay_safe: false };
       result = redactJson(text, bounds);
     } catch {
       // An unparsed structured payload cannot be safely inspected for nested secrets.
@@ -186,44 +230,89 @@ export function redactBody(
         reason: "unparsed_json",
       };
     }
-  } else if (/html/i.test(mime)) {
-    // A password can also occur in a server-rendered input's value attribute.
-    // Remove that input from retained HTML rather than exposing its initial value.
-    result = redactText(
-      text.replace(/<input\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (tag) => {
-        const attributes = tag.matchAll(
-          /\b(type|name|id|autocomplete)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
-        );
-        for (const match of attributes) {
-          const value = htmlField(match[2] ?? match[3] ?? match[4]);
-          if (
-            secretField(value) ||
-            secretField(value.toLowerCase()) ||
-            value
-              .trim()
-              .split(/\s+/)
-              .some((token) =>
-                /^(?:current-password|new-password|one-time-code|cc-.+)$/i.test(token),
-              )
-          )
-            return '<input data-bsk-redacted="true">';
-        }
-        return tag;
-      }),
-      BODY_CHARS,
-    );
-  } else if (/x-www-form-urlencoded/i.test(mime)) {
-    // Preserve untouched bytes, ordering and duplicates (including signed form bodies).
-    result = text
-      .split("&")
-      .map((field) => {
-        const key = new URLSearchParams(field).keys().next().value;
-        if (key === undefined || !secretField(key)) return field;
-        return `${field.split("=", 1)[0]}=${encodeURIComponent(MASK)}`;
-      })
-      .join("&");
-  } else {
-    result = redactText(text, BODY_CHARS);
+  } else if (isNdjsonMime) {
+    if (!text.trim()) {
+      result = text;
+    } else {
+      const ndjson = redactNdjson(text, bounds);
+      if (ndjson.kind !== "ok") {
+        return {
+          text: "",
+          redacted: true,
+          truncated: true,
+          replay_safe: false,
+          reason: "unparsed_json",
+        };
+      }
+      result = ndjson.text;
+    }
+  } else if (!truncated && /^[\s]*[\[{]/.test(text)) {
+    // Valid JSON served under form, HTML, JS, or plain-text MIME types must still
+    // go through JSON key redaction before falling back to MIME-specific redaction.
+    try {
+      result = redactJson(text, bounds);
+    } catch {
+      bounds.truncated = false;
+    }
+  }
+  if (result === undefined) {
+    if (isHtmlMime) {
+      // A password can also occur in a server-rendered input's value attribute.
+      // Remove that input from retained HTML rather than exposing its initial value.
+      result = redactText(
+        text.replace(/<input\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (tag) => {
+          const attributes = tag.matchAll(
+            /\b(type|name|id|autocomplete)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+          );
+          for (const match of attributes) {
+            const value = htmlField(match[2] ?? match[3] ?? match[4]);
+            if (
+              secretField(value) ||
+              secretField(value.toLowerCase()) ||
+              value
+                .trim()
+                .split(/\s+/)
+                .some((token) =>
+                  /^(?:current-password|new-password|one-time-code|cc-.+)$/i.test(token),
+                )
+            )
+              return '<input data-bsk-redacted="true">';
+          }
+          return tag;
+        }),
+        BODY_CHARS,
+      );
+    } else if (isFormMime) {
+      // Preserve untouched bytes, ordering and duplicates (including signed form bodies).
+      result = text
+        .split("&")
+        .map((field) => {
+          const key = new URLSearchParams(field).keys().next().value;
+          if (key === undefined || !secretField(key)) return field;
+          return `${field.split("=", 1)[0]}=${encodeURIComponent(MASK)}`;
+        })
+        .join("&");
+    } else if (!isCodeOrMarkupMime && /^[\s]*[\[{]/.test(text)) {
+      const ndjson = redactNdjson(text, bounds);
+      if (ndjson.kind === "ok") {
+        result = ndjson.text;
+      } else if (ndjson.kind === "malformed") {
+        // Earlier lines already parsed as JSON records; fail closed rather than
+        // dropping JSON redaction and leaking secrets through plain-text fallback.
+        return {
+          text: "",
+          redacted: true,
+          truncated: true,
+          replay_safe: false,
+          reason: "unparsed_json",
+        };
+      } else {
+        bounds.truncated = false;
+        result = redactText(text, BODY_CHARS);
+      }
+    } else {
+      result = redactText(text, BODY_CHARS);
+    }
   }
   return {
     text: result.slice(0, BODY_CHARS),

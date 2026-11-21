@@ -11,6 +11,7 @@ export function createHelpRequestData(
   message: Omit<HelpRequestMessage, "type">,
   deps: HelpRequestDataDeps,
 ): HelpRequestData {
+  const hasDynamicRects = message.hasDynamicRects === true || (message.rects?.length ?? 0) > 0;
   return {
     id: message.requestId,
     prompt: message.prompt,
@@ -18,12 +19,17 @@ export function createHelpRequestData(
     ...(message.displayMode ? { displayMode: message.displayMode } : {}),
     selectors: message.selectors,
     rects: message.rects,
-    refreshRects: async () => {
-      const response = await deps.query();
-      return response?.active && response.request?.requestId === message.requestId
-        ? response.request.rects
-        : undefined;
-    },
+    ...(hasDynamicRects
+      ? {
+          hasDynamicRects: true,
+          refreshRects: async () => {
+            const response = await deps.query();
+            return response?.active && response.request?.requestId === message.requestId
+              ? response.request.rects
+              : undefined;
+          },
+        }
+      : {}),
     onContinue: (note: string) =>
       deps.finish(message.requestId, "continued", note.trim() ? note : undefined),
     onCancel: () => deps.finish(message.requestId, "cancelled"),

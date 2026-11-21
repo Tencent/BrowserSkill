@@ -156,13 +156,25 @@ export async function sendTabMessageBounded(
   }
 }
 
+export interface InjectCooperationAllFramesOptions {
+  /** Active cooperation lease for the tab, forwarded on COOPERATION_ARM_FRAME. */
+  lease?: string;
+  /** Re-checked across awaits so a tab released mid-flight is never rearmed. */
+  isActive?: () => boolean;
+}
+
 function sendArmMessageBounded(
   tabId: number,
   target: { documentId: string } | { frameId: number },
+  lease?: string,
 ): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
-    chrome.tabs.sendMessage(tabId, { kind: COOPERATION_ARM_FRAME }, target),
+    chrome.tabs.sendMessage(
+      tabId,
+      { kind: COOPERATION_ARM_FRAME, ...(lease !== undefined ? { lease } : {}) },
+      target,
+    ),
     new Promise<typeof ARM_INJECT_TIMED_OUT>((resolve) => {
       timer = setTimeout(() => resolve(ARM_INJECT_TIMED_OUT), ARM_INJECT_TIMEOUT_MS);
     }),
@@ -173,10 +185,16 @@ function isMissingReceiverError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("Receiving end does not exist");
 }
 
-export async function injectCooperationAllFrames(tabId: number): Promise<void> {
+export async function injectCooperationAllFrames(
+  tabId: number,
+  options?: InjectCooperationAllFramesOptions,
+): Promise<void> {
   if (typeof chrome === "undefined" || typeof chrome.scripting?.executeScript !== "function") {
     return;
   }
+  const lease = options?.lease;
+  const isActive = options?.isActive;
+  if (isActive && !isActive()) return;
   if (
     typeof chrome.webNavigation?.getAllFrames === "function" &&
     typeof chrome.tabs?.sendMessage === "function"
@@ -187,16 +205,18 @@ export async function injectCooperationAllFrames(tabId: number): Promise<void> {
     } catch {
       frames = null;
     }
+    if (isActive && !isActive()) return;
     if (frames && frames.length > 0) {
       await Promise.all(
         frames.map(async (frame) => {
+          if (isActive && !isActive()) return;
           if (frame.errorOccurred) return;
           if (frame.documentLifecycle && frame.documentLifecycle !== "active") return;
           const msgTarget = frame.documentId
             ? { documentId: frame.documentId }
             : { frameId: frame.frameId };
           try {
-            const ack = await sendArmMessageBounded(tabId, msgTarget);
+            const ack = await sendArmMessageBounded(tabId, msgTarget, lease);
             if (
               ack === ARM_INJECT_TIMED_OUT ||
               (ack && typeof ack === "object" && (ack as { ok?: unknown }).ok === true)
@@ -206,6 +226,7 @@ export async function injectCooperationAllFrames(tabId: number): Promise<void> {
           } catch (error) {
             if (!isMissingReceiverError(error)) return;
           }
+          if (isActive && !isActive()) return;
           try {
             const injected = await executeScriptBounded({
               target: frame.documentId
@@ -214,7 +235,9 @@ export async function injectCooperationAllFrames(tabId: number): Promise<void> {
               files: [COOPERATION_CONTENT_SCRIPT_FILE],
               injectImmediately: true,
             });
-            if (injected) await sendArmMessageBounded(tabId, msgTarget);
+            if (injected && (!isActive || isActive())) {
+              await sendArmMessageBounded(tabId, msgTarget, lease);
+            }
           } catch {
             // Restricted pages or closing frames cannot receive scripts.
           }
@@ -223,6 +246,7 @@ export async function injectCooperationAllFrames(tabId: number): Promise<void> {
       return;
     }
   }
+  if (isActive && !isActive()) return;
   try {
     await executeScriptBounded({
       target: { tabId, allFrames: true },

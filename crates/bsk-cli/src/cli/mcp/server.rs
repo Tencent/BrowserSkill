@@ -53,6 +53,7 @@ struct Server {
     daemon: Daemon,
     conn_scope: String,
     may_own_transient_session: AtomicBool,
+    may_own_transient_record_session: AtomicBool,
     out: mpsc::UnboundedSender<Value>,
     calls: Mutex<HashMap<String, Arc<CallControl>>>,
 }
@@ -86,6 +87,7 @@ where
         daemon,
         conn_scope,
         may_own_transient_session: AtomicBool::new(false),
+        may_own_transient_record_session: AtomicBool::new(false),
         out,
         calls: Mutex::default(),
     });
@@ -127,18 +129,70 @@ where
     Ok(())
 }
 
+const REAP_SESSION_BUSY_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn is_session_busy_rpc(err: &bsk_protocol::RpcError) -> bool {
+    err.data
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .and_then(Value::as_str)
+        == Some(bsk_protocol::RpcErrorReason::SessionBusy.as_str())
+}
+
+async fn stop_scope_session_until_idle(
+    sock: &std::path::Path,
+    rpc_prefix: &str,
+    scope: String,
+    deadline: tokio::time::Instant,
+) -> Option<Value> {
+    let mut client = crate::ipc_client::IpcClient::connect(sock).await.ok()?;
+    let mut attempt: u32 = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        attempt = attempt.saturating_add(1);
+        let meta = crate::ipc_client::IpcRequestMeta {
+            caller_scope: Some(scope.clone()),
+            ..Default::default()
+        };
+        match client
+            .call_envelope::<Value, Value>(
+                format!("{rpc_prefix}-{attempt}"),
+                bsk_protocol::Method::SessionStop,
+                Some(json!({ "all": false })),
+                meta,
+                remaining,
+            )
+            .await
+        {
+            Ok((Ok(reply), _)) => return Some(reply),
+            Ok((Err(err), _)) if is_session_busy_rpc(&err) => {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    return None;
+                }
+                tokio::time::sleep(REAP_SESSION_BUSY_RETRY_INTERVAL.min(left)).await;
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// When an MCP `stdio` client disconnects at EOF and this server was running
 /// under its own exclusive transient `mcp:<pid>:<nonce>` scope (no `BSK_SCOPE`,
 /// `BSK_SESSION`, or `HOST_AGENT_ENV_KEYS` shared scope), ask an already-running
 /// daemon to stop any session bound to that transient scope immediately rather
 /// than leaving an orphan Agent Window until the 5-minute idle timeout.
 async fn reap_orphan_transient_mcp_session(server: &Server) {
-    if !server.may_own_transient_session.load(Ordering::Relaxed) {
-        return;
-    }
-    let effective_scope =
-        crate::daemon::scopes::resolve_caller_scope_from_env(None, Some(&server.conn_scope));
-    if effective_scope != server.conn_scope {
+    let reap_browsing = server.may_own_transient_session.load(Ordering::Relaxed)
+        && crate::daemon::scopes::resolve_caller_scope_from_env(None, Some(&server.conn_scope))
+            == server.conn_scope;
+    let reap_record = server
+        .may_own_transient_record_session
+        .load(Ordering::Relaxed);
+    if !reap_browsing && !reap_record {
         return;
     }
     let sock = match &server.daemon {
@@ -152,23 +206,49 @@ async fn reap_orphan_transient_mcp_session(server: &Server) {
         return;
     };
     let stop_timeout = std::time::Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + stop_timeout;
     let _ = tokio::time::timeout(stop_timeout, async {
-        let Ok(mut client) = crate::ipc_client::IpcClient::connect(sock).await else {
-            return;
+        let stop_browsing = async {
+            if reap_browsing {
+                let _ = stop_scope_session_until_idle(
+                    &sock,
+                    "mcp-eof-stop",
+                    server.conn_scope.clone(),
+                    deadline,
+                )
+                .await;
+            }
         };
-        let meta = crate::ipc_client::IpcRequestMeta {
-            caller_scope: Some(server.conn_scope.clone()),
-            ..Default::default()
+        let stop_record = async {
+            if reap_record
+                && let Some(reply) = stop_scope_session_until_idle(
+                    &sock,
+                    "mcp-eof-record-stop",
+                    tools::mcp_record_scope(&server.conn_scope),
+                    deadline,
+                )
+                .await
+                && reply
+                    .get("failed")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty)
+                && let Some(stopped) = reply.get("stopped").and_then(Value::as_array)
+            {
+                let ids: Vec<String> = stopped
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect();
+                if !ids.is_empty() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        for sid in ids {
+                            crate::cli::record_state::clear_session(&sid);
+                        }
+                    })
+                    .await;
+                }
+            }
         };
-        let _ = client
-            .call_envelope::<Value, Value>(
-                "mcp-eof-stop",
-                bsk_protocol::Method::SessionStop,
-                Some(json!({ "all": false })),
-                meta,
-                stop_timeout,
-            )
-            .await;
+        tokio::join!(stop_browsing, stop_record);
     })
     .await;
 }
@@ -283,7 +363,11 @@ impl Server {
             .get("session")
             .and_then(Value::as_str)
             .is_some_and(|s| !s.trim().is_empty());
-        if !has_explicit_scope && (!has_explicit_session || name == "bsk_session") {
+        if name == "bsk_record" && arguments.get("action").and_then(Value::as_str) == Some("start")
+        {
+            self.may_own_transient_record_session
+                .store(true, Ordering::Relaxed);
+        } else if !has_explicit_scope && (!has_explicit_session || name == "bsk_session") {
             self.may_own_transient_session
                 .store(true, Ordering::Relaxed);
         }

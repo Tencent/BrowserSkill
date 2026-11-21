@@ -36,6 +36,7 @@ export class AgentWindowRouting {
     api.tabs.onUpdated.addListener(this.updated);
     api.tabs.onRemoved.addListener(this.forget);
     api.tabs.onDetached.addListener(this.forget);
+    api.tabs.onReplaced?.addListener(this.replaced);
     api.webNavigation.onCreatedNavigationTarget.addListener(this.navigationTarget);
     api.windows.onFocusChanged.addListener(this.focusChanged);
     api.windows.onRemoved.addListener(this.windowRemoved);
@@ -82,6 +83,7 @@ export class AgentWindowRouting {
     tabs.onUpdated.removeListener(this.updated);
     tabs.onRemoved.removeListener(this.forget);
     tabs.onDetached.removeListener(this.forget);
+    tabs.onReplaced?.removeListener(this.replaced);
     webNavigation.onCreatedNavigationTarget.removeListener(this.navigationTarget);
     windows.onFocusChanged.removeListener(this.focusChanged);
     windows.onRemoved.removeListener(this.windowRemoved);
@@ -144,6 +146,35 @@ export class AgentWindowRouting {
     clearTimeout(this.candidates.get(id)?.timer);
     this.candidates.delete(id);
   }
+
+  /** Reconcile tab IDs across Chrome Memory Saver / prerender replacement. */
+  handleTabReplaced(addedTabId: number, removedTabId: number): void {
+    if (this.disposed || addedTabId === removedTabId) return;
+    const windowId = this.tabWindows.get(removedTabId);
+    if (windowId !== undefined) {
+      this.tabWindows.delete(removedTabId);
+      this.tabWindows.set(addedTabId, windowId);
+    }
+    const sourceWindowId = this.pageSourceWindows.get(removedTabId);
+    if (sourceWindowId !== undefined) {
+      this.pageSourceWindows.delete(removedTabId);
+      this.pageSourceWindows.set(addedTabId, sourceWindowId);
+    }
+    const removedTask = this.candidates.get(removedTabId)?.task;
+    removedTask?.pendingRoutingTabs?.delete(removedTabId);
+    this.clearCandidate(removedTabId);
+    const addedWindowId = this.tabWindows.get(addedTabId);
+    const addedTask =
+      addedWindowId !== undefined ? this.manager.findByWindowId(addedWindowId) : null;
+    if (addedTask && this.protected(addedTask, addedTabId)) {
+      addedTask.pendingRoutingTabs?.delete(addedTabId);
+      this.clearCandidate(addedTabId);
+    }
+  }
+
+  private replaced = (addedTabId: number, removedTabId: number): void => {
+    this.handleTabReplaced(addedTabId, removedTabId);
+  };
 
   private forget = (id: number): void => {
     const task =
