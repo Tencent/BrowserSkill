@@ -42,6 +42,7 @@ export const VIDEO_NAVIGATION_TIMEOUT_MS = 60_000;
 interface ActiveVideo {
   value: StoredVideo;
   lease?: ScreencastLease;
+  releaseBackgroundExecution?: boolean;
   starting?: Promise<VideoGrant>;
   stopping?: Promise<StoredVideo>;
   releasing?: Promise<void>;
@@ -292,8 +293,10 @@ export class VideoManager {
       check();
       cdp.trackSessionTab?.(session, tab);
       await captureReply(cdp.send(tab, "Page.enable"), signal);
-      if (cdp.acquireBackgroundExecution)
+      if (cdp.acquireBackgroundExecution) {
+        active.releaseBackgroundExecution = cdp.ownsBackgroundExecution?.(session, tab) !== true;
         await captureReply(cdp.acquireBackgroundExecution(session, tab), signal);
+      }
       const first = await captureReply(
         cdp.send<{ data: string }>(tab, "Page.captureScreenshot", {
           format: "jpeg",
@@ -472,6 +475,22 @@ export class VideoManager {
     active.pending = undefined;
     await active.lease?.release().catch(() => {});
     active.lease = undefined;
+    if (active.releaseBackgroundExecution) {
+      active.releaseBackgroundExecution = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          this.deps.cdp
+            .releaseBackgroundExecution?.(active.value.session_id, active.value.tab_id)
+            ?.catch(() => {}),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, 1_000);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
     await this.deps.overlay(active.value.tab_id, null).catch(() => {});
     if (this.active === active) this.active = undefined;
     this.deps.changed?.();
