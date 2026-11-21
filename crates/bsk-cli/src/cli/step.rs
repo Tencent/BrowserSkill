@@ -525,10 +525,10 @@ impl<'a> Output<'a> {
                 }
             }
         }
-        if let Some(post) = reply.get_mut("post") {
-            if !self.match_text.is_empty() {
-                cooperate::presentation::filter(post, self.match_text, self.context_lines as usize);
-            }
+        if let Some(post) = reply.get_mut("post")
+            && !self.match_text.is_empty()
+        {
+            cooperate::presentation::filter(post, self.match_text, self.context_lines as usize);
         }
         println!(
             "{}",

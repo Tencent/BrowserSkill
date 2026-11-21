@@ -991,10 +991,10 @@ fn safe_outcome(body: &ResponseBody) -> Value {
                     data[key] = value.clone();
                 }
             }
-            if let Some(outcome) = value.get("outcome").and_then(Value::as_str) {
-                if ["done", "cancelled", "timeout", "disabled", "completed"].contains(&outcome) {
-                    data["outcome"] = json!(outcome);
-                }
+            if let Some(outcome) = value.get("outcome").and_then(Value::as_str)
+                && ["done", "cancelled", "timeout", "disabled", "completed"].contains(&outcome)
+            {
+                data["outcome"] = json!(outcome);
             }
             if let Some(dialogs) = value.get("dialogs").and_then(Value::as_array) {
                 data["dialogs_handled"] = json!(dialogs.len());

@@ -1140,13 +1140,13 @@ impl Recipe {
         for segment in &self.segments {
             for step in &segment.steps {
                 for literal in step.value.iter().chain(step.values.iter().flatten()) {
-                    if placeholders(literal).is_empty() {
-                        if let Some(kind) = personal_data_hint(literal) {
-                            hints.insert(format!(
-                                "a value for \"{}\" contains {kind} and is stored in the file",
-                                step.target.name
-                            ));
-                        }
+                    if placeholders(literal).is_empty()
+                        && let Some(kind) = personal_data_hint(literal)
+                    {
+                        hints.insert(format!(
+                            "a value for \"{}\" contains {kind} and is stored in the file",
+                            step.target.name
+                        ));
                     }
                 }
             }

@@ -65,7 +65,7 @@ fn status_and_pair_auto_spawn_from_an_empty_home() {
     let info: bsk::daemon::info::DaemonInfo =
         serde_json::from_slice(&std::fs::read(home.join("daemon.json")).unwrap()).unwrap();
     assert_eq!(reported.pid, info.pid);
-    assert_eq!(reported.sock_path, info.sock_path);
+    assert_eq!(reported.sock_path.as_str(), info.sock_path.as_os_str());
     assert!(info.pid > 0);
     assert!(home.join("daemon.lock").exists());
 
