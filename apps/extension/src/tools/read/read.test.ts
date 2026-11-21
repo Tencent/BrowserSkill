@@ -54,7 +54,7 @@ describe("declarative DOM reads", () => {
     const limited = collect({ max_bytes: 1024 });
     expect(limited).toMatchObject({ items: [], error: { reason: "read_limit" } });
   });
-  it("redacts sensitive fields and their ancestor text", () => {
+  it("redacts sensitive fields and their ancestor text without letting void inputs blank containers", () => {
     document.body.innerHTML =
       '<div id="row"><textarea autocomplete="section-auth one-time-code">secret</textarea></div>';
     expect(collect().items[0]).toMatchObject({ values: { text: null }, redacted: ["text"] });
@@ -69,6 +69,41 @@ describe("declarative DOM reads", () => {
     ).toMatchObject({ values: { x: null, attr: null }, redacted: ["x", "attr"] });
     document.body.innerHTML = '<div data-bsk-overlay-host><div id="row">overlay-ui</div></div>';
     expect(collect().items[0]).toMatchObject({ values: { text: null }, redacted: ["text"] });
+
+    // Mainstream forms include CSRF <input type="hidden">, password, and file inputs;
+    // void <input> .value never appears in textContent and must not blank container text.
+    // Excluded descendant subtrees like <script> / <style> are omitted from container text.
+    document.body.innerHTML =
+      '<form id="row"><input type="hidden" name="_csrf" value="csrf-secret"><input type="password" value="pw-secret"><input type="file"><script type="application/json">{"csrf":"csrf-secret"}</script><span>Order #1024</span></form>';
+    expect(collect().items[0]).toMatchObject({ values: { text: "Order #1024" }, redacted: [] });
+    // Direct reads on those sensitive inputs remain redacted.
+    expect(
+      collect({
+        selector: 'input[type="hidden"]',
+        fields: [
+          { key: "val", read: "value" },
+          { key: "attr", read: "attribute", attribute: "value" },
+          { key: "txt", read: "text" },
+        ],
+      }).items[0],
+    ).toMatchObject({
+      values: { val: null, attr: null, txt: null },
+      redacted: ["val", "attr", "txt"],
+    });
+  });
+
+  it("reads ARIA checked state on custom switch, checkbox, and radio controls", () => {
+    document.body.innerHTML =
+      '<div id="row"><button id="sw" role="switch" aria-checked="true"></button><div id="cb" role="checkbox" aria-checked="false"></div><span id="mx" role="checkbox" aria-checked="mixed"></span></div>';
+    expect(
+      collect({
+        fields: [
+          { key: "sw", read: "checked", selector: "#sw" },
+          { key: "cb", read: "checked", selector: "#cb" },
+          { key: "mx", read: "checked", selector: "#mx" },
+        ],
+      }).items[0].values,
+    ).toEqual({ sw: true, cb: false, mx: null });
   });
   it("does not quietly redirect a detached node to a replacement", () => {
     const node = document.querySelector("#row")!;
@@ -254,5 +289,71 @@ describe("DOM read identity and lifecycle", () => {
       scope: "current_dom",
       items: [{ ref: expect.stringMatching(/^@e\d+$/), values: { label: "A" } }],
     });
+  });
+
+  it("preserves existing rowAnchor and name when reusing an observed ref in target mode", async () => {
+    const h = await fixture();
+    const store = h.manager.get("s")!.refStore;
+    store.enableStableRefs();
+    const observed = {
+      backendNodeId: 2,
+      tabId: 7,
+      frameId: "root",
+      loaderId: "",
+      documentElementBackendNodeId: 1,
+      name: "Delete",
+      rowAnchor: "Order #42",
+    };
+    const observedRef = store.allocateRef(observed);
+    store.replace([[observedRef, observed]]);
+
+    const res = await h.run();
+    expect(res).toMatchObject({ items: [{ ref: `@${observedRef}`, values: { label: "A" } }] });
+    expect(store.resolveEntry(observedRef)).toMatchObject({
+      kind: "dom",
+      backendNodeId: 2,
+      name: "Delete",
+      rowAnchor: "Order #42",
+    });
+  });
+
+  it("does not mutate RefStore identities or nextRef when max_bytes validation fails", async () => {
+    const h = await fixture();
+    const store = h.manager.get("s")!.refStore;
+    store.enableStableRefs();
+    const original = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, args) => {
+      if (method === "Runtime.callFunctionOn" && (args as { arguments?: unknown[] }).arguments) {
+        return {
+          result: {
+            value: {
+              frame_url: h.tab.url,
+              title: "Test",
+              captured_at: "now",
+              truncated: false,
+              items: [
+                {
+                  node: { backendNodeId: 2 },
+                  values: { label: "x".repeat(1200) },
+                  redacted: [],
+                },
+              ],
+            },
+          },
+        };
+      }
+      return original(tabId, method, args);
+    });
+
+    const failed = await h.run({ max_bytes: 1024 });
+    expect(failed).toMatchObject({
+      code: "unsupported",
+      data: { reason: "read_limit", effect_state: "none" },
+    });
+    expect(store.size()).toBe(0);
+    // Ref numbering was never advanced by the failed read.
+    expect(store.allocateRef({ tabId: 7, backendNodeId: 99, frameId: "root", loaderId: "" })).toBe(
+      "e1",
+    );
   });
 });

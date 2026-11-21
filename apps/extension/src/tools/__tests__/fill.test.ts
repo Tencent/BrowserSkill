@@ -1091,4 +1091,85 @@ describe("fill result verification", () => {
     h.release.mockRejectedValueOnce(new Error("target closed"));
     expect(await h.fill()).toMatchObject({ value_length: 5 });
   });
+
+  it("does not send keyUp when caret positioning rawKeyDown fails before dispatch, and preserves original error when keyUp cleanup throws", async () => {
+    const h = await setup('<input type="number" value="12">');
+    vi.spyOn(h.element, "selectionStart", "get").mockReturnValue(null);
+    vi.spyOn(h.element, "selectionEnd", "get").mockReturnValue(null);
+
+    // Case 1: rawKeyDown rejects BEFORE dispatch (e.g. pre-dispatch guard / abort) -> no keyUp.
+    const sentMethods: Array<{ method: string; type?: string }> = [];
+    const baseSend = h.send.getMockImplementation()!;
+    const cdpPreDispatch = createStubCdpRunner({
+      send: baseSend as CdpRunner["send"],
+      sendToFrame: async (handle, method, params, guard) => {
+        if (
+          method === "Input.dispatchKeyEvent" &&
+          (params as { type?: string }).type === "rawKeyDown"
+        ) {
+          throw new Error("guard rejected before dispatch");
+        }
+        sentMethods.push({ method, type: (params as { type?: string })?.type });
+        guard?.onDispatch?.();
+        return baseSend(handle.tabId, method, params) as never;
+      },
+    });
+    const manager1 = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 100, initialTabIds: [] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 4,
+      },
+    });
+    const ctx1 = await manager1.start("aa11");
+    ctx1.refStore.set("e1", 12, { tabId: 4 });
+    const res1 = await handleFill(
+      manager1,
+      { session_id: "aa11", ref: "e1", value: "3", clear_before: false },
+      {
+        cdp: cdpPreDispatch,
+        tabsApi: {
+          get: async (id) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab,
+          query: async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab],
+        },
+      },
+    );
+    expect(res1).toMatchObject({
+      code: "cdp_failed",
+      message: expect.stringContaining("guard rejected before dispatch"),
+    });
+    expect(
+      sentMethods.some((c) => c.method === "Input.dispatchKeyEvent" && c.type === "keyUp"),
+    ).toBe(false);
+
+    // Case 2: rawKeyDown dispatches and throws, and cleanup keyUp also throws -> original error preserved.
+    const keyTypes: string[] = [];
+    const cdpCleanupFails = createStubCdpRunner({
+      send: (async (tabId, method, params) => {
+        if (method === "Input.dispatchKeyEvent") {
+          const type = (params as { type?: string }).type ?? "";
+          keyTypes.push(type);
+          if (type === "rawKeyDown") throw new Error("original keyDown error");
+          if (type === "keyUp") throw new Error("secondary keyUp error");
+        }
+        return baseSend(tabId, method, params);
+      }) as CdpRunner["send"],
+    });
+    const res2 = await handleFill(
+      manager1,
+      { session_id: "aa11", ref: "e1", value: "3", clear_before: false },
+      {
+        cdp: cdpCleanupFails,
+        tabsApi: {
+          get: async (id) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab,
+          query: async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab],
+        },
+      },
+    );
+    expect(res2).toMatchObject({
+      code: "cdp_failed",
+      message: expect.stringContaining("original keyDown error"),
+    });
+    expect(keyTypes).toEqual(["rawKeyDown", "keyUp"]);
+  });
 });
