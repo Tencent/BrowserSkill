@@ -205,4 +205,45 @@ describe("stable DOM references", () => {
     expect(store.resolveEntry(first)).toBeNull();
     expect(store.resolve(dom)).toBe(42);
   });
+
+  it("preserves name and rowAnchor on same-node set() updates and keeps previewRefs read-only", () => {
+    const store = new RefStore();
+    store.enableStableRefs();
+    const rowButton: DomRefInput = {
+      backendNodeId: 42,
+      tabId: 7,
+      frameId: "top",
+      loaderId: "l1",
+      name: "Delete",
+      rowAnchor: "INV-001",
+    };
+    const [ref] = publish(store, [rowButton]);
+    store.set(ref, 42, {
+      tabId: 7,
+      frameId: "top",
+      loaderId: "l1",
+      documentElementBackendNodeId: 1,
+    });
+    expect(store.resolveEntry(ref)).toMatchObject({
+      backendNodeId: 42,
+      name: "Delete",
+      rowAnchor: "INV-001",
+      documentElementBackendNodeId: 1,
+    });
+    // Updating the same ref with a different DOM node must NOT inherit old rowAnchor/name.
+    store.set(ref, 99, { tabId: 7, frameId: "top", loaderId: "l1" });
+    expect(store.resolveEntry(ref)).toMatchObject({ backendNodeId: 99 });
+    expect(store.resolveEntry(ref)).not.toHaveProperty("rowAnchor");
+    expect(store.resolveEntry(ref)).not.toHaveProperty("name");
+
+    const previewed = store.previewRefs([
+      rowButton,
+      { backendNodeId: 50, tabId: 7, frameId: "top", loaderId: "l1" },
+    ]);
+    expect(previewed).toEqual([ref, "e2"]);
+    // previewRefs must not reserve e2 in nextRef or identities.
+    expect(store.allocateRef({ backendNodeId: 51, tabId: 7, frameId: "top", loaderId: "l1" })).toBe(
+      "e2",
+    );
+  });
 });

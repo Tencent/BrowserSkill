@@ -1,4 +1,6 @@
+import { ActionCheckError } from "@/cooperation/action-checks";
 import { withInputReady } from "./input-readiness";
+import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 import { consumeVisualCapture, isVisualPointRequest } from "./visual-capture";
 import { resolveVisualRegionNow, sameVisualMapping, verifyVisualHit } from "./visual-target";
 import { isAbortError } from "./vom/capture-abort";
@@ -17,6 +19,7 @@ import {
   type FrameDocumentHandle,
   type FrameNodeHandle,
   isStaleFrameHandleError,
+  toRootFrameHandle,
 } from "@/browser-driver/frame-handles";
 import {
   RECORD_PASSWORD_ATTRIBUTE,
@@ -686,6 +689,7 @@ export async function handleHover(
   const ctxOrErr = lookupSession(manager, params, "hover");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
+  const deadline = Date.now() + (params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS);
   const aborted = throwIfAborted(deps.signal);
   if (aborted) return aborted;
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
@@ -699,71 +703,94 @@ export async function handleHover(
   const cancelled = throwIfAborted(deps.signal);
   if (cancelled) return cancelled;
 
-  deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-  const geometry = await resolveNodeGeometry(deps.cdp, target.tabId, node.handle, {
-    scrollIntoView: true,
-  });
-  if (isRpcError(geometry)) return geometry;
-  const centre = geometry.actionPoint;
+  return withInputReady(
+    ctx,
+    target.tabId,
+    { ...deps, deadline, preserveWindowFocus: true },
+    async (input) => {
+      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      const geometry = await resolveNodeGeometry(deps.cdp, target.tabId, node.handle, {
+        scrollIntoView: true,
+      });
+      if (isRpcError(geometry)) return geometry;
+      const centre = geometry.actionPoint;
 
-  if (throwIfAborted(deps.signal)) {
-    return { code: "cancelled", message: "hover aborted" };
-  }
-
-  const modifiers = modifiersBitfield(params.modifiers);
-  const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, centre.x, centre.y);
-  let automationBypassEnabled = false;
-  let hoverCompleted = false;
-  if (overlayBlocking && deps.bypassOverlay) {
-    try {
-      await deps.bypassOverlay(target.tabId, true);
-      automationBypassEnabled = true;
-    } catch (err) {
-      console.debug("[bsk interaction] overlay bypass enable failed", err);
-    }
-  }
-
-  try {
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: centre.x,
-      y: centre.y,
-      modifiers,
-    });
-    const settleMs = params.settle_ms ?? DEFAULT_HOVER_SETTLE_MS;
-    if (settleMs > 0) {
-      await wait(settleMs, deps.signal);
-    }
-    hoverCompleted = true;
-  } catch (err) {
-    if (isAbortLikeError(err)) {
-      return { code: "cancelled", message: "hover aborted" };
-    }
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  } finally {
-    if (
-      automationBypassEnabled &&
-      deps.bypassOverlay &&
-      (!deps.keepOverlayBypassAfterHover || !hoverCompleted)
-    ) {
-      try {
-        await deps.bypassOverlay(target.tabId, false);
-      } catch (err) {
-        console.debug("[bsk interaction] overlay bypass disable failed", err);
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "hover aborted" };
       }
-    }
-  }
 
-  return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-    tab_id: target.tabId,
-    used_ref: node.usedRef,
-    used_selector: node.usedSelector,
-    x: centre.x,
-    y: centre.y,
-  });
+      const modifiers = modifiersBitfield(params.modifiers);
+      const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, centre.x, centre.y);
+      let automationBypassEnabled = false;
+      let hoverCompleted = false;
+      if (overlayBlocking && deps.bypassOverlay) {
+        try {
+          await deps.bypassOverlay(target.tabId, true);
+          automationBypassEnabled = true;
+        } catch (err) {
+          console.debug("[bsk interaction] overlay bypass enable failed", err);
+        }
+      }
+
+      try {
+        if (deps.cdp.verifyPointerTarget) {
+          await deps.cdp.verifyPointerTarget({ handle: node.handle }, centre);
+        }
+        if (throwIfAborted(deps.signal)) {
+          return { code: "cancelled", message: "hover aborted" };
+        }
+        input.markSent();
+        await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: centre.x,
+          y: centre.y,
+          modifiers,
+        });
+        const settleMs = params.settle_ms ?? DEFAULT_HOVER_SETTLE_MS;
+        if (settleMs > 0) {
+          await wait(settleMs, deps.signal);
+        }
+        hoverCompleted = true;
+      } catch (err) {
+        if (err instanceof ActionCheckError) {
+          return {
+            ...err.rpcError,
+            data: { ...err.rpcError.data, effect_state: "none" },
+          };
+        }
+        if (isStaleFrameHandleError(err)) {
+          return rpcError("not_found", "ref_not_found", err.message);
+        }
+        if (deps.signal?.aborted || isAbortLikeError(err) || isAbortError(err)) {
+          return { code: "cancelled", message: "hover aborted" };
+        }
+        return {
+          code: err instanceof Error && err.name === "TimeoutError" ? "timeout" : "cdp_failed",
+          message: err instanceof Error ? err.message : String(err),
+        };
+      } finally {
+        if (
+          automationBypassEnabled &&
+          deps.bypassOverlay &&
+          (!deps.keepOverlayBypassAfterHover || !hoverCompleted)
+        ) {
+          try {
+            await deps.bypassOverlay(target.tabId, false);
+          } catch (err) {
+            console.debug("[bsk interaction] overlay bypass disable failed", err);
+          }
+        }
+      }
+
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
+        used_ref: node.usedRef,
+        used_selector: node.usedSelector,
+        x: centre.x,
+        y: centre.y,
+      });
+    },
+  );
 }
 
 interface OverlayHitInspection {
@@ -904,6 +931,7 @@ type SelectMutationResult =
       reason: "option_not_found" | "option_ambiguous" | "target_disabled";
       missing?: string;
       ambiguous?: string;
+      disabled?: string;
       count?: number;
       available?: string[];
     };
@@ -1476,13 +1504,29 @@ export async function handleFill(
           if (moved && (await focusDelivered())) return;
           pointerFlush = false;
         }
+        let keyDownDispatched = false;
         try {
-          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-            type: "rawKeyDown",
-            commands: [],
-          });
+          await sendToFrameHandle(
+            deps.cdp,
+            toRootFrameHandle(target.tabId),
+            "Input.dispatchKeyEvent",
+            {
+              type: "rawKeyDown",
+              commands: [],
+            },
+            {
+              signal: deps.signal,
+              onDispatch: () => {
+                keyDownDispatched = true;
+              },
+            },
+          );
         } finally {
-          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+          if (keyDownDispatched) {
+            await deps.cdp
+              .send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" })
+              .catch(() => {});
+          }
         }
       };
 
@@ -1620,13 +1664,29 @@ export async function handleFill(
 
         if (step1.write === "insert" && params.value !== "") {
           if (step1.native && !clearBefore && !step1.supportsSelection) {
+            let keyDownDispatched = false;
             try {
-              await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-                type: "rawKeyDown",
-                commands: ["moveToEndOfDocument"],
-              });
+              await sendToFrameHandle(
+                deps.cdp,
+                toRootFrameHandle(target.tabId),
+                "Input.dispatchKeyEvent",
+                {
+                  type: "rawKeyDown",
+                  commands: ["moveToEndOfDocument"],
+                },
+                {
+                  signal: deps.signal,
+                  onDispatch: () => {
+                    keyDownDispatched = true;
+                  },
+                },
+              );
             } finally {
-              await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+              if (keyDownDispatched) {
+                await deps.cdp
+                  .send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" })
+                  .catch(() => {});
+              }
             }
             if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
           }
@@ -2008,109 +2068,194 @@ export async function handlePress(
       ? await resolveBackendNode(deps.cdp, ctx, target, params, "press")
       : undefined;
   if (node && isRpcError(node)) return node;
-  return withInputReady(ctx, target.tabId, { ...deps, deadline }, async (input) => {
-    // Optional focus before key dispatch.
-    if (node) {
-      const nodeCdp = cdpRunnerForFrame(deps.cdp, node.handle);
+  return withInputReady(
+    ctx,
+    target.tabId,
+    { ...deps, deadline, preserveWindowFocus: true },
+    async (input) => {
+      // Optional focus before key dispatch.
+      if (node) {
+        const nodeCdp = cdpRunnerForFrame(deps.cdp, node.handle);
+        try {
+          deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+          const scrollErr = await scrollElementAndFramesIntoView(
+            deps.cdp,
+            target.tabId,
+            node.handle,
+          );
+          if (scrollErr) return scrollErr;
+          if (throwIfAborted(deps.signal)) {
+            return { code: "cancelled", message: "press aborted" };
+          }
+          await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+        } catch (err) {
+          if (isStaleFrameHandleError(err)) {
+            return rpcError("not_found", "ref_not_found", err.message);
+          }
+          return {
+            code: "cdp_failed",
+            message: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "press aborted" };
+      }
+
+      const modifiers = modifiersBitfield(mods);
+      // Suppress `text` when any non-shift modifier is held — `Ctrl+a`
+      // should not also type the character "a" into the focused field.
+      const suppressText = mods.some((m) => m === "ctrl" || m === "meta" || m === "alt");
+      // Enter can navigate on keydown (links) or keypress (form submission).
+      // Let Chromium dispatch that pair in one command: a separate char command
+      // would either fail the old document's guard or reach the new document.
+      const enterText = descriptor.key === "Enter" && !suppressText ? descriptor.text : undefined;
+      let keyDownDispatched = false;
+      let keyReleased = false;
+      const releaseKey = () =>
+        deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key: descriptor.key,
+          code: descriptor.code,
+          windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
+          modifiers,
+        });
+      const runBoundedPressStep = async (
+        paramsObj: object,
+        timeoutMessage: string,
+        onDispatched?: () => void,
+      ) => {
+        const stepAbort = new AbortController();
+        const forward = () => stepAbort.abort();
+        deps.signal?.addEventListener("abort", forward, { once: true });
+        if (deps.signal?.aborted) stepAbort.abort();
+        let dispatched = false;
+        try {
+          await waitBounded(
+            sendToFrameHandle(
+              deps.cdp,
+              toRootFrameHandle(target.tabId),
+              "Input.dispatchKeyEvent",
+              paramsObj,
+              {
+                signal: stepAbort.signal,
+                onDispatch: () => {
+                  if (stepAbort.signal.aborted || Date.now() >= deadline) {
+                    throw new DOMException(timeoutMessage, "AbortError");
+                  }
+                  dispatched = true;
+                  onDispatched?.();
+                },
+              },
+            ),
+            deadline,
+            deps.signal,
+            timeoutMessage,
+          );
+        } catch (err) {
+          if (!dispatched) stepAbort.abort();
+          throw err;
+        } finally {
+          deps.signal?.removeEventListener("abort", forward);
+        }
+      };
       try {
+        let cancelled = false;
         deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-        const scrollErr = await scrollElementAndFramesIntoView(deps.cdp, target.tabId, node.handle);
-        if (scrollErr) return scrollErr;
-        if (throwIfAborted(deps.signal)) {
+        await runBoundedPressStep(
+          {
+            type: enterText ? "keyDown" : "rawKeyDown",
+            key: descriptor.key,
+            code: descriptor.code,
+            windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
+            modifiers,
+            ...(enterText ? { text: enterText } : {}),
+          },
+          "press keyDown timed out",
+          () => {
+            deps.onInputSent?.(target.tabId);
+            input.markSent();
+            keyDownDispatched = true;
+          },
+        );
+        cancelled = throwIfAborted(deps.signal) !== null;
+        if (
+          !cancelled &&
+          !enterText &&
+          !suppressText &&
+          typeof descriptor.text === "string" &&
+          descriptor.text.length > 0
+        ) {
+          await runBoundedPressStep(
+            {
+              type: "char",
+              key: descriptor.key,
+              code: descriptor.code,
+              text: descriptor.text,
+              modifiers,
+            },
+            "press char timed out",
+          );
+          cancelled = throwIfAborted(deps.signal) !== null;
+        }
+        if (!cancelled && params.hold_ms && params.hold_ms > 0) {
+          await sleep(params.hold_ms, deps.signal);
+          if (throwIfAborted(deps.signal)) {
+            // Still send keyUp so the page doesn't think the key is stuck
+            // down — best-effort.
+            cancelled = true;
+          }
+        }
+        deps.onInputSent?.(target.tabId);
+        keyReleased = true;
+        await waitBounded(
+          releaseKey(),
+          Math.max(deadline, Date.now() + 1_000),
+          undefined,
+          "press keyUp timed out",
+        );
+        if (cancelled || throwIfAborted(deps.signal)) {
           return { code: "cancelled", message: "press aborted" };
         }
-        await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
       } catch (err) {
         if (isStaleFrameHandleError(err)) {
           return rpcError("not_found", "ref_not_found", err.message);
         }
+        if (err instanceof BoundedWaitError) {
+          return {
+            code: err.kind === "aborted" ? "cancelled" : "timeout",
+            message: err.kind === "aborted" ? "press aborted" : err.message,
+          };
+        }
         return {
-          code: "cdp_failed",
+          code:
+            deps.signal?.aborted || isAbortError(err)
+              ? "cancelled"
+              : err instanceof Error && err.name === "TimeoutError"
+                ? "timeout"
+                : "cdp_failed",
           message: err instanceof Error ? err.message : String(err),
         };
-      }
-    }
-
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "press aborted" };
-    }
-
-    const modifiers = modifiersBitfield(mods);
-    // Suppress `text` when any non-shift modifier is held — `Ctrl+a`
-    // should not also type the character "a" into the focused field.
-    const suppressText = mods.some((m) => m === "ctrl" || m === "meta" || m === "alt");
-    // Enter can navigate on keydown (links) or keypress (form submission).
-    // Let Chromium dispatch that pair in one command: a separate char command
-    // would either fail the old document's guard or reach the new document.
-    const enterText = descriptor.key === "Enter" && !suppressText ? descriptor.text : undefined;
-    try {
-      let cancelled = false;
-      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-      deps.onInputSent?.(target.tabId);
-      input.markSent();
-      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-        type: enterText ? "keyDown" : "rawKeyDown",
-        key: descriptor.key,
-        code: descriptor.code,
-        windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
-        modifiers,
-        ...(enterText ? { text: enterText } : {}),
-      });
-      cancelled = throwIfAborted(deps.signal) !== null;
-      if (
-        !cancelled &&
-        !enterText &&
-        !suppressText &&
-        typeof descriptor.text === "string" &&
-        descriptor.text.length > 0
-      ) {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-          type: "char",
-          key: descriptor.key,
-          code: descriptor.code,
-          text: descriptor.text,
-          modifiers,
-        });
-        cancelled = throwIfAborted(deps.signal) !== null;
-      }
-      if (!cancelled && params.hold_ms && params.hold_ms > 0) {
-        await sleep(params.hold_ms, deps.signal);
-        if (throwIfAborted(deps.signal)) {
-          // Still send keyUp so the page doesn't think the key is stuck
-          // down — best-effort.
-          cancelled = true;
+      } finally {
+        if (keyDownDispatched && !keyReleased) {
+          await waitBounded(
+            releaseKey(),
+            Date.now() + 1_000,
+            undefined,
+            "press keyUp cleanup timed out",
+          ).catch(() => {});
         }
       }
-      deps.onInputSent?.(target.tabId);
-      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-        type: "keyUp",
+
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
         key: descriptor.key,
         code: descriptor.code,
-        windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
-        modifiers,
+        modifiers: mods,
       });
-      if (cancelled || throwIfAborted(deps.signal)) {
-        return { code: "cancelled", message: "press aborted" };
-      }
-    } catch (err) {
-      return {
-        code:
-          deps.signal?.aborted || isAbortError(err)
-            ? "cancelled"
-            : err instanceof Error && err.name === "TimeoutError"
-              ? "timeout"
-              : "cdp_failed",
-        message: err instanceof Error ? err.message : String(err),
-      };
-    }
-
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      tab_id: target.tabId,
-      key: descriptor.key,
-      code: descriptor.code,
-      modifiers: mods,
-    });
-  });
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2126,13 +2271,19 @@ const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
   }
   const multiple = select.multiple;
   const opts = Array.from(select.options);
+  const isDisabledOption = (o) =>
+    Boolean(
+      o.disabled ||
+        (typeof o.closest === 'function' && o.closest('optgroup[disabled]')) ||
+        (typeof o.matches === 'function' && o.matches(':disabled')),
+    );
   const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
   const formatCandidate = (o) => {
     const lbl = norm(o.getAttribute('label')) || norm(o.text);
     if (!lbl || o.value === lbl) return JSON.stringify(o.value);
     return (o.value === '' ? '""' : o.value) + '=' + JSON.stringify(lbl);
   };
-  const available = opts.slice(0, 12).map(formatCandidate);
+  const available = opts.filter((o) => !isDisabledOption(o)).slice(0, 12).map(formatCandidate);
   const selectedIndices = new Set();
   for (const v of values) {
     const byValue = [];
@@ -2140,8 +2291,12 @@ const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
       if (opts[i].value === v) byValue.push(i);
     }
     if (byValue.length > 0) {
-      for (const idx of byValue) selectedIndices.add(idx);
-      continue;
+      const enabledByValue = byValue.filter((idx) => !isDisabledOption(opts[idx]));
+      if (enabledByValue.length > 0) {
+        for (const idx of enabledByValue) selectedIndices.add(idx);
+        continue;
+      }
+      return { ok: false, reason: 'target_disabled', disabled: v, available };
     }
     const vTrim = norm(v);
     if (vTrim) {
@@ -2153,18 +2308,22 @@ const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
           byExactLabel.push(i);
         }
       }
-      if (byExactLabel.length === 1) {
-        selectedIndices.add(byExactLabel[0]);
-        continue;
-      }
-      if (byExactLabel.length > 1) {
-        return {
-          ok: false,
-          reason: 'option_ambiguous',
-          ambiguous: v,
-          count: byExactLabel.length,
-          available,
-        };
+      if (byExactLabel.length > 0) {
+        const enabledByExactLabel = byExactLabel.filter((idx) => !isDisabledOption(opts[idx]));
+        if (enabledByExactLabel.length === 1) {
+          selectedIndices.add(enabledByExactLabel[0]);
+          continue;
+        }
+        if (enabledByExactLabel.length > 1) {
+          return {
+            ok: false,
+            reason: 'option_ambiguous',
+            ambiguous: v,
+            count: enabledByExactLabel.length,
+            available,
+          };
+        }
+        return { ok: false, reason: 'target_disabled', disabled: v, available };
       }
       const vLower = vTrim.toLowerCase();
       const byLowerLabel = [];
@@ -2175,18 +2334,22 @@ const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
           byLowerLabel.push(i);
         }
       }
-      if (byLowerLabel.length === 1) {
-        selectedIndices.add(byLowerLabel[0]);
-        continue;
-      }
-      if (byLowerLabel.length > 1) {
-        return {
-          ok: false,
-          reason: 'option_ambiguous',
-          ambiguous: v,
-          count: byLowerLabel.length,
-          available,
-        };
+      if (byLowerLabel.length > 0) {
+        const enabledByLowerLabel = byLowerLabel.filter((idx) => !isDisabledOption(opts[idx]));
+        if (enabledByLowerLabel.length === 1) {
+          selectedIndices.add(enabledByLowerLabel[0]);
+          continue;
+        }
+        if (enabledByLowerLabel.length > 1) {
+          return {
+            ok: false,
+            reason: 'option_ambiguous',
+            ambiguous: v,
+            count: enabledByLowerLabel.length,
+            available,
+          };
+        }
+        return { ok: false, reason: 'target_disabled', disabled: v, available };
       }
     }
     return { ok: false, reason: 'option_not_found', missing: v, available };
@@ -2343,6 +2506,9 @@ export async function handleSelect(
         selected_labels: mutation.selected_labels,
       });
     } catch (err) {
+      if (isStaleFrameHandleError(err)) {
+        return rpcError("not_found", "ref_not_found", err.message);
+      }
       return {
         code: "cdp_failed",
         message: err instanceof Error ? err.message : String(err),
@@ -2358,10 +2524,21 @@ function selectFailure(
 ): RpcError {
   const effect = preWrite ? PRE_WRITE_FAILURE : {};
   if (mutation?.reason === "target_disabled") {
+    const suffix = mutation.available?.length
+      ? ` (available: ${mutation.available.join(" | ")})`
+      : "";
     return {
       code: "invalid_params",
-      message: "select requires an enabled <select>",
-      data: { reason: "target_disabled", ...effect },
+      message:
+        mutation.disabled !== undefined
+          ? `option ${JSON.stringify(mutation.disabled)} is disabled in <select>${suffix}`
+          : "select requires an enabled <select>",
+      data: {
+        reason: "target_disabled",
+        ...effect,
+        ...(mutation.disabled !== undefined ? { disabled: mutation.disabled } : {}),
+        ...(mutation.available ? { available: mutation.available } : {}),
+      },
     };
   }
   if (mutation?.reason === "option_ambiguous") {

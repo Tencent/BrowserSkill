@@ -169,10 +169,20 @@ async function captureElementScreenshot(
   tabId: number,
   handle: FrameNodeHandle,
   signal?: AbortSignal,
+  scrollIntoView = true,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   if (signal?.aborted) return cancelled("screenshot");
-  const geometry = await resolveNodeGeometry(cdp, tabId, handle, { scrollIntoView: true });
-  if (isRpcError(geometry)) return geometry;
+  const geometry = await resolveNodeGeometry(cdp, tabId, handle, { scrollIntoView });
+  if (isRpcError(geometry)) {
+    if (!scrollIntoView && geometry.code === "permission_denied") {
+      return rpcError(
+        "permission_denied",
+        "element_not_visible",
+        "element is not visible in the current viewport; unborrowed user tabs are not scrolled for screenshot --ref (borrow the tab first to capture off-screen elements)",
+      );
+    }
+    return geometry;
+  }
   if (signal?.aborted) return cancelled("screenshot");
   const rect = geometry.topBounds;
   const clip = screenshotPageRect(rect, geometry.topViewport);
@@ -314,9 +324,16 @@ export async function handleScreenshot(
       await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
       if (signal?.aborted) return cancelled("screenshot");
       const verifiedEntry = lookupRefTarget(ctx, ref, target.tabId);
-      if (verifiedEntry?.kind !== "visual-region") {
-        const missing = resolveSnapshotRef(ctx, ref, target.tabId);
-        if (isRpcError(missing)) return missing;
+      if (verifiedEntry !== entry) {
+        if (!verifiedEntry) {
+          const missing = resolveSnapshotRef(ctx, ref, target.tabId);
+          if (isRpcError(missing)) return missing;
+        }
+        return rpcError(
+          "not_found",
+          "visual_target_changed",
+          "visual ref changed during attachment; observe again before requesting a screenshot",
+        );
       }
       const hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
       const captured = await withAuraCompositorKeepalive(
@@ -357,7 +374,21 @@ export async function handleScreenshot(
     if (signal?.aborted) return cancelled("screenshot");
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;
+    if (
+      node.backendNodeId !== initialNode.backendNodeId ||
+      node.frameId !== initialNode.frameId ||
+      node.handle.loaderId !== initialNode.handle.loaderId
+    ) {
+      return rpcError(
+        "not_found",
+        "ref_not_found",
+        `Ref @${node.refKey} changed during attachment; observe again before requesting a screenshot`,
+      );
+    }
     const cdp = deps.cdp;
+    // passive_read must not mutate scroll position on unborrowed user tabs.
+    const allowScrollIntoView =
+      isAgentControlledTab(ctx, target.tabId) && target.windowId === ctx.agentWindowId;
     const hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
     const captured = await withAuraCompositorKeepalive(
       cdp,
@@ -367,7 +398,8 @@ export async function handleScreenshot(
       () =>
         withExtensionOverlayHidden(
           target.tabId,
-          () => captureElementScreenshot(cdp, target.tabId, node.handle, signal),
+          () =>
+            captureElementScreenshot(cdp, target.tabId, node.handle, signal, allowScrollIntoView),
           deps.sendToTab,
         ),
     );
