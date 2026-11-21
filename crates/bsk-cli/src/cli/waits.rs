@@ -448,45 +448,54 @@ mod tests {
     /// Bad flags must fail before a daemon is spawned.
     #[test]
     fn dispatch_rejects_bad_flags_before_starting_a_daemon() {
-        for argv in [
+        for (argv, invalid_params) in [
             // 目标一个都没给
-            vec!["bsk", "wait-for-element", "--session", "s1"],
+            (vec!["bsk", "wait-for-element", "--session", "s1"], true),
             // 目标给了两个
-            vec![
-                "bsk",
-                "wait-for-element",
-                "#a",
-                "--selector",
-                "#b",
-                "--session",
-                "s1",
-            ],
+            (
+                vec![
+                    "bsk",
+                    "wait-for-element",
+                    "#a",
+                    "--selector",
+                    "#b",
+                    "--session",
+                    "s1",
+                ],
+                true,
+            ),
             // poll 为 0
-            vec![
-                "bsk",
-                "wait-for-element",
-                "#a",
-                "--poll-ms",
-                "0",
-                "--session",
-                "s1",
-            ],
+            (
+                vec![
+                    "bsk",
+                    "wait-for-element",
+                    "#a",
+                    "--poll-ms",
+                    "0",
+                    "--session",
+                    "s1",
+                ],
+                false,
+            ),
         ] {
             let cli = crate::cli::Cli::try_parse_from(argv.clone()).unwrap();
             let crate::cli::Command::WaitForElement(args) = cli.command else {
                 panic!("expected wait-for for {argv:?}");
             };
-            assert!(
-                matches!(
-                    dispatch_wait_for_element(
-                        args,
-                        &crate::cli::business_rpc::ClientContext::default(),
-                        Format::Json
-                    ),
-                    Err(CliError::Local(_))
-                ),
-                "{argv:?} should have failed locally"
-            );
+            let error = dispatch_wait_for_element(
+                args,
+                &crate::cli::business_rpc::ClientContext::default(),
+                Format::Json,
+            )
+            .expect_err("bad wait-for flags must fail before the daemon");
+            if invalid_params {
+                // #794: the shared target parser reports caller-side
+                // argument errors as invalid_params, not a local/daemon
+                // failure.
+                assert_eq!(error.code(), Some(bsk_protocol::ErrorCode::InvalidParams));
+            } else {
+                assert!(matches!(error, CliError::Local(_)), "{error:?}");
+            }
         }
     }
     #[test]

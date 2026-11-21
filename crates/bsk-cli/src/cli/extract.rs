@@ -153,15 +153,17 @@ pub fn dispatch(
         && args.out.is_none()
         && matches!(format, Format::Json)
     {
-        return Err(CliError::Local(anyhow::anyhow!(
+        return Err(CliError::invalid_params(anyhow::anyhow!(
             "--json with --format csv requires --out; otherwise stdout is CSV"
         )));
     }
-    let params = params(&args).map_err(CliError::Local)?;
+    let params = params(&args).map_err(CliError::invalid_params)?;
     if let Some(path) = &args.out {
-        preflight(path, args.overwrite).map_err(CliError::Local)?;
+        preflight(path, args.overwrite).map_err(|error| output_file_error(error, path))?;
         if args.output_format == OutputFormat::Csv {
-            preflight(&metadata_path(path), args.overwrite).map_err(CliError::Local)?;
+            let meta_path = metadata_path(path);
+            preflight(&meta_path, args.overwrite)
+                .map_err(|error| output_file_error(error, &meta_path))?;
         }
     }
     let op_ctx = ctx.with_scope(args.scope.as_deref());
@@ -177,7 +179,13 @@ pub fn dispatch(
         other => other,
     })?;
     order_rows(&mut reply);
-    render(&reply, &args, format).map_err(CliError::Local)
+    render(&reply, &args, format).map_err(|error| match &args.out {
+        Some(out) => output_file_error(error, out),
+        None => CliError::file_validation(
+            error,
+            "check that stdout is writable for the extracted output",
+        ),
+    })
 }
 
 pub(crate) fn render_in_memory(
@@ -263,6 +271,19 @@ fn metadata_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(".meta.json");
     name.into()
+}
+
+/// A local output-file failure is caller-side: report file validation (exit 1,
+/// path hint) instead of a daemon transport failure (exit 2, "is the daemon
+/// running?") (#794).
+fn output_file_error(error: anyhow::Error, out: &Path) -> CliError {
+    CliError::file_validation(
+        error,
+        &format!(
+            "check --out: use a writable path whose parent directory exists ({})",
+            out.display()
+        ),
+    )
 }
 fn preflight(path: &Path, overwrite: bool) -> anyhow::Result<()> {
     if !overwrite && path.try_exists()? {
@@ -531,5 +552,26 @@ mod tests {
             meta["escaped_cells"][0],
             json!({"header":0,"original":"=title"})
         );
+    }
+
+    /// #794: a local --out write failure is caller-side file validation, not a
+    /// daemon transport failure.
+    #[test]
+    fn output_write_failures_are_file_errors_not_daemon_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("missing").join("rows.csv");
+        let mut reply = sample();
+        let error = write_output_artifact(&mut reply, &out, false, OutputFormat::Csv, false)
+            .expect_err("missing parent directory");
+        let cli = output_file_error(error, &out);
+        assert!(cli.code().is_some(), "{cli:?}");
+        assert_eq!(cli.exit_code(), 1);
+        let rendered = crate::cli::error::render_human_to_string(&cli, None);
+        assert!(!rendered.contains("daemon"), "{rendered}");
+        assert!(
+            rendered.contains("local file validation failed"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("--out"), "{rendered}");
     }
 }

@@ -70,11 +70,7 @@ pub fn dispatch(
             crate::daemon::file_transfer::MAX_UPLOAD_FILES
         )));
     }
-    let (ref_, selector) =
-        split_target(args.target, args.ref_, args.selector).map_err(|error| match error {
-            CliError::Local(error) => CliError::invalid_params(error),
-            error => error,
-        })?;
+    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let sources = args
         .files
         .iter()

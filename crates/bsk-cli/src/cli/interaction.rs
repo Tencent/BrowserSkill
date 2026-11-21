@@ -79,7 +79,7 @@ pub(crate) fn split_target(
     explicit_selector: Option<String>,
 ) -> Result<(Option<String>, Option<String>), CliError> {
     match (positional, explicit_ref, explicit_selector) {
-        (None, None, None) => Err(CliError::Local(anyhow::anyhow!(
+        (None, None, None) => Err(CliError::invalid_params(anyhow::anyhow!(
             "missing target: pass <ref-or-selector>, --ref @eN, or --selector <css>"
         ))),
         (None, Some(r), None) => Ok((Some(r), None)),
@@ -91,7 +91,7 @@ pub(crate) fn split_target(
                 Ok((None, Some(t)))
             }
         }
-        _ => Err(CliError::Local(anyhow::anyhow!(
+        _ => Err(CliError::invalid_params(anyhow::anyhow!(
             "pass exactly one of: <target>, --ref, or --selector"
         ))),
     }
@@ -850,6 +850,42 @@ mod tests {
         let (r, s) = split_target(Some(".btn".into()), None, None).unwrap();
         assert!(r.is_none());
         assert_eq!(s.as_deref(), Some(".btn"));
+    }
+
+    /// #794: the target is a caller-side argument, so a missing or
+    /// conflicting target must be `invalid_params` (exit 1) instead of
+    /// `Local` (exit 2 with the misleading "is the daemon running?" hint).
+    #[test]
+    fn split_target_errors_are_invalid_params_not_daemon_failures() {
+        for (positional, explicit_ref, explicit_selector, message) in [
+            (
+                None,
+                None,
+                None,
+                "missing target: pass <ref-or-selector>, --ref @eN, or --selector <css>",
+            ),
+            (
+                Some("e3".to_string()),
+                Some("@e4".to_string()),
+                None,
+                "pass exactly one of: <target>, --ref, or --selector",
+            ),
+        ] {
+            let error = split_target(positional, explicit_ref, explicit_selector)
+                .expect_err("target arguments must be rejected");
+            assert_eq!(
+                error.code(),
+                Some(bsk_protocol::ErrorCode::InvalidParams),
+                "{error:?}"
+            );
+            assert_eq!(error.exit_code(), 1);
+            let rendered = crate::cli::error::render_human_to_string(&error, None);
+            assert!(rendered.contains(message), "{rendered}");
+            assert!(
+                !rendered.contains("daemon"),
+                "argument errors must not blame the daemon: {rendered}"
+            );
+        }
     }
 
     #[test]

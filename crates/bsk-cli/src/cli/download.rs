@@ -48,11 +48,7 @@ pub fn dispatch(
     if args.out.exists() && !args.overwrite {
         return Err(output_exists(&args.out));
     }
-    let (ref_, selector) =
-        split_target(args.target, args.ref_, args.selector).map_err(|error| match error {
-            CliError::Local(error) => CliError::invalid_params(error),
-            error => error,
-        })?;
+    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let op_ctx = ctx.with_scope(args.scope.as_deref());
     let aux_ctx = op_ctx.without_action_metadata();
     let info = ensure_daemon().context("ensure daemon is running")?;
