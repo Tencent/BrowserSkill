@@ -99,6 +99,23 @@ pub(super) fn valid_path(name: &str) -> bool {
         })
 }
 
+/// A package resource that is a symlink or is reached through one inside the
+/// installed package. This is how externally managed installations (dotfiles /
+/// GNU Stow / Nix Home Manager) store their files, so it is a distinct type:
+/// automatic sync pauses on it instead of reporting a filesystem failure,
+/// while explicit installs keep refusing to touch the link.
+#[derive(Debug, thiserror::Error)]
+#[error("skill resource is not a regular file or has an unsafe parent: {}", path.display())]
+pub(super) struct SymlinkedResource {
+    pub(super) path: PathBuf,
+}
+
+/// Finds a [`SymlinkedResource`] rejection anywhere in an error chain.
+pub(super) fn symlink_rejection(err: &anyhow::Error) -> Option<&SymlinkedResource> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<SymlinkedResource>())
+}
+
 /// Reject symlinks and non-directory parents rather than reading or writing outside
 /// the installed package. The root can live under a symlinked harness/home directory.
 pub(super) fn resource_path(root: &Path, name: &str) -> Result<PathBuf> {
@@ -110,9 +127,11 @@ pub(super) fn resource_path(root: &Path, name: &str) -> Result<PathBuf> {
     for (index, part) in parts.iter().enumerate() {
         path.push(part);
         match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(anyhow::Error::new(SymlinkedResource { path }));
+            }
             Ok(meta)
-                if meta.file_type().is_symlink()
-                    || (index + 1 < parts.len() && !meta.is_dir())
+                if (index + 1 < parts.len() && !meta.is_dir())
                     || (index + 1 == parts.len() && !meta.is_file()) =>
             {
                 bail!(
