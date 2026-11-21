@@ -583,3 +583,51 @@ async fn native_tls_serves_the_same_authorization_and_websocket_protocol() {
     server.command(&["daemon", "revoke", "--all"]);
     closed(&mut ws).await;
 }
+
+#[tokio::test]
+async fn remote_mode_rejects_transfer_begin_upfront_before_staging() {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let mut cfg = bsk::daemon::DaemonConfig::new(0);
+    cfg.server = bsk::cli::daemon::StartArgs {
+        mode: bsk::cli::daemon::DaemonMode::Server,
+        public_url: Some("wss://browser.example/extension".into()),
+        ..Default::default()
+    }
+    .server_config()
+    .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let state = Arc::new(bsk::daemon::DaemonState::new_isolated(cfg, temp.path()));
+    let handler = bsk::daemon::ipc::full_handler(
+        bsk::daemon::ipc::DaemonStatus {
+            started_at: Instant::now(),
+            ws_port: 0,
+            sock_path: std::path::PathBuf::from("/unused"),
+            daemon_version: "0.5.0",
+            protocol_version: bsk::daemon::state::PROTOCOL_VERSION,
+        },
+        Arc::clone(&state),
+    );
+    let body = handler(
+        "tx-1".into(),
+        bsk_protocol::Method::TransferBegin,
+        serde_json::json!({
+            "session_id": "abcd",
+            "name": "large.bin",
+            "byte_size": 256 * 1024 * 1024_u64,
+        }),
+    )
+    .await;
+    match body {
+        bsk_protocol::ResponseBody::Err(err) => {
+            assert_eq!(err.code, bsk_protocol::ErrorCode::Unsupported);
+            assert!(
+                err.message.contains("not supported for remote browsers"),
+                "unexpected message: {}",
+                err.message
+            );
+        }
+        other => panic!("expected Unsupported error, got {other:?}"),
+    }
+}

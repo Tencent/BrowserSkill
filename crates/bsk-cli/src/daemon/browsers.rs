@@ -101,6 +101,10 @@ impl BrowserSink {
 pub struct Pending {
     waiters: HashMap<RpcId, oneshot::Sender<bsk_protocol::ResponseFrame>>,
     terminated: Option<Termination>,
+    /// Cancelled whenever this socket is closed or replaced so the owning
+    /// `drive_connection` task stops immediately instead of parking on
+    /// `rx.recv()` while holding `Arc<BrowserClient>`.
+    closed: super::abort::AbortToken,
 }
 
 #[derive(Debug)]
@@ -110,6 +114,10 @@ enum Termination {
 }
 
 impl Pending {
+    pub fn closed_token(&self) -> super::abort::AbortToken {
+        self.closed.clone()
+    }
+
     pub fn register(
         &mut self,
         id: RpcId,
@@ -146,6 +154,7 @@ impl Pending {
     /// later registrations. The first termination wins, so a replaced socket
     /// keeps reporting the reconnect when its own teardown closes it later.
     pub fn terminate(&mut self, cause: RpcError) {
+        self.closed.cancel();
         if self.terminated.is_some() {
             return;
         }
@@ -161,6 +170,7 @@ impl Pending {
     /// The socket is gone: drop every waiter so each caller takes its
     /// existing transport-closed path, and refuse later registrations.
     pub fn close(&mut self) {
+        self.closed.cancel();
         self.terminated.get_or_insert(Termination::Closed);
         self.waiters.clear();
     }
@@ -363,6 +373,24 @@ impl BrowserClient {
         Ok(waiter)
     }
 
+    /// Token cancelled as soon as this browser connection is closed, evicted,
+    /// or replaced by a reconnect.
+    pub fn closed_token(&self) -> super::abort::AbortToken {
+        self.pending
+            .lock()
+            .expect("browser pending poisoned")
+            .closed_token()
+    }
+
+    /// Close this client: fail all pending RPC waiters and signal the owning
+    /// WS driver task to stop and release its socket/permit.
+    pub fn close(&self) {
+        self.pending
+            .lock()
+            .expect("browser pending poisoned")
+            .close();
+    }
+
     /// Record that a frame just arrived from this browser.
     pub fn touch(&self) {
         self.liveness.touch();
@@ -443,6 +471,23 @@ impl BrowserRegistry {
                 .expect("browser pending poisoned")
                 .terminate(extension_reconnected_error());
         }
+    }
+
+    /// Remove and terminate any prior registration for `id` ahead of a
+    /// reconnect's session purge and audit setup so no new sessions can attach
+    /// to the dying socket while the new registration finishes initializing.
+    pub fn evict_for_reconnect(&self, id: &BrowserId) -> Option<std::sync::Arc<BrowserClient>> {
+        let prev = self.remove(id)?;
+        tracing::info!(
+            id = %id,
+            old_generation = prev.generation,
+            "browser reconnect: evicting previous registration"
+        );
+        prev.pending
+            .lock()
+            .expect("browser pending poisoned")
+            .terminate(extension_reconnected_error());
+        Some(prev)
     }
 
     pub fn remove(&self, id: &BrowserId) -> Option<std::sync::Arc<BrowserClient>> {
