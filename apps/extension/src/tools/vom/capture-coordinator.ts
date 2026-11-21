@@ -27,7 +27,12 @@ import {
   type FrameDocument,
   type FrameOwnedAxNode,
 } from "./frame-document";
-import { type PreparedFrameDocument, prepareSnapshot, projectSnapshot } from "./normalize";
+import {
+  finalizeDocumentHiddenExclusions,
+  type PreparedFrameDocument,
+  prepareSnapshot,
+  projectSnapshot,
+} from "./normalize";
 import {
   BASIC_SNAPSHOT,
   describeSnapshotFrames,
@@ -842,6 +847,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
       .filter((doc) => belongs(doc.frame))
       .map((doc) => [doc.frame.frameId, doc]),
   );
+  for (const doc of decoded.values()) finalizeDocumentHiddenExclusions(doc);
   const ax = batches.flatMap((batch) => batch.ax).filter((batch) => belongs(batch.frame));
   const documents = await buildFrameDocuments(
     { rootFrameId, frames },

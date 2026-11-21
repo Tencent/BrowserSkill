@@ -83,6 +83,8 @@ export interface SnapshotDocument {
     nodeValue?: number[];
     /** Maps node array index → index into `documents[]` for frame content. */
     contentDocumentIndex?: SparseArray;
+    /** Shadow root type (`"open"`, `"closed"`, `"user-agent"`) per shadow-tree node. */
+    shadowRootType?: SparseArray;
     inputValue?: SparseArray;
     textValue?: SparseArray;
     inputChecked?: RareBooleanData;
@@ -183,6 +185,7 @@ export async function decodeDocument(
 
   const inputValues = sparseIndexMap(dn.inputValue);
   const textValues = sparseIndexMap(dn.textValue);
+  const shadowRootTypes = sparseIndexMap(dn.shadowRootType);
   const checkedInputs = new Set(dn.inputChecked?.index ?? []);
   const selectedOptions = new Set(dn.optionSelected?.index ?? []);
   const clickableNodes = new Set(dn.isClickable?.index ?? []);
@@ -312,17 +315,29 @@ export async function decodeDocument(
     const rawFormValue =
       rawFormValueIndex !== undefined ? str(strings, rawFormValueIndex) : undefined;
     const sensitive = isSensitiveFormControl({ tag, attrs });
+    const inputType = tag === "input" ? (attrs.type ?? "").toLowerCase() : "";
+    const isCheckable = inputType === "checkbox" || inputType === "radio";
+    const hasValueAttr = Object.prototype.hasOwnProperty.call(attrs, "value");
+    const isChecked = isCheckable ? checkedInputs.has(n) : undefined;
+    const defaultChecked = isCheckable && Object.prototype.hasOwnProperty.call(attrs, "checked");
     const formDefaultValue = attrs.value ?? "";
-    const formValue = sensitive ? undefined : rawFormValue;
-    const formState = snapshotFormState(
-      rawFormValue,
-      formDefaultValue,
-      Object.prototype.hasOwnProperty.call(attrs, "value"),
-      sensitive,
-    );
+    const formValue =
+      sensitive || (isCheckable && !hasValueAttr && rawFormValue === "on")
+        ? undefined
+        : rawFormValue;
+    const formState = isCheckable
+      ? !isChecked
+        ? "empty"
+        : defaultChecked
+          ? "default"
+          : "filled"
+      : snapshotFormState(rawFormValue, formDefaultValue, hasValueAttr, sensitive);
     if (sensitive && "value" in attrs) delete attrs.value;
 
     const zIndex = parseZIndex(styles?.["z-index"]);
+    const shadowRootTypeIdx = shadowRootTypes.get(n);
+    const shadowRootType =
+      shadowRootTypeIdx !== undefined ? str(strings, shadowRootTypeIdx) || undefined : undefined;
 
     nodes.push({
       backendNodeId,
@@ -331,6 +346,7 @@ export async function decodeDocument(
       ...(dn.parentIndex?.[n] === undefined || (parentIdx >= 0 && parentBackendNodeId === null)
         ? { parentMissing: true }
         : {}),
+      ...(shadowRootType ? { shadowRootType } : {}),
 
       tag,
       attrs,
@@ -351,9 +367,7 @@ export async function decodeDocument(
             ...(formState ? { formState } : {}),
           }
         : {}),
-      ...(tag === "input" && ["checkbox", "radio"].includes((attrs.type ?? "").toLowerCase())
-        ? { checked: checkedInputs.has(n) }
-        : {}),
+      ...(isCheckable ? { checked: isChecked } : {}),
       ...(tag === "option" && dn.optionSelected !== undefined
         ? { checked: selectedOptions.has(n) }
         : {}),

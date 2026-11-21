@@ -17,6 +17,7 @@ interface CapturedFormState {
   inForm?: boolean;
   value?: string;
   defaultValue?: string;
+  checked?: boolean;
   placeholder?: string;
   state?: "empty" | "filled" | "default";
   sensitive?: boolean;
@@ -33,6 +34,39 @@ function formStateBatchExpression(maxControls: number): string {
     let remaining = maxControls;
     const controlSelector = "input,textarea,select";
     const sensitiveSelector = ${JSON.stringify(`input[type="password"],[${RECORD_PASSWORD_ATTRIBUTE}],${SENSITIVE_AUTOCOMPLETE_SELECTOR}`)};
+    const isDefaultSelected = (opt) =>
+      Boolean(opt.defaultSelected) ||
+      (typeof opt.hasAttribute === "function" && opt.hasAttribute("selected"));
+    const selectState = (el, rawValue, sensitive) => {
+      const options = Array.from(el.options || []);
+      if (el.multiple) {
+        const selected = options.filter((opt) => opt.selected);
+        if (selected.length === 0) return { state: "empty", defaultValue: "" };
+        const untouched = options.every((opt) => Boolean(opt.selected) === isDefaultSelected(opt));
+        return { state: !sensitive && untouched ? "default" : "filled", defaultValue: "" };
+      }
+      let defaultOpt = null;
+      for (const opt of options) {
+        if (isDefaultSelected(opt)) defaultOpt = opt;
+      }
+      if (!defaultOpt && (el.size || 0) <= 1) {
+        defaultOpt =
+          options.find(
+            (opt) =>
+              !opt.disabled &&
+              !(opt.parentElement && opt.parentElement.tagName === "OPTGROUP" && opt.parentElement.disabled),
+          ) ||
+          options[0] ||
+          null;
+      }
+      const defaultValue = defaultOpt && typeof defaultOpt.value === "string" ? defaultOpt.value : "";
+      if (rawValue === "" || el.selectedIndex < 0) return { state: "empty", defaultValue };
+      const isDefault =
+        !sensitive &&
+        ((defaultOpt !== null && options[el.selectedIndex] === defaultOpt) ||
+          rawValue === defaultValue);
+      return { state: isDefault ? "default" : "filled", defaultValue };
+    };
     const controlState = (el) => {
       const tag = el.tagName.toLowerCase();
       const type = tag === "input" ? String(el.type || "text").toLowerCase() : tag;
@@ -41,32 +75,74 @@ function formStateBatchExpression(maxControls: number): string {
         type === "credit-card" ||
         (typeof el.matches === "function" && el.matches(sensitiveSelector));
       const rawValue = typeof el.value === "string" ? el.value : "";
-      const defaultValue = typeof el.defaultValue === "string" ? el.defaultValue : "";
       const placeholder = typeof el.placeholder === "string" ? el.placeholder : "";
+      const inForm = el.form !== null;
+      if (tag === "input" && (type === "checkbox" || type === "radio")) {
+        const checked = Boolean(el.checked);
+        const defaultChecked =
+          Boolean(el.defaultChecked) ||
+          (typeof el.hasAttribute === "function" && el.hasAttribute("checked"));
+        const hasExplicitValue =
+          typeof el.hasAttribute === "function" ? el.hasAttribute("value") : Boolean(el.defaultValue);
+        const state = !checked ? "empty" : defaultChecked ? "default" : "filled";
+        const defaultValue = hasExplicitValue && typeof el.defaultValue === "string" ? el.defaultValue : "";
+        const omitSyntheticOn = !hasExplicitValue && rawValue === "on";
+        return {
+          state,
+          checked,
+          sensitive,
+          placeholder,
+          inForm,
+          ...(sensitive
+            ? {}
+            : {
+                defaultValue,
+                ...(omitSyntheticOn ? {} : { value: rawValue }),
+              }),
+        };
+      }
+      if (tag === "select") {
+        const { state, defaultValue } = selectState(el, rawValue, sensitive);
+        return {
+          state,
+          sensitive,
+          placeholder,
+          inForm,
+          ...(sensitive ? {} : { value: rawValue, defaultValue }),
+        };
+      }
+      const defaultValue = typeof el.defaultValue === "string" ? el.defaultValue : "";
       const state =
         rawValue === "" ? "empty" : !sensitive && rawValue === defaultValue ? "default" : "filled";
       return {
         state,
         sensitive,
         placeholder,
-        inForm: el.form !== null,
+        inForm,
         ...(sensitive ? {} : { value: rawValue, defaultValue }),
       };
     };
     const controls = [];
-    const collect = (doc) => {
-      for (const el of Array.from(doc.querySelectorAll(controlSelector))) {
+    const seenRoots = new Set();
+    const collect = (root) => {
+      if (!root || seenRoots.has(root) || remaining <= 0) return;
+      seenRoots.add(root);
+      for (const el of Array.from(root.querySelectorAll(controlSelector))) {
         if (remaining <= 0) break;
         // Deep serialization supplies the node's backend id. Keep the
         // state as JSON so decoding needs no general-purpose V8 deserializer.
         controls.push([el, JSON.stringify(controlState(el))]);
         remaining -= 1;
       }
-      for (const frame of Array.from(doc.querySelectorAll("iframe"))) {
+      if (remaining <= 0) return;
+      for (const el of Array.from(root.querySelectorAll("*"))) {
         if (remaining <= 0) break;
-        let childDoc = null;
-        try { childDoc = frame.contentDocument; } catch { childDoc = null; }
-        if (childDoc) collect(childDoc);
+        if (el && el.shadowRoot) collect(el.shadowRoot);
+        if (el && el.tagName && el.tagName.toLowerCase() === "iframe") {
+          let childDoc = null;
+          try { childDoc = el.contentDocument; } catch { childDoc = null; }
+          if (childDoc) collect(childDoc);
+        }
       }
     };
     collect(document);
@@ -94,8 +170,10 @@ function formStatesByBackendId(result: RuntimeEvaluateReply): Map<number, Captur
         typeof state.sensitive !== "boolean" ||
         typeof state.placeholder !== "string" ||
         (state.inForm !== undefined && typeof state.inForm !== "boolean") ||
+        (state.checked !== undefined && typeof state.checked !== "boolean") ||
         (!state.sensitive &&
-          (typeof state.value !== "string" || typeof state.defaultValue !== "string"))
+          ((state.value !== undefined && typeof state.value !== "string") ||
+            typeof state.defaultValue !== "string"))
       ) {
         continue;
       }
@@ -119,6 +197,7 @@ function applyFormStates(nodes: CapturedNode[], states: Map<number, CapturedForm
           Object.prototype.hasOwnProperty.call(node.attrs, RECORD_PASSWORD_ATTRIBUTE))) ||
       sensitiveAutocomplete(node.attrs.autocomplete);
     node.inForm = state.inForm;
+    if (typeof state.checked === "boolean") node.checked = state.checked;
     node.formState = sensitive && state.state === "default" ? "filled" : state.state;
     node.formPlaceholder = state.placeholder ?? "";
     if (sensitive) {
@@ -128,6 +207,7 @@ function applyFormStates(nodes: CapturedNode[], states: Map<number, CapturedForm
     } else {
       node.formDefaultValue = state.defaultValue ?? "";
       if (state.value !== undefined) node.formValue = state.value;
+      else delete node.formValue;
     }
   }
 }
