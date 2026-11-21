@@ -1836,4 +1836,105 @@ describe("record-capture semantic", () => {
       overlayHost.remove();
     }
   });
+
+  it("avoids full-page querySelectorAll('*') and O(N) getComputedStyle scans during hover recording", () => {
+    const filler = Array.from({ length: 200 }, (_, i) => `<div class="card">Item ${i}</div>`).join(
+      "",
+    );
+    document.body.innerHTML = `
+      <button type="button" aria-haspopup="menu">More</button>
+      <ul class="dropdown-menu">
+        <li><a href="/settings">Settings</a></li>
+      </ul>
+      <section>${filler}</section>
+    `;
+    const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".dropdown-menu")!;
+    const link = document.querySelector("a")!;
+    mockRect(trigger, { left: 100, top: 10, width: 60, height: 32 });
+    mockRect(menu, { left: 100, top: 44, width: 140, height: 60 });
+    mockRect(link, { left: 108, top: 52, width: 120, height: 28 });
+
+    const qsaSpy = vi.spyOn(document, "querySelectorAll");
+    const styleSpy = vi.spyOn(window, "getComputedStyle").mockImplementation(
+      (el) =>
+        ({
+          cursor: el === trigger || el === link ? "pointer" : "auto",
+          display: "block",
+          pointerEvents: "auto",
+          position: "static",
+          visibility: "visible",
+        }) as CSSStyleDeclaration,
+    );
+    qsaSpy.mockClear();
+    styleSpy.mockClear();
+
+    const capture = startRecordCapture("rec-hover-perf", (step) => steps.push(step));
+    try {
+      mouseOver(trigger);
+      mouseOver(link);
+      click(link);
+    } finally {
+      capture.dispose();
+      qsaSpy.mockRestore();
+      styleSpy.mockRestore();
+    }
+
+    expect(qsaSpy.mock.calls.filter(([selector]) => selector === "*")).toHaveLength(0);
+    expect(styleSpy.mock.calls.length).toBeLessThan(30);
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+  });
+
+  it("preserves Account as the menu opener when pointer crosses a neighboring toolbar button before clicking inside the menu", () => {
+    document.body.innerHTML = `
+      <nav class="toolbar">
+        <button id="account" type="button" aria-haspopup="menu">Account</button>
+        <button id="notifications" type="button" aria-haspopup="menu">Notifications</button>
+      </nav>
+      <div id="account-menu" role="menu" style="display: none; position: absolute;">
+        <a id="settings" href="/settings">Settings</a>
+      </div>
+    `;
+    const account = document.getElementById("account")!;
+    const notifications = document.getElementById("notifications")!;
+    const menu = document.getElementById("account-menu")!;
+    const settings = document.getElementById("settings")!;
+
+    mockRect(account, { left: 100, top: 10, width: 90, height: 32 });
+    mockRect(notifications, { left: 200, top: 10, width: 110, height: 32 });
+    mockRect(menu, { left: 100, top: 44, width: 220, height: 80 });
+    mockRect(settings, { left: 110, top: 54, width: 180, height: 28 });
+
+    // Bubble-phase listener opens Account's menu when Account is hovered.
+    account.addEventListener("mouseover", () => {
+      menu.style.display = "block";
+    });
+
+    const styleSpy = vi.spyOn(window, "getComputedStyle").mockImplementation(
+      (el) =>
+        ({
+          cursor: el === account || el === notifications || el === settings ? "pointer" : "auto",
+          display: el instanceof HTMLElement && el.style.display ? el.style.display : "block",
+          pointerEvents: "auto",
+          position: el instanceof HTMLElement && el.style.position ? el.style.position : "static",
+          visibility: "visible",
+        }) as CSSStyleDeclaration,
+    );
+
+    const capture = startRecordCapture("rec-neighbor-toolbar", (step) => steps.push(step));
+    try {
+      mouseOver(account);
+      // Pointer crosses neighboring Notifications immediately on its way to Settings.
+      mouseOver(notifications);
+      mouseOver(settings);
+      click(settings);
+    } finally {
+      capture.dispose();
+      styleSpy.mockRestore();
+    }
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]?.target?.name).toBe("Account");
+    expect(steps[1]?.target?.name).toBe("Settings");
+  });
 });
