@@ -463,4 +463,60 @@ describe("frame geometry projection", () => {
       }),
     ).resolves.toMatchObject({ code: "cdp_failed" });
   });
+
+  it("clips OOPIF targetActionPoint against parent viewport and nested iframe clips", async () => {
+    // OOPIF (200x200) sits at y=500..700 in an 800x600 top viewport, so only
+    // the top half (local y=0..100, top y=500..600) is visible.
+    const rootSend = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+      }
+      if (method === "DOM.getBoxModel") {
+        return { model: { content: [100, 500, 300, 500, 300, 700, 100, 700] } };
+      }
+      throw new Error(`unexpected root command ${method}`);
+    });
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: rootSend as CdpRunner["send"],
+      sendToFrame: vi.fn(async (handle, method) => {
+        if (handle.frameId !== "child") return rootSend(handle.tabId, method);
+        if (method === "Runtime.evaluate")
+          return { result: { value: { width: 200, height: 200 } } };
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 200, clientHeight: 200 } };
+        }
+        if (method === "DOM.getContentQuads") {
+          return { quads: [[0, 0, 200, 0, 200, 200, 0, 200]] };
+        }
+        throw new Error(`unexpected child command ${method}`);
+      }) as CdpRunner["sendToFrame"],
+      getFrameDocuments: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [
+          createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+          createFrameDocumentInfo({
+            tabId: 4,
+            frameId: "child",
+            parentFrameId: "main",
+            ownerBackendNodeId: 10,
+            processKey: "oopif:child",
+            isOutOfProcess: true,
+          }),
+        ],
+      })),
+    });
+
+    const geometry = await resolveNodeGeometry(cdp, 4, {
+      tabId: 4,
+      frameId: "child",
+      loaderId: "",
+      backendNodeId: 101,
+    });
+    expect(geometry).toMatchObject({
+      topBounds: { x: 100, y: 500, width: 200, height: 100 },
+      actionPoint: { x: 200, y: 550 },
+      // Previously returned y=100 (the bottom edge of the parent viewport); must land at y=50.
+      targetActionPoint: { x: 100, y: 50 },
+    });
+  });
 });

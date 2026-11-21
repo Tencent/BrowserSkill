@@ -173,7 +173,7 @@ export async function handleRead(
       const settledTab = await deps.tabsApi.get(tab.tabId);
       if (settledTab.url !== tab.url || (frame === root && raw.frame_url !== tab.url)) stale();
       check();
-      // Stage refs until the entire result, its identity and byte bound pass.
+      // Stage refs without mutating RefStore until identity, byte bound and check() pass.
       const identities = raw.items.map(({ node: item }) => {
         if (!Number.isSafeInteger(item?.backendNodeId))
           throw new Error("DOM read returned no node identity");
@@ -185,6 +185,7 @@ export async function handleRead(
           documentElementBackendNodeId: current.identity.documentElementBackendNodeId,
         };
       });
+      const previewedRefs = ctx.refStore.previewRefs(identities);
       const result: ReadResult = {
         tab_id: tab.tabId,
         page_url: frame === root ? raw.frame_url : (rootUrl ?? tab.url ?? ""),
@@ -195,7 +196,7 @@ export async function handleRead(
         scope: "current_dom",
         truncated: raw.truncated,
         items: raw.items.map((item, i) => ({
-          ref: `@${ctx.refStore.allocateRef(identities[i])}`,
+          ref: `@${previewedRefs[i]}`,
           values: item.values,
           redacted: item.redacted,
         })),
@@ -206,9 +207,11 @@ export async function handleRead(
           "DOM read response exceeds max_bytes; narrow fields or max_nodes",
         );
       check();
-      identities.forEach((identity, i) =>
-        ctx.refStore.set(result.items[i].ref, identity.backendNodeId, identity),
-      );
+      identities.forEach((identity, i) => {
+        const ref = `@${ctx.refStore.allocateRef(identity)}`;
+        result.items[i].ref = ref;
+        ctx.refStore.set(ref, identity.backendNodeId, identity);
+      });
       return result;
     } finally {
       await sendFrame(current.identity, "Runtime.releaseObjectGroup", {

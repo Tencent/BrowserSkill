@@ -144,4 +144,73 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("select disabled state in Chrome",
       await send("Target.closeTarget", { targetId });
     }
   });
+
+  it.each([
+    {
+      name: "disabled option",
+      options:
+        '<option value="us">United States</option><option value="ca" disabled>Canada</option>',
+    },
+    {
+      name: "option inside disabled optgroup",
+      options:
+        '<option value="us">United States</option><optgroup label="North" disabled><option value="ca">Canada</option></optgroup>',
+    },
+  ])("refuses $name without mutating selection", async ({ options }) => {
+    const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+      url: "about:blank",
+    });
+    try {
+      const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId,
+        flatten: true,
+      });
+      const evaluate = async (expression: string) => {
+        const reply = await send<{ result: { value: unknown }; exceptionDetails?: unknown }>(
+          "Runtime.evaluate",
+          { expression, returnByValue: true },
+          sessionId,
+        );
+        expect(reply.exceptionDetails).toBeUndefined();
+        return reply.result.value;
+      };
+      await evaluate(`document.body.innerHTML = '<select>${options}</select>';
+        const select = document.querySelector('select');
+        window.events = [];
+        for (const type of ['input', 'change']) select.addEventListener(type, () => window.events.push(type));`);
+      const manager = new SessionManager({
+        agentWindow: {
+          create: async () => ({ windowId: 100, initialTabIds: [] }),
+          remove: async () => {},
+          ensureActiveTab: async () => 4,
+        },
+      });
+      await manager.start("aa11");
+      const cdp: CdpRunner = createStubCdpRunner({
+        send: async (_tabId, method, params) => send(method, params, sessionId) as never,
+      });
+      const result = await handleSelect(
+        manager,
+        { session_id: "aa11", selector: "select", values: ["ca"] },
+        {
+          cdp,
+          tabsApi: {
+            get: async (id) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab,
+            query: async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab],
+          },
+        },
+      );
+      expect(result).toMatchObject({
+        code: "invalid_params",
+        data: { reason: "target_disabled", effect_state: "none", disabled: "ca" },
+      });
+      expect(
+        await evaluate(
+          "({ value: document.querySelector('select').value, events: window.events })",
+        ),
+      ).toEqual({ value: "us", events: [] });
+    } finally {
+      await send("Target.closeTarget", { targetId });
+    }
+  });
 });

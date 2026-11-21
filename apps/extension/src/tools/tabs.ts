@@ -628,12 +628,6 @@ async function authoriseAgentTab(
   if (typeof tab.id !== "number" || typeof tab.windowId !== "number") {
     return { code: "not_found", message: `tab ${tabId} not found` };
   }
-  if (ctx.remote && !isAgentControlledTab(ctx, tabId)) {
-    return {
-      code: "permission_denied",
-      message: `${toolName}: borrow this tab before controlling it remotely`,
-    };
-  }
   const otherBorrower = manager.findBorrowingSession(tabId, ctx.sessionId);
   if (otherBorrower) {
     return rpcError(
@@ -642,14 +636,29 @@ async function authoriseAgentTab(
       `${toolName}: tab ${tabId} is borrowed by session ${otherBorrower}`,
     );
   }
-  if (tab.windowId === ctx.agentWindowId) {
-    return tab;
+  if (tab.windowId !== ctx.agentWindowId) {
+    if (ctx.remote && !isAgentControlledTab(ctx, tabId)) {
+      return {
+        code: "permission_denied",
+        message: `${toolName}: borrow this tab before controlling it remotely`,
+      };
+    }
+    return rpcError(
+      "permission_denied",
+      "agent_window_scope",
+      `${toolName}: tab ${tabId} is not in Agent Window ${ctx.agentWindowId}`,
+    );
   }
-  return rpcError(
-    "permission_denied",
-    "agent_window_scope",
-    `${toolName}: tab ${tabId} is not in Agent Window ${ctx.agentWindowId}`,
-  );
+  if (!isAgentControlledTab(ctx, tabId)) {
+    return rpcError(
+      "permission_denied",
+      "agent_window_scope",
+      ctx.remote
+        ? `${toolName}: borrow this tab before controlling it remotely`
+        : `${toolName}: tab ${tabId} is not controlled by this session`,
+    );
+  }
+  return tab;
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,6 +1148,18 @@ async function executeBorrowCore(
   if (p.manager.get(p.ctx.sessionId) !== p.ctx || aborted(p.signal, "tab_borrow")) {
     return { code: "cancelled", message: "tab_borrow session ended" };
   }
+  try {
+    await p.manager.stageBorrowedTab(p.ctx.sessionId, { tabId: p.tabId, ...snapshot });
+  } catch (err) {
+    return {
+      code: "protocol_error",
+      message: `tab_borrow: failed to persist return destination before move: ${describeError(err)}`,
+    };
+  }
+  if (p.manager.get(p.ctx.sessionId) !== p.ctx || aborted(p.signal, "tab_borrow")) {
+    await p.manager.unstageBorrowedTab(p.ctx.sessionId, p.tabId);
+    return { code: "cancelled", message: "tab_borrow session ended" };
+  }
   const moveErr = await moveTabForBorrow(
     p.tabsApi,
     p.tabId,
@@ -1149,7 +1170,13 @@ async function executeBorrowCore(
     p.signal,
     p.mutate,
   );
-  if (moveErr) return moveErr;
+  if (moveErr) {
+    const moveData = moveErr.data as { reason?: string; effect_state?: string } | undefined;
+    if (moveData?.reason !== "borrow_outcome_unknown" && moveData?.effect_state !== "unknown") {
+      await p.manager.unstageBorrowedTab(p.ctx.sessionId, p.tabId);
+    }
+    return moveErr;
+  }
 
   return snapshot;
 }
@@ -1274,6 +1301,7 @@ export async function handleTabBorrow(
           { effect_state: "unknown", tab_id: params.tab_id },
         );
       }
+      await manager.unstageBorrowedTab(ctx.sessionId, params.tab_id);
       return {
         code: "cancelled",
         message: `tab_borrow claim could not be committed: ${describeError(err)}`,

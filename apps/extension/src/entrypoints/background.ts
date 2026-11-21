@@ -47,7 +47,12 @@ import { attachUiChannel } from "@/lib/ui-channel";
 import { attachLongScreenshot } from "@/long-screenshot/background";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
-import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  SessionManager,
+} from "@/session-manager/manager";
+import { RefStore } from "@/session-manager/ref-store";
 import { AgentWindowRouting } from "@/session-manager/window-routing";
 import {
   attachBorrowNotificationButtonHandler,
@@ -73,8 +78,13 @@ import {
   type RecordRuntimeDeps,
   subscribeActiveRecordings,
 } from "@/tools/record";
-import { cdpBlockedUrlReason, chromeTabsApi } from "@/tools/shared";
-import { chromeTabMutationApi } from "@/tools/tabs";
+import {
+  cdpBlockedUrlReason,
+  chromeTabsApi,
+  evictSessionCdpRunner,
+  isRpcError,
+} from "@/tools/shared";
+import { chromeTabMutationApi, returnBorrowedTab } from "@/tools/tabs";
 import { detectBrowserMeta } from "@/transport/handshake";
 import { createLocalAuthenticator } from "@/transport/local-auth";
 import { watchRemoteAuthorization } from "@/transport/remote-authorization";
@@ -134,7 +144,10 @@ export default defineBackground(() => {
     },
     onSessionReleased: (ctx) => {
       dispatcher.cancelSession(ctx.sessionId);
+      void dispatcher.releaseHoverForSession(ctx.sessionId).catch(() => {});
+      void dispatcher.releaseScreenshotExports(ctx.sessionId).catch(() => {});
       cooperation.release(ctx.sessionId);
+      evictSessionCdpRunner(cdp, ctx.sessionId);
       debug.releaseSession(ctx.sessionId);
       void video.stopSession(ctx.sessionId).catch(() => {});
       clearRecordingForSession(ctx.sessionId, recordDeps);
@@ -283,7 +296,7 @@ export default defineBackground(() => {
   const minimizedControlSessions = new Set<string>();
 
   attachLocalPairing(controller, transport);
-  watchRemoteAuthorization();
+  watchRemoteAuthorization({ onAuthorized: () => transport.resetAuthenticationBackoff() });
   const daemonPort = watchDaemonConnection(
     (url, remote) => {
       const key = JSON.stringify([remote ? "remote" : "local", url, remote?.deviceId ?? null]);
@@ -297,6 +310,7 @@ export default defineBackground(() => {
         remoteEndpoint.url === remote.url
       ) {
         remoteEndpoint = remote;
+        transport.resetAuthenticationBackoff();
         return;
       }
       // Connection identity is public metadata. Credential rotation updates the
@@ -304,6 +318,7 @@ export default defineBackground(() => {
       void controller.reconfigureTransport(key, () => {
         connectionPreferenceValid = true;
         remoteEndpoint = remote;
+        transport.resetAuthenticationBackoff();
         transport.setUrl(url);
       });
     },
@@ -473,6 +488,24 @@ export default defineBackground(() => {
     clearObserveIdentityStreaksForTab(tabId);
     debug.sync();
   });
+  chrome.tabs.onReplaced?.addListener((addedTabId, removedTabId) => {
+    forgetOverlayInjectedTab(removedTabId);
+    const replacedSessions = sessions.replaceTab(addedTabId, removedTabId);
+    windowRouting.handleTabReplaced(addedTabId, removedTabId);
+    cdp.replaceTab(addedTabId, removedTabId);
+    cooperation.replaceTab(addedTabId, removedTabId);
+    dispatcher.forgetClosedTab(removedTabId);
+    void video.stopTab(removedTabId, "tab_closed").catch(() => {});
+    debug.stopTab(removedTabId, "tab_closed");
+    clearObserveIdentityStreaksForTab(removedTabId);
+    debug.sync();
+    if (replacedSessions.length > 0) {
+      void chrome.tabs
+        .get(addedTabId)
+        .then((tab) => pushOverlayStateForTab(addedTabId, tab.windowId))
+        .catch(() => {});
+    }
+  });
   // Reconcile dynamic Tier B content-script registrations on SW startup so
   // idle browser startups always begin with zero registered content scripts.
   void runtimeScripts.sync();
@@ -498,6 +531,19 @@ export default defineBackground(() => {
   } satisfies RecordRuntimeDeps;
   const cleanupAfterDisconnect = createDisconnectCleanup({
     manager: sessions,
+    cancelAll: () => dispatcher.beginDisconnectCleanup(),
+    awaitPendingStarts: () => dispatcher.awaitPendingStarts(),
+    cancelSession: (sessionId) => dispatcher.cancelSession(sessionId),
+    awaitSessionCancelled: (sessionId) => dispatcher.awaitSessionCancelled(sessionId),
+    releaseHover: (sessionId) => dispatcher.releaseHoverForSession(sessionId),
+    onSessionStopped: async (sessionId) => {
+      await video.stopSession(sessionId).catch(() => {});
+      debug.releaseSession(sessionId);
+      await dispatcher.releaseScreenshotExports(sessionId);
+      cooperation.release(sessionId);
+      clearObserveIdentityStreaksForSession(sessionId);
+      evictSessionCdpRunner(cdp, sessionId);
+    },
     // Same contract as the dispatcher's `tool.session_stop`: without these
     // deps the agent-tab cleanup and the window-release path are dead code.
     sessionStopDeps: {
@@ -664,8 +710,38 @@ export default defineBackground(() => {
       daemonPort.ready,
       getAuditEnabled(),
     ]);
+    await cdp
+      .reconcileOrphanedAttachments((tabId) => sessions.findControllingSession(tabId) !== null)
+      .catch((err) => console.warn("[browser-skill] orphan debugger reconciliation failed", err));
+    const orphanContexts = new Map<number, SessionContext>();
+    await sessions
+      .reapOrphanAgentWindows({
+        returnBorrowedTab: async (windowId, borrowed, entry, orphanWindowIds) => {
+          let orphanCtx = orphanContexts.get(windowId);
+          if (!orphanCtx) {
+            orphanCtx = {
+              sessionId: entry.sessionId ?? `orphan-${windowId}`,
+              agentWindowId: windowId,
+              refStore: new RefStore(),
+              borrowedTabs: new Map((entry.borrowedTabs ?? []).map((item) => [item.tabId, item])),
+              agentCreatedTabs: new Set(entry.ownedTabIds),
+              createdAtMs: entry.updatedAtMs,
+            };
+            orphanContexts.set(windowId, orphanCtx);
+          }
+          const outcome = await returnBorrowedTab(orphanCtx, borrowed.tabId, {
+            tabs: chromeTabMutationApi,
+            tabsQuery: chromeTabsApi,
+            isAgentWindowId: (id) => sessions.isTrackedAgentWindow(id) || orphanWindowIds.has(id),
+          });
+          if (!isRpcError(outcome)) orphanCtx.borrowedTabs.delete(borrowed.tabId);
+          return !isRpcError(outcome);
+        },
+      })
+      .catch((err) => console.warn("[browser-skill] orphan window reap failed", err));
     controller.setAuditEnabled(auditEnabled);
     const cleanup = async () => {
+      dispatcher.beginDisconnectCleanup();
       await video
         .disconnect()
         .catch((error) => console.warn("Video finalization failed during disconnect", error));
@@ -681,7 +757,6 @@ export default defineBackground(() => {
       beforeDisconnect: cleanup,
       onDisconnected: cleanup,
     });
-    await sessions.reapOrphanAgentWindows();
   })().catch((err) => {
     console.error("[browser-skill] controller failed to attach", err);
   });

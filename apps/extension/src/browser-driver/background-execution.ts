@@ -35,6 +35,18 @@ export class BackgroundExecution {
     this.applied.delete(tabId);
   }
 
+  replaceTab(addedTabId: number, removedTabId: number): void {
+    if (addedTabId === removedTabId) return;
+    const removedOwners = this.owners.get(removedTabId);
+    if (removedOwners?.size) {
+      const targetOwners = this.owners.get(addedTabId) ?? new Set<string>();
+      for (const sessionId of removedOwners) targetOwners.add(sessionId);
+      this.owners.set(addedTabId, targetOwners);
+    }
+    this.owners.delete(removedTabId);
+    this.applied.delete(removedTabId);
+  }
+
   invalidate(tabId: number): void {
     this.applied.delete(tabId);
   }

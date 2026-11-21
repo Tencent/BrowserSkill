@@ -1150,6 +1150,20 @@ export function attachCooperationCapture() {
       return false;
     }
     if (message.kind === COOPERATION_ARM_FRAME) {
+      if (typeof message.lease === "string") {
+        if (retired.has(message.lease)) {
+          reply({ ok: false });
+          return false;
+        }
+        if (lease && lease !== message.lease) {
+          retired.add(lease);
+          expectation = undefined;
+          insertTarget = undefined;
+          inputSource = undefined;
+          clearScripted();
+        }
+        lease = message.lease;
+      }
       enabled = true;
       setListenersAttached(true);
       observeShadowSubtree(document);
@@ -1178,7 +1192,7 @@ export function attachCooperationCapture() {
       setListenersAttached(true);
     } else if (message.kind === COOPERATION_DISABLE) {
       retired.add(message.lease);
-      if (lease !== message.lease) {
+      if (lease !== undefined && lease !== message.lease) {
         reply({ ...state });
         return false;
       }
@@ -1187,7 +1201,10 @@ export function attachCooperationCapture() {
     }
     if (message.kind === COOPERATION_DISABLE) {
       enabled = false;
+      lease = undefined;
       setListenersAttached(false);
+      clearTimeout(timer);
+      timer = undefined;
       clearTimeout(focusTimer);
       clearTimeout(pointerTimer);
       clearTimeout(eventTimer);

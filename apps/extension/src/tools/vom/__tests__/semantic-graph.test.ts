@@ -1308,3 +1308,34 @@ it("excludes style/script/noscript/template subtrees from DOM label and sibling 
   expect(rendered).not.toContain("initInput");
   expect(rendered).toContain('button "工具栏2"');
 });
+
+it("classifies untouched <select> controls as default (not filled) even in snapshot-only fallback without form enrichment", () => {
+  const scene = buildSemanticVomScene({
+    viewport: { width: 800, height: 600 },
+    rootFrameId: "main",
+    documents: [
+      document(
+        "main",
+        [],
+        [
+          dom(1, null, "body"),
+          // Untouched <select> whose first option is selected by default
+          dom(2, 1, "select", { "aria-label": "Country" }),
+          { ...dom(3, 2, "option", { value: "us" }, "United States"), checked: true },
+          { ...dom(4, 2, "option", { value: "uk" }, "United Kingdom"), checked: false },
+          // Changed <select> whose second option was chosen away from default first
+          dom(5, 1, "select", { "aria-label": "Region" }),
+          { ...dom(6, 5, "option", { value: "east" }, "East"), checked: false },
+          { ...dom(7, 5, "option", { value: "west" }, "West"), checked: true },
+          // Untouched <select> whose empty placeholder option is selected
+          dom(8, 1, "select", { "aria-label": "Role" }),
+          { ...dom(9, 8, "option", { value: "" }, "Choose..."), checked: true },
+          { ...dom(10, 8, "option", { value: "admin" }, "Admin"), checked: false },
+        ],
+      ),
+    ],
+  });
+  expect(scene.nodes.find((n) => n.backendNodeId === 2)?.inputState).toBe("default");
+  expect(scene.nodes.find((n) => n.backendNodeId === 5)?.inputState).toBe("filled");
+  expect(scene.nodes.find((n) => n.backendNodeId === 8)?.inputState).toBe("empty");
+});

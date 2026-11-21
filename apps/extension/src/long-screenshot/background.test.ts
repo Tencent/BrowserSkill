@@ -60,7 +60,10 @@ function setup(saved: CaptureState | null = null, busy = false) {
       onMessage: event(),
     },
     tabs: {
-      sendMessage: vi.fn(async () => ({ ok: true, metrics: {} })),
+      sendMessage: vi.fn(async (_tabId?: unknown, _message?: unknown) => ({
+        ok: true,
+        metrics: {},
+      })),
       get: vi.fn(async () => ({
         id: 4,
         windowId: 1,
@@ -599,5 +602,147 @@ describe("independent screenshot jobs", () => {
       frames: 3,
     });
     expect(await call("status")).toMatchObject({ state: { phase: "error", error: "interrupted" } });
+  });
+
+  it("does not throw or overwrite terminal phase when capture completes while pause/resume awaits page", async () => {
+    let releasePause!: () => void;
+    let captureDeps!: Parameters<typeof capturePage>[0];
+    vi.mocked(capturePage).mockImplementationOnce(
+      (deps) =>
+        new Promise((resolve) => {
+          captureDeps = deps;
+          deps.prepared?.();
+          resolveCapture = resolve;
+        }),
+    );
+    const { api, call } = setup();
+    api.tabs.sendMessage.mockImplementation(async (_tabId, message) => {
+      if ((message as { action?: string })?.action === "pause") {
+        await new Promise<void>((resolve) => {
+          releasePause = resolve;
+        });
+      }
+      return { ok: true, metrics: {} };
+    });
+
+    const started = await call("start");
+    if (!started.ok || !started.state) throw new Error("missing job");
+    const jobId = started.state.id;
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
+
+    // Start pausing -> blocks on `await job.page({ action: "pause", paused: true })`.
+    const pausing = call("pause", { id: jobId });
+    await vi.waitFor(() => expect(releasePause).toBeTypeOf("function"));
+
+    // While pause IPC is in flight, the capture writes a frame and finishes cleanly.
+    await captureDeps.write({} as ImageBitmap, 800, 0, 0, 512);
+    resolveCapture({ width: 800, height: 512, blob: new Blob() });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { phase: "complete", height: 512 } }),
+    );
+
+    // Now the in-flight pause RPC resolves: must NOT throw TypeError or flip phase back to "paused".
+    releasePause();
+    await expect(pausing).resolves.toMatchObject({
+      ok: true,
+      state: { id: jobId, phase: "complete" },
+    });
+    expect(await call("status")).toMatchObject({
+      ok: true,
+      state: { id: jobId, phase: "complete" },
+    });
+  });
+
+  it("does not overwrite a cancelled capture or a newly started job when pause/resume settles late", async () => {
+    let releasePause!: () => void;
+    let firstDeps!: Parameters<typeof capturePage>[0];
+    vi.mocked(capturePage)
+      .mockImplementationOnce(
+        (deps) =>
+          new Promise((resolve) => {
+            firstDeps = deps;
+            deps.prepared?.();
+            resolveCapture = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveCapture = resolve;
+          }),
+      );
+    const { api, call } = setup();
+    api.tabs.sendMessage.mockImplementation(async (_tabId, message) => {
+      if ((message as { action?: string })?.action === "pause") {
+        await new Promise<void>((resolve) => {
+          releasePause = resolve;
+        });
+      }
+      return { ok: true, metrics: {} };
+    });
+
+    const first = await call("start");
+    if (!first.ok || !first.state) throw new Error("missing job");
+    const firstId = first.state.id;
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledTimes(1));
+
+    const pausing = call("pause", { id: firstId });
+    await vi.waitFor(() => expect(releasePause).toBeTypeOf("function"));
+
+    // Complete first job and start a second job while the first job's pause IPC is still pending.
+    await firstDeps.write({} as ImageBitmap, 800, 0, 0, 512);
+    resolveCapture({ width: 800, height: 512, blob: new Blob() });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { id: firstId, phase: "complete" } }),
+    );
+
+    const second = await call("start");
+    if (!second.ok || !second.state) throw new Error("missing second job");
+    const secondId = second.state.id;
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledTimes(2));
+
+    releasePause();
+    await expect(pausing).resolves.toMatchObject({
+      ok: true,
+      state: { id: secondId, phase: "preparing" },
+    });
+    expect(await call("status")).toMatchObject({
+      ok: true,
+      state: { id: secondId, phase: "preparing" },
+    });
+  });
+
+  it("returns ok with terminal cancelled state when cancel aborts an in-flight pause", async () => {
+    let pausePending = false;
+    vi.mocked(capturePage).mockImplementationOnce(
+      (deps) =>
+        new Promise((resolve) => {
+          deps.prepared?.();
+          resolveCapture = resolve;
+        }),
+    );
+    const { api, call } = setup();
+    api.tabs.sendMessage.mockImplementation(async (_tabId, message) => {
+      if ((message as { action?: string })?.action === "pause") {
+        pausePending = true;
+        return new Promise(() => {});
+      }
+      return { ok: true, metrics: {} };
+    });
+
+    const started = await call("start");
+    if (!started.ok || !started.state) throw new Error("missing job");
+    const jobId = started.state.id;
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
+
+    const pausing = call("pause", { id: jobId });
+    await vi.waitFor(() => expect(pausePending).toBe(true));
+
+    await call("cancel", { id: jobId });
+    resolveCapture({ width: 0, height: 0, blob: new Blob() });
+    await expect(pausing).resolves.toMatchObject({ ok: true });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { id: jobId, phase: "cancelled" } }),
+    );
   });
 });
