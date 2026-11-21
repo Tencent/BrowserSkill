@@ -579,6 +579,13 @@ export class ToolDispatcher {
         };
       }
     } finally {
+      if (
+        ac.signal.aborted &&
+        requestSessionId &&
+        this.activeDialogOperations.get(requestSessionId)?.request.id === req.id
+      ) {
+        await this.awaitDismissedOperationDialogs(requestSessionId, req.id);
+      }
       if (startsSession) this.pendingSessionStarts -= 1;
       this.debug?.after(debugTicket, "operation failed");
       this.inflightAbortControllers.delete(req.id);
@@ -1142,6 +1149,85 @@ export class ToolDispatcher {
     for (const dialog of this.cdp?.pendingDialogs?.() ?? []) {
       if (this.sessions.findControllingSession(dialog.tab_id) === sessionId)
         void this.cdp?.resolveDialog?.(dialog.id, false).catch(() => {});
+    }
+  }
+
+  /**
+   * When a cancelled operation unblocks via AbortSignal before Chrome finishes
+   * closing its pending JS dialog, wait briefly (within daemon's 2s cancel
+   * cleanup budget) for dismissal — including any synchronously chained follow-up
+   * dialog — before releasing `activeDialogOperations` and replying.
+   */
+  private async awaitDismissedOperationDialogs(
+    sessionId: string,
+    requestId: string,
+  ): Promise<void> {
+    if (!this.pendingForSession(sessionId)) return;
+    const deadline = Date.now() + 1_500;
+    const seen = new Set<string>();
+    while (this.activeDialogOperations.get(sessionId)?.request.id === requestId) {
+      const pending = this.pendingForSession(sessionId);
+      if (!pending || seen.has(pending.id)) return;
+      seen.add(pending.id);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      let cleared = false;
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const done = (dialogCleared: boolean) => {
+          if (settled) return;
+          settled = true;
+          cleared = dialogCleared;
+          clearTimeout(timer);
+          subscription?.dispose();
+          resolve();
+        };
+        const timer = setTimeout(() => done(false), remaining);
+        const subscription = this.cdp?.onDialogChanged?.((tabId) => {
+          if (
+            this.sessions.findControllingSession(tabId) === sessionId &&
+            this.pendingForSession(sessionId)?.id !== pending.id
+          ) {
+            done(true);
+          }
+        });
+        if (this.pendingForSession(sessionId)?.id !== pending.id) {
+          done(true);
+          return;
+        }
+        void this.cdp?.resolveDialog?.(pending.id, false).then(
+          () => done(this.pendingForSession(sessionId)?.id !== pending.id),
+          (err) => {
+            if (
+              !(err instanceof Error && err.message === "Dialog decision is already in progress")
+            ) {
+              done(this.pendingForSession(sessionId)?.id !== pending.id);
+            }
+          },
+        );
+      });
+      if (!cleared) return;
+      // If closing the dialog synchronously resumed JS that opens a chained dialog,
+      // give the next CDP `Page.javascriptDialogOpening` event a brief window to arrive.
+      if (!this.pendingForSession(sessionId)) {
+        const settleRemaining = Math.min(50, deadline - Date.now());
+        if (settleRemaining > 0) {
+          await new Promise<void>((resolve) => {
+            let settled = false;
+            const done = () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              subscription?.dispose();
+              resolve();
+            };
+            const timer = setTimeout(done, settleRemaining);
+            const subscription = this.cdp?.onDialogChanged?.((tabId, dialog) => {
+              if (dialog && this.sessions.findControllingSession(tabId) === sessionId) done();
+            });
+          });
+        }
+      }
     }
   }
 

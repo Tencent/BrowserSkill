@@ -581,7 +581,11 @@ export function cdpRunnerForFrame(
           buildFrameCleanupGuard(guard, undefined),
         );
       }
-      const effectiveGuard = signal && !guard?.signal ? { ...guard, signal } : guard;
+      const mergedSignal =
+        signal && guard?.signal && signal !== guard.signal
+          ? AbortSignal.any([guard.signal, signal])
+          : (signal ?? guard?.signal);
+      const effectiveGuard = mergedSignal ? { ...guard, signal: mergedSignal } : guard;
       if (effectiveGuard !== undefined) {
         return cdp.sendToFrame<T>(handle, method, params, effectiveGuard);
       }
@@ -604,12 +608,16 @@ export function cdpRunnerForFrame(
           buildFrameCleanupGuard(guard, callGuard),
         );
       }
+      const mergedSignal =
+        callGuard?.signal && guard?.signal && callGuard.signal !== guard.signal
+          ? AbortSignal.any([guard.signal, callGuard.signal])
+          : (callGuard?.signal ?? guard?.signal);
       const mergedGuard =
         guard || callGuard
           ? {
               ...guard,
               ...callGuard,
-              signal: callGuard?.signal ?? guard?.signal,
+              ...(mergedSignal ? { signal: mergedSignal } : {}),
             }
           : undefined;
       if (mergedGuard !== undefined) {
@@ -620,6 +628,22 @@ export function cdpRunnerForFrame(
         : cdp.sendToFrame<T>(remapped, method);
     },
   });
+}
+
+const REMOTE_OBJECT_RELEASE_TIMEOUT_MS = 1_000;
+
+async function awaitBoundedRelease(work: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      work.catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, REMOTE_OBJECT_RELEASE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -640,11 +664,13 @@ export async function withObjectGroup<T>(
     return await fn(objectGroup);
   } finally {
     try {
-      await cleanup.sendToFrame(
-        handle,
-        "Runtime.releaseObjectGroup",
-        { objectGroup },
-        { allowReattach: false },
+      await awaitBoundedRelease(
+        cleanup.sendToFrame(
+          handle,
+          "Runtime.releaseObjectGroup",
+          { objectGroup },
+          { allowReattach: false },
+        ),
       );
     } catch {
       // Never let cleanup failures (detached tab, unowned tab, or navigated frame) mask caller outcome.
@@ -669,11 +695,13 @@ export async function withRemoteObject<T>(
     return await fn(objectId);
   } finally {
     try {
-      await cleanup.sendToFrame(
-        handle,
-        "Runtime.releaseObject",
-        { objectId },
-        { allowReattach: false },
+      await awaitBoundedRelease(
+        cleanup.sendToFrame(
+          handle,
+          "Runtime.releaseObject",
+          { objectId },
+          { allowReattach: false },
+        ),
       );
     } catch {
       // Never let cleanup failures (detached tab, unowned tab, or navigated frame) mask caller outcome.
