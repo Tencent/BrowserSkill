@@ -198,25 +198,34 @@ mod tests {
     fn rejects_invalid_commands_before_starting_the_daemon() {
         use crate::cli::{Cli, Command};
         use clap::Parser;
-        for options in [
-            vec![],
-            vec!["--delta-y", "120", "--ref", ""],
-            vec!["--delta-y", "120", "--ref", "e3", "--selector", "#panel"],
-            vec!["--delta-y", "120", "--modifiers", "invalid"],
+        for (options, invalid_params) in [
+            (vec![], false),
+            (vec!["--delta-y", "120", "--ref", ""], false),
+            (
+                vec!["--delta-y", "120", "--ref", "e3", "--selector", "#panel"],
+                true,
+            ),
+            (vec!["--delta-y", "120", "--modifiers", "invalid"], false),
         ] {
             let mut argv = vec!["bsk", "wheel", "--session", "s1"];
             argv.extend(options);
             let Command::Wheel(args) = Cli::try_parse_from(argv).unwrap().command else {
                 panic!("wheel");
             };
-            assert!(matches!(
-                dispatch(
-                    args,
-                    &crate::cli::business_rpc::ClientContext::default(),
-                    Format::Json
-                ),
-                Err(CliError::Local(_))
-            ));
+            let error = dispatch(
+                args,
+                &crate::cli::business_rpc::ClientContext::default(),
+                Format::Json,
+            )
+            .expect_err("invalid wheel command must fail before the daemon");
+            if invalid_params {
+                // #794: the shared target parser reports caller-side
+                // argument errors as invalid_params, not a local/daemon
+                // failure.
+                assert_eq!(error.code(), Some(bsk_protocol::ErrorCode::InvalidParams));
+            } else {
+                assert!(matches!(error, CliError::Local(_)), "{error:?}");
+            }
         }
     }
 }

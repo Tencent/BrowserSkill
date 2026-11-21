@@ -70,9 +70,7 @@ fn run(
     };
     let reply: GetHtmlResult = call(sock, ctx, params)?;
     if let Some(out) = &args.out {
-        std::fs::write(out, reply.html.as_bytes())
-            .with_context(|| format!("write HTML to {}", out.display()))
-            .map_err(CliError::Local)?;
+        write_html_file(out, reply.html.as_bytes())?;
     }
     match format {
         Format::Json => {
@@ -99,6 +97,20 @@ fn run(
         }
     }
     Ok(())
+}
+
+/// Write the dumped HTML to `--out`. A local write failure is caller-side, so
+/// classify it as file validation (exit 1) instead of a daemon transport
+/// failure (exit 2, "is the daemon running?") (#794).
+fn write_html_file(out: &Path, html: &[u8]) -> Result<(), CliError> {
+    std::fs::write(out, html)
+        .with_context(|| format!("write HTML to {}", out.display()))
+        .map_err(|error| {
+            CliError::file_validation(
+                error,
+                "check --out: use a writable path whose parent directory exists",
+            )
+        })
 }
 
 fn call(
@@ -169,5 +181,23 @@ mod tests {
         let json = json_reply(&reply(), None);
         assert_eq!(json["html"], "<html><body>secret page body</body></html>");
         assert_eq!(json["byte_size"], 343_001);
+    }
+
+    /// #794: a local --out write failure is caller-side file validation, not a
+    /// daemon transport failure.
+    #[test]
+    fn output_write_failures_are_file_errors_not_daemon_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("missing").join("page.html");
+        let error = write_html_file(&out, b"<html/>").expect_err("missing parent");
+        assert!(error.code().is_some(), "{error:?}");
+        assert_eq!(error.exit_code(), 1);
+        let rendered = crate::cli::error::render_human_to_string(&error, None);
+        assert!(!rendered.contains("daemon"), "{rendered}");
+        assert!(
+            rendered.contains("local file validation failed"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("--out"), "{rendered}");
     }
 }

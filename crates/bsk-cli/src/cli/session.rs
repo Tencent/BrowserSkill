@@ -203,6 +203,12 @@ pub fn dispatch(
     ctx: &crate::cli::business_rpc::ClientContext,
     format: Format,
 ) -> Result<(), CliError> {
+    // Validate caller-side argument pairs before daemon discovery so a bad
+    // flag combination never blames (or starts) a healthy daemon; `bsk open`
+    // already does this for the same --width/--height pair.
+    if let SessionSub::Start(args) = &cmd.sub {
+        validate_start_args(args)?;
+    }
     let info = ensure_daemon().context("ensure daemon is running")?;
     match cmd.sub {
         SessionSub::Start(args) => {
@@ -241,6 +247,17 @@ pub fn dispatch(
     }
 }
 
+/// Validate `session start` arguments that are purely caller-side and must
+/// be reported before the CLI probes or starts the daemon (#794).
+fn validate_start_args(args: &SessionStartArgs) -> Result<(), CliError> {
+    if args.width.is_some() != args.height.is_some() {
+        return Err(CliError::invalid_params(anyhow::anyhow!(
+            "--width and --height must be given together"
+        )));
+    }
+    Ok(())
+}
+
 fn run_start(
     sock: PathBuf,
     ctx: &crate::cli::business_rpc::ClientContext,
@@ -250,11 +267,6 @@ fn run_start(
     let op_ctx = ctx.with_scope(args.scope.as_deref());
     if args.unattended {
         crate::cli::interaction_policy::warn_legacy_override("--unattended");
-    }
-    if args.width.is_some() != args.height.is_some() {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "--width and --height must be given together"
-        )));
     }
     // The daemon may hold `session.start` open for up to
     // `EXTENSION_CONNECT_WAIT` while a just-woken service worker

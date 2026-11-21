@@ -236,6 +236,89 @@ fn invalid_tab_value_keeps_its_diagnostic_without_a_position_hint() {
     assert!(!error["hint"].as_str().unwrap().contains("after"));
 }
 
+/// #794: pure CLI argument errors are caller-side failures. They must not be
+/// reported as `Local` transport errors (code null, exit 2, daemon hint).
+#[test]
+fn target_argument_errors_use_invalid_params_not_the_daemon_hint() {
+    for (args, message) in [
+        (
+            vec!["click", "--json"],
+            "missing target: pass <ref-or-selector>, --ref @eN, or --selector <css>",
+        ),
+        (
+            vec!["hover", "--ref", "@e1", "--selector", "#a", "--json"],
+            "pass exactly one of: <target>, --ref, or --selector",
+        ),
+    ] {
+        let output = bsk(&args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        let error: Value = serde_json::from_slice(&output.stdout).expect("JSON target error");
+        assert_eq!(error["code"], "invalid_params", "{args:?}");
+        assert_eq!(error["message"], message, "{args:?}");
+        assert_eq!(error["exit_code"], 1, "{args:?}");
+        let hint = error["hint"].as_str().expect("hint");
+        assert!(!hint.contains("daemon"), "{args:?}: {hint}");
+        assert!(hint.contains("--help"), "{args:?}: {hint}");
+    }
+}
+
+/// #794: `--width`/`--height` are validated by the CLI before any daemon
+/// discovery, so a missing pair cannot be masked by daemon state.
+#[test]
+fn session_start_window_pair_is_validated_before_daemon_discovery() {
+    for flags in [["--width", "1280"], ["--height", "720"]] {
+        let home = tempfile::tempdir().unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_bsk"))
+            .args(["session", "start", "--json"])
+            .args(flags)
+            .env("BSK_HOME", home.path())
+            .env("BSK_AUTO_START", "0")
+            .env("BSK_AUTO_UPDATE", "off")
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run bsk session start");
+        assert_eq!(output.status.code(), Some(1), "{flags:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{flags:?}: {output:?}");
+        let error: Value = serde_json::from_slice(&output.stdout).expect("JSON session error");
+        assert_eq!(error["code"], "invalid_params", "{flags:?}");
+        assert_eq!(
+            error["message"], "--width and --height must be given together",
+            "{flags:?}"
+        );
+        assert_eq!(error["exit_code"], 1, "{flags:?}");
+        let hint = error["hint"].as_str().expect("hint");
+        assert!(!hint.contains("daemon"), "{flags:?}: {hint}");
+        assert!(!home.path().join("daemon.json").exists(), "{flags:?}");
+    }
+}
+
+/// #794: `--json --format csv` without `--out` is a caller-side argument
+/// conflict that must be reported as `invalid_params` before any RPC.
+#[test]
+fn extract_csv_json_without_out_is_invalid_params() {
+    let output = bsk(&[
+        "extract",
+        "table",
+        "--format",
+        "csv",
+        "--json",
+        "--selector",
+        "a",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let error: Value = serde_json::from_slice(&output.stdout).expect("JSON extract error");
+    assert_eq!(error["code"], "invalid_params");
+    assert_eq!(
+        error["message"],
+        "--json with --format csv requires --out; otherwise stdout is CSV"
+    );
+    assert_eq!(error["exit_code"], 1);
+    let hint = error["hint"].as_str().expect("hint");
+    assert!(!hint.contains("daemon"), "{hint}");
+}
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_arguments_still_produce_a_json_error() {

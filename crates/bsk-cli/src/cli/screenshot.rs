@@ -195,6 +195,16 @@ fn run_full_page(
     Ok(())
 }
 
+/// A local output-file failure is a caller-side problem: report it as file
+/// validation (exit 1, path/permission hint) instead of a daemon transport
+/// failure (exit 2, "is the daemon running?") (#794).
+fn screenshot_output_error(error: anyhow::Error) -> CliError {
+    CliError::file_validation(
+        error,
+        "check --out: use a writable path whose parent directory exists",
+    )
+}
+
 pub(crate) fn write_screenshot_bytes(
     out: &Path,
     bytes: &[u8],
@@ -217,17 +227,17 @@ pub(crate) fn write_screenshot_bytes(
             .create_new(true)
             .open(&temp)
             .with_context(|| format!("create screenshot temporary file {}", temp.display()))
-            .map_err(CliError::Local)?;
+            .map_err(screenshot_output_error)?;
         file.write_all(bytes)
             .context("write screenshot bytes")
-            .map_err(CliError::Local)?;
+            .map_err(screenshot_output_error)?;
         file.sync_all()
             .context("flush screenshot")
-            .map_err(CliError::Local)?;
+            .map_err(screenshot_output_error)?;
         drop(file);
         crate::cli::atomic_output::commit(&temp, out, overwrite)
             .with_context(|| format!("save screenshot to {}", out.display()))
-            .map_err(CliError::Local)
+            .map_err(screenshot_output_error)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -260,7 +270,7 @@ pub(crate) fn write_full_page(
             .create_new(true)
             .open(&temp)
             .with_context(|| format!("create screenshot temporary file {}", temp.display()))
-            .map_err(CliError::Local)?;
+            .map_err(screenshot_output_error)?;
         let mut offset = 0;
         loop {
             let chunk: ScreenshotReadResult = ctx.call(
@@ -277,7 +287,7 @@ pub(crate) fn write_full_page(
             let bytes = validate_chunk(&chunk, offset, reply.byte_size)?;
             file.write_all(&bytes)
                 .context("write screenshot chunk")
-                .map_err(CliError::Local)?;
+                .map_err(screenshot_output_error)?;
             offset = chunk.next_offset;
             if chunk.eof {
                 break;
@@ -285,12 +295,12 @@ pub(crate) fn write_full_page(
         }
         file.sync_all()
             .context("flush screenshot")
-            .map_err(CliError::Local)?;
+            .map_err(screenshot_output_error)?;
         drop(file);
         // Never replace a previous image with an interrupted or partially transferred PNG.
         crate::cli::atomic_output::commit(&temp, out, overwrite)
             .with_context(|| format!("save screenshot to {}", out.display()))
-            .map_err(CliError::Local)
+            .map_err(screenshot_output_error)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -520,6 +530,30 @@ mod tests {
     #[test]
     fn decode_base64_rejects_garbage() {
         assert!(decode_base64("***").is_err());
+    }
+
+    /// #794: a local output-file failure is not a daemon failure. It must keep
+    /// exit code 1 and point at the --out path instead of daemon connectivity.
+    #[test]
+    fn output_write_failures_are_file_errors_not_daemon_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("missing").join("shot.png");
+        let error = write_screenshot_bytes(&out, b"png", true).expect_err("missing parent");
+        assert!(
+            error.code().is_some(),
+            "must carry a structured code instead of Local: {error:?}"
+        );
+        assert_eq!(error.exit_code(), 1);
+        let rendered = crate::cli::error::render_human_to_string(&error, None);
+        assert!(
+            !rendered.contains("daemon"),
+            "local file errors must not blame the daemon: {rendered}"
+        );
+        assert!(
+            rendered.contains("local file validation failed"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("--out"), "{rendered}");
     }
 
     #[test]
