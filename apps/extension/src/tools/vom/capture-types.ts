@@ -13,6 +13,8 @@ export interface CapturedNode {
   /** Frame-local viewport-relative CSS px before top-level projection. */
   localRect?: Rect | null;
   paintOrder: number;
+  /** Parsed integer CSS `z-index` when explicitly set (absent for `auto`). */
+  zIndex?: number;
   position: string;
   pointerEvents: string;
   /**

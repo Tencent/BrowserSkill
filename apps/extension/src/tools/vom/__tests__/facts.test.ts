@@ -132,8 +132,10 @@ describe("document facts", () => {
         "overflow-y": "visible",
         width: "120px",
         height: "40px",
+        "z-index": "auto",
       },
     });
+    expect(nodes[0].zIndex).toBeUndefined();
     expect(nodes[0]).not.toHaveProperty("rect");
     expect(nodes[0]).not.toHaveProperty("excluded");
   });
