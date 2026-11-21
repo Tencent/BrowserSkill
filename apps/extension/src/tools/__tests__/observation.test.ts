@@ -2454,6 +2454,482 @@ describe("buildFrameVomScene", () => {
     expect(scene.nodes.find((node) => node.backendNodeId === 30)?.sensitive).toBe(true);
   });
 
+  it("scopes hover surface probes and aria-controls active scopes by frameId and skips hidden scope descendants", () => {
+    const mainAx: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        name: { type: "computedString", value: "Shop App" },
+        backendDOMNodeId: 10,
+        childIds: ["2", "3", "4"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "button" },
+        name: { type: "computedString", value: "Main Products" },
+        backendDOMNodeId: 20,
+      },
+      {
+        nodeId: "3",
+        parentId: "1",
+        role: { type: "role", value: "tab" },
+        name: { type: "computedString", value: "Main Tab" },
+        backendDOMNodeId: 30,
+      },
+      {
+        nodeId: "4",
+        parentId: "1",
+        role: { type: "role", value: "Iframe" },
+        name: { type: "computedString", value: "Widget Frame" },
+        backendDOMNodeId: 40,
+      },
+    ];
+    const oopifAx: CdpAxNode[] = [
+      {
+        nodeId: "f1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 10,
+        childIds: ["f2", "f3", "f4"],
+      },
+      // Separate OOPIF renderer allocates the exact same backendNodeId 20 as main document!
+      {
+        nodeId: "f2",
+        parentId: "f1",
+        role: { type: "role", value: "button" },
+        name: { type: "computedString", value: "OOPIF Cart" },
+        backendDOMNodeId: 20,
+      },
+      {
+        nodeId: "f3",
+        parentId: "f1",
+        role: { type: "role", value: "tab" },
+        name: { type: "computedString", value: "Frame Tab" },
+        backendDOMNodeId: 30,
+      },
+      // Must NOT cross-link to main document's #main-only panel!
+      {
+        nodeId: "f4",
+        parentId: "f1",
+        role: { type: "role", value: "tab" },
+        name: { type: "computedString", value: "Orphan Frame Tab" },
+        backendDOMNodeId: 31,
+      },
+    ];
+
+    const scene = buildTestScene(
+      mainAx,
+      {
+        rootFrameId: "main",
+        viewport: { width: 1000, height: 800 },
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            frameId: "main",
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "button",
+            attrs: {},
+            rect: { x: 20, y: 20, w: 120, h: 40 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+          {
+            backendNodeId: 30,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "button",
+            attrs: { role: "tab", "aria-selected": "true", "aria-controls": "shared-panel" },
+            rect: { x: 20, y: 80, w: 100, h: 32 },
+            paintOrder: 2,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+          {
+            backendNodeId: 35,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "div",
+            attrs: { id: "shared-panel" },
+            rect: { x: 20, y: 120, w: 300, h: 80 },
+            paintOrder: 3,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+          {
+            backendNodeId: 36,
+            parentBackendNodeId: 35,
+            frameId: "main",
+            tag: "p",
+            attrs: {},
+            rect: { x: 20, y: 120, w: 200, h: 20 },
+            paintOrder: 4,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+            textContent: "Main Visible Summary",
+          },
+          // display:none descendant (rendered: false in Chrome DOMSnapshot) -> must be skipped!
+          {
+            backendNodeId: 37,
+            parentBackendNodeId: 35,
+            frameId: "main",
+            tag: "div",
+            attrs: { style: "display: none" },
+            rect: null,
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: false,
+            textContent: "Hidden Display None Text",
+          },
+          // visibility:hidden descendant with an explicit visibility:visible grandchild -> skip hidden, keep visible!
+          {
+            backendNodeId: 38,
+            parentBackendNodeId: 35,
+            frameId: "main",
+            tag: "div",
+            attrs: { style: "visibility: hidden" },
+            rect: { x: 20, y: 140, w: 200, h: 20 },
+            paintOrder: 5,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: false,
+            textContent: "Hidden Visibility Text",
+          },
+          {
+            backendNodeId: 39,
+            parentBackendNodeId: 38,
+            frameId: "main",
+            tag: "span",
+            attrs: { style: "visibility: visible" },
+            rect: { x: 20, y: 140, w: 120, h: 20 },
+            paintOrder: 6,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+            textContent: "Explicitly Visible Child",
+          },
+          {
+            backendNodeId: 41,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "div",
+            attrs: { id: "main-only" },
+            rect: { x: 20, y: 220, w: 200, h: 30 },
+            paintOrder: 7,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+            textContent: "Main Secret Panel",
+          },
+          {
+            backendNodeId: 40,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "iframe",
+            attrs: { title: "Widget Frame" },
+            rect: { x: 20, y: 300, w: 400, h: 200 },
+            paintOrder: 8,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+        ],
+        documents: [
+          frameDoc({
+            frameId: "oopif-1",
+            parentFrameId: "main",
+            ownerBackendNodeId: 40,
+            processKey: "oopif-proc",
+            isOutOfProcess: true,
+            contextScopeId: "oopif-1",
+            axNodes: oopifAx,
+            domNodes: [
+              {
+                backendNodeId: 10,
+                parentBackendNodeId: null,
+                frameId: "oopif-1",
+                tag: "body",
+                attrs: {},
+                rect: { x: 20, y: 300, w: 400, h: 200 },
+                paintOrder: 0,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+              },
+              {
+                backendNodeId: 20,
+                parentBackendNodeId: 10,
+                frameId: "oopif-1",
+                tag: "button",
+                attrs: {},
+                rect: { x: 40, y: 320, w: 120, h: 40 },
+                paintOrder: 1,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+              },
+              {
+                backendNodeId: 30,
+                parentBackendNodeId: 10,
+                frameId: "oopif-1",
+                tag: "button",
+                attrs: { role: "tab", "aria-selected": "true", "aria-controls": "shared-panel" },
+                rect: { x: 40, y: 370, w: 100, h: 32 },
+                paintOrder: 2,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+              },
+              {
+                backendNodeId: 31,
+                parentBackendNodeId: 10,
+                frameId: "oopif-1",
+                tag: "button",
+                attrs: { role: "tab", "aria-selected": "true", "aria-controls": "main-only" },
+                rect: { x: 150, y: 370, w: 120, h: 32 },
+                paintOrder: 3,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+              },
+              {
+                backendNodeId: 35,
+                parentBackendNodeId: 10,
+                frameId: "oopif-1",
+                tag: "div",
+                attrs: { id: "shared-panel" },
+                rect: { x: 40, y: 410, w: 300, h: 60 },
+                paintOrder: 4,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+                textContent: "OOPIF Own Panel Content",
+              },
+            ],
+          }),
+        ],
+      },
+      {
+        surfaceProbes: [
+          {
+            triggerBackendNodeId: 20,
+            triggerFrameId: "main",
+            triggerAction: "hover",
+            subItems: ["Shoes", "Bags"],
+          },
+          {
+            triggerBackendNodeId: 20,
+            triggerFrameId: "oopif-1",
+            triggerAction: "hover",
+            subItems: ["Checkout", "Clear cart"],
+          },
+        ],
+      },
+    );
+
+    const mainProducts = scene.nodes.find(
+      (node) => node.frameId === "main" && node.backendNodeId === 20,
+    )!;
+    const oopifCart = scene.nodes.find(
+      (node) => node.frameId === "oopif-1" && node.backendNodeId === 20,
+    )!;
+    expect(scene.surfaces).toEqual([
+      { triggerId: mainProducts.id, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
+      { triggerId: oopifCart.id, triggerAction: "hover", subItems: ["Checkout", "Clear cart"] },
+    ]);
+
+    const mainTab = scene.nodes.find(
+      (node) => node.frameId === "main" && node.backendNodeId === 30,
+    )!;
+    const frameTab = scene.nodes.find(
+      (node) => node.frameId === "oopif-1" && node.backendNodeId === 30,
+    )!;
+    expect(scene.activeScopeBlocks).toEqual([
+      {
+        triggerId: mainTab.id,
+        label: "Main Tab",
+        lines: ["Main Visible Summary", "Explicitly Visible Child"],
+      },
+      {
+        triggerId: frameTab.id,
+        label: "Frame Tab",
+        lines: ["OOPIF Own Panel Content"],
+      },
+    ]);
+    const rendered = renderVom(scene).text;
+    expect(rendered).toContain('button "Main Products" [hover first: Shoes | Bags]');
+    expect(rendered).toContain('button "OOPIF Cart" [hover first: Checkout | Clear cart]');
+    expect(rendered).not.toContain("Hidden Display None Text");
+    expect(rendered).not.toContain("Hidden Visibility Text");
+    expect(rendered).not.toContain("Main Secret Panel");
+  });
+
+  it("isolates repeated shadow-root aria-controls panels and omits textarea/select form values from active scope blocks", () => {
+    const mk = (
+      id: number,
+      parent: number | null,
+      tag: string,
+      attrs: Record<string, string> = {},
+      textContent?: string,
+      extra: Partial<CapturedNode> = {},
+    ): CapturedNode => ({
+      backendNodeId: id,
+      parentBackendNodeId: parent,
+      frameId: "main",
+      tag,
+      attrs,
+      ...(textContent !== undefined ? { textContent } : {}),
+      rect: { x: 0, y: id * 10, w: 120, h: 20 },
+      rendered: true,
+      paintOrder: id,
+      position: "static",
+      pointerEvents: "auto",
+      ...extra,
+    });
+
+    const scene = buildTestScene([], {
+      rootFrameId: "main",
+      viewport: { width: 800, height: 600 },
+      excludedBackendNodeIds: new Set(),
+      nodes: [
+        mk(1, null, "body"),
+        // Shadow root A (stripped #document-fragment id 100)
+        mk(10, 1, "order-card"),
+        mk(11, 100, "button", {
+          role: "button",
+          "aria-expanded": "true",
+          "aria-controls": "details",
+          "aria-label": "Order A",
+        }),
+        mk(12, 100, "div", { id: "details" }, "Order A summary"),
+        mk(13, 12, "textarea", { "aria-label": "Delivery note" }, "Secret delivery pin 4829"),
+        mk(14, 12, "select", { "aria-label": "Secret tier" }),
+        mk(15, 14, "option", { value: "vip" }, "Secret VIP Option"),
+        // Shadow root B (stripped #document-fragment id 200) reuses id="details"
+        mk(20, 1, "order-card"),
+        mk(21, 200, "button", {
+          role: "button",
+          "aria-expanded": "true",
+          "aria-controls": "details",
+          "aria-label": "Order B",
+        }),
+        mk(22, 200, "div", { id: "details" }, "Order B summary"),
+      ],
+    });
+
+    expect(scene.activeScopeBlocks).toEqual([
+      expect.objectContaining({ label: "Order A", lines: ["Order A summary"] }),
+      expect.objectContaining({ label: "Order B", lines: ["Order B summary"] }),
+    ]);
+    const redacted = renderVom(scene, { redactValues: true }).text;
+    expect(redacted).toContain("Order A summary");
+    expect(redacted).toContain("Order B summary");
+    expect(redacted).not.toContain("Secret delivery pin 4829");
+    expect(redacted).not.toContain("Secret VIP Option");
+  });
+
+  it("isolates repeated Chrome DOMSnapshot shadow trees via shadowRootType without breaking slotted light-DOM aria-controls", () => {
+    const mk = (
+      id: number,
+      parent: number | null,
+      tag: string,
+      attrs: Record<string, string> = {},
+      textContent?: string,
+      shadowRootType?: string,
+    ): CapturedNode => ({
+      backendNodeId: id,
+      parentBackendNodeId: parent,
+      frameId: "main",
+      ...(shadowRootType ? { shadowRootType } : {}),
+      tag,
+      attrs,
+      ...(textContent !== undefined ? { textContent } : {}),
+      rect: { x: 0, y: id * 10, w: 120, h: 20 },
+      rendered: true,
+      paintOrder: id,
+      position: "static",
+      pointerEvents: "auto",
+    });
+
+    const scene = buildTestScene([], {
+      rootFrameId: "main",
+      viewport: { width: 800, height: 600 },
+      excludedBackendNodeIds: new Set(),
+      nodes: [
+        // Real Chrome DOMSnapshot omits `#document` (id 1) from normalized nodes; HTML points to 1.
+        mk(2, 1, "html"),
+        mk(3, 2, "body"),
+        // Light-DOM panel controlled by a light-DOM button slotted inside host A's shadow <slot>.
+        mk(4, 3, "div", { id: "details" }, "Light DOM details"),
+        // Shadow host A: direct shadow children point to host A (10) and carry shadowRootType="open".
+        mk(10, 3, "order-card"),
+        mk(11, 10, "div", { class: "wrap" }, undefined, "open"),
+        mk(
+          12,
+          11,
+          "button",
+          {
+            role: "button",
+            "aria-expanded": "true",
+            "aria-controls": "details",
+            "aria-label": "Shadow Card A",
+          },
+          undefined,
+          "open",
+        ),
+        mk(13, 11, "div", { id: "details" }, "Shadow A details", "open"),
+        mk(14, 11, "slot", {}, undefined, "open"),
+        // Light-DOM button slotted into <slot> (14): parentBackendNodeId is 14, shadowRootType is undefined!
+        mk(15, 14, "button", {
+          role: "button",
+          "aria-expanded": "true",
+          "aria-controls": "details",
+          "aria-label": "Slotted Light Trigger",
+        }),
+        // Shadow host B: reuses id="details" inside its own open shadow root.
+        mk(20, 3, "order-card"),
+        mk(
+          21,
+          20,
+          "button",
+          {
+            role: "button",
+            "aria-expanded": "true",
+            "aria-controls": "details",
+            "aria-label": "Shadow Card B",
+          },
+          undefined,
+          "open",
+        ),
+        mk(22, 20, "div", { id: "details" }, "Shadow B details", "open"),
+      ],
+    });
+
+    expect(scene.activeScopeBlocks).toEqual([
+      expect.objectContaining({ label: "Shadow Card A", lines: ["Shadow A details"] }),
+      expect.objectContaining({ label: "Slotted Light Trigger", lines: ["Light DOM details"] }),
+      expect.objectContaining({ label: "Shadow Card B", lines: ["Shadow B details"] }),
+    ]);
+  });
+
   it("aggregates AX virtual text into unnamed structural nodes", () => {
     const scene = buildTestScene(
       [
