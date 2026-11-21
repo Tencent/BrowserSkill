@@ -20,6 +20,7 @@
 //   `EvaluateResult { ok: false, error: { text, line?, column? } }`
 //   so the agent can read the throw text in-band (M9 review intent).
 
+import { readTimeoutDetails } from "@/browser-driver/command-deadline";
 import type { SessionManager } from "@/session-manager/manager";
 import type { EvaluateError, EvaluateParams, EvaluateResult, RpcError } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
@@ -30,13 +31,14 @@ import {
   isRpcError,
   lookupSession,
   resolveTargetTab,
+  toRootFrameHandle,
   withRemoteObject,
 } from "./shared";
+import { isAbortError } from "./vom/capture-abort";
 
 export interface EvaluateDeps {
   cdp: CdpRunner;
   tabsApi: ChromeTabsApi;
-  /** Abort hook (full chain wired in M10.2). */
   signal?: AbortSignal;
 }
 
@@ -62,11 +64,29 @@ interface RuntimeEvaluateReply {
   exceptionDetails?: CdpExceptionDetails;
 }
 
-function abortedError(signal: AbortSignal | undefined): RpcError | null {
-  if (signal?.aborted) {
-    return { code: "cancelled", message: "evaluate aborted" };
-  }
-  return null;
+function cancelledBeforeDispatch(): RpcError {
+  return {
+    code: "cancelled",
+    message: "evaluate cancelled before dispatch",
+    data: {
+      reason: "cancelled_before_dispatch",
+      dispatched: false,
+      effect_state: "none",
+      phase: "precondition",
+    },
+  };
+}
+
+function cancelledAfterDispatch(tabId: number): RpcError {
+  return {
+    code: "cancelled",
+    message: "evaluate cancelled after dispatch; page effects may have occurred",
+    data: {
+      effect_state: "unknown",
+      phase: "execution",
+      tab_id: tabId,
+    },
+  };
 }
 
 /**
@@ -138,32 +158,36 @@ export async function handleEvaluate(
   const ctxOrErr = lookupSession(manager, params, "evaluate");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
-  const ab = abortedError(deps.signal);
-  if (ab) return ab;
+  if (deps.signal?.aborted) return cancelledBeforeDispatch();
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
   const denied = enforceAgentWindow(ctx, target, "evaluate");
   if (denied) return denied;
-  if (abortedError(deps.signal)) {
-    return { code: "cancelled", message: "evaluate aborted" };
-  }
+  if (deps.signal?.aborted) return cancelledBeforeDispatch();
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
   deps.cdp.trackSessionTab(ctx.sessionId, target.tabId);
+  let dispatched = false;
   try {
     await deps.cdp.beginDomMutation?.();
-    const reply = await deps.cdp.send<RuntimeEvaluateReply>(target.tabId, "Runtime.evaluate", {
-      expression: params.expression,
-      awaitPromise: params.await_promise ?? true,
-      returnByValue: params.return_by_value ?? true,
-      throwOnSideEffect: false,
-    });
+    if (deps.signal?.aborted) return cancelledBeforeDispatch();
+    const reply = await deps.cdp.sendToFrame<RuntimeEvaluateReply>(
+      toRootFrameHandle(target.tabId),
+      "Runtime.evaluate",
+      {
+        expression: params.expression,
+        awaitPromise: params.await_promise ?? true,
+        returnByValue: params.return_by_value ?? true,
+        throwOnSideEffect: false,
+      },
+      {
+        signal: deps.signal,
+        onDispatch: () => {
+          dispatched = true;
+        },
+      },
+    );
     const releaseAndFormat = async (): Promise<EvaluateResult | RpcError> => {
-      if (deps.signal?.aborted)
-        return {
-          code: "cancelled",
-          message: "evaluate cancelled after dispatch; page effects may have occurred",
-          data: { effect_state: "unknown" },
-        };
+      if (deps.signal?.aborted) return cancelledAfterDispatch(target.tabId);
       // The receipt says so when nothing about the page was verified.
       const unverified = params.unverified === true ? { verified: false as const } : {};
       if (reply.exceptionDetails) {
@@ -195,9 +219,19 @@ export async function handleEvaluate(
     }
     return await run();
   } catch (err) {
+    if (deps.signal?.aborted || isAbortError(err)) {
+      return dispatched ? cancelledAfterDispatch(target.tabId) : cancelledBeforeDispatch();
+    }
+    const timeoutData = readTimeoutDetails(err).data;
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
+      data: {
+        effect_state: dispatched ? "unknown" : "none",
+        phase: dispatched ? "execution" : "precondition",
+        ...(dispatched ? { tab_id: target.tabId } : { dispatched: false }),
+        ...timeoutData,
+      },
     };
   }
 }

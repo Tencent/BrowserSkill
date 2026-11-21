@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
+import type { Transport } from "@/transport/transport";
+import type { ProtocolFrame, ResponseFrame } from "@/transport/types";
+import { ToolDispatcher } from "../dispatcher";
 import { handleEvaluate } from "../evaluate";
 
 function fakeAgentWindow(ids: number[]) {
@@ -415,5 +418,351 @@ describe("handleEvaluate", () => {
     });
     expect(api.attach).toHaveBeenCalledTimes(1);
     expect(realCdp.getAttachmentId(4)).toBeUndefined();
+  });
+
+  it("reports effect_state='none' and skips CDP dispatch when aborted before dispatch", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const abort = new AbortController();
+    abort.abort();
+    const fake = makeFakeCdp();
+
+    const res = await handleEvaluate(
+      sm,
+      { session_id: "aa11", expression: "window.mutated = true" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, signal: abort.signal },
+    );
+    expect(res).toEqual({
+      code: "cancelled",
+      message: "evaluate cancelled before dispatch",
+      data: {
+        reason: "cancelled_before_dispatch",
+        dispatched: false,
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+    expect(fake.sent).toEqual([]);
+  });
+
+  it("unblocks hanging evaluate via ToolDispatcher cancel, releases activeDialogOperations, and silences late CDP rejection", async () => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async (tabId: number) => ({
+          id: tabId,
+          windowId: 100,
+          active: true,
+          url: "https://example.test/",
+        })),
+        query: vi.fn(async () => [
+          { id: 4, windowId: 100, active: true, url: "https://example.test/" },
+        ]),
+        sendMessage: vi.fn(async () => ({ ok: true })),
+      },
+    });
+    let rejectHanging!: (err: Error) => void;
+    let firstEval = true;
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target, method) => {
+        if (method === "Runtime.evaluate") {
+          if (firstEval) {
+            firstEval = false;
+            return new Promise((_resolve, reject) => {
+              rejectHanging = reject;
+            });
+          }
+          return { result: { type: "number", value: 42 } };
+        }
+        return {};
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onEvent: { addListener: vi.fn(), removeListener: vi.fn() } as any,
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onDetach: { addListener: vi.fn(), removeListener: vi.fn() } as any,
+    };
+    const realCdp = new ChromiumCdp(api);
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+
+    const sent: ProtocolFrame[] = [];
+    let onMessage: ((frame: ProtocolFrame) => void) | null = null;
+    const transport: Transport = {
+      state: "connected",
+      connect: async () => {},
+      disconnect: async () => {},
+      send: (frame) => sent.push(frame),
+      onMessage: (cb) => {
+        onMessage = cb;
+        return { dispose: () => (onMessage = null) };
+      },
+      onConnectionStateChange: () => ({ dispose: () => {} }),
+    };
+    const dispatcher = new ToolDispatcher({ transport, sessions: sm, cdp: realCdp });
+    dispatcher.start();
+    try {
+      onMessage!({
+        id: "eval-hang",
+        operation_id: "op-1",
+        method: "tool.evaluate",
+        params: { session_id: "aa11", tab_id: 4, expression: "new Promise(() => {})" },
+      });
+      await vi.waitFor(() => expect(rejectHanging).toBeDefined());
+
+      onMessage!({ id: "cancel-1", method: "cancel", params: { rpc_id: "eval-hang" } });
+      await vi.waitFor(() =>
+        expect(
+          sent.find((f): f is ResponseFrame => "id" in f && f.id === "eval-hang"),
+        ).toBeDefined(),
+      );
+      expect(sent.find((f) => "id" in f && f.id === "eval-hang")).toMatchObject({
+        id: "eval-hang",
+        error: {
+          code: "cancelled",
+          data: { effect_state: "unknown", phase: "execution", tab_id: 4 },
+        },
+      });
+
+      // Next operation_id request on the same session succeeds immediately (no deadlock / no blocked read gate).
+      onMessage!({
+        id: "eval-next",
+        operation_id: "op-2",
+        method: "tool.evaluate",
+        params: { session_id: "aa11", tab_id: 4, expression: "40 + 2" },
+      });
+      await vi.waitFor(() =>
+        expect(
+          sent.find((f): f is ResponseFrame => "id" in f && f.id === "eval-next"),
+        ).toBeDefined(),
+      );
+      expect(sent.find((f) => "id" in f && f.id === "eval-next")).toMatchObject({
+        id: "eval-next",
+        result: { ok: true, tab_id: 4, value: 42 },
+      });
+
+      // Late rejection of the abandoned CDP command (e.g. tab detach) must not trigger unhandledRejection.
+      rejectHanging(new Error("Detached while handling command"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      dispatcher.stop();
+      realCdp.dispose();
+      vi.unstubAllGlobals();
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("aborts in-flight ChromiumCdp.send() on signal without unhandled rejection on late detach", async () => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    let rejectCmd!: (err: Error) => void;
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target, method) => {
+        if (method === "Runtime.evaluate") {
+          return new Promise((_resolve, reject) => {
+            rejectCmd = reject;
+          });
+        }
+        return {};
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onEvent: { addListener: vi.fn(), removeListener: vi.fn() } as any,
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onDetach: { addListener: vi.fn(), removeListener: vi.fn() } as any,
+    };
+    const realCdp = new ChromiumCdp(api);
+    const ac = new AbortController();
+    try {
+      const pending = realCdp.send(
+        4,
+        "Runtime.evaluate",
+        { expression: "new Promise(() => {})", awaitPromise: true },
+        ac.signal,
+      );
+      await vi.waitFor(() => expect(rejectCmd).toBeDefined());
+      ac.abort();
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      rejectCmd(new Error("Target closed"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      realCdp.dispose();
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("unblocks evaluate cancelled during initial Page.enable attach with effect_state='none' and recovers", async () => {
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async (tabId: number) => ({
+          id: tabId,
+          windowId: 100,
+          active: true,
+          url: "https://example.test/",
+        })),
+        query: vi.fn(async () => [
+          { id: 4, windowId: 100, active: true, url: "https://example.test/" },
+        ]),
+        sendMessage: vi.fn(async () => ({ ok: true })),
+      },
+    });
+    let resolvePageEnable!: (v: object) => void;
+    let evalCalls = 0;
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target, method) => {
+        if (method === "Page.enable") {
+          return new Promise<object>((resolve) => {
+            resolvePageEnable = resolve;
+          });
+        }
+        if (method === "Runtime.evaluate") {
+          evalCalls += 1;
+          return { result: { type: "number", value: 7 } };
+        }
+        return {};
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onEvent: { addListener: vi.fn(), removeListener: vi.fn() } as any,
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onDetach: { addListener: vi.fn(), removeListener: vi.fn() } as any,
+    };
+    const realCdp = new ChromiumCdp(api);
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+
+    const sent: ProtocolFrame[] = [];
+    let onMessage: ((frame: ProtocolFrame) => void) | null = null;
+    const transport: Transport = {
+      state: "connected",
+      connect: async () => {},
+      disconnect: async () => {},
+      send: (frame) => sent.push(frame),
+      onMessage: (cb) => {
+        onMessage = cb;
+        return { dispose: () => (onMessage = null) };
+      },
+      onConnectionStateChange: () => ({ dispose: () => {} }),
+    };
+    const dispatcher = new ToolDispatcher({ transport, sessions: sm, cdp: realCdp });
+    dispatcher.start();
+    try {
+      onMessage!({
+        id: "eval-attach",
+        operation_id: "op-attach-1",
+        method: "tool.evaluate",
+        params: { session_id: "aa11", tab_id: 4, expression: "window.x = 1" },
+      });
+      await vi.waitFor(() => expect(resolvePageEnable).toBeDefined());
+
+      onMessage!({ id: "cancel-attach", method: "cancel", params: { rpc_id: "eval-attach" } });
+      await vi.waitFor(() =>
+        expect(
+          sent.find((f): f is ResponseFrame => "id" in f && f.id === "eval-attach"),
+        ).toBeDefined(),
+      );
+      expect(sent.find((f) => "id" in f && f.id === "eval-attach")).toMatchObject({
+        id: "eval-attach",
+        error: {
+          code: "cancelled",
+          data: {
+            reason: "cancelled_before_dispatch",
+            dispatched: false,
+            effect_state: "none",
+            phase: "precondition",
+          },
+        },
+      });
+      expect(evalCalls).toBe(0);
+
+      // Once shared attach completes, the next operation_id RPC succeeds immediately.
+      resolvePageEnable({});
+      onMessage!({
+        id: "eval-after-attach",
+        operation_id: "op-attach-2",
+        method: "tool.evaluate",
+        params: { session_id: "aa11", tab_id: 4, expression: "7" },
+      });
+      await vi.waitFor(() =>
+        expect(
+          sent.find((f): f is ResponseFrame => "id" in f && f.id === "eval-after-attach"),
+        ).toBeDefined(),
+      );
+      expect(sent.find((f) => "id" in f && f.id === "eval-after-attach")).toMatchObject({
+        id: "eval-after-attach",
+        result: { ok: true, tab_id: 4, value: 7 },
+      });
+    } finally {
+      dispatcher.stop();
+      realCdp.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("bounds hung Runtime.releaseObject cleanup and unblocks aborted getFrameDocuments", async () => {
+    vi.useFakeTimers();
+    let releaseSent = 0;
+    let frameTreeStarted = false;
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target, method) => {
+        if (method === "Runtime.evaluate") {
+          return {
+            result: { type: "object", objectId: "hung-obj-1", description: "Object" },
+          };
+        }
+        if (method === "Runtime.releaseObject") {
+          releaseSent += 1;
+          return new Promise(() => {});
+        }
+        if (method === "Page.getFrameTree") {
+          frameTreeStarted = true;
+          return new Promise(() => {});
+        }
+        return {};
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onEvent: { addListener: vi.fn(), removeListener: vi.fn() } as any,
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onDetach: { addListener: vi.fn(), removeListener: vi.fn() } as any,
+    };
+    const realCdp = new ChromiumCdp(api);
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabsApi = {
+      get: vi.fn(
+        async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+      ),
+      query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+    };
+    try {
+      const pendingEval = handleEvaluate(
+        sm,
+        { session_id: "aa11", tab_id: 4, expression: "({})", return_by_value: false },
+        { cdp: realCdp, tabsApi },
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await pendingEval).toMatchObject({ ok: true, tab_id: 4 });
+      expect(releaseSent).toBe(1);
+
+      // Aborting getFrameDocuments during a hanging Page.getFrameTree exits immediately.
+      const frameAc = new AbortController();
+      const pendingGraph = realCdp.getFrameDocuments(4, frameAc.signal);
+      const rejected = expect(pendingGraph).rejects.toMatchObject({ name: "AbortError" });
+      await vi.advanceTimersByTimeAsync(25);
+      expect(frameTreeStarted).toBe(true);
+      frameAc.abort();
+      await rejected;
+    } finally {
+      realCdp.dispose();
+      vi.useRealTimers();
+    }
   });
 });
