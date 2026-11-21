@@ -2815,7 +2815,11 @@ export class CooperationController implements ControlAuthority {
         sent &&
         !isRpcError(result) &&
         (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
-      if (["tool.evaluate", "tool.upload"].includes(req.method)) {
+      if (
+        !signal.aborted &&
+        !state.stopped &&
+        ["tool.evaluate", "tool.upload"].includes(req.method)
+      ) {
         const intact = !state.unavailable && state.epoch === epoch;
         const postActionReplyTimeoutMs =
           actionReplyTimeoutMs !== undefined

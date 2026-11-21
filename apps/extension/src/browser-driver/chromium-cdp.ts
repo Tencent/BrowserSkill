@@ -29,7 +29,12 @@ import type {
   PendingJavaScriptDialog,
 } from "@/transport/types";
 import { BackgroundExecution } from "./background-execution";
-import { CdpReadGate, CdpReadTimeoutError, READ_TIMEOUT_MS } from "./command-deadline";
+import {
+  CdpReadGate,
+  CdpReadTimeoutError,
+  READ_TIMEOUT_MS,
+  waitForAbort,
+} from "./command-deadline";
 import {
   buildFrameGraph,
   type CdpFrameGraph,
@@ -650,6 +655,17 @@ export class ChromiumCdp {
     this.touchTabActivity(tabId);
   }
 
+  /** Wait for shared debugger attach while letting a cancelled caller exit immediately. */
+  private async waitForAttach(tabId: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const attach = this.ensureAttached(tabId);
+    if (!signal) {
+      await attach;
+      return;
+    }
+    await waitForAbort(attach, signal);
+  }
+
   /** `CdpRunner` entry point used by passive read/extract/observation tools. */
   async ensureAttachedToUrl(tabId: number, _expectedUrl?: string): Promise<void> {
     await this.ensureAttached(tabId);
@@ -969,10 +985,17 @@ export class ChromiumCdp {
     signal?: AbortSignal,
   ): Promise<T> {
     signal?.throwIfAborted();
-    await this.ensureAttached(tabId);
+    await this.waitForAttach(tabId, signal);
     signal?.throwIfAborted();
     try {
-      const result = await this.command({ tabId }, method, params ?? {});
+      const result = await this.command(
+        { tabId },
+        method,
+        params ?? {},
+        undefined,
+        undefined,
+        signal,
+      );
       return result as T;
     } catch (err) {
       throw normalizeError(err);
@@ -1001,7 +1024,7 @@ export class ChromiumCdp {
   ): Promise<T> {
     guard.signal?.throwIfAborted();
     if (guard.attachmentId === undefined && guard.allowReattach !== false) {
-      await this.ensureAttached(target.tabId);
+      await this.waitForAttach(target.tabId, guard.signal);
     } else if (guard.allowReattach === false && !this.isAttached(target.tabId)) {
       throw new Error("debugger detached");
     }
@@ -1049,7 +1072,11 @@ export class ChromiumCdp {
     const currentBefore = this.tabs.get(tabId);
     if (currentBefore?.kind === "attaching") {
       if (!allowReattach) throw new Error("debugger detached");
-      await currentBefore.attachInFlight;
+      if (guard?.signal) {
+        await waitForAbort(currentBefore.attachInFlight, guard.signal);
+      } else {
+        await currentBefore.attachInFlight;
+      }
     }
     guard?.signal?.throwIfAborted();
 
@@ -1060,7 +1087,7 @@ export class ChromiumCdp {
         state?.kind === "soft_detached" &&
         state.snapshot.attachmentId === guard.attachmentId
       ) {
-        await this.ensureAttached(tabId);
+        await this.waitForAttach(tabId, guard.signal);
       } else if (state?.kind === "attached") {
         if (allowReattach) {
           if (state.deferredRootCheck && !state.openDialog) {
@@ -1076,7 +1103,7 @@ export class ChromiumCdp {
     } else if (!allowReattach) {
       if (!this.isAttached(tabId)) throw new Error("debugger detached");
     } else {
-      await this.ensureAttached(tabId);
+      await this.waitForAttach(tabId, guard?.signal);
       guard?.signal?.throwIfAborted();
     }
 
@@ -1472,7 +1499,7 @@ export class ChromiumCdp {
   /** Resolve the tab's current root `FrameDocumentHandle` (attaching or reattaching if needed). */
   async getMainFrameHandle(tabId: number, signal?: AbortSignal): Promise<FrameDocumentHandle> {
     signal?.throwIfAborted();
-    await this.ensureAttached(tabId);
+    await this.waitForAttach(tabId, signal);
     signal?.throwIfAborted();
     const entry = this.tabs.get(tabId);
     if (entry?.kind === "attached" && entry.frameDiscovery.rootFrameId) {
@@ -1565,7 +1592,7 @@ export class ChromiumCdp {
     options?: FrameDocumentGraphOptions,
   ): Promise<CdpFrameGraph> {
     signal?.throwIfAborted();
-    await this.ensureAttached(tabId);
+    await this.waitForAttach(tabId, signal);
     const attachmentId = this.getAttachmentId(tabId);
     const check = () => {
       signal?.throwIfAborted();
@@ -1583,7 +1610,7 @@ export class ChromiumCdp {
     ): Promise<T> => {
       check();
       try {
-        const result = await this.command(target, method, params, timeoutMs, check);
+        const result = await this.command(target, method, params, timeoutMs, check, signal);
         check();
         return result as T;
       } catch (error) {
@@ -1749,7 +1776,7 @@ export class ChromiumCdp {
   async ensureConsoleCapture(tabId: number, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     if (!this.isAttached(tabId)) {
-      await this.ensureAttached(tabId);
+      await this.waitForAttach(tabId, signal);
     }
     signal?.throwIfAborted();
     await this.enableConsoleDomains(tabId, signal);
@@ -2575,6 +2602,11 @@ export class ChromiumCdp {
     const rootEpochBefore = discoveryBefore?.rootNavigationEpoch;
     const version = entryBefore?.version ?? 0;
     const processKey = this.processKeyForTarget(target);
+    // An async JS Promise (`awaitPromise: true`) yields the renderer immediately
+    // and may stay unresolved indefinitely without blocking subsequent CDP calls.
+    const awaitsPromise =
+      (method === "Runtime.evaluate" || method === "Runtime.callFunctionOn") &&
+      (params as { awaitPromise?: unknown }).awaitPromise === true;
     const result = await this.readGate.run(
       target,
       method,
@@ -2585,6 +2617,7 @@ export class ChromiumCdp {
       readTimeoutMs,
       signal,
       processKey,
+      !awaitsPromise,
     );
     if (discoveryBefore && typeof tabId === "number") {
       const entryAfter = this.tabs.get(tabId);
@@ -3801,7 +3834,11 @@ function normalizeError(err: unknown): Error {
   if (err instanceof Error) return err;
   if (typeof err === "string") return new Error(err);
   if (err && typeof err === "object" && "message" in err) {
-    return new Error(String((err as { message: unknown }).message));
+    const normalized = new Error(String((err as { message: unknown }).message));
+    if ("name" in err && typeof (err as { name: unknown }).name === "string") {
+      normalized.name = (err as { name: string }).name;
+    }
+    return normalized;
   }
   return new Error("unknown chrome.debugger error");
 }
