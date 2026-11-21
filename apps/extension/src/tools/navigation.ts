@@ -1105,6 +1105,14 @@ function navigationError(error: unknown): RpcError {
     : cdpError(error);
 }
 
+function beforeUnloadDismissedError(): RpcError {
+  return {
+    code: "cancelled",
+    message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
+    data: { reason: "user_cancelled", effect_state: "none" },
+  };
+}
+
 /** Recover only a failed preflight; never replay an already-dispatched navigation. */
 async function recoverBrowserNavigation(
   deps: NavigationDeps,
@@ -1383,22 +1391,14 @@ export async function handleNavigate(
       const stopped = await waitPromise;
       waitAbort.cleanup();
       if (refused || stopped.lastLifecycle === "dialog_dismissed")
-        return {
-          code: "cancelled",
-          message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
-          data: { reason: "user_cancelled" },
-        };
+        return beforeUnloadDismissedError();
       throw err;
     }
     if ((await wait.dialogDecision()) === false) {
       waitAbort.abort();
       await waitPromise;
       waitAbort.cleanup();
-      return {
-        code: "cancelled",
-        message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
-        data: { reason: "user_cancelled" },
-      };
+      return beforeUnloadDismissedError();
     }
     frameId = nav.frameId ?? "";
     loaderId = nav.loaderId ?? "";
@@ -1408,12 +1408,7 @@ export async function handleNavigate(
       waitAbort.abort();
       const stopped = await waitPromise;
       waitAbort.cleanup();
-      if (stopped.lastLifecycle === "dialog_dismissed")
-        return {
-          code: "cancelled",
-          message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
-          data: { reason: "user_cancelled" },
-        };
+      if (stopped.lastLifecycle === "dialog_dismissed") return beforeUnloadDismissedError();
       return {
         code: "cdp_failed",
         message: `Page.navigate rejected: ${nav.errorText}`,
@@ -1422,13 +1417,9 @@ export async function handleNavigate(
     const outcome = await finishLifecycleWait(wait, waitPromise, beforeReadyState);
     waitAbort.cleanup();
     if (outcome.reached === "cancelled") {
-      return {
-        code: "cancelled",
-        message:
-          outcome.lastLifecycle === "dialog_dismissed"
-            ? "Agent dismissed beforeunload; navigation cancelled and the page was kept"
-            : "navigate aborted",
-      };
+      return outcome.lastLifecycle === "dialog_dismissed"
+        ? beforeUnloadDismissedError()
+        : { code: "cancelled", message: "navigate aborted" };
     }
     const finalUrl = await readTabUrl(deps.tabsApi, target.tabId);
     if (outcome.reached === "match") {
@@ -1546,16 +1537,27 @@ async function handleHistory(
     try {
       await deps.cdp.send(target.tabId, "Page.navigateToHistoryEntry", { entryId: targetEntry.id });
     } catch (err) {
+      const refused = (await wait.dialogDecision()) === false;
+      waitAbort.abort();
+      const stopped = await waitPromise;
+      waitAbort.cleanup();
+      if (refused || stopped.lastLifecycle === "dialog_dismissed")
+        return beforeUnloadDismissedError();
+      throw err;
+    }
+    if ((await wait.dialogDecision()) === false) {
       waitAbort.abort();
       await waitPromise;
       waitAbort.cleanup();
-      throw err;
+      return beforeUnloadDismissedError();
     }
 
     const outcome = await finishLifecycleWait(wait, waitPromise, beforeReadyState);
     waitAbort.cleanup();
     if (outcome.reached === "cancelled") {
-      return { code: "cancelled", message: `navigate_${direction} aborted` };
+      return outcome.lastLifecycle === "dialog_dismissed"
+        ? beforeUnloadDismissedError()
+        : { code: "cancelled", message: `navigate_${direction} aborted` };
     }
     const finalUrl = await readTabUrl(deps.tabsApi, target.tabId);
     if (outcome.reached === "match") {
@@ -1660,16 +1662,27 @@ export async function handleReload(
     try {
       await deps.cdp.send(target.tabId, "Page.reload", { ignoreCache });
     } catch (err) {
+      const refused = (await wait.dialogDecision()) === false;
+      waitAbort.abort();
+      const stopped = await waitPromise;
+      waitAbort.cleanup();
+      if (refused || stopped.lastLifecycle === "dialog_dismissed")
+        return beforeUnloadDismissedError();
+      throw err;
+    }
+    if ((await wait.dialogDecision()) === false) {
       waitAbort.abort();
       await waitPromise;
       waitAbort.cleanup();
-      throw err;
+      return beforeUnloadDismissedError();
     }
 
     const outcome = await finishLifecycleWait(wait, waitPromise, beforeReadyState);
     waitAbort.cleanup();
     if (outcome.reached === "cancelled") {
-      return { code: "cancelled", message: "reload aborted" };
+      return outcome.lastLifecycle === "dialog_dismissed"
+        ? beforeUnloadDismissedError()
+        : { code: "cancelled", message: "reload aborted" };
     }
     const finalUrl = await readTabUrl(deps.tabsApi, target.tabId);
     if (outcome.reached === "match") {

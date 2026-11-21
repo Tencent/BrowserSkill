@@ -179,12 +179,14 @@ export class ConnectionController {
       // Credentials may rotate while the same device is still waiting for
       // startup or cleanup. Apply the latest snapshot without another teardown.
       if (this.pendingConfiguration) this.pendingConfiguration = apply;
+      this.transport?.resetAuthenticationBackoff?.();
       return this.transition ?? Promise.resolve();
     }
     this.daemonUpgradeRequired = null;
     this.lastError = null;
     this.configurationKey = key;
     this.pendingConfiguration = apply;
+    this.transport?.resetAuthenticationBackoff?.();
     this.fire();
     if (!this.ready) return Promise.resolve();
     return this.teardown(false);
@@ -342,7 +344,9 @@ export class ConnectionController {
   }
 
   private applyPendingConfiguration(): void {
-    this.pendingConfiguration?.();
+    if (!this.pendingConfiguration) return;
+    this.transport?.resetAuthenticationBackoff?.();
+    this.pendingConfiguration();
     this.pendingConfiguration = null;
   }
 

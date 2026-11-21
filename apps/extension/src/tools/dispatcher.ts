@@ -37,6 +37,7 @@ import { prepareBackgroundExecution } from "./background-execution";
 import { handleConsole } from "./console";
 import { handleDebug } from "./debug";
 import { handleDialog } from "./dialog-control";
+import { withSessionDialogCleanup } from "./dialogs";
 import { DownloadConcurrencyGate, handleDownload } from "./download";
 import { handleDrag } from "./drag";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
@@ -86,6 +87,7 @@ import { handleSessionStart, handleSessionStop } from "./session";
 import {
   cdpBlockedUrlReason,
   chromeTabsApi,
+  evictSessionCdpRunner,
   lookupSession,
   resolveTargetTab,
   sessionCdpRunner,
@@ -202,7 +204,10 @@ export class ToolDispatcher {
   private readonly tabsOnRemoved?: TabRemovedEvent;
   private readonly windowsApi?: InputWindowsApi;
   private subscription: { dispose(): void } | null = null;
+  private transportStateSubscription: { dispose(): void } | null = null;
   private tabRemovedSubscription: { dispose(): void } | null = null;
+  private connectionEpoch = 0;
+  private acceptingRequests = true;
   private readonly hoverBypassTabs = new Map<number, string>();
   private readonly hoverLatches = new Map<number, HoverLatch>();
   private readonly downloadGate = new DownloadConcurrencyGate();
@@ -220,6 +225,8 @@ export class ToolDispatcher {
    * controllers. Made public for tests.
    */
   readonly inflightAbortControllers = new Map<string, AbortController>();
+  private readonly inflightSettled = new Map<string, Promise<void>>();
+  private readonly inflightSessionStarts = new Set<string>();
   private readonly requestSessions = new Map<string, string>();
 
   constructor(deps: DispatcherDeps) {
@@ -244,6 +251,14 @@ export class ToolDispatcher {
 
   start(): void {
     if (this.subscription) return;
+    this.acceptingRequests = true;
+    this.transportStateSubscription = this.transport.onConnectionStateChange((state) => {
+      if (state === "connected") {
+        this.acceptingRequests = true;
+      } else {
+        this.connectionEpoch += 1;
+      }
+    });
     if (this.tabsOnRemoved && !this.tabRemovedSubscription) {
       const onTabRemoved = (tabId: number) => {
         this.forgetClosedTab(tabId);
@@ -314,8 +329,11 @@ export class ToolDispatcher {
     this.debug?.dispose();
     this.tabRemovedSubscription?.dispose();
     this.tabRemovedSubscription = null;
+    this.transportStateSubscription?.dispose();
+    this.transportStateSubscription = null;
     this.subscription?.dispose();
     this.subscription = null;
+    this.connectionEpoch += 1;
     // Trip every outstanding controller so dependent waits unblock
     // before the dispatcher is GC'd.
     this.dialogSubscription?.dispose();
@@ -331,7 +349,10 @@ export class ToolDispatcher {
       }
     }
     this.inflightAbortControllers.clear();
+    this.inflightSettled.clear();
+    this.inflightSessionStarts.clear();
     this.requestSessions.clear();
+    void this.releaseHoverLatch().catch(() => {});
     const exports = this.screenshotExports;
     this.screenshotExports = new ScreenshotExports((id) => this.sessions.has(id));
     void exports.dispose();
@@ -351,19 +372,98 @@ export class ToolDispatcher {
     }
   }
 
+  /** Abort all in-flight RPCs (e.g. on WS disconnect, including pending session starts). */
+  cancelAll(): void {
+    this.connectionEpoch += 1;
+    for (const ac of this.inflightAbortControllers.values()) {
+      try {
+        ac.abort();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * Stop admitting new tool requests on the outgoing connection, invalidate in-flight
+   * response routing across connection generations, and abort all active RPCs.
+   * Dispatch resumes automatically once the transport emits `"connected"` again.
+   */
+  beginDisconnectCleanup(): void {
+    this.acceptingRequests = false;
+    this.cancelAll();
+  }
+
+  /** Wait briefly for cancelled in-flight `tool.session_start` RPCs to unwind/roll back. */
+  async awaitPendingStarts(timeoutMs = 1_000): Promise<void> {
+    const pending: Promise<void>[] = [];
+    for (const rpcId of this.inflightSessionStarts) {
+      const settled = this.inflightSettled.get(rpcId);
+      if (settled) pending.push(settled);
+    }
+    if (pending.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(pending),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** Wait briefly for cancelled in-flight RPCs of `sessionId` to unwind before teardown. */
+  async awaitSessionCancelled(sessionId: string, timeoutMs = 1_000): Promise<void> {
+    const pending: Promise<void>[] = [];
+    for (const [rpcId, owner] of this.requestSessions) {
+      if (owner !== sessionId) continue;
+      const settled = this.inflightSettled.get(rpcId);
+      if (settled) pending.push(settled);
+    }
+    if (pending.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(pending),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** Release hover latches and `OVERLAY_AUTOMATION_BYPASS` state for a session (or all sessions). */
+  releaseHoverForSession(sessionId?: string, tabId?: number): Promise<void> {
+    return this.releaseHoverLatch(sessionId, tabId);
+  }
+
+  /** Release cached full-page screenshot exports belonging to a stopped session. */
+  releaseScreenshotExports(sessionId: string): Promise<void> {
+    return this.screenshotExports.releaseSession(sessionId);
+  }
+
   private async dispatch(msg: ProtocolFrame): Promise<void> {
     if (!isRequestFrame(msg)) return;
     const raw = msg;
+    const requestEpoch = this.connectionEpoch;
 
     // Cancel frames take a fast path: trip the matching controller
     // (if any), reply with `{cancelled}` so the daemon can answer
     // its own peer, and skip the regular tool dispatch.
     if (raw.method === "cancel") {
       if (!validateCancelParams(raw.params)) {
-        this.sendResponse({
-          id: raw.id,
-          error: { code: "invalid_params", message: "cancel requires a string rpc_id" },
-        });
+        this.sendResponse(
+          {
+            id: raw.id,
+            error: { code: "invalid_params", message: "cancel requires a string rpc_id" },
+          },
+          requestEpoch,
+        );
         return;
       }
       const params = raw.params;
@@ -384,7 +484,15 @@ export class ToolDispatcher {
         id: raw.id,
         result: { cancelled: ac !== undefined },
       };
-      this.sendResponse(reply);
+      this.sendResponse(reply, requestEpoch);
+      return;
+    }
+
+    if (!this.acceptingRequests) {
+      this.sendResponse({
+        id: raw.id,
+        error: { code: "cancelled", message: "Connection is disconnecting" },
+      });
       return;
     }
 
@@ -397,13 +505,16 @@ export class ToolDispatcher {
           ? params.session_id
           : undefined;
       if (typeof sessionId === "string" && this.sessions.get(sessionId)?.remote) {
-        this.sendResponse({
-          id: raw.id,
-          error: {
-            code: "unsupported",
-            message: "Remote connections do not support upload or download",
+        this.sendResponse(
+          {
+            id: raw.id,
+            error: {
+              code: "unsupported",
+              message: "Remote connections do not support upload or download",
+            },
           },
-        });
+          requestEpoch,
+        );
         return;
       }
     }
@@ -412,7 +523,7 @@ export class ToolDispatcher {
 
     const decoded = decodeToolRequest(raw);
     if (!decoded.ok) {
-      this.sendResponse({ id: raw.id, error: decoded.error });
+      this.sendResponse({ id: raw.id, error: decoded.error }, requestEpoch);
       return;
     }
     const req = decoded.request;
@@ -420,9 +531,17 @@ export class ToolDispatcher {
     const startsSession = req.method === "tool.session_start";
     const stopsSession = req.method === "tool.session_stop";
     const mutatesSessions = startsSession || stopsSession;
-    if (startsSession) this.pendingSessionStarts += 1;
+    if (startsSession) {
+      this.pendingSessionStarts += 1;
+      this.inflightSessionStarts.add(req.id);
+    }
     const ac = new AbortController();
+    let markSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      markSettled = resolve;
+    });
     this.inflightAbortControllers.set(req.id, ac);
+    this.inflightSettled.set(req.id, settled);
     const requestSessionId =
       "session_id" in req.params && typeof req.params.session_id === "string"
         ? req.params.session_id
@@ -597,36 +716,45 @@ export class ToolDispatcher {
         this.activeDialogOperations.delete(requestSessionId);
       }
     }
-    if (mutatesSessions) {
-      this.debug?.sync();
-      const pendingSync = this.onSessionsChanged?.();
-      if (pendingSync) await pendingSync;
-    }
-    const sent = this.sendResponse(body);
-    if (!sent && startedSession) {
-      // The daemon never observed the session id we just allocated, so
-      // its `start_session` reservation will be cancelled. Roll back
-      // the Agent Window + SessionContext here so we do not leak an
-      // orphan window the user has to close manually (review M4/M5
-      // round 3 I-R3-3).
-      try {
-        const ctx = await this.sessions.stop(startedSession);
-        if (ctx) {
-          console.warn(
-            "[bsk dispatcher] rolled back orphan session after send failure",
-            startedSession,
-          );
-        }
-      } catch (rollbackErr) {
-        console.warn("[bsk dispatcher] session rollback after send failure failed", rollbackErr);
+    try {
+      if (mutatesSessions) {
+        this.debug?.sync();
+        const pendingSync = this.onSessionsChanged?.();
+        if (pendingSync) await pendingSync;
       }
-      this.debug?.sync();
-      const rollbackSync = this.onSessionsChanged?.();
-      if (rollbackSync) await rollbackSync;
+      const sent = this.sendResponse(body, requestEpoch);
+      if (!sent && startedSession) {
+        // The daemon never observed the session id we just allocated, so
+        // its `start_session` reservation will be cancelled. Roll back
+        // the Agent Window + SessionContext here so we do not leak an
+        // orphan window the user has to close manually (review M4/M5
+        // round 3 I-R3-3).
+        try {
+          const ctx = await this.sessions.stop(startedSession);
+          if (ctx) {
+            console.warn(
+              "[bsk dispatcher] rolled back orphan session after send failure",
+              startedSession,
+            );
+          }
+        } catch (rollbackErr) {
+          console.warn("[bsk dispatcher] session rollback after send failure failed", rollbackErr);
+        }
+        this.debug?.sync();
+        const rollbackSync = this.onSessionsChanged?.();
+        if (rollbackSync) await rollbackSync;
+      }
+    } finally {
+      this.inflightSettled.delete(req.id);
+      this.inflightSessionStarts.delete(req.id);
+      markSettled();
     }
   }
 
-  private sendResponse(body: ResponseFrame): boolean {
+  private sendResponse(body: ResponseFrame, expectedEpoch?: number): boolean {
+    if (expectedEpoch !== undefined && expectedEpoch !== this.connectionEpoch) {
+      return false;
+    }
     try {
       this.transport.send(body);
       return true;
@@ -726,6 +854,7 @@ export class ToolDispatcher {
       });
       if (!this.sessions.has(params.session_id)) {
         this.cooperation?.release(params.session_id);
+        evictSessionCdpRunner(this.cdp, params.session_id);
         clearObserveIdentityStreaksForSession(params.session_id);
       }
       return result;
@@ -1234,21 +1363,7 @@ export class ToolDispatcher {
   /** Teardown must also dismiss dialogs opened after their initiating action
    * returned, including a chained dialog resumed by the first dismissal. */
   private withDialogCleanup(sessionId: string, stop: () => Promise<unknown>): Promise<unknown> {
-    const owned = (tabId: number) => this.sessions.findControllingSession(tabId) === sessionId;
-    const dismiss = (id: string) => this.cdp?.resolveDialog?.(id, false).catch(() => {});
-    const subscription = this.cdp?.onDialogChanged?.((tabId, dialog) => {
-      if (dialog && owned(tabId)) void dismiss(dialog.id);
-    });
-    const pending = (this.cdp?.pendingDialogs?.() ?? []).filter((dialog) => owned(dialog.tab_id));
-    if (!subscription && pending.length === 0) return stop();
-    return (async () => {
-      try {
-        await Promise.all(pending.map((dialog) => dismiss(dialog.id)));
-        return await stop();
-      } finally {
-        subscription?.dispose();
-      }
-    })();
+    return withSessionDialogCleanup(this.sessions, this.cdp, sessionId, stop);
   }
 
   private getBorrowApprover(): BorrowConfirmationApprover | undefined {
