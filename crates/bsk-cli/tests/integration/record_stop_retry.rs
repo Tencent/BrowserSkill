@@ -465,7 +465,7 @@ async fn exercise_record_cleanup(first: Method, cleanup: Cleanup) {
         assert_eq!(lead_trace, follow_trace);
         let exported: Value = serde_json::from_slice(&lead_trace).unwrap();
         assert_eq!(exported["stopped_by"], "cli_stop");
-        assert!(!home.join("record-session.json").exists());
+        assert_eq!(home.join("record-session.json").exists(), error_code.is_some());
         assert_eq!(daemon.state().sessions.len(), usize::from(error_code.is_some()));
         assert!(ws.next().now_or_never().is_none(), "duplicate extension teardown");
         shutdown.send(()).unwrap();

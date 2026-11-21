@@ -70,7 +70,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
                 "inspect `bsk dialog status --session <id> --json`; decide with dialog accept/dismiss, then retrieve the ORIGINAL result with `bsk operation await <operation-id> --session <id> --json`. Do not repeat the original action.",
             ),
             Some(
-                "call bsk_assist(action='dialog_status', session_id=...), decide with dialog_accept or dialog_dismiss, then retrieve the ORIGINAL result with bsk_assist(action='operation_await', operation_id=..., session_id=...). Do not repeat the original action.",
+                "call bsk_assist(action='dialog_status', session=...), decide with bsk_assist(action='dialog_accept', dialog_id=..., session=...) or bsk_assist(action='dialog_dismiss', dialog_id=..., session=...), then retrieve the ORIGINAL result with bsk_assist(action='operation_await', operation_id=..., session=...). Do not repeat the original action.",
             ),
             6,
         ),
@@ -90,7 +90,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
                 "upgrade both bsk CLI and the browser-skill extension; CLI and daemon may be on mismatched protocol versions",
             ),
             Some(
-                "check bsk_session(action='status'); daemon and extension protocol versions may be out of sync — ask the user to update both to protocol 2.0",
+                "check bsk_session(action='browsers'); daemon and extension protocol versions may be out of sync — ask the user to update both to protocol 2.0",
             ),
             // Design §3.1 maps version / protocol incompatibility to
             // exit 5 and the design notes call out `unknown_method`
@@ -105,7 +105,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
                 "check `bsk --version` and the bsk changelog to confirm whether the feature is available",
             ),
             Some(
-                "call bsk_session(action='status') to confirm supported capabilities on this build",
+                "call bsk_session(action='browsers') to confirm connected versions and supported capabilities on this build",
             ),
             1,
         ),
@@ -121,7 +121,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
                 "the session, tab, or browser may have stopped; run `bsk session list` / `bsk browsers` to see current state",
             ),
             Some(
-                "the session, tab, or browser may have stopped; call bsk_session(action='list') or bsk_session(action='status') to see current state",
+                "the session, tab, or browser may have stopped; call bsk_session(action='list') or bsk_session(action='browsers') to see current state",
             ),
             1,
         ),
@@ -131,7 +131,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
                 "tabs outside an Agent Window must first be borrowed via `bsk tab borrow <tab-id> --session <id>`",
             ),
             Some(
-                "tabs outside an Agent Window must first be borrowed via bsk_tabs(action='borrow', tab_id=..., session_id=...)",
+                "tabs outside an Agent Window must first be borrowed via bsk_tabs(action='borrow', tab_id=..., session=...)",
             ),
             1,
         ),
@@ -161,7 +161,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
                 "ensure CLI and daemon protocol versions match — check `protocol version` in `bsk status`",
             ),
             Some(
-                "ensure MCP server and daemon protocol versions match — check bsk_session(action='status')",
+                "ensure MCP server and daemon protocol versions match — check bsk_session(action='browsers')",
             ),
             2,
         ),
@@ -195,7 +195,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
                 "use `--browser <instance_id-or-label>` to target a specific browser (run `bsk browsers` to list online browsers)",
             ),
             Some(
-                "pass browser=<instance_id-or-label> on bsk_session(action='open'|'start') after listing online browsers via bsk_session(action='status')",
+                "pass browser=<instance_id-or-label> on bsk_session(action='open'|'start') after listing online browsers via bsk_session(action='browsers')",
             ),
             1,
         ),
@@ -274,7 +274,7 @@ pub fn reason_info_for_error(
                     Some("ask the user to upgrade the BrowserSkill extension to protocol 2.0+")
                 }
                 _ => Some(
-                    "call bsk_session(action='status') and ask the user to upgrade both bsk CLI/daemon and extension to protocol 2.0+",
+                    "call bsk_session(action='browsers') and ask the user to upgrade both bsk CLI/daemon and extension to protocol 2.0+",
                 ),
             },
             base.exit_code,
@@ -401,7 +401,7 @@ pub fn reason_info_for_error(
                 "all pages were preserved and browser control ended; this session cannot resume. Ask the user before starting a new session or borrowing a page again",
             ),
             Some(
-                "all pages were preserved and browser control ended; this session cannot resume. Ask the user before calling bsk_session(action='open'|'start') or bsk_tabs(action='borrow')",
+                "all pages were preserved and browser control ended; this session cannot resume. Ask the user before calling bsk_session(action='open'|'start') or bsk_tabs(action='borrow', tab_id=...)",
             ),
             base.exit_code,
         ),
@@ -431,7 +431,7 @@ pub fn reason_info_for_error(
                 "use `bsk cooperate wait --session SID`, then `bsk cooperate sync --session SID`; replan toward the assigned goal and check existing effects before another action",
             ),
             Some(
-                "call bsk_assist(action='cooperate_wait', session_id=...), then bsk_session(action='sync', session_id=...); replan toward the assigned goal and check existing effects before another action",
+                "call bsk_session(action='wait', session=...), then bsk_session(action='sync', session=...); replan toward the assigned goal and check existing effects before another action",
             ),
             base.exit_code,
         ),
@@ -441,7 +441,7 @@ pub fn reason_info_for_error(
                 "reload the tab once; if it persists, use read-only commands such as `bsk get-html` or `bsk snapshot`",
             ),
             Some(
-                "reload once via bsk_page(action='reload'); if it persists, use read-only bsk_inspect(action='get_html'|'snapshot')",
+                "reload once via bsk_page(action='reload'); if it persists, use read-only bsk_inspect(action='html'|'snapshot')",
             ),
             base.exit_code,
         ),
@@ -483,7 +483,7 @@ pub fn reason_info_for_error(
                 "run `bsk open <url>` first to start a session and synchronize, or pass `--session <id>`",
             ),
             Some(
-                "call bsk_session(action='open', url=...) first to start a session and synchronize, or pass session_id",
+                "call bsk_session(action='open', url=...) first to start a session and synchronize, or pass session",
             ),
             base.exit_code,
         ),
@@ -493,7 +493,7 @@ pub fn reason_info_for_error(
                 "pass `--session <id>` (see `bsk session list`), set `BSK_SCOPE=<name>`, or run `bsk open --scope <name> <url>`",
             ),
             Some(
-                "pass session_id (see bsk_session(action='list')), or pass an explicit scope on bsk_session(action='open', scope=...)",
+                "pass session (see bsk_session(action='list')), or pass an explicit scope on bsk_session(action='open', url=..., scope=...)",
             ),
             base.exit_code,
         ),
@@ -509,7 +509,7 @@ pub fn reason_info_for_error(
                 "run `bsk close` first, or pass `--scope <new-scope>` to open another browser profile in parallel",
             ),
             Some(
-                "call bsk_session(action='stop') first, or pass a new `scope` on bsk_session(action='open') to open another browser profile in parallel",
+                "call bsk_session(action='stop') first, or pass a new `scope` on bsk_session(action='open', url=..., scope=...) to open another browser profile in parallel",
             ),
             base.exit_code,
         ),
@@ -519,7 +519,7 @@ pub fn reason_info_for_error(
                 "run `bsk close` first, or pass `--scope <new-scope>` to run normal and incognito sessions in parallel",
             ),
             Some(
-                "call bsk_session(action='stop') first, or pass a new `scope` on bsk_session(action='open') to run normal and incognito sessions in parallel",
+                "call bsk_session(action='stop') first, or pass a new `scope` on bsk_session(action='open', url=..., scope=...) to run normal and incognito sessions in parallel",
             ),
             base.exit_code,
         ),
@@ -539,7 +539,7 @@ pub fn reason_info_for_error(
                 "for DOM data use read/extract without syncing again; actual scripts/visual actions require a fresh sync and explicit --observation. Never replay uncertain actions",
             ),
             Some(
-                "for DOM data call bsk_inspect(action='read'|'extract') without syncing again; scripts/visual actions require a fresh bsk_session(action='sync') and explicit observation_id. Never replay uncertain actions",
+                "for DOM data call bsk_inspect(action='read'|'extract') without syncing again; scripts/visual actions require a fresh bsk_session(action='sync') and explicit observation. Never replay uncertain actions",
             ),
             base.exit_code,
         ),
@@ -576,7 +576,7 @@ pub fn reason_info_for_error(
             "the user has control of this tab",
             Some("wait for control to return, then synchronize before deciding on another action"),
             Some(
-                "call bsk_assist(action='cooperate_wait'), then bsk_session(action='sync') before deciding on another action",
+                "call bsk_session(action='wait'), then bsk_session(action='sync') before deciding on another action",
             ),
             base.exit_code,
         ),
@@ -586,7 +586,7 @@ pub fn reason_info_for_error(
                 "wait for the user to return control, then inspect the current operation or dialog before deciding again; status and cancellation remain available; do not replay the original action",
             ),
             Some(
-                "wait for the user to return control via bsk_assist(action='cooperate_wait'), then inspect the current operation or dialog before deciding again; status and cancellation remain available; do not replay the original action",
+                "wait for the user to return control via bsk_session(action='wait'), then inspect the current operation or dialog before deciding again; status and cancellation remain available; do not replay the original action",
             ),
             base.exit_code,
         ),
@@ -685,7 +685,7 @@ pub fn reason_info_for_error(
         (ErrorCode::PermissionDenied, RpcErrorReason::IncognitoBorrowDisabled) => info(
             "tab borrowing is unavailable for incognito sessions and tabs",
             Some("create a new task tab with `bsk tab create <url> --session <id>`"),
-            Some("create a new task tab with bsk_tabs(action='create', url=..., session_id=...)"),
+            Some("create a new task tab with bsk_tabs(action='create', url=..., session=...)"),
             base.exit_code,
         ),
         (ErrorCode::PermissionDenied, RpcErrorReason::BorrowConflict) => info(
@@ -694,7 +694,7 @@ pub fn reason_info_for_error(
                 "return the tab from the borrowing session via `bsk tab return <tab-id> --session <id>` or stop that session",
             ),
             Some(
-                "return the tab from the borrowing session via bsk_tabs(action='return', tab_id=..., session_id=...) or stop that session",
+                "return the tab from the borrowing session via bsk_tabs(action='return', tab_id=..., session=...) or stop that session",
             ),
             base.exit_code,
         ),
@@ -865,7 +865,7 @@ pub fn reason_info_for_error(
                 "select the tab with `bsk tab select <tab-id> --session <id>` or omit `--tab-id` to capture the Agent Window's active tab",
             ),
             Some(
-                "select the tab via bsk_tabs(action='select', tab_id=..., session_id=...) or omit tab_id to capture the Agent Window's active tab",
+                "select the tab via bsk_tabs(action='select', tab_id=..., session=...) or omit tab_id to capture the Agent Window's active tab",
             ),
             base.exit_code,
         ),
@@ -875,7 +875,7 @@ pub fn reason_info_for_error(
                 "wait for the current command to finish, or cancel it through its parent process or with Ctrl-C in the terminal running that command, then retry; if the caller is gone and the session stays busy, use `bsk daemon restart` (interrupts all sessions)",
             ),
             Some(
-                "wait for the current command via bsk_debug(action='wait', session_id=...) or cancel it via bsk_assist(action='operation_cancel'); if a wedged process stays busy across restarts, ask the user to restart the daemon",
+                "wait for the current command via bsk_debug(action='wait', session=...) or cancel it via bsk_assist(action='operation_cancel', operation_id=..., session=...); if a wedged process stays busy across restarts, ask the user to restart the daemon",
             ),
             base.exit_code,
         ),
@@ -927,7 +927,7 @@ pub fn reason_info_for_error(
                 "use --full-page --scope current only if the currently loaded document range satisfies the request",
             ),
             Some(
-                "pass full_page=true with full_page_scope='current' on bsk_inspect(action='screenshot') only if the currently loaded document range satisfies the request",
+                "call bsk_inspect(action='screenshot', full_page=true, full_page_scope='current') only if the currently loaded document range satisfies the request",
             ),
             4,
         ),
@@ -966,7 +966,7 @@ pub fn reason_info_for_error(
                 "the page may use a non-input picker such as showOpenFilePicker(); when effect_state is none, re-observe and use `--mode drop` once only for a reliably identified attachment-receiving area — otherwise use `bsk request-help` with the exact original local path",
             ),
             Some(
-                "the page may use a non-input picker such as showOpenFilePicker(); when effect_state is none, re-observe and call bsk_interact(action='upload', mode='drop') once only for a reliably identified attachment-receiving area — otherwise call bsk_assist(action='request_help') with the exact original local path",
+                "the page may use a non-input picker such as showOpenFilePicker(); when effect_state is none, re-observe and call bsk_interact(action='upload', params={\"mode\": \"drop\", \"files\": [...]}) once only for a reliably identified attachment-receiving area — otherwise call bsk_assist(action='request_help', prompt=...) with the exact original local path",
             ),
             base.exit_code,
         ),
@@ -976,7 +976,7 @@ pub fn reason_info_for_error(
                 "do not retry the same upload blindly; use `bsk request-help` when human help is available",
             ),
             Some(
-                "do not retry the same upload blindly; call bsk_assist(action='request_help') when human help is available",
+                "do not retry the same upload blindly; call bsk_assist(action='request_help', prompt=...) when human help is available",
             ),
             base.exit_code,
         ),
@@ -986,7 +986,7 @@ pub fn reason_info_for_error(
                 "check that BrowserSkill has Chrome's 'Allow access to file URLs' permission; otherwise use `bsk request-help`",
             ),
             Some(
-                "check that BrowserSkill has Chrome's 'Allow access to file URLs' permission; otherwise call bsk_assist(action='request_help')",
+                "check that BrowserSkill has Chrome's 'Allow access to file URLs' permission; otherwise call bsk_assist(action='request_help', prompt=...)",
             ),
             base.exit_code,
         ),
@@ -996,7 +996,7 @@ pub fn reason_info_for_error(
                 "do not retry the same drop; use a standard file-input target or `bsk request-help`",
             ),
             Some(
-                "do not retry the same drop; use a standard file-input target or bsk_assist(action='request_help')",
+                "do not retry the same drop; use a standard file-input target or bsk_assist(action='request_help', prompt=...)",
             ),
             base.exit_code,
         ),
@@ -1019,7 +1019,7 @@ pub fn reason_info_for_error(
                 "do not retry when effect_state is unknown; observe the page first, otherwise use `bsk request-help`",
             ),
             Some(
-                "do not retry when effect_state is unknown; call bsk_inspect(action='observe') first, otherwise call bsk_assist(action='request_help')",
+                "do not retry when effect_state is unknown; call bsk_inspect(action='observe') first, otherwise call bsk_assist(action='request_help', prompt=...)",
             ),
             base.exit_code,
         ),
@@ -1707,7 +1707,9 @@ mod tests {
     }
 
     #[test]
-    fn mcp_hints_never_emit_cli_only_commands() {
+    fn mcp_hints_never_emit_cli_only_commands_and_match_real_mcp_schemas() {
+        use serde_json::{Map, Value, json};
+
         const FORBIDDEN_CLI_CMDS: &[&str] = &[
             "bsk sync",
             "bsk cooperate",
@@ -1730,29 +1732,242 @@ mod tests {
             "bsk status",
             "bsk daemon restart",
         ];
-        for &code in ErrorCode::ALL {
-            let base = info_for(code);
-            let effective = base.mcp_hint.or(base.hint).unwrap_or_default();
+        // Protocol/CLI wire field names that fail `deny_unknown_fields` on MCP tool args.
+        const FORBIDDEN_MCP_DRIFT: &[&str] = &[
+            "session_id",
+            "observation_id",
+            "cooperate_wait",
+            "action='get_html'",
+            "mode='drop'",
+        ];
+
+        let defs: std::collections::HashMap<String, Value> = crate::cli::mcp::tools::definitions()
+            .into_iter()
+            .map(|d| (d["name"].as_str().unwrap().to_owned(), d))
+            .collect();
+
+        fn split_top_level_args(body: &str) -> Vec<&str> {
+            let mut parts = Vec::new();
+            let mut start = 0;
+            let mut brace_depth = 0usize;
+            let mut in_single = false;
+            let mut in_double = false;
+            for (idx, ch) in body.char_indices() {
+                match ch {
+                    '\'' if !in_double => in_single = !in_single,
+                    '"' if !in_single => in_double = !in_double,
+                    '{' if !in_single && !in_double => brace_depth += 1,
+                    '}' if !in_single && !in_double => brace_depth = brace_depth.saturating_sub(1),
+                    ',' if !in_single && !in_double && brace_depth == 0 => {
+                        parts.push(body[start..idx].trim());
+                        start = idx + 1;
+                    }
+                    _ => {}
+                }
+            }
+            let tail = body[start..].trim();
+            if !tail.is_empty() {
+                parts.push(tail);
+            }
+            parts
+        }
+
+        fn parse_mcp_calls(hint: &str) -> Vec<(String, String)> {
+            let mut out = Vec::new();
+            let bytes = hint.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let Some(rel) = hint[i..].find("bsk_") else {
+                    break;
+                };
+                let start = i + rel;
+                let mut name_end = start + 4;
+                while name_end < bytes.len()
+                    && (bytes[name_end].is_ascii_lowercase() || bytes[name_end] == b'_')
+                {
+                    name_end += 1;
+                }
+                let tool = hint[start..name_end].to_owned();
+                if name_end < bytes.len() && bytes[name_end] == b'(' {
+                    let mut depth = 0usize;
+                    let mut close = None;
+                    for (off, ch) in hint[name_end..].char_indices() {
+                        match ch {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close = Some(name_end + off);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let close = close
+                        .unwrap_or_else(|| panic!("unclosed MCP call `{tool}(` in hint: {hint}"));
+                    out.push((tool, hint[name_end + 1..close].to_owned()));
+                    i = close + 1;
+                } else {
+                    i = name_end;
+                }
+            }
+            out
+        }
+
+        fn sample_value_for(schema: &Value, raw: &str) -> Value {
+            let raw = raw.trim();
+            if raw.starts_with('{') {
+                let normalized = raw.replace("[...]", "[\"/tmp/sample.txt\"]");
+                return serde_json::from_str(&normalized).unwrap_or_else(|e| {
+                    panic!("invalid JSON object literal `{raw}` in hint: {e}")
+                });
+            }
+            if raw == "true" {
+                return Value::Bool(true);
+            }
+            if raw == "false" {
+                return Value::Bool(false);
+            }
+            if raw.starts_with('\'') && raw.ends_with('\'') && raw.len() >= 2 {
+                return Value::String(raw[1..raw.len() - 1].to_owned());
+            }
+            match schema.get("type").and_then(Value::as_str) {
+                Some("integer") => json!(1),
+                Some("number") => json!(1.0),
+                Some("boolean") => json!(true),
+                Some("array") => json!([]),
+                Some("object") => json!({}),
+                _ => json!("sample"),
+            }
+        }
+
+        let validate_hint = |label: &str, hint: &str| {
             for pat in FORBIDDEN_CLI_CMDS {
                 assert!(
-                    !effective.contains(pat),
-                    "base MCP hint for {code:?} leaked CLI command `{pat}`: {effective}"
+                    !hint.contains(pat),
+                    "{label} leaked CLI command `{pat}`: {hint}"
                 );
             }
-            for &reason in RpcErrorReason::ALL {
-                let rendered = info_for_error(
-                    code,
-                    Some(&serde_json::json!({ "reason": reason.as_str() })),
+            for pat in FORBIDDEN_MCP_DRIFT {
+                assert!(
+                    !hint.contains(pat),
+                    "{label} leaked drifted MCP name `{pat}`: {hint}"
                 );
-                let effective = rendered.mcp_hint.or(rendered.hint).unwrap_or_default();
-                for pat in FORBIDDEN_CLI_CMDS {
-                    assert!(
-                        !effective.contains(pat),
-                        "MCP hint for ({code:?}, {reason:?}) leaked CLI command `{pat}`: {effective}"
+            }
+            for (tool, body) in parse_mcp_calls(hint) {
+                let def = defs.get(&tool).unwrap_or_else(|| {
+                    panic!("{label} referenced unknown MCP tool `{tool}`: {hint}")
+                });
+                let props = def["inputSchema"]["properties"]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{tool} missing inputSchema.properties"));
+                let mut actions: Vec<String> = Vec::new();
+                let mut other_fields: Vec<(String, Value)> = Vec::new();
+                for arg in split_top_level_args(&body) {
+                    let Some((key, val)) = arg.split_once('=') else {
+                        panic!("{label} malformed arg `{arg}` in {tool}({body}): {hint}");
+                    };
+                    let key = key.trim();
+                    let val = val.trim();
+                    let prop_schema = props.get(key).unwrap_or_else(|| {
+                        panic!("{label} referenced unknown parameter `{key}` on `{tool}`: {hint}")
+                    });
+                    if key == "action" {
+                        let allowed_enum = prop_schema["enum"]
+                            .as_array()
+                            .unwrap_or_else(|| panic!("{tool}.action missing enum"));
+                        for variant in val.split('|') {
+                            let v = variant.trim().trim_matches('\'');
+                            assert!(
+                                allowed_enum.iter().any(|e| e.as_str() == Some(v)),
+                                "{label} referenced invalid action `{v}` on `{tool}` (allowed: {allowed_enum:?}): {hint}"
+                            );
+                            actions.push(v.to_owned());
+                        }
+                    } else {
+                        other_fields.push((key.to_owned(), sample_value_for(prop_schema, val)));
+                    }
+                }
+                assert!(
+                    !actions.is_empty(),
+                    "{label} call to `{tool}({body})` must specify a valid action: {hint}"
+                );
+                let is_union = actions.len() > 1;
+                for action in actions {
+                    let mut obj = Map::new();
+                    obj.insert("action".into(), Value::String(action));
+                    for (k, v) in &other_fields {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                    crate::cli::mcp::tools::tests::assert_valid_mcp_args(
+                        &tool,
+                        &Value::Object(obj),
+                        is_union,
                     );
                 }
             }
+        };
+
+        let mut total_calls_validated = 0usize;
+        for &code in ErrorCode::ALL {
+            let base = info_for(code);
+            let effective = base.mcp_hint.or(base.hint).unwrap_or_default();
+            total_calls_validated += parse_mcp_calls(effective).len();
+            validate_hint(&format!("base {code:?}"), effective);
+
+            for &reason in RpcErrorReason::ALL {
+                for component in [None, Some("daemon"), Some("extension")] {
+                    let data = match component {
+                        Some(c) => json!({ "reason": reason.as_str(), "component": c }),
+                        None => json!({ "reason": reason.as_str() }),
+                    };
+                    let rendered = info_for_error(code, Some(&data));
+                    let effective = rendered.mcp_hint.or(rendered.hint).unwrap_or_default();
+                    total_calls_validated += parse_mcp_calls(effective).len();
+                    validate_hint(&format!("({code:?}, {reason:?}, {component:?})"), effective);
+                }
+            }
         }
+        // Also validate the local daemon fallback hint emitted by `mcp_json_error_value`.
+        let local_err = crate::cli::error::mcp_json_error_value(
+            &crate::cli::error::CliError::Local(anyhow::anyhow!("connect failed")),
+        );
+        let local_hint = local_err["hint"].as_str().unwrap_or_default();
+        total_calls_validated += parse_mcp_calls(local_hint).len();
+        validate_hint("CliError::Local", local_hint);
+        assert!(
+            total_calls_validated > 0,
+            "expected MCP hint validator to exercise real bsk_* calls"
+        );
+
+        // Diagnostic/missing-session errors must point at `bsk_session(action='browsers')`,
+        // never `bsk_session(action='status')` (which requires an active session).
+        for (code, data) in [
+            (ErrorCode::UnknownMethod, None),
+            (ErrorCode::Unsupported, None),
+            (ErrorCode::NotFound, None),
+            (ErrorCode::ProtocolError, None),
+            (ErrorCode::MultipleBrowsersOnline, None),
+            (
+                ErrorCode::Unsupported,
+                Some(json!({ "reason": RpcErrorReason::UnsupportedFeature.as_str() })),
+            ),
+        ] {
+            let effective = info_for_error(code, data.as_ref())
+                .mcp_hint
+                .unwrap_or_default();
+            assert!(
+                effective.contains("bsk_session(action='browsers')"),
+                "expected browsers diagnostic for ({code:?}, {data:?}): {effective}"
+            );
+            assert!(
+                !effective.contains("bsk_session(action='status')"),
+                "must not suggest session-requiring status for ({code:?}, {data:?}): {effective}"
+            );
+        }
+        assert!(local_hint.contains("bsk_session(action='browsers')"));
+        assert!(!local_hint.contains("bsk_session(action='status')"));
     }
     #[test]
     fn target_control_errors_point_to_the_failed_check() {
