@@ -169,7 +169,7 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
         onProgressTransitionEnd={(event) => {
           if (!awaitingAutoDeny || secondsLeft !== 0) return;
           if (event.propertyName !== "width") return;
-          handleDeny();
+          handleDeny(true);
         }}
       />
       <ActionButtons onDeny={() => handleDeny()} onAllow={handleAllow} gapClass="gap-2" />

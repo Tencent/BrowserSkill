@@ -10,11 +10,7 @@ import {
   type RecordFramePortMessage,
   type RecordFrameStartMessage,
 } from "@/lib/recording/frame-bridge";
-import {
-  hasAddedSubframeElement,
-  isExtensionOverlayNode,
-  openOrClosedShadowRoot,
-} from "../dom-primitives";
+import { isExtensionOverlayNode, scanSubtreeForShadowRootsAndSubframes } from "../dom-primitives";
 import { type RecordCaptureController, startRecordCapture } from "../record-capture";
 import { RecordStepDelivery } from "../record-step-delivery";
 
@@ -117,36 +113,24 @@ export class RecordFrameAgent {
     );
     let subframeNotifyScheduled = false;
     const observedSubframeRoots = new WeakSet<Node>();
-    const observeSubframesIn = (target: Node) => {
-      if (isExtensionOverlayNode(target)) return;
-      if (
-        target.nodeType === Node.DOCUMENT_NODE ||
-        target instanceof ShadowRoot ||
-        target === root
-      ) {
-        if (!observedSubframeRoots.has(target)) {
-          observedSubframeRoots.add(target);
-          subframeObserver.observe(target, { childList: true, subtree: true });
-        }
-      }
-      if (target instanceof Element) {
-        const nested = openOrClosedShadowRoot(target);
-        if (nested) observeSubframesIn(nested);
-      }
-      if ("querySelectorAll" in target) {
-        for (const el of (target as ParentNode).querySelectorAll("*")) {
-          if (isExtensionOverlayNode(el)) continue;
-          const nested = openOrClosedShadowRoot(el);
-          if (nested) observeSubframesIn(nested);
-        }
-      }
+    const observeSubframeRoot = (shadowOrRoot: Node) => {
+      if (observedSubframeRoots.has(shadowOrRoot)) return;
+      observedSubframeRoots.add(shadowOrRoot);
+      subframeObserver.observe(shadowOrRoot, { childList: true, subtree: true });
     };
     const subframeObserver = new MutationObserver((records) => {
+      const visited = new Set<Node>();
+      let addedSubframe = false;
       for (const record of records) {
         if (record.type !== "childList" || isExtensionOverlayNode(record.target)) continue;
-        for (const node of record.addedNodes) observeSubframesIn(node);
+        for (const node of record.addedNodes) {
+          if (!(node instanceof Element) || isExtensionOverlayNode(node)) continue;
+          if (scanSubtreeForShadowRootsAndSubframes(node, observeSubframeRoot, visited)) {
+            addedSubframe = true;
+          }
+        }
       }
-      if (subframeNotifyScheduled || !hasAddedSubframeElement(records)) return;
+      if (subframeNotifyScheduled || !addedSubframe) return;
       subframeNotifyScheduled = true;
       queueMicrotask(() => {
         subframeNotifyScheduled = false;
@@ -162,7 +146,8 @@ export class RecordFrameAgent {
         }
       });
     });
-    observeSubframesIn(root);
+    observeSubframeRoot(root);
+    scanSubtreeForShadowRootsAndSubframes(root, observeSubframeRoot, new Set<Node>());
     const active: ActiveFrameRecording = {
       requestId: message.requestId,
       producerId,
