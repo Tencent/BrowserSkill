@@ -156,7 +156,20 @@ pub(super) async fn handle_session_start_scoped(
     let binds_caller_scope = req_meta.bind_scope || req_meta.reuse_or_start_scope;
     let scope_lock = binds_caller_scope.then(|| state.scopes.scope_start_lock(scope));
     let _scope_guard = match &scope_lock {
-        Some(lock) => Some(lock.lock().await),
+        Some(lock) => {
+            if cancel.is_cancelled() {
+                return Err(map_start_error(StartSessionError::Cancelled));
+            }
+            let acquire = lock.lock();
+            tokio::pin!(acquire);
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(map_start_error(StartSessionError::Cancelled));
+                }
+                guard = &mut acquire => Some(guard),
+            }
+        }
         None => None,
     };
     if req_meta.reuse_or_start_scope
@@ -267,7 +280,7 @@ pub(super) async fn handle_session_start_scoped(
         }
         Err(err) => {
             if recoverable && let StartSessionError::CleanupFailed { session_id, .. } = &err {
-                state.tool_queues.spawn(session_id.clone());
+                state.tool_queues.spawn_if_live(session_id.clone());
             }
             let mut error = map_start_error(err);
             if error.code == ErrorCode::NoBrowserConnected && state.recent_unpaired().is_some() {
@@ -290,6 +303,7 @@ pub(super) fn map_start_error(err: StartSessionError) -> RpcError {
         StartSessionError::CleanupFailed { .. } => ErrorCode::ProtocolError,
         StartSessionError::TransportClosed => ErrorCode::ProtocolError,
         StartSessionError::ExtensionUnresponsive => ErrorCode::Timeout,
+        StartSessionError::DaemonRestarting => ErrorCode::ProtocolError,
         StartSessionError::ExtensionError(inner) => inner.code,
     };
     let message = err.to_string();
