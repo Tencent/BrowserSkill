@@ -321,6 +321,7 @@ describe("snapshot capture and hover", () => {
     expect(surfaceProbes).toEqual([
       {
         triggerBackendNodeId: 12,
+        triggerFrameId: "root",
         triggerPoint: { x: 956, y: 32 },
         triggerAction: "hover",
         subItems: ["My profile", "Sign out"],

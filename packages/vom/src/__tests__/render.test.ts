@@ -127,7 +127,7 @@ describe("renderVom single-layer page", () => {
     { checked: false, marker: " [unchecked]" },
     { checked: "mixed" as const, marker: " [mixed]" },
     { checked: undefined, marker: "" },
-  ])("renders checkbox state separately from its value: %j", ({ checked, marker }) => {
+  ])("renders checkbox state separately from explicit values: %j", ({ checked, marker }) => {
     const out = renderVom(
       scene([
         node({
@@ -137,13 +137,53 @@ describe("renderVom single-layer page", () => {
           role: "checkbox",
           name: "Subscribe",
           checked,
-          value: "on",
+          value: "weekly",
+          attrs: { value: "weekly" },
           rect: { x: 0, y: 0, w: 20, h: 20 },
         }),
       ]),
     );
-    expect(out.text).toContain('@e1 checkbox "Subscribe"' + marker + ' ="on"');
+    expect(out.text).toContain('@e1 checkbox "Subscribe"' + marker + ' ="weekly"');
     expect(out.refs).toHaveLength(1);
+  });
+
+  it("omits synthetic default ='on' on checkboxes without an explicit value attribute (including when redacted)", () => {
+    const unchecked = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          tag: "input",
+          role: "checkbox",
+          name: "Accept terms",
+          checked: false,
+          value: "on",
+          inputState: "empty",
+          rect: { x: 0, y: 0, w: 20, h: 20 },
+        }),
+      ]),
+    );
+    expect(unchecked.text).toContain('@e1 checkbox "Accept terms" [unchecked]');
+    expect(unchecked.text).not.toContain('="on"');
+
+    const redacted = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          tag: "input",
+          role: "checkbox",
+          name: "Accept terms",
+          checked: true,
+          value: "on",
+          inputState: "filled",
+          rect: { x: 0, y: 0, w: 20, h: 20 },
+        }),
+      ]),
+      { redactValues: true },
+    );
+    expect(redacted.text).toContain('@e1 checkbox "Accept terms" [checked]');
+    expect(redacted.text).not.toContain('="•••"');
   });
   it.each([100, 600, 2000])("bounds sibling-context reads for %i repeated actions", (count) => {
     let nameReads = 0;
@@ -916,6 +956,36 @@ describe("renderVom single-layer page", () => {
       ].join("\n"),
     );
     expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it("propagates trigger frameId onto active scope header and body rows in prepareObservationRender", () => {
+    const prepared = prepareObservationRender({
+      ...scene([
+        node({ id: 1, role: "RootWebArea", name: "Host", frameId: "main" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "tab",
+          name: "Child Tab",
+          tag: "button",
+          frameId: "oopif-1",
+        }),
+      ]),
+      activeScopeBlocks: [
+        {
+          triggerId: 2,
+          label: "Child Tab",
+          lines: ["OOPIF panel line 1", "OOPIF panel line 2"],
+        },
+      ],
+    });
+    const rows = Array.from({ [Symbol.iterator]: () => prepared.rows });
+    const scopeHeader = rows.find((row) => row.text.includes("[§ active: Child Tab]"));
+    const scopeLine1 = rows.find((row) => row.text.includes("OOPIF panel line 1"));
+    const scopeLine2 = rows.find((row) => row.text.includes("OOPIF panel line 2"));
+    expect(scopeHeader?.frameId).toBe("oopif-1");
+    expect(scopeLine1?.frameId).toBe("oopif-1");
+    expect(scopeLine2?.frameId).toBe("oopif-1");
   });
 
   it("does not render redundant children inside named ref controls", () => {

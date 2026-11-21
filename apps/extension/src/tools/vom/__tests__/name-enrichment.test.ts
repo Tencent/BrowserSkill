@@ -3,7 +3,7 @@ import { type FrameDocumentHandle, toFrameDocumentHandle } from "@/browser-drive
 import { type CdpRunner, createStubCdpRunner } from "../../shared";
 import type { CapturedNode } from "../capture";
 import type { FrameDocument, FrameOwnedAxNode } from "../frame-document";
-import { probeTooltipNames } from "../name-enrichment";
+import { clearTooltipCache, evictTooltipCacheForTab, probeTooltipNames } from "../name-enrichment";
 import { buildSemanticGraph, resolveSemanticGraph } from "../semantic-graph";
 import { stableIdentifierName } from "../semantic-graph/name-evidence";
 import { frameBackendKey } from "../semantic-graph/types";
@@ -221,6 +221,125 @@ describe("tooltip name enrichment", () => {
 
     expect(names.get(frameBackendKey("left", 701))).toBe("Left action");
     expect(names.get(frameBackendKey("right", 701))).toBe("Right action");
+  });
+
+  it("includes loaderId in cache keys so recycled backendNodeIds after reload never reuse stale tooltips", async () => {
+    clearTooltipCache();
+    let label = "Archive";
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      sendToFrame: vi.fn(async (_handle, method) => {
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 41 };
+        if (method === "DOM.resolveNode") return { object: { objectId: "btn-901" } };
+        if (method === "Runtime.callFunctionOn") {
+          const calls = vi
+            .mocked(cdp.sendToFrame)
+            .mock.calls.filter(([, m]) => m === "Runtime.callFunctionOn").length;
+          return { result: { value: calls % 2 === 0 ? [label] : [] } };
+        }
+        return {};
+      }) as CdpRunner["sendToFrame"],
+    });
+
+    const firstDocs = [
+      document(
+        toFrameDocumentHandle(15, { frameId: "main", loaderId: "loader-v1" }),
+        901,
+        undefined,
+        "main",
+      ),
+    ];
+    const firstNames = await probeTooltipNames(cdp, 15, firstDocs, semantics(firstDocs));
+    expect(firstNames.get(frameBackendKey("main", 901))).toBe("Archive");
+
+    // Same tab, frame, URL, and backendNodeId, but new loaderId after page reload -> must re-probe!
+    label = "Delete permanently";
+    const reloadedDocs = [
+      document(
+        toFrameDocumentHandle(15, { frameId: "main", loaderId: "loader-v2" }),
+        901,
+        undefined,
+        "main",
+      ),
+    ];
+    const reloadedNames = await probeTooltipNames(cdp, 15, reloadedDocs, semantics(reloadedDocs));
+    expect(reloadedNames.get(frameBackendKey("main", 901))).toBe("Delete permanently");
+    clearTooltipCache();
+  });
+
+  it("evicts cached tooltips on navigation or tab close and detaches chrome lifecycle listeners when empty", async () => {
+    clearTooltipCache();
+    const removedListeners = new Set<(tabId: number) => void>();
+    const navListeners = new Set<(details: { tabId: number; frameId: number }) => void>();
+    const prevChrome = (globalThis as { chrome?: unknown }).chrome;
+    (globalThis as { chrome?: unknown }).chrome = {
+      tabs: {
+        onRemoved: {
+          addListener: (fn: (tabId: number) => void) => removedListeners.add(fn),
+          removeListener: (fn: (tabId: number) => void) => removedListeners.delete(fn),
+        },
+      },
+      webNavigation: {
+        onCommitted: {
+          addListener: (fn: (details: { tabId: number; frameId: number }) => void) =>
+            navListeners.add(fn),
+          removeListener: (fn: (details: { tabId: number; frameId: number }) => void) =>
+            navListeners.delete(fn),
+        },
+      },
+    };
+    try {
+      let tooltipCall = 0;
+      const cdp: CdpRunner = createStubCdpRunner({
+        send: vi.fn(async () => ({})) as CdpRunner["send"],
+        sendToFrame: vi.fn(async (_handle, method) => {
+          if (method === "Page.createIsolatedWorld") return { executionContextId: 51 };
+          if (method === "DOM.resolveNode") return { object: { objectId: "btn-950" } };
+          if (method === "Runtime.callFunctionOn") {
+            tooltipCall += 1;
+            return { result: { value: tooltipCall % 2 === 0 ? [`Tip ${tooltipCall}`] : [] } };
+          }
+          return {};
+        }) as CdpRunner["sendToFrame"],
+      });
+
+      const docs = [
+        document(
+          toFrameDocumentHandle(21, { frameId: "main", loaderId: "loader-a" }),
+          950,
+          undefined,
+          "main",
+        ),
+      ];
+      const graph = semantics(docs);
+      const initial = await probeTooltipNames(cdp, 21, docs, graph);
+      expect(initial.get(frameBackendKey("main", 950))).toBe("Tip 2");
+      expect(removedListeners.size).toBe(1);
+      expect(navListeners.size).toBe(1);
+
+      // Main-frame navigation evicts entries for tab 21 and detaches listeners once empty.
+      for (const listener of navListeners) listener({ tabId: 21, frameId: 0 });
+      expect(removedListeners.size).toBe(0);
+      expect(navListeners.size).toBe(0);
+
+      const afterNav = await probeTooltipNames(cdp, 21, docs, graph);
+      expect(afterNav.get(frameBackendKey("main", 950))).toBe("Tip 4");
+      expect(removedListeners.size).toBe(1);
+
+      // Tab close evicts entries and detaches listeners again.
+      for (const listener of removedListeners) listener(21);
+      expect(removedListeners.size).toBe(0);
+      expect(navListeners.size).toBe(0);
+
+      // Explicit eviction helper also clears cleanly.
+      const rePopulated = await probeTooltipNames(cdp, 21, docs, graph);
+      expect(rePopulated.get(frameBackendKey("main", 950))).toBe("Tip 6");
+      evictTooltipCacheForTab(21);
+      expect(removedListeners.size).toBe(0);
+    } finally {
+      clearTooltipCache();
+      (globalThis as { chrome?: unknown }).chrome = prevChrome;
+    }
   });
 });
 

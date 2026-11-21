@@ -23,6 +23,7 @@ import {
   throwIfAborted as throwCaptureAborted,
 } from "./capture-abort";
 import {
+  applyHiddenTextExclusions,
   buildDocumentIndex,
   type CaptureIssue,
   type DocumentGeometry,
@@ -45,6 +46,7 @@ export interface FrameContext {
   targetProjection?: GeometryProjection | null;
   process: FrameProcessBoundary;
   coordinates: SnapshotCoordinates | null;
+  layoutScale?: number;
   pageScale?: number;
 }
 
@@ -53,6 +55,27 @@ export interface NormalizedDocument {
   nodes: NodeFacts[];
   index: DocumentIndex;
   documentElementBackendNodeId?: number;
+  hiddenExclusionsPending?: boolean;
+}
+
+/** Finalize deferred hidden-text exclusions once `layoutScale` is known (or fall back when geometry is unavailable). */
+export function finalizeDocumentHiddenExclusions(
+  document: NormalizedDocument,
+  layoutScale?: number,
+): void {
+  if (!document.hiddenExclusionsPending) return;
+  document.hiddenExclusionsPending = false;
+  const excluded = new Set(document.index.excludedBackendNodeIds);
+  applyHiddenTextExclusions(
+    [...document.index.nodes.values()],
+    document.index.nodes,
+    excluded,
+    layoutScale,
+  );
+  if (excluded.size !== document.index.excludedBackendNodeIds.size) {
+    document.index = { ...document.index, excludedBackendNodeIds: excluded };
+    document.nodes = document.nodes.filter((node) => !excluded.has(node.backendNodeId));
+  }
 }
 
 /** Custom progress widgets have no native .form owner. Preserve their raw
@@ -124,6 +147,7 @@ export async function normalizeDocument(
   context: FrameContext,
   signal?: AbortSignal,
   profile: SnapshotProfile = BASIC_SNAPSHOT,
+  deferHiddenTextExclusions = false,
 ): Promise<NormalizedDocument> {
   const decoded = await decodeDocument(doc, strings, signal, profile);
   const checkpoint = createCaptureCheckpoint(signal);
@@ -160,7 +184,8 @@ export async function normalizeDocument(
     nodes,
     signal,
     profile.includeVisualFacts,
-    context.coordinates?.layoutUnitsPerCssPixel,
+    context.coordinates?.layoutUnitsPerCssPixel ?? context.layoutScale,
+    deferHiddenTextExclusions ? { deferHiddenTextExclusions: true } : undefined,
   );
   await captureCustomProgressFormMembership(index, signal);
   const document: NormalizedDocument = {
@@ -168,6 +193,7 @@ export async function normalizeDocument(
       (node) => !node.tag.startsWith("#") && !index.excludedBackendNodeIds.has(node.backendNodeId),
     ),
     index,
+    ...(deferHiddenTextExclusions ? { hiddenExclusionsPending: true } : {}),
     documentElementBackendNodeId: nodes.find(
       (node) =>
         node.nodeType === 1 &&
@@ -187,6 +213,10 @@ async function projectDocument(
   signal?: AbortSignal,
   profile: SnapshotProfile = BASIC_SNAPSHOT,
 ): Promise<void> {
+  finalizeDocumentHiddenExclusions(
+    document,
+    context.coordinates?.layoutUnitsPerCssPixel ?? context.layoutScale,
+  );
   const checkpoint = createCaptureCheckpoint(signal);
   let i = 0;
   for (const node of document.index.nodes.values()) {
@@ -280,6 +310,7 @@ export async function prepareSnapshot(
       },
       signal,
       profile,
+      true,
     );
     documents.push({ ...normalized, frame, snapshot: doc });
   }
@@ -483,6 +514,7 @@ export async function projectSnapshot(
         process,
         ...(process.isOutOfProcess ? { targetProjection } : {}),
         coordinates,
+        layoutScale: layoutUnitsPerCssPixel ?? undefined,
       },
       signal,
       profile,
