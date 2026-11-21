@@ -64,6 +64,8 @@ mod browser_list_ordering;
 mod browser_liveness;
 #[path = "integration/cancel_forwarding.rs"]
 mod cancel_forwarding;
+#[path = "integration/cli_mcp_recipe_contracts_e2e.rs"]
+mod cli_mcp_recipe_contracts_e2e;
 #[path = "integration/cli_parse.rs"]
 mod cli_parse;
 #[path = "integration/cli_usage_errors.rs"]

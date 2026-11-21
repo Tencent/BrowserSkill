@@ -115,6 +115,13 @@ impl CliError {
         }
     }
 
+    pub(crate) fn is_session_busy(&self) -> bool {
+        self.data()
+            .and_then(|d| d.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            == Some(bsk_protocol::RpcErrorReason::SessionBusy.as_str())
+    }
+
     /// Map this error to the CLI exit code (§3.1).
     pub fn exit_code(&self) -> u8 {
         if let CliError::RenderedExit { exit_code } = self {
@@ -396,7 +403,7 @@ fn mcp_hint_for(err: &CliError) -> Option<&str> {
             CliError::Local(error) => recovery_hint(error)
                 .or_else(|| super::update::source_recovery_hint(error))
                 .or(Some(
-                    "is the bsk daemon running? check bsk_session(action='status') or ask the user to start the bsk daemon",
+                    "is the bsk daemon running? check bsk_session(action='browsers') or ask the user to start the bsk daemon",
                 )),
             _ => None,
         })
