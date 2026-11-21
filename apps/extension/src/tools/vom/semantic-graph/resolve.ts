@@ -600,6 +600,7 @@ function resolvedName(
   indexes: ResolveIndexes,
   supplementalNames: ReadonlyMap<string, string>,
   identifierFallback: boolean,
+  isSensitive: boolean,
 ): string | undefined {
   const attrs = node.dom?.attrs ?? EMPTY_ATTRS;
   const axIgnored = node.ax?.ignored === true;
@@ -612,8 +613,10 @@ function resolvedName(
     nativeLabelText(node, indexes) ??
     clean(attrs.title) ??
     clean(attrs.alt) ??
-    (axIgnored ? undefined : indexes.axText(node.id)) ??
-    indexes.domText(node.id);
+    // Sensitive controls must never derive their name from inner StaticText/DOM
+    // content, which holds the revealed plaintext value on unlabelled inputs.
+    (isSensitive || axIgnored ? undefined : indexes.axText(node.id)) ??
+    (isSensitive ? undefined : indexes.domText(node.id));
   if (name === undefined) {
     const formControl = FORM_TAGS.has(tag);
     if (formControl) {
@@ -976,12 +979,15 @@ export function resolveSemanticGraph(
   options: {
     supplementalNames?: ReadonlyMap<string, string>;
     identifierFallback?: boolean;
+    /** Mask editable AX-only controls lacking DOM attribute evidence (recording fallback). */
+    redactUnverifiedAxValues?: boolean;
   } = {},
 ): ResolvedSemanticGraph {
   const indexes = buildIndexes(graph);
   const resolveRowAnchor = createRowAnchorResolver(graph, indexes);
   const supplementalNames = options.supplementalNames ?? new Map<string, string>();
   const identifierFallback = options.identifierFallback ?? true;
+  const redactUnverifiedAxValues = options.redactUnverifiedAxValues ?? false;
   const nodes = new Map<SemanticNodeId, ResolvedSemanticNode>();
   for (const node of graph.nodes.values()) {
     const axProps = extractAxProps(node.ax);
@@ -989,6 +995,11 @@ export function resolveSemanticGraph(
     const roleResolution = resolvedRole(node);
     const role = roleResolution.value;
     const tag = node.dom?.tag.toLowerCase() ?? "";
+    const isSensitive =
+      sensitive(node, axProps) ||
+      (redactUnverifiedAxValues &&
+        node.dom === undefined &&
+        ["textbox", "searchbox", "combobox"].includes(role?.toLowerCase() ?? ""));
     const name = resolvedName(
       node,
       role,
@@ -997,8 +1008,8 @@ export function resolveSemanticGraph(
       indexes,
       supplementalNames,
       identifierFallback,
+      isSensitive,
     );
-    const isSensitive = sensitive(node, axProps);
     const sourceValue = node.dom?.formValue ?? axValue(node.ax?.value);
     const value = isSensitive ? undefined : sourceValue;
     const checked = checkedState(node, role, axProps);
@@ -1010,7 +1021,8 @@ export function resolveSemanticGraph(
     const inForm = node.dom?.inForm;
     const nearby = nearbyText(node, indexes);
     const placeholder = clean(node.dom?.formPlaceholder ?? attrs.placeholder);
-    const textContent = NON_TEXT_CONTAINER_TAGS.has(tag) ? undefined : clean(node.dom?.textContent);
+    const textContent =
+      isSensitive || NON_TEXT_CONTAINER_TAGS.has(tag) ? undefined : clean(node.dom?.textContent);
     const selectInfo =
       tag === "select" && !isSensitive
         ? extractSelectOptions(node, sourceValue, graph, indexes)

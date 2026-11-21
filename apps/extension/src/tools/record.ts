@@ -301,7 +301,7 @@ export interface RecordDeps {
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   frameCoordinator?: Pick<
     RecordFrameCoordinator,
-    "begin" | "armTab" | "sourceFor" | "stop" | "cancel"
+    "begin" | "armTab" | "sourceFor" | "stop" | "cleanup" | "cancel"
   >;
   cdp?: CdpRunner;
   signal?: AbortSignal;
@@ -853,9 +853,9 @@ async function finishRecordingAttempt(
 ): Promise<FinishOutcome> {
   await clearRearmTimersForRecording(recording, deps);
   try {
-    // Disposing content capture may commit a final dirty fill. Flush content
-    // first so all resulting RECORD_STEP messages enter actionQueue before it
-    // and the observation queues are drained.
+    // Stopping content capture commits any final dirty fill and flushes all
+    // resulting RECORD_STEP messages into actionQueue while preserving
+    // `data-bsk-record-password` markers until trailing VOM capture finishes.
     await stopRecordingOnAllAgentTabs(recording, deps);
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
@@ -863,10 +863,17 @@ async function finishRecordingAttempt(
   if (!(await drainRecordingToStability(recording))) {
     return { error: "navigation and action queues did not settle" };
   }
-  await recording.observation?.settleTrailing(recording.tabs.currentTabId, recording.steps);
+  try {
+    await recording.observation?.settleTrailing(recording.tabs.currentTabId, recording.steps);
+  } finally {
+    await deps.frameCoordinator?.cleanup(recording.requestId);
+  }
+  if (recording.settled) {
+    return { error: "recording was cleared" };
+  }
 
   recording.settled = true;
-  recordings.delete(sessionId);
+  if (recordings.get(sessionId) === recording) recordings.delete(sessionId);
   releaseBrowserObservationListenersIfIdle();
   await notifyActiveRecordingsChanged();
   const trace = buildTrace(recording);
@@ -922,7 +929,7 @@ export async function handleRecordStart(
   const recordingDeps: RecordDeps = { ...deps, signal: undefined };
   const armedTabIds = new Set<number>();
   const bypassedTabIds = new Set<number>();
-  recordings.set(params.session_id, {
+  const recordingEntry: ActiveRecording = {
     requestId,
     deps: recordingDeps,
     armedTabIds,
@@ -954,7 +961,8 @@ export async function handleRecordStart(
     acceptingNavigation: true,
     actionQueue: Promise.resolve(),
     lastStepSequenceByProducer: new Map(),
-  });
+  };
+  recordings.set(params.session_id, recordingEntry);
   deps.frameCoordinator?.begin(requestId, startedAtMs, target.tabId, async (scope) => {
     const recording = recordings.get(params.session_id);
     if (
@@ -977,9 +985,11 @@ export async function handleRecordStart(
   await notifyActiveRecordingsChanged();
 
   const abortPending = async (notifyContent: boolean) => {
-    recordings.get(params.session_id)?.observation?.cancel();
+    recordingEntry.observation?.cancel();
     deps.frameCoordinator?.cancel(requestId);
-    recordings.delete(params.session_id);
+    if (recordings.get(params.session_id) === recordingEntry) {
+      recordings.delete(params.session_id);
+    }
     releaseBrowserObservationListenersIfIdle();
     await notifyActiveRecordingsChanged();
     if (notifyContent) {
@@ -1057,8 +1067,8 @@ export async function handleRecordStart(
   }
 
   const active = recordings.get(params.session_id);
-  if (!active) {
-    // Cleared by a concurrent abort / session teardown.
+  if (active !== recordingEntry) {
+    // Cleared or replaced by a concurrent abort / session teardown.
     return cancelledError();
   }
   active.startUrl = startUrl;
@@ -1116,7 +1126,7 @@ export async function handleRecordStart(
 
   if (active.observation) {
     const activeRecording = recordings.get(params.session_id);
-    if (activeRecording) {
+    if (activeRecording === recordingEntry) {
       try {
         await activeRecording.observation?.captureInitial(target.tabId);
       } catch {

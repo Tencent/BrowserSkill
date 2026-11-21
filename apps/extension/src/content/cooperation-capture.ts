@@ -26,6 +26,7 @@ import {
   isSensitiveFormField,
   openOrClosedShadowRoot,
   primaryEventTarget,
+  rememberFormerPassword,
   resolveDeepActiveElement,
   SUBFRAME_OWNER_TAGS,
   uncheckedElementShadowRoot,
@@ -127,19 +128,24 @@ export function attachCooperationCapture() {
   const formerPasswords = new WeakSet<Element>();
   const markFormerPasswords = (records: MutationRecord[]) => {
     for (const r of records) {
-      if (isPasswordTypeMutation(r)) formerPasswords.add(r.target);
+      if (isPasswordTypeMutation(r)) {
+        formerPasswords.add(r.target);
+        rememberFormerPassword(r.target);
+      }
     }
   };
   // Passwords, codes, card details and file selections never enter field state.
   const secret = (target: Element) => {
     if (target instanceof HTMLInputElement && target.type === "password") {
       formerPasswords.add(target);
+      rememberFormerPassword(target);
       return true;
     }
-    return (
-      (target instanceof HTMLInputElement && ["file", "hidden"].includes(target.type)) ||
-      isSensitiveFormField(target, formerPasswords)
-    );
+    if (isSensitiveFormField(target, formerPasswords)) {
+      formerPasswords.add(target);
+      return true;
+    }
+    return target instanceof HTMLInputElement && ["file", "hidden"].includes(target.type);
   };
   const label = (target: EventTarget | null) => {
     if (!(target instanceof Element)) return "page";

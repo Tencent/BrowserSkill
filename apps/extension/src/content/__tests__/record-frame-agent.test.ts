@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RecordFramePortMessage } from "@/lib/recording/frame-bridge";
 import { RECORD_FRAME_START } from "@/lib/recording/frame-bridge";
+import { RECORD_PASSWORD_ATTRIBUTE } from "@/lib/sensitive-autocomplete";
 import { RECORD_DOCUMENT_ATTRIBUTE } from "@/shared/recording-document-identity";
 import { attachRecordFrameAgent, RecordFrameAgent } from "../recording/frame-agent";
 
@@ -39,6 +40,9 @@ function portHarness() {
     outbound,
     receive(message: RecordFramePortMessage) {
       for (const listener of onMessage.values) listener(message);
+    },
+    disconnect() {
+      for (const listener of onDisconnect.values) listener();
     },
   };
 }
@@ -119,6 +123,58 @@ describe("RecordFrameAgent", () => {
       }),
     );
     expect(sendMessage).toHaveBeenCalledTimes(3);
+    // Markers stay intact after `stopped` so trailing VOM captures stay redacted.
+    expect(document.documentElement.hasAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe(true);
+    expect(harness.port.disconnect).not.toHaveBeenCalled();
+    // An already-stopped frame must not claim re-arming succeeded while awaiting cleanup.
+    await expect(
+      agent.start({ type: RECORD_FRAME_START, requestId: "rec-1", startedAtMs: 10 }),
+    ).resolves.toEqual({ ok: false, error: "recording document is stopping" });
+
+    harness.receive({ type: "cleanup", requestId: "rec-1" });
+    expect(harness.outbound).toContainEqual({ type: "cleaned", requestId: "rec-1" });
+    expect(document.documentElement.hasAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe(false);
+    expect(harness.port.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("preserves data-bsk-record-password across stop until cleanup or port disconnect", async () => {
+    const harness = portHarness();
+    const sendMessage = vi.fn(async (message: { sequence: number }) => ({
+      ok: true,
+      sequence: message.sequence,
+    }));
+    vi.stubGlobal("chrome", {
+      runtime: {
+        connect: vi.fn(() => harness.port),
+        sendMessage,
+      },
+    });
+    document.body.innerHTML = `<input id="pw" type="password" autocomplete="off" aria-label="Password" />`;
+    const agent = new RecordFrameAgent();
+    await expect(
+      agent.start({ type: RECORD_FRAME_START, requestId: "rec-pw", startedAtMs: 10 }),
+    ).resolves.toEqual({ ok: true });
+
+    const input = document.querySelector<HTMLInputElement>("#pw")!;
+    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    input.value = "SECRET_VAL_1";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.type = "text";
+
+    harness.receive({ type: "stop", requestId: "rec-pw", commandId: "stop-pw" });
+    await vi.waitFor(() =>
+      expect(harness.outbound).toContainEqual({
+        type: "stopped",
+        requestId: "rec-pw",
+        commandId: "stop-pw",
+        ok: true,
+      }),
+    );
+    expect(input.hasAttribute(RECORD_PASSWORD_ATTRIBUTE)).toBe(true);
+
+    // Port disconnect (e.g. SW teardown or coordinator cancel) also cleans up markers.
+    harness.disconnect();
+    expect(input.hasAttribute(RECORD_PASSWORD_ATTRIBUTE)).toBe(false);
     expect(document.documentElement.hasAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe(false);
   });
 

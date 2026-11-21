@@ -18,10 +18,16 @@ import { shouldRecordPress } from "@/lib/recording/draft-policy";
 import { RECORD_PASSWORD_ATTRIBUTE } from "@/lib/sensitive-autocomplete";
 import {
   isExtensionOverlayEvent,
+  isExtensionOverlayNode,
   isInternalBskMutation,
+  isNodeInsideShadowHost,
   isPasswordTypeMutation,
   isSensitiveFormField,
+  openOrClosedShadowRoot,
   primaryEventTarget,
+  rememberFormerPassword,
+  resolveDeepActiveElement,
+  visitShadowRoots,
 } from "./dom-primitives";
 import {
   closestHoverSurfaceCandidate,
@@ -33,6 +39,7 @@ import {
 } from "./record-hover-surface";
 
 export interface RecordCaptureController {
+  stop(): void;
   dispose(): void;
 }
 
@@ -41,6 +48,7 @@ interface FillSession {
   target: CaptureTargetDescriptor;
   baselineValue: string;
   lastValue: string;
+  startedAsPassword: boolean;
   pendingCommit?: "enter" | "suggestion" | "blur";
 }
 
@@ -85,6 +93,18 @@ function fillableFromTarget(target: EventTarget | null): FillableElement | null 
   const el = target.closest('input,textarea,[contenteditable]:not([contenteditable="false"])');
   if (!el || !isTextFillable(el) || isControlInNonEditableRegion(target, el)) return null;
   return el;
+}
+
+/**
+ * Closed shadow roots retarget editing events to their host; resolve the deep
+ * active control so password inputs inside closed Shadow DOM stay tracked and masked.
+ */
+function resolveClosedShadowEditTarget(raw: EventTarget | null): EventTarget | null {
+  if (!(raw instanceof Element) || raw.shadowRoot || !openOrClosedShadowRoot(raw)) {
+    return raw;
+  }
+  const active = resolveDeepActiveElement();
+  return active && isNodeInsideShadowHost(active, raw) ? active : raw;
 }
 
 /**
@@ -383,27 +403,71 @@ export function startRecordCapture(
   const hoverSurfaceNodes = new Map<Element, HoverSurfaceNode>();
   let generatedControlClick: Element | null = null;
   const committedValues = new WeakMap<FillableElement, string>();
-  // A "show password" toggle switches type=password to text; keep masking those fields.
+  // A "show password" toggle switches type=password to text; keep masking those
+  // fields across the light DOM and open/closed ShadowRoots until recording cleanup.
   const formerPasswords = new Set<Element>();
-  const markFormerPasswords = (records: MutationRecord[]) => {
+  const observedPasswordRoots = new WeakSet<Node>();
+  const markFormerPasswordElement = (element: Element) => {
+    formerPasswords.add(element);
+    rememberFormerPassword(element);
+    element.setAttribute(RECORD_PASSWORD_ATTRIBUTE, "");
+  };
+  const observePasswordRoot = (root: Document | ShadowRoot) => {
+    if (observedPasswordRoots.has(root)) return;
+    observedPasswordRoots.add(root);
+    typeObserver.observe(root, {
+      subtree: true,
+      childList: true,
+      attributeFilter: ["type"],
+      attributeOldValue: true,
+    });
+  };
+  const handlePasswordMutations = (records: MutationRecord[]) => {
+    const visited = new Set<Node>();
     for (const record of records) {
       if (isPasswordTypeMutation(record)) {
-        formerPasswords.add(record.target);
-        record.target.setAttribute(RECORD_PASSWORD_ATTRIBUTE, "");
+        markFormerPasswordElement(record.target);
+      } else if (record.type === "childList" && !isExtensionOverlayNode(record.target)) {
+        for (const node of record.addedNodes) {
+          if (node instanceof Element) visitShadowRoots(node, observePasswordRoot, visited);
+        }
       }
     }
   };
-  const typeObserver = new MutationObserver(markFormerPasswords);
-  typeObserver.observe(document, {
-    subtree: true,
-    attributeFilter: ["type"],
-    attributeOldValue: true,
-  });
+  const typeObserver = new MutationObserver(handlePasswordMutations);
+  visitShadowRoots(document, observePasswordRoot);
+
+  // `attachShadow()` on an already-connected host emits no childList mutation;
+  // observe newly attached roots on interaction before page handlers toggle `type`.
+  const observeEventShadowRoots = (event: Event) => {
+    for (const entry of event.composedPath()) {
+      if (entry instanceof ShadowRoot) {
+        if (!observedPasswordRoots.has(entry)) {
+          visitShadowRoots(entry, observePasswordRoot);
+        }
+      } else if (entry instanceof Element) {
+        const nested = openOrClosedShadowRoot(entry);
+        // Closed roots hide nested descendants from composedPath(), so always
+        // scan them for lazily attached inner ShadowRoots.
+        if (nested && (!entry.shadowRoot || !observedPasswordRoots.has(nested))) {
+          visitShadowRoots(nested, observePasswordRoot);
+        }
+      }
+    }
+  };
 
   const emitFill = (session: FillSession) => {
     if (session.lastValue === session.baselineValue) return;
-    markFormerPasswords(typeObserver.takeRecords());
-    const isPassword = isSensitiveFormField(session.element, formerPasswords);
+    handlePasswordMutations(typeObserver.takeRecords());
+    if (
+      session.startedAsPassword &&
+      session.element instanceof HTMLInputElement &&
+      session.element.type.toLowerCase() !== "password"
+    ) {
+      markFormerPasswordElement(session.element);
+    }
+    const isPassword =
+      session.startedAsPassword || isSensitiveFormField(session.element, formerPasswords);
     const value = isPassword ? "***" : session.lastValue;
     emitStep({
       op: "fill",
@@ -439,6 +503,7 @@ export function startRecordCapture(
       target: describeTarget(el),
       baselineValue,
       lastValue: currentValue,
+      startedAsPassword: el instanceof HTMLInputElement && el.type.toLowerCase() === "password",
     };
   };
 
@@ -733,6 +798,7 @@ export function startRecordCapture(
 
   const onClick = (event: MouseEvent) => {
     if (event.button !== 0 || isExtensionOverlayEvent(event)) return;
+    observeEventShadowRoots(event);
     const target = primaryEventTarget(event);
     if (event.detail === 0 && generatedControlClick !== null && target === generatedControlClick) {
       generatedControlClick = null;
@@ -740,7 +806,12 @@ export function startRecordCapture(
     }
     if (
       event.detail === 0 &&
-      keyboardActivation?.target === target &&
+      keyboardActivation &&
+      (keyboardActivation.target === target ||
+        (target instanceof Element &&
+          !target.shadowRoot &&
+          keyboardActivation.target instanceof Node &&
+          isNodeInsideShadowHost(keyboardActivation.target, target))) &&
       Date.now() - keyboardActivation.recordedAt < 500
     ) {
       keyboardActivation = undefined;
@@ -792,13 +863,22 @@ export function startRecordCapture(
 
   const onFocusIn = (event: FocusEvent) => {
     if (isExtensionOverlayEvent(event)) return;
-    const target = fillableFromTarget(primaryEventTarget(event));
+    observeEventShadowRoots(event);
+    const target = fillableFromTarget(resolveClosedShadowEditTarget(primaryEventTarget(event)));
     if (target) ensureFillSession(target);
   };
 
   const onFocusOut = (event: FocusEvent) => {
     if (isExtensionOverlayEvent(event)) return;
-    const target = fillableFromTarget(primaryEventTarget(event));
+    const rawTarget = primaryEventTarget(event);
+    const target =
+      fillableFromTarget(resolveClosedShadowEditTarget(rawTarget)) ??
+      (fillSession &&
+      rawTarget instanceof Element &&
+      !rawTarget.shadowRoot &&
+      isNodeInsideShadowHost(fillSession.element, rawTarget)
+        ? fillSession.element
+        : null);
     if (!target) return;
     if (!fillSession || fillSession.element !== target) return;
     syncFillSessionValue(target);
@@ -807,7 +887,8 @@ export function startRecordCapture(
 
   const onInput = (event: Event) => {
     if (isExtensionOverlayEvent(event)) return;
-    const rawTarget = primaryEventTarget(event);
+    observeEventShadowRoots(event);
+    const rawTarget = resolveClosedShadowEditTarget(primaryEventTarget(event));
     // A native <select> in a shadow root fires a non-composed `change` that
     // never reaches the document; its composed `input` does.
     if (rawTarget instanceof HTMLSelectElement && rawTarget.getRootNode() instanceof ShadowRoot) {
@@ -829,7 +910,7 @@ export function startRecordCapture(
   const onCompositionEnd = (event: CompositionEvent) => {
     if (isExtensionOverlayEvent(event)) return;
     composing = false;
-    const target = fillableFromTarget(primaryEventTarget(event));
+    const target = fillableFromTarget(resolveClosedShadowEditTarget(primaryEventTarget(event)));
     if (target) {
       ensureFillSession(target);
       syncFillSessionValue(target);
@@ -856,7 +937,7 @@ export function startRecordCapture(
 
   const onChange = (event: Event) => {
     if (isExtensionOverlayEvent(event)) return;
-    const target = primaryEventTarget(event);
+    const target = resolveClosedShadowEditTarget(primaryEventTarget(event));
     if (target instanceof HTMLSelectElement) {
       recordSelect(target);
     } else {
@@ -866,7 +947,8 @@ export function startRecordCapture(
 
   const onKeyDown = (event: KeyboardEvent) => {
     if (isExtensionOverlayEvent(event)) return;
-    const target = primaryEventTarget(event);
+    observeEventShadowRoots(event);
+    const target = resolveClosedShadowEditTarget(primaryEventTarget(event));
     const fillable = fillableFromTarget(target);
     if (fillable) {
       ensureFillSession(fillable);
@@ -938,27 +1020,39 @@ export function startRecordCapture(
   }
   window.addEventListener("pagehide", onPageHide);
 
-  return {
-    dispose() {
-      commitFillSession();
-      document.removeEventListener("click", onClick, true);
-      document.removeEventListener("mouseover", onMouseOver, true);
-      document.removeEventListener("focusin", onFocusIn, true);
-      document.removeEventListener("focusout", onFocusOut, true);
-      document.removeEventListener("input", onInput, true);
-      document.removeEventListener("compositionstart", onCompositionStart, true);
-      document.removeEventListener("compositionend", onCompositionEnd, true);
-      document.removeEventListener("change", onChange, true);
-      document.removeEventListener("keydown", onKeyDown, true);
-      urlObserver?.disconnect();
-      typeObserver.disconnect();
-      for (const element of formerPasswords) element.removeAttribute(RECORD_PASSWORD_ATTRIBUTE);
-      formerPasswords.clear();
-      if (captureNavigation) {
-        window.removeEventListener("hashchange", onUrlEvent);
-        window.removeEventListener("popstate", onUrlEvent);
-      }
-      window.removeEventListener("pagehide", onPageHide);
-    },
+  let stopped = false;
+  let disposed = false;
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    handlePasswordMutations(typeObserver.takeRecords());
+    commitFillSession();
+    document.removeEventListener("click", onClick, true);
+    document.removeEventListener("mouseover", onMouseOver, true);
+    document.removeEventListener("focusin", onFocusIn, true);
+    document.removeEventListener("focusout", onFocusOut, true);
+    document.removeEventListener("input", onInput, true);
+    document.removeEventListener("compositionstart", onCompositionStart, true);
+    document.removeEventListener("compositionend", onCompositionEnd, true);
+    document.removeEventListener("change", onChange, true);
+    document.removeEventListener("keydown", onKeyDown, true);
+    urlObserver?.disconnect();
+    if (captureNavigation) {
+      window.removeEventListener("hashchange", onUrlEvent);
+      window.removeEventListener("popstate", onUrlEvent);
+    }
+    window.removeEventListener("pagehide", onPageHide);
   };
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    stop();
+    typeObserver.disconnect();
+    for (const element of formerPasswords) element.removeAttribute(RECORD_PASSWORD_ATTRIBUTE);
+    formerPasswords.clear();
+  };
+
+  return { stop, dispose };
 }

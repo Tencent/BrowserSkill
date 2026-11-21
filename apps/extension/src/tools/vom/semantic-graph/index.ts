@@ -29,6 +29,7 @@ export function resolveSemanticGraph(
   options: {
     supplementalNames?: ReadonlyMap<string, string>;
     identifierFallback?: boolean;
+    redactUnverifiedAxValues?: boolean;
   } = {},
 ): ResolvedSemanticGraph {
   return resolveGraph(graph, options);
