@@ -161,7 +161,7 @@ async function renewRemote(): Promise<void> {
   }
 }
 
-export function watchRemoteAuthorization() {
+export function watchRemoteAuthorization(options: { onAuthorized?: () => void } = {}) {
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (message?.kind !== "bsk-remote-authorization") return false;
     if (
@@ -176,7 +176,10 @@ export function watchRemoteAuthorization() {
     void (
       message.resume === true ? resumeRemoteConnection() : updateRemoteConnection(message.pairing)
     ).then(
-      (url) => reply({ url }),
+      (url) => {
+        options.onAuthorized?.();
+        reply({ url });
+      },
       () => reply({ error: "Unable to pair; copy a new pairing link and try again" }),
     );
     return true;
