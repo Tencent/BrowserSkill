@@ -1,7 +1,8 @@
 //! Process-level coverage of argument errors, output streams, and exit codes.
 
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 
@@ -56,6 +57,54 @@ fn json_usage_error(output: &Output) -> Value {
     assert!(!error["hint"].as_str().unwrap().is_empty());
     assert!(error.get("error").is_none(), "keep the flat error contract");
     error
+}
+
+#[test]
+fn fill_rejects_unusable_stdin_before_starting_a_daemon() {
+    for cancel_on_close in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_bsk"))
+            .args(["fill", "@e3", "--session", "s1", "--value-stdin", "--json"])
+            .env("BSK_HOME", home.path())
+            .env("BSK_AUTO_UPDATE", "0")
+            .env("BSK_AUTO_START", "0")
+            .env(
+                "BSK_CANCEL_ON_STDIN_CLOSE",
+                if cancel_on_close { "1" } else { "0" },
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take();
+        if !cancel_on_close {
+            stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"private-input\xff")
+                .unwrap();
+            drop(stdin.take());
+        }
+        // Keep the control pipe open: a conflicting cancellation setting must
+        // fail without waiting for EOF or starting a daemon.
+        let output = child.wait_with_output().unwrap();
+        drop(stdin);
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let message = error["message"].as_str().unwrap();
+        if cancel_on_close {
+            assert!(message.contains("BSK_CANCEL_ON_STDIN_CLOSE=1"), "{message}");
+        } else {
+            assert!(
+                message.contains("read UTF-8 fill value from stdin"),
+                "{message}"
+            );
+        }
+        assert!(!message.contains("private-input"));
+        assert!(!home.path().join("daemon.json").exists());
+    }
 }
 
 #[test]

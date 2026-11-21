@@ -15,6 +15,31 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 #[test]
+fn fill_requires_exactly_one_value_source() {
+    let Command::Fill(fill) =
+        parse(&["bsk", "fill", "@e3", "--session", "s1", "--value-stdin"]).command
+    else {
+        panic!("expected fill");
+    };
+    assert!(fill.value_stdin);
+    assert!(fill.value.is_none());
+
+    let Command::Fill(fill) =
+        parse(&["bsk", "fill", "@e3", "--session", "s1", "--value", ""]).command
+    else {
+        panic!("expected fill");
+    };
+    assert_eq!(fill.value.as_deref(), Some(""));
+    assert!(!fill.value_stdin);
+
+    for source in [vec![], vec!["--value", "secret", "--value-stdin"]] {
+        let mut argv = vec!["bsk", "fill", "@e3", "--session", "s1"];
+        argv.extend(source);
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+}
+
+#[test]
 fn global_output_flags_work_before_and_after_the_command() {
     for args in [
         vec![

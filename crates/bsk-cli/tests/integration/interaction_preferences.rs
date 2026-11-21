@@ -9,6 +9,7 @@ use bsk::daemon::info::read_from_path;
 use bsk_protocol::{ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -129,6 +130,79 @@ async fn start_with_protocol(protocol: &str) -> (tempfile::TempDir, Child, Ws) {
     let handshake: ResponseFrame = serde_json::from_str(&text).unwrap();
     assert!(matches!(handshake.body, ResponseBody::Ok(_)));
     (temp, daemon, ws)
+}
+
+#[tokio::test]
+async fn fill_preserves_stdin_and_inline_values_through_the_daemon() {
+    let (temp, mut daemon, mut ws) =
+        start_with_protocol(bsk::daemon::state::PROTOCOL_VERSION).await;
+    let start = command(temp.path(), &["session", "start", "--json"])
+        .spawn()
+        .unwrap();
+    let request = next_request(&mut ws, Method::ToolSessionStart).await;
+    reply(
+        &mut ws,
+        request,
+        ResponseBody::Ok(json!({"agent_window_id": 100})),
+    )
+    .await;
+    let started = successful_json(&output(start).await);
+    let session = started["session_id"].as_str().unwrap();
+
+    for value in ["", "  private-填充🔒\r\nsecond line\n"] {
+        for from_stdin in [true, false] {
+            let mut args = vec!["fill", "@e3", "--session", session];
+            if from_stdin {
+                args.extend(["--value-stdin", "--no-clear"]);
+            } else {
+                args.extend(["--value", value]);
+            }
+            let mut fill = command(temp.path(), &args)
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = fill.stdin.take().unwrap();
+            if from_stdin {
+                stdin.write_all(value.as_bytes()).await.unwrap();
+            }
+            drop(stdin);
+            let request = next_request(&mut ws, Method::ToolFill).await;
+            let params = request.params.as_ref().unwrap();
+            assert_eq!(params["value"], value);
+            assert_eq!(params["ref"], "@e3");
+            assert_eq!(
+                params["clear_before"],
+                if from_stdin {
+                    json!(false)
+                } else {
+                    Value::Null
+                }
+            );
+            reply(
+                &mut ws,
+                request,
+                ResponseBody::Ok(json!({"tab_id": 7, "used_ref": "e3", "value_length": value.encode_utf16().count()})),
+            )
+            .await;
+            let result = output(fill).await;
+            assert!(result.status.success(), "{:?}", result);
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert_eq!(
+                stdout.trim_end(),
+                format!(
+                    "fill ok tab=7 target=@e3 length={}",
+                    value.encode_utf16().count()
+                )
+            );
+            if !value.is_empty() {
+                assert!(!stdout.contains("private-"));
+                assert!(!String::from_utf8_lossy(&result.stderr).contains("private-"));
+            }
+        }
+    }
+    drop(ws);
+    daemon.kill().await.unwrap();
+    daemon.wait().await.unwrap();
 }
 
 #[tokio::test]
