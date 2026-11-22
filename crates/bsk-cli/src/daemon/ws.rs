@@ -60,7 +60,9 @@ fn is_lowercase_uuid(s: &str) -> bool {
     let lens = [8, 4, 4, 4, 12];
     groups.len() == lens.len()
         && groups.iter().zip(lens).all(|(g, len)| {
-            g.len() == len && g.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            g.len() == len
+                && g.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         })
 }
 

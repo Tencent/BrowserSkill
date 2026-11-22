@@ -23,6 +23,9 @@ use super::paths;
 pub const TRANSFER_CHUNK_SIZE: u32 = 512 * 1024;
 pub const MAX_TRANSFER_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_UPLOAD_FILES: usize = 20;
+/// Cap on the bytes inlined into one `tool.upload` for a Safari browser (base64
+/// adds a third on the wire; the WebSocket message limit is far above this).
+pub const SAFARI_INLINE_UPLOAD_MAX: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
@@ -715,6 +718,31 @@ fn invalid(message: impl Into<String>) -> RpcError {
         data: None,
     }
 }
+/// Read the staged files and return their bytes as standard base64, in order.
+/// Used for browsers whose extension cannot read `staged_path` (Safari). Fails
+/// with `invalid_params` when the total exceeds `max` bytes.
+pub fn inline_upload_bytes(paths: &[PathBuf], max: u64) -> Result<Vec<String>, RpcError> {
+    let mut total: u64 = 0;
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let size = fs::metadata(path)
+            .map_err(|err| not_found(format!("cannot read staged upload: {err}")))?
+            .len();
+        total = total.saturating_add(size);
+        if total > max {
+            return Err(invalid(format!(
+                "Safari uploads are limited to {} MiB per call (this call: {} MiB)",
+                max / (1024 * 1024),
+                total.div_ceil(1024 * 1024),
+            )));
+        }
+        let bytes =
+            fs::read(path).map_err(|err| not_found(format!("cannot read staged upload: {err}")))?;
+        out.push(base64::engine::general_purpose::STANDARD.encode(bytes));
+    }
+    Ok(out)
+}
+
 fn not_found(message: impl Into<String>) -> RpcError {
     RpcError {
         code: ErrorCode::NotFound,
@@ -1147,6 +1175,29 @@ mod tests {
                     byte_size: 1008,
                 })
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn inline_upload_bytes_encodes_in_order_and_enforces_the_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a.bin");
+        let b = temp.path().join("b.bin");
+        fs::write(&a, [0xff, 0x00, 0x10]).unwrap();
+        fs::write(&b, b"hi").unwrap();
+        let both = [a.clone(), b.clone()];
+
+        let ok = inline_upload_bytes(&both, 16).unwrap();
+        assert_eq!(ok, vec!["/wAQ".to_string(), "aGk=".to_string()]);
+
+        let err = inline_upload_bytes(&both, 4).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("limited to"), "{}", err.message);
+
+        let missing = [temp.path().join("nope")];
+        assert_eq!(
+            inline_upload_bytes(&missing, 16).unwrap_err().code,
+            ErrorCode::NotFound
         );
     }
 }
