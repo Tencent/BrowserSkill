@@ -169,6 +169,12 @@ determines which versions can connect.
   rules to visible non-sensitive `<input>` and `<textarea>` values while preserving browser
   UA `text-transform: none` defaults and byte-budget accounting (follow-up to
   [#613](https://github.com/Tencent/BrowserSkill/pull/613)).
+- `bsk` human error output now prints the structured `observed_change` /
+  `observed_changes` diagnosis the extension already attaches to evidence
+  refusals, naming the part, node, field and before/after values plus the change
+  counters instead of only the generic "the action's observed content changed"
+  sentence; JSON and MCP payloads are unchanged
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
 
 ### Removed
 
