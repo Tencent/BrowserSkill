@@ -33,6 +33,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- 修复 `bsk window resize` 在窗口尺寸被浏览器或窗口管理器钳制时误报守护进程协议错误的问题（[#692](https://github.com/Tencent/BrowserSkill/issues/692)）：窗口已按允许的最大尺寸完成调整时，CLI 现在报告尺寸被钳制，而非“protocol error communicating with bsk daemon”。失败仍返回退出码 2，仅修正了错误文案；MCP 提示指向 `bsk_inspect(action='observe')` 以确认实际窗口尺寸。
 - 加固守护进程 WebSocket 生命周期、审计存储容错、`tool.debug` 动态副作用策略、自动更新交接及文件传输/运维可靠性：
   - 为 `Pending` 增加显式关闭/取消令牌（`BrowserClient::close()`），并在本地/远程监听退出时通过监听级 `AbortToken` 与活跃连接任务回收（`run_accept_loop`、`drive_connection`、`spawn_browser_liveness_reaper`、重连驱逐）阻断关闭后迟到握手继续注册，同时补齐 TCP Keepalive（`SO_KEEPALIVE` 与 Unix 保活参数）、WS 写超时与服务端周期性 WS Ping，彻底解决被淘汰或半开连接泄漏 Tokio 任务、文件描述符、64 并发连接许可及挂起等待方的问题；将远程模式每连接 1 Hz 读取 `remote-authorization.json` 替换为按文件元信息缓存且空闲自动休眠的全局共享监控器，并消除每条入站 WS 帧的二次 JSON 全量解析。
   - 修正远程网关 `TcpListener::accept()` 在瞬态错误（如 `ECONNABORTED`、`EMFILE`）时静默退出并中断全部健康远程连接的问题，改为记录日志并短暂退避继续监听（仅在致命套接字错误或关闭信号时退出），同时在 `daemon/start.rs` 中监控 `WsHandle.task` 异常退出，避免守护进程沦为僵尸进程。
