@@ -33,7 +33,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
-- 修复录制模式下点击可交互 `<label>`（含带 `cursor: pointer` 的复选框/单选框标签触发的 `detail: 1` 可信转发点击）时将 `<label>` 与目标控件重复录为两次点击导致回放反复切换的问题，同时保留普通 `<label>` 激活在目标控件上的单次点击记录（#645）。
+- 为 Chrome debugger attach 增加 10 秒上限；未响应时返回明确错误，并在允许重试前隔离并回滚迟到的 attach 完成（#452）。
 - 加固守护进程 WebSocket 生命周期、审计存储容错、`tool.debug` 动态副作用策略、自动更新交接及文件传输/运维可靠性：
   - 为 `Pending` 增加显式关闭/取消令牌（`BrowserClient::close()`），并在本地/远程监听退出时通过监听级 `AbortToken` 与活跃连接任务回收（`run_accept_loop`、`drive_connection`、`spawn_browser_liveness_reaper`、重连驱逐）阻断关闭后迟到握手继续注册，同时补齐 TCP Keepalive（`SO_KEEPALIVE` 与 Unix 保活参数）、WS 写超时与服务端周期性 WS Ping，彻底解决被淘汰或半开连接泄漏 Tokio 任务、文件描述符、64 并发连接许可及挂起等待方的问题；将远程模式每连接 1 Hz 读取 `remote-authorization.json` 替换为按文件元信息缓存且空闲自动休眠的全局共享监控器，并消除每条入站 WS 帧的二次 JSON 全量解析。
   - 修正远程网关 `TcpListener::accept()` 在瞬态错误（如 `ECONNABORTED`、`EMFILE`）时静默退出并中断全部健康远程连接的问题，改为记录日志并短暂退避继续监听（仅在致命套接字错误或关闭信号时退出），同时在 `daemon/start.rs` 中监控 `WsHandle.task` 异常退出，避免守护进程沦为僵尸进程。
@@ -91,6 +91,9 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 - VOM 树折叠规则（`shouldSkipRedundantRefChildren` 与 `renderTreeRows`）识别具名交互父节点下独立可交互的后代（如 Vue 3 + Element Plus 将二级浮层嵌在父 `menuitem` 内的多级 `<el-sub-menu>` 或自定义 ARIA `combobox` 弹出项），使每个已展开、可操作的子项在 `bsk sync`、`observe` 和 `snapshot` 中均输出独立行与专属 `@eN` 引用，同时保持被动内部包装节点、继承 `cursor: pointer` / 标题皮肤点击节点及原生 `<input>` / `<textarea>` / `<select>` 的折叠行为不变而不产生重复伪引用，并新增发版前必测用例 `EDGE-NESTED-MENU-REFS`。
 - 结构化列表提取（`extract list`）支持通过 open Shadow DOM `<slot>` 投影分配的列表项及默认链接（`url`），保留插槽渲染顺序、闭合 `<details>` 隐藏行位置、嵌套子列表项与链接归属、可见性判断及采集限制（[#588](https://github.com/Tencent/BrowserSkill/issues/588)、[#612](https://github.com/Tencent/BrowserSkill/pull/612)），并新增发版前必测用例 `EDGE-SLOTTED-LIST-EXTRACT`。
 - 修复结构化提取（`extract table`、`extract list` 与 `extract discover`）未对可见非敏感 `<input>` 和 `<textarea>` 值应用计算后的 CSS `text-transform`（`uppercase` 与 `lowercase`）及渲染语言环境大小写规则的问题，同时保留浏览器默认样式表的 `text-transform: none` 行为与字节预算统计（[#613](https://github.com/Tencent/BrowserSkill/pull/613) 后续完善）。
+- 录制 contenteditable 编辑器时保留用户输入的换行，多行编辑按原样重放，不再被合并成一行
+  （[#594](https://github.com/Tencent/BrowserSkill/issues/594)）。
+- 修复录制模式下点击可交互 `<label>`（含带 `cursor: pointer` 的复选框/单选框标签触发的 `detail: 1` 可信转发点击）时将 `<label>` 与目标控件重复录为两次点击导致回放反复切换的问题，同时保留普通 `<label>` 激活在目标控件上的单次点击记录（#645）。
 
 ### 移除
 
