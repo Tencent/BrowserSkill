@@ -187,6 +187,48 @@ fn parses_daemon_start_with_defaults() {
     assert!(!args.foreground);
     assert_eq!(args.resolved_port(), bsk_protocol::DEFAULT_DAEMON_PORT);
     assert_eq!(args.resolved_daemon_idle(), Duration::from_secs(600));
+    assert_eq!(args.resolved_session_idle(), Duration::from_secs(300));
+}
+
+#[test]
+fn parses_daemon_start_with_env_idle_and_flag_override() {
+    let cli = parse(&["bsk", "daemon", "start"]);
+    let Command::Daemon(DaemonCmd::Start(args)) = cli.command else {
+        panic!("expected daemon start subcommand");
+    };
+    let from_env = args.with_env_idle_from(Some("15m"), Some("45m")).unwrap();
+    assert_eq!(
+        from_env.resolved_session_idle(),
+        Duration::from_secs(15 * 60)
+    );
+    assert_eq!(
+        from_env.resolved_daemon_idle(),
+        Duration::from_secs(45 * 60)
+    );
+
+    let cli_override = parse(&[
+        "bsk",
+        "daemon",
+        "start",
+        "--session-idle",
+        "2m",
+        "--daemon-idle",
+        "5m",
+    ]);
+    let Command::Daemon(DaemonCmd::Start(explicit)) = cli_override.command else {
+        panic!("expected daemon start subcommand");
+    };
+    let effective = explicit
+        .with_env_idle_from(Some("15m"), Some("45m"))
+        .unwrap();
+    assert_eq!(
+        effective.resolved_session_idle(),
+        Duration::from_secs(2 * 60)
+    );
+    assert_eq!(
+        effective.resolved_daemon_idle(),
+        Duration::from_secs(5 * 60)
+    );
 }
 
 #[test]
