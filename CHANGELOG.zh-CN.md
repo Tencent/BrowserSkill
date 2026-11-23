@@ -90,6 +90,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 - VOM 树折叠规则（`shouldSkipRedundantRefChildren` 与 `renderTreeRows`）识别具名交互父节点下独立可交互的后代（如 Vue 3 + Element Plus 将二级浮层嵌在父 `menuitem` 内的多级 `<el-sub-menu>` 或自定义 ARIA `combobox` 弹出项），使每个已展开、可操作的子项在 `bsk sync`、`observe` 和 `snapshot` 中均输出独立行与专属 `@eN` 引用，同时保持被动内部包装节点、继承 `cursor: pointer` / 标题皮肤点击节点及原生 `<input>` / `<textarea>` / `<select>` 的折叠行为不变而不产生重复伪引用，并新增发版前必测用例 `EDGE-NESTED-MENU-REFS`。
 - 结构化列表提取（`extract list`）支持通过 open Shadow DOM `<slot>` 投影分配的列表项及默认链接（`url`），保留插槽渲染顺序、闭合 `<details>` 隐藏行位置、嵌套子列表项与链接归属、可见性判断及采集限制（[#588](https://github.com/Tencent/BrowserSkill/issues/588)、[#612](https://github.com/Tencent/BrowserSkill/pull/612)），并新增发版前必测用例 `EDGE-SLOTTED-LIST-EXTRACT`。
 - 修复结构化提取（`extract table`、`extract list` 与 `extract discover`）未对可见非敏感 `<input>` 和 `<textarea>` 值应用计算后的 CSS `text-transform`（`uppercase` 与 `lowercase`）及渲染语言环境大小写规则的问题，同时保留浏览器默认样式表的 `text-transform: none` 行为与字节预算统计（[#613](https://github.com/Tencent/BrowserSkill/pull/613) 后续完善）。
+- `bsk screenshot --out` 与 `bsk get-html --out` 现在会在访问守护进程之前拒绝不可用的输出路径（父目录不存在或父路径是普通文件），全页截图不再先跑上几分钟再因本地写入失败而丢弃结果；两者统一返回 `local file validation failed` 与 `--out` 恢复提示，与 `bsk download`、`bsk extract` 保持一致。
 
 ### 移除
 

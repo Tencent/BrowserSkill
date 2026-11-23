@@ -356,3 +356,45 @@ fn version_flag_prints_semver_and_exits_zero() {
         "expected `bsk <version>` line, got: {body:?}"
     );
 }
+
+#[test]
+fn output_commands_reject_an_unusable_destination_before_reaching_the_daemon() {
+    let home = tempfile::tempdir().unwrap();
+    let out = home.path().join("no-such-dir").join("artifact");
+    for command in ["screenshot", "get-html"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_bsk"))
+            .args([
+                "--json",
+                command,
+                "--session",
+                "s1",
+                "--out",
+                out.to_str().unwrap(),
+            ])
+            .env("BSK_HOME", home.path())
+            .env("BSK_AUTO_UPDATE", "off")
+            // Any daemon probe would fail with a different error, so this
+            // also proves the destination is checked first.
+            .env("BSK_AUTO_START", "0")
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{command}: {output:?}");
+        assert!(output.stderr.is_empty(), "{command}: {output:?}");
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(error["code"], "not_found", "{command}: {error}");
+        assert_eq!(error["exit_code"], 1, "{command}: {error}");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("output directory is not usable:"),
+            "{command}: {error}"
+        );
+        assert_eq!(error["data"]["reason"], "local_file_error");
+        let hint = error["hint"].as_str().unwrap();
+        assert!(hint.contains("--out"), "{command}: {hint}");
+        assert!(!hint.contains("daemon"), "{command}: {hint}");
+    }
+    assert!(!home.path().join("daemon.json").exists());
+}

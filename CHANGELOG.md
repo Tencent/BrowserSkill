@@ -169,6 +169,12 @@ determines which versions can connect.
   rules to visible non-sensitive `<input>` and `<textarea>` values while preserving browser
   UA `text-transform: none` defaults and byte-budget accounting (follow-up to
   [#613](https://github.com/Tencent/BrowserSkill/pull/613)).
+- `bsk screenshot --out` and `bsk get-html --out` reject an unusable destination
+  (missing parent directory, or a parent that is a file) before the daemon round
+  trip, so a full-page capture no longer runs for minutes and then fails on the
+  local write; both now report `local file validation failed` with an `--out`
+  recovery hint instead of a daemon or write error, matching `bsk download` and
+  `bsk extract`.
 
 ### Removed
 
