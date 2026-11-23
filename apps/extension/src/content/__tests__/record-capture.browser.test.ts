@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_RECORD_CHROME; the fixture owns a headless browser and profile.
+// Opt in with BSK_TEST_CHROME; the fixture owns a headless browser and profile.
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -11,7 +11,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 
-const chromeExecutable = process.env.BSK_RECORD_CHROME;
+const chromeExecutable = process.env.BSK_TEST_CHROME;
 let send: Send;
 let source: string;
 let close: (() => void) | undefined;

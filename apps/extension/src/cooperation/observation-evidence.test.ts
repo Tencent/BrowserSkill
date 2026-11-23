@@ -1,6 +1,11 @@
 import type { VomNode } from "@browser-skill/vom";
 import { describe, expect, it } from "vitest";
-import { contentChanges, sameObservationEvidence } from "./observation-evidence";
+import {
+  contentChanges,
+  observedChange,
+  preparationEvidence,
+  sameObservationEvidence,
+} from "./observation-evidence";
 
 const node = (id: number, parentId: number | null, role: string, name = ""): VomNode => ({
   id,
@@ -512,4 +517,261 @@ it("rejects a change in form membership even when the timeline value is unchange
   const after = structuredClone(before);
   after.nodes[6].inForm = true;
   expect(sameObservationEvidence(before, after, target)).toBe(false);
+});
+
+describe("identified decorations after the action's own preparation", () => {
+  const editor = () => [
+    node(1, null, "form", "Title 9/30 Body"),
+    {
+      ...node(2, 1, "textbox", "Title"),
+      value: "Chapter 1",
+      inForm: true,
+      focused: true,
+      attrs: { maxlength: "30" },
+    },
+    { ...node(3, 1, "generic"), text: "9/30" },
+    { ...node(4, 1, "textbox", "Body"), value: "", inForm: true },
+  ];
+  const body = { backendNodeId: 4, frameId: "frame" };
+  const preparation = { focus: true, hover: true };
+  const compare = (before: VomNode[], after: VomNode[], target = body) =>
+    sameObservationEvidence(
+      ...preparationEvidence({ nodes: before }, { nodes: after }, target, preparation),
+      target,
+    );
+
+  it("allows a removed character counter and an added noninteractive tooltip", () => {
+    const before = editor();
+    const after = structuredClone(before);
+    // Blurring the title removes its counter; a hover shows helper text.
+    after.splice(2, 1);
+    after[1].focused = false;
+    after[0].name = "Title Body Press Enter to save";
+    after.push({ ...node(5, 1, "tooltip"), text: "Press Enter to save" });
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, body)).toBe(false);
+    expect(compare(before, after)).toBe(true);
+    expect(
+      sameObservationEvidence(
+        ...preparationEvidence({ nodes: before }, { nodes: after }, body, preparation),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["value", (nodes: VomNode[]) => (nodes[1].value = "Chapter 2")],
+    ["checked", (nodes: VomNode[]) => nodes.push({ ...node(6, 1, "checkbox"), checked: true })],
+    ["disabled", (nodes: VomNode[]) => (nodes[1].disabled = true)],
+    ["selection", (nodes: VomNode[]) => (nodes[3].attrs = { "aria-selected": "true" })],
+    ["modal", (nodes: VomNode[]) => nodes.push({ ...node(7, null, "dialog"), modal: true })],
+    ["required", (nodes: VomNode[]) => (nodes[1].attrs = { required: "" })],
+    ["maxlength", (nodes: VomNode[]) => (nodes[1].attrs = { maxlength: "40" })],
+    ["visibility", (nodes: VomNode[]) => (nodes[3].rect = { x: 0, y: 0, w: 0, h: 0 })],
+    ["name", (nodes: VomNode[]) => (nodes[3].name = "Delete")],
+    ["href", (nodes: VomNode[]) => (nodes[3].attrs = { href: "#delete" })],
+    [
+      "ordinary text",
+      (nodes: VomNode[]) => nodes.push({ ...node(8, 1, "generic"), text: "$1000" }),
+    ],
+    ["removed target", (nodes: VomNode[]) => nodes.splice(3, 1)],
+  ])("keeps %s exact", (_kind, change) => {
+    const before = editor();
+    const after = structuredClone(before);
+    change(after);
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it.each([
+    "unfocused",
+    "unbound",
+    "wrong length",
+    "wrong limit",
+    "other field group",
+  ])("does not infer a character counter from a ratio alone (%s)", (kind) => {
+    const before = editor();
+    if (kind === "unfocused") before[1].focused = false;
+    if (kind === "unbound") before[1].attrs = {};
+    if (kind === "wrong length") before[2].text = "1/30";
+    if (kind === "wrong limit") before[2].text = "9/100";
+    if (kind === "other field group") before[2].parentId = null;
+    const after = before.filter((node) => node.id !== 3);
+    expect(
+      sameObservationEvidence(
+        ...preparationEvidence({ nodes: before }, { nodes: after }, body, preparation),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps a counter exact when focus changes but the counter remains", () => {
+    const before = editor();
+    const after = structuredClone(before);
+    after[1].focused = false;
+    expect(compare(before, after)).toBe(true);
+    after[2].text = "100/300";
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("allows only the newly revealed suffix of a clipped name after counter removal", () => {
+    const before = editor();
+    const prefix = "Chapter ".repeat(40);
+    before[0].name = `9/30 ${prefix}`.slice(0, 240);
+    const after = before.filter((node) => node.id !== 3).map((node) => ({ ...node }));
+    after[0].name = prefix.slice(0, 240);
+    expect(compare(before, after)).toBe(true);
+    after[0].name = `Changed ${prefix}`.slice(0, 240);
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("does not drop a previously observed suffix hidden by a newly added tooltip", () => {
+    const before = editor();
+    const prefix = "Chapter ".repeat(40);
+    before[0].name = prefix.slice(0, 240);
+    const after = structuredClone(before);
+    after[0].name = `Hint ${prefix}`.slice(0, 240);
+    after.push({ ...node(5, 1, "tooltip"), text: "Hint" });
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("does not discard a tooltip containing a control", () => {
+    const before = editor();
+    const after = [
+      ...before,
+      { ...node(5, 1, "tooltip"), text: "Confirm" },
+      node(6, 5, "button", "Delete"),
+    ];
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("keeps all modal content exact even outside the action region", () => {
+    const before = [
+      ...editor(),
+      { ...node(9, null, "dialog", "Confirm"), modal: true },
+      { ...node(10, 9, "generic"), text: "Deleting 1 file" },
+    ];
+    const after = structuredClone(before);
+    after[5].text = "Deleting 100 files";
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("retains a tooltip when it is the target or appears inside a modal", () => {
+    const before = [...editor(), { ...node(5, 1, "tooltip"), text: "Warning" }];
+    const after = before.filter((node) => node.id !== 5);
+    expect(compare(before, after, { backendNodeId: 5, frameId: "frame" })).toBe(false);
+    before[0].modal = true;
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("does not apply focus or hover exceptions before those effects were sent", () => {
+    const before = editor();
+    const after = before.filter((node) => node.id !== 3);
+    expect(
+      sameObservationEvidence(
+        ...preparationEvidence({ nodes: before }, { nodes: after }, body, {
+          focus: false,
+          hover: false,
+        }),
+        body,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("incidental media for a targeted action's whole-page check", () => {
+  it("tolerates only an identified timeline, and only when requested", () => {
+    const before = mediaScene();
+    const after = structuredClone(before);
+    after[6].value = "2";
+    const media = { incidentalMedia: true };
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after })).toBe(false);
+    expect(
+      sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, undefined, media),
+    ).toBe(true);
+    after[2].value = "changed";
+    expect(
+      sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, undefined, media),
+    ).toBe(false);
+  });
+
+  it("keeps an in-form or unnamed slider exact", () => {
+    const before = mediaScene();
+    before[6].name = "";
+    const after = structuredClone(before);
+    after[6].value = "2";
+    expect(
+      sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, undefined, {
+        incidentalMedia: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("observedChange", () => {
+  it("returns nothing when the observations match", () => {
+    expect(observedChange({ nodes: scene() }, { nodes: scene() }, target)).toBeUndefined();
+  });
+
+  it("names the first changed field with truncated text", () => {
+    const before = scene();
+    before.push({ ...node(6, 2, "generic"), text: "6/30" });
+    const after = structuredClone(before);
+    after[5].text = "7/30";
+    expect(observedChange({ nodes: before }, { nodes: after }, target)).toEqual({
+      part: "region",
+      change: "changed",
+      role: "generic",
+      name: "",
+      field: "text",
+      before: "6/30",
+      after: "7/30",
+    });
+    after[5].text = "x".repeat(200);
+    expect(observedChange({ nodes: before }, { nodes: after }, target)?.after).toHaveLength(80);
+  });
+
+  it("reports added and removed nodes instead of their successors", () => {
+    const before = scene();
+    const after = structuredClone(before);
+    after.splice(2, 0, { ...node(9, 2, "status"), text: "Saving" });
+    expect(observedChange({ nodes: before }, { nodes: after }, target)).toMatchObject({
+      part: "region",
+      change: "added",
+      role: "status",
+    });
+    expect(observedChange({ nodes: after }, { nodes: before }, target)).toMatchObject({
+      part: "region",
+      change: "removed",
+      role: "status",
+    });
+  });
+
+  it("never reports value contents or sensitive text", () => {
+    const before = scene();
+    before[2].value = "secret order";
+    const after = structuredClone(before);
+    after[2].value = "other order";
+    const change = observedChange({ nodes: before }, { nodes: after }, target);
+    expect(change).toMatchObject({ part: "region", field: "value", name: "Choice" });
+    expect(change).not.toHaveProperty("before");
+    expect(change).not.toHaveProperty("after");
+    after[2].value = before[2].value;
+    after[2].sensitive = before[2].sensitive = true;
+    after[2].name = "Password 1234";
+    const sensitive = observedChange({ nodes: before }, { nodes: after }, target);
+    expect(sensitive).toMatchObject({ field: "name" });
+    expect(JSON.stringify(sensitive)).not.toContain("1234");
+  });
+
+  it("names a changed attribute and a missing target", () => {
+    const before = scene();
+    const after = structuredClone(before);
+    after[3].attrs = { "aria-disabled": "true" };
+    expect(observedChange({ nodes: before }, { nodes: after }, target)).toMatchObject({
+      field: "attribute:aria-disabled",
+      before: undefined,
+      after: "true",
+    });
+    expect(observedChange({ nodes: before }, { nodes: after.slice(0, 3) }, target)).toEqual({
+      part: "target",
+      change: "removed",
+    });
+  });
 });

@@ -20,18 +20,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
-use bsk_protocol::{CancelParams, CancelResult, ErrorCode, Method, RpcError, RpcId};
+use bsk_protocol::{
+    ActionMetadataPolicy, CancelParams, CancelResult, ErrorCode, Method, RpcError, RpcId,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::{Instant, timeout_at};
 use tracing::debug;
 
 use crate::cli::error::CliError;
-use crate::ipc_client::IpcClient;
+use crate::ipc_client::{IpcClient, IpcRequestMeta, IpcResponseMeta};
 
-/// Total budget after cancellation is observed: connecting, sending cancel,
-/// retrying before registration, and waiting for the original RPC to settle.
-pub const CANCEL_RESPONSE_GRACE: Duration = Duration::from_secs(2);
+pub use crate::cli::orchestration::CANCEL_RESPONSE_GRACE;
 
 const CANCEL_RETRY_INITIAL: Duration = Duration::from_millis(10);
 const CANCEL_RETRY_MAX: Duration = Duration::from_millis(250);
@@ -41,12 +41,476 @@ pub(crate) fn ipc_timeout(timeout_ms: u32) -> Duration {
     Duration::from_millis(u64::from(timeout_ms) + 15_000)
 }
 
-static OBSERVATION_DEPENDENCIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+fn normalize_non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
 
-static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-static ACTION_EVIDENCE: std::sync::OnceLock<(Option<String>, Option<serde_json::Value>)> =
-    std::sync::OnceLock::new();
-static TARGET_POLICY_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+/// Param-sensitive caller action-metadata policy:
+/// - `Full` for guarded browser actions (including `observe` only when `probe_hover == true`
+///   and `debug` only when `action.cooperation_guarded()`).
+/// - `ContextOnly` for `tool.read` (`--context` / `context` only).
+/// - `None` for all other methods, so caller-supplied conditions fail closed with `invalid_params`
+///   before contacting the daemon.
+pub(crate) fn caller_action_metadata_policy(
+    method: &Method,
+    params: Option<&serde_json::Value>,
+) -> ActionMetadataPolicy {
+    method.caller_action_metadata_policy_with_params(params)
+}
+
+pub(crate) fn method_accepts_action_metadata_with_params(
+    method: &Method,
+    params: Option<&serde_json::Value>,
+) -> bool {
+    method.caller_action_metadata_policy_with_params(params) == ActionMetadataPolicy::Full
+}
+
+/// Request-scoped context replacing process-wide global action metadata and caller scope state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientContext {
+    pub scope: Option<String>,
+    pub mcp_scope: Option<String>,
+    pub context_id: Option<String>,
+    pub depends_on: Vec<String>,
+    pub observation_id: Option<String>,
+    pub expect: Option<serde_json::Value>,
+}
+
+impl ClientContext {
+    /// Build request context from parsed CLI global flags.
+    pub fn from_cli_flags(flags: &crate::cli::GlobalFlags) -> Self {
+        Self {
+            scope: flags.scope.as_deref().and_then(normalize_non_empty),
+            mcp_scope: None,
+            context_id: flags.context.clone(),
+            depends_on: flags.depends_on.clone(),
+            observation_id: flags.observation.clone(),
+            expect: flags.expect.clone(),
+        }
+    }
+
+    /// Build request context for a single MCP tool invocation.
+    pub fn for_mcp(
+        mcp_scope: Option<&str>,
+        scope: Option<&str>,
+        context_id: Option<String>,
+        depends_on: Vec<String>,
+        observation_id: Option<String>,
+        expect: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            scope: scope.and_then(normalize_non_empty),
+            mcp_scope: mcp_scope.and_then(normalize_non_empty),
+            context_id,
+            depends_on,
+            observation_id,
+            expect,
+        }
+    }
+
+    /// Override caller scope when an explicit non-empty scope is supplied.
+    pub fn with_scope(&self, scope: Option<&str>) -> Self {
+        let mut next = self.clone();
+        if let Some(scope) = scope.and_then(normalize_non_empty) {
+            next.scope = Some(scope);
+        }
+        next
+    }
+
+    /// Override the explicit observation id when supplied on an action command.
+    pub fn with_observation_id(&self, observation_id: Option<&str>) -> Self {
+        let mut next = self.clone();
+        if let Some(observation_id) = observation_id {
+            next.observation_id = Some(observation_id.to_owned());
+        }
+        next
+    }
+
+    /// Preserve caller scope while stripping action metadata before auxiliary RPCs.
+    pub fn without_action_metadata(&self) -> Self {
+        Self {
+            scope: self.scope.clone(),
+            mcp_scope: self.mcp_scope.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// Whether the caller attached any action condition (`context`, `depends_on`, `observation`, `expect`).
+    pub fn has_any_action_metadata(&self) -> bool {
+        self.context_id.is_some() || self.verification_requested()
+    }
+
+    /// Whether the caller attached anything asking for the page to be checked.
+    pub fn verification_requested(&self) -> bool {
+        !self.depends_on.is_empty() || self.observation_id.is_some() || self.expect.is_some()
+    }
+
+    /// Resolve the effective caller scope against `BSK_SCOPE`, `BSK_SESSION`, MCP scope and defaults.
+    pub fn resolved_caller_scope(&self) -> String {
+        crate::daemon::scopes::resolve_caller_scope_from_env(
+            self.scope.as_deref(),
+            self.mcp_scope.as_deref(),
+        )
+    }
+
+    /// Reject caller action conditions before daemon discovery when `method` + `params` do not verify them.
+    pub fn validate_action_metadata(
+        &self,
+        method: &Method,
+        params: Option<&serde_json::Value>,
+    ) -> Result<ActionMetadataPolicy, CliError> {
+        let caller_policy = caller_action_metadata_policy(method, params);
+        match caller_policy {
+            ActionMetadataPolicy::None | ActionMetadataPolicy::TabBindingContext => {
+                if self.has_any_action_metadata() {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "action conditions (--context, --depends-on, --observation, --expect) do not apply to {}",
+                        method.wire_name()
+                    )));
+                }
+            }
+            ActionMetadataPolicy::ContextOnly => {
+                if self.verification_requested() {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "--observation, --expect and --depends-on apply only to guarded browser actions; read accepts --context only"
+                    )));
+                }
+            }
+            ActionMetadataPolicy::Full => {
+                if !self.depends_on.is_empty() && self.context_id.is_none() {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "depends_on requires context"
+                    )));
+                }
+            }
+        }
+        Ok(caller_policy)
+    }
+
+    /// Validate and frame outgoing RPC parameters using compile-time `MethodSpec` and param-sensitive rules.
+    pub fn prepare_params<P: Serialize>(
+        &self,
+        method: &Method,
+        params: Option<P>,
+    ) -> Result<Option<serde_json::Value>, CliError> {
+        let mut value = params
+            .map(|p| serde_json::to_value(p).map_err(|err| CliError::invalid_params(err.into())))
+            .transpose()?;
+        let caller_policy = self.validate_action_metadata(method, value.as_ref())?;
+        let wire_policy = if matches!(method, Method::ToolObserve | Method::ToolDebug) {
+            caller_policy
+        } else {
+            method.action_metadata_policy()
+        };
+
+        let Some(object) = value.as_mut().and_then(serde_json::Value::as_object_mut) else {
+            return Ok(value);
+        };
+
+        match wire_policy {
+            ActionMetadataPolicy::None => {
+                if ["context_id", "depends_on", "observation_id", "expect"]
+                    .iter()
+                    .any(|key| object.get(*key).is_some_and(|v| !v.is_null()))
+                {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "{} does not accept action metadata (context_id, depends_on, observation_id, expect)",
+                        method.wire_name()
+                    )));
+                }
+            }
+            ActionMetadataPolicy::ContextOnly | ActionMetadataPolicy::TabBindingContext => {
+                if ["depends_on", "observation_id", "expect"]
+                    .iter()
+                    .any(|key| object.get(*key).is_some_and(|v| !v.is_null()))
+                {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "{} does not accept depends_on, observation_id, or expect",
+                        method.wire_name()
+                    )));
+                }
+                if caller_policy == ActionMetadataPolicy::ContextOnly
+                    && let Some(context) = &self.context_id
+                {
+                    if let Some(existing) = object.get("context_id").filter(|v| !v.is_null()) {
+                        if existing.as_str() != Some(context.as_str()) {
+                            return Err(CliError::invalid_params(anyhow::anyhow!(
+                                "--context conflicts with the action's context_id"
+                            )));
+                        }
+                    } else {
+                        object.insert("context_id".into(), context.clone().into());
+                    }
+                }
+            }
+            ActionMetadataPolicy::Full => {
+                if let Some(context) = &self.context_id {
+                    if let Some(existing) = object.get("context_id").filter(|v| !v.is_null()) {
+                        if existing.as_str() != Some(context.as_str()) {
+                            return Err(CliError::invalid_params(anyhow::anyhow!(
+                                "--context conflicts with the action's context_id"
+                            )));
+                        }
+                    } else {
+                        object.insert("context_id".into(), context.clone().into());
+                    }
+                    if !self.depends_on.is_empty() {
+                        object.insert(
+                            "depends_on".into(),
+                            serde_json::to_value(&self.depends_on)
+                                .map_err(|err| CliError::Local(err.into()))?,
+                        );
+                    }
+                }
+                if let Some(observation) = &self.observation_id {
+                    if let Some(existing) = object.get("observation_id").filter(|v| !v.is_null())
+                        && existing.as_str() != Some(observation.as_str())
+                    {
+                        return Err(CliError::invalid_params(anyhow::anyhow!(
+                            "--observation conflicts with the action's observation_id"
+                        )));
+                    }
+                    object.insert("observation_id".into(), observation.clone().into());
+                }
+                if let Some(expect) = &self.expect {
+                    object.insert("expect".into(), expect.clone());
+                }
+            }
+        }
+
+        Ok(value)
+    }
+
+    /// Prepare both the clean business JSON `params` and the out-of-band
+    /// [`IpcRequestMeta`] envelope header for `method`.
+    pub fn prepare_envelope<P: Serialize>(
+        &self,
+        method: &Method,
+        params: Option<P>,
+        mut meta: IpcRequestMeta,
+    ) -> Result<(Option<serde_json::Value>, IpcRequestMeta), CliError> {
+        let value = self.prepare_params(method, params)?;
+        let has_empty_session = value
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .and_then(|obj| obj.get("session_id"))
+            .is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()));
+        if meta.caller_scope.is_none()
+            && (has_empty_session || meta.bind_scope || meta.reuse_or_start_scope)
+        {
+            meta.caller_scope = Some(self.resolved_caller_scope());
+        }
+        Ok((value, meta))
+    }
+
+    /// Issue a business RPC against the daemon with SIGINT-driven cancellation.
+    pub fn call<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        call_timeout: Duration,
+    ) -> Result<R, CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
+        self.call_envelope::<P, R>(
+            sock,
+            rpc_id_prefix,
+            method,
+            params,
+            IpcRequestMeta::default(),
+            call_timeout,
+        )
+        .map(|(reply, _)| reply)
+    }
+
+    /// Issue a business RPC with an explicit [`IpcRequestMeta`] envelope and
+    /// return both the decoded reply and [`IpcResponseMeta`].
+    pub fn call_envelope<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        meta: IpcRequestMeta,
+        call_timeout: Duration,
+    ) -> Result<(R, IpcResponseMeta), CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build tokio runtime for business RPC")
+            .map_err(CliError::Local)?;
+        rt.block_on(self.call_envelope_async::<P, R>(
+            sock,
+            rpc_id_prefix,
+            method,
+            params,
+            meta,
+            call_timeout,
+        ))
+    }
+
+    /// Same as [`ClientContext::call`] but assumes a pre-existing tokio runtime context.
+    pub async fn call_async<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        call_timeout: Duration,
+    ) -> Result<R, CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
+        self.call_envelope_async::<P, R>(
+            sock,
+            rpc_id_prefix,
+            method,
+            params,
+            IpcRequestMeta::default(),
+            call_timeout,
+        )
+        .await
+        .map(|(reply, _)| reply)
+    }
+
+    /// Same as [`ClientContext::call_envelope`] inside an existing tokio runtime.
+    pub async fn call_envelope_async<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        meta: IpcRequestMeta,
+        call_timeout: Duration,
+    ) -> Result<(R, IpcResponseMeta), CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
+        let mut sock = super::ensure_daemon::resolve_effective_sock(&sock);
+        let parent_cancel = stdin_cancellation();
+        if cancel_requested() || parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+            CANCEL_REQUESTED.store(true, Ordering::Relaxed);
+            return Err(CliError::from_rpc(RpcError {
+                code: ErrorCode::Cancelled,
+                message: "command cancelled before dispatch".into(),
+                data: Some(serde_json::json!({
+                    "reason": bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str()
+                })),
+            }));
+        }
+        let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
+        let (params, meta) = self.prepare_envelope(&method, params, meta)?;
+        // Optimistic single-UDS fast path: connect once and send the target RPC directly.
+        // Fail-safe auto-spawn: ONLY if initial connect() fails before any bytes are written
+        // (NotFound / ConnectionRefused on an unverified optimistic daemon.json candidate),
+        // fall back to ensure_daemon_with_protocol() and connect once to the fresh daemon.
+        let was_optimistic = super::ensure_daemon::take_optimistic_candidate(&sock);
+        let mut client = match IpcClient::connect(sock.clone()).await {
+            Ok(client) => client,
+            Err(connect_err) if was_optimistic && is_daemon_absent_connect_error(&connect_err) => {
+                let stale_sock = sock.clone();
+                let (fresh_info, fresh_protocol) =
+                    tokio::task::spawn_blocking(super::ensure_daemon::ensure_daemon_with_protocol)
+                        .await
+                        .context("join daemon auto-spawn task")
+                        .map_err(CliError::Local)?
+                        .context("ensure daemon is running")
+                        .map_err(CliError::Local)?;
+                check_daemon_protocol(&fresh_protocol).map_err(CliError::Local)?;
+                super::ensure_daemon::record_redirected_sock(&stale_sock, &fresh_info.sock_path);
+                sock = fresh_info.sock_path;
+                IpcClient::connect(sock.clone()).await?
+            }
+            Err(connect_err) => return Err(connect_err.into()),
+        };
+        let rpc_id_for_call = rpc_id.clone();
+        let rpc_id_for_cancel = rpc_id.clone();
+        let action_started = AtomicBool::new(false);
+        let action_started_ref = &action_started;
+
+        let main_fut = async move {
+            action_started_ref.store(true, Ordering::Relaxed);
+            client
+                .call_envelope_with_id::<serde_json::Value, R>(
+                    rpc_id_for_call,
+                    method,
+                    params,
+                    meta,
+                    call_timeout,
+                )
+                .await
+        };
+        tokio::pin!(main_fut);
+
+        let (outcome, resp_meta) = tokio::select! {
+            biased;
+            // Arm cancellation before the RPC can dispatch browser input.
+            sig = wait_for_cancel(parent_cancel) => {
+                sig.context("wait for cancellation").map_err(CliError::Local)?;
+                CANCEL_REQUESTED.store(true, Ordering::Relaxed);
+                if !action_started.load(Ordering::Relaxed) {
+                    return Err(CliError::from_rpc(RpcError {
+                        code: ErrorCode::Cancelled,
+                        message: "request cancelled before dispatch".into(),
+                        data: Some(serde_json::json!({
+                            "reason": bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str(),
+                            "effect_state": "none"
+                        })),
+                    }));
+                }
+                debug!(rpc_id = %rpc_id_for_cancel, "forwarding cancel to daemon");
+                // Separate IPC connections can deliver cancel before the business
+                // request is registered. Keep polling that request while confirming
+                // cancellation, including any write that has not completed yet.
+                let deadline = Instant::now() + CANCEL_RESPONSE_GRACE;
+                let settle = async {
+                    tokio::select! {
+                        biased;
+                        res = &mut main_fut => return res,
+                        result = send_cancel(&sock, &rpc_id_for_cancel, deadline) => {
+                            if let Err(err) = result {
+                                debug!(rpc_id = %rpc_id_for_cancel, %err, "cancel was not confirmed");
+                            }
+                        },
+                    }
+                    main_fut.await
+                };
+                match crate::cli::orchestration::await_cancelled_operation_until(deadline, settle)
+                    .await
+                {
+                    Some(res) => res?,
+                    None => {
+                        debug!(
+                            rpc_id = %rpc_id_for_cancel,
+                            "cancel grace elapsed; synthesising cancelled error"
+                        );
+                        return Err(CliError::from_rpc(RpcError {
+                            code: ErrorCode::Cancelled,
+                            message: "rpc did not respond within cancel grace window".into(),
+                            data: None,
+                        }));
+                    }
+                }
+            }
+            res = &mut main_fut => res?,
+        };
+
+        outcome
+            .map(|reply| (reply, resp_meta))
+            .map_err(CliError::from_rpc)
+    }
+}
 
 // Keep the user's stop request even if the in-flight RPC finishes successfully.
 // One CLI process is one command, including its follow-up reads.
@@ -56,204 +520,27 @@ pub(super) fn cancel_requested() -> bool {
     CANCEL_REQUESTED.load(Ordering::Relaxed)
 }
 
-/// A CLI process represents one explicit caller operation. Never fill this from cached state.
-pub fn set_context(context: Option<String>) {
-    let _ = OBSERVATION_CONTEXT.set(context);
-}
-
-pub fn set_dependencies(dependencies: Vec<String>) {
-    let _ = OBSERVATION_DEPENDENCIES.set(dependencies);
-}
-
-pub fn set_action_evidence(observation: Option<String>, expect: Option<serde_json::Value>) {
-    let _ = ACTION_EVIDENCE.set((observation, expect));
-}
-
-pub fn set_target_policy_requested() {
-    let _ = TARGET_POLICY_REQUESTED.set(true);
-}
-
-/// Use the status already read during discovery, before any guarded action can be forwarded.
-pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
-    require_target_control(
-        protocol,
-        TARGET_POLICY_REQUESTED.get().copied().unwrap_or(false),
-        ACTION_EVIDENCE
-            .get()
-            .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some()),
-    )
-}
-
-/// Reject target policy or action evidence when the daemon could silently discard them.
-pub(crate) fn require_target_control(
-    protocol: &str,
-    target_policy: bool,
-    evidence: bool,
-) -> anyhow::Result<()> {
-    if target_policy {
-        anyhow::ensure!(
-            bsk_protocol::tools::supports_target_control(protocol),
-            "--policy target requires daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol})"
-        );
-    }
-    if evidence {
-        anyhow::ensure!(
-            bsk_protocol::tools::supports_target_control(protocol),
-            "--expect and --observation require daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol}). Conditions are never silently discarded"
-        );
-    }
+/// Verify daemon protocol compatibility against v2.0 baseline.
+pub(crate) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        bsk_protocol::catalog::is_protocol_compatible(protocol),
+        "daemon protocol {protocol} is incompatible with CLI (requires >= {}, current {}); update the CLI and restart its daemon",
+        bsk_protocol::catalog::MIN_COMPATIBLE_PROTOCOL,
+        bsk_protocol::catalog::PROTOCOL_VERSION,
+    );
     Ok(())
 }
 
-pub(crate) fn with_context<P: Serialize>(
-    params: Option<P>,
-    context: Option<&str>,
-    dependencies: &[String],
-    observation: Option<&str>,
-    expect: Option<&serde_json::Value>,
-) -> anyhow::Result<Option<serde_json::Value>> {
-    params
-        .map(|p| {
-            let mut value = serde_json::to_value(p)?;
-            if let (Some(context), Some(object)) = (context, value.as_object_mut()) {
-                object.insert("context_id".into(), context.into());
-                if !dependencies.is_empty() {
-                    object.insert("depends_on".into(), serde_json::to_value(dependencies)?);
-                }
-            }
-            if let Some(object) = value.as_object_mut() {
-                if let Some(observation) = observation {
-                    anyhow::ensure!(
-                        object
-                            .get("observation_id")
-                            .is_none_or(|existing| existing == observation),
-                        "--observation conflicts with the action's observation_id"
-                    );
-                    object.insert("observation_id".into(), observation.into());
-                }
-                if let Some(expect) = expect {
-                    object.insert("expect".into(), expect.clone());
-                }
-            }
-            Ok(value)
+fn is_daemon_absent_connect_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
         })
-        .transpose()
-}
-
-/// Issue a business RPC against the daemon with SIGINT-driven
-/// cancellation.
-pub fn call<P, R>(
-    sock: PathBuf,
-    rpc_id_prefix: &str,
-    method: Method,
-    params: Option<P>,
-    call_timeout: Duration,
-) -> Result<R, CliError>
-where
-    P: Serialize + Send + 'static,
-    R: DeserializeOwned + Send + 'static,
-{
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build tokio runtime for business RPC")
-        .map_err(CliError::Local)?;
-    rt.block_on(async move {
-        call_async::<P, R>(sock, rpc_id_prefix, method, params, call_timeout).await
     })
 }
-
-/// Same as [`call`] but assumes a pre-existing tokio runtime context.
-pub async fn call_async<P, R>(
-    sock: PathBuf,
-    rpc_id_prefix: &str,
-    method: Method,
-    params: Option<P>,
-    call_timeout: Duration,
-) -> Result<R, CliError>
-where
-    P: Serialize + Send + 'static,
-    R: DeserializeOwned + Send + 'static,
-{
-    let parent_cancel = stdin_cancellation();
-    if cancel_requested() || parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
-        CANCEL_REQUESTED.store(true, Ordering::Relaxed);
-        return Err(CliError::from_rpc(RpcError {
-            code: ErrorCode::Cancelled,
-            message: "command cancelled before dispatch".into(),
-            data: Some(serde_json::json!({"reason": "cancelled_before_dispatch"})),
-        }));
-    }
-    let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
-    let params = with_context(
-        params,
-        OBSERVATION_CONTEXT.get().and_then(|c| c.as_deref()),
-        OBSERVATION_DEPENDENCIES
-            .get()
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        ACTION_EVIDENCE
-            .get()
-            .and_then(|(observation, _)| observation.as_deref()),
-        ACTION_EVIDENCE
-            .get()
-            .and_then(|(_, expect)| expect.as_ref()),
-    )?;
-    let mut client = IpcClient::connect(sock.clone()).await?;
-    let rpc_id_for_call = rpc_id.clone();
-    let rpc_id_for_cancel = rpc_id.clone();
-
-    let main_fut = async move {
-        client
-            .call_with_id::<serde_json::Value, R>(rpc_id_for_call, method, params, call_timeout)
-            .await
-    };
-    tokio::pin!(main_fut);
-
-    let outcome = tokio::select! {
-        biased;
-        // Arm cancellation before the RPC can dispatch browser input.
-        sig = wait_for_cancel(parent_cancel) => {
-            sig.context("wait for cancellation").map_err(CliError::Local)?;
-            CANCEL_REQUESTED.store(true, Ordering::Relaxed);
-            debug!(rpc_id = %rpc_id_for_cancel, "forwarding cancel to daemon");
-            // Separate IPC connections can deliver cancel before the business
-            // request is registered. Keep polling that request while confirming
-            // cancellation, including any write that has not completed yet.
-            let deadline = Instant::now() + CANCEL_RESPONSE_GRACE;
-            let settle = async {
-                tokio::select! {
-                    biased;
-                    res = &mut main_fut => return res,
-                    result = send_cancel(&sock, &rpc_id_for_cancel, deadline) => {
-                        if let Err(err) = result {
-                            debug!(rpc_id = %rpc_id_for_cancel, %err, "cancel was not confirmed");
-                        }
-                    },
-                }
-                main_fut.await
-            };
-            match timeout_at(deadline, settle).await {
-                Ok(res) => res?,
-                Err(_) => {
-                    debug!(
-                        rpc_id = %rpc_id_for_cancel,
-                        "cancel grace elapsed; synthesising cancelled error"
-                    );
-                    return Err(CliError::from_rpc(RpcError {
-                        code: ErrorCode::Cancelled,
-                        message: "rpc did not respond within cancel grace window".into(),
-                        data: None,
-                    }));
-                }
-            }
-        }
-        res = &mut main_fut => res?,
-    };
-
-    outcome.map_err(CliError::from_rpc)
-}
-
 /// Release caller-owned staging even after cancellation. This deliberately
 /// exposes only transfer.release, not a general bypass for business RPCs.
 /// The entire batch, including connection setup, shares one bounded budget.
@@ -267,13 +554,14 @@ pub fn release_transfers<'a>(
     if ids.is_empty() {
         return Ok(());
     }
+    let sock = super::ensure_daemon::resolve_effective_sock(sock);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("build runtime for transfer cleanup")?;
     rt.block_on(async {
         tokio::time::timeout(CLEANUP_TIMEOUT, async {
-            let mut client = IpcClient::connect(sock).await?;
+            let mut client = IpcClient::connect(&sock).await?;
             for id in ids {
                 client
                     .call::<_, TransferReleaseResult>(
@@ -437,7 +725,8 @@ mod windows_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{ipc_timeout, with_context};
+    use super::{ClientContext, ipc_timeout};
+    use bsk_protocol::Method;
     use serde_json::json;
     use std::time::Duration;
 
@@ -451,28 +740,37 @@ mod tests {
     fn context_is_explicit_and_does_not_change_action_parameters() {
         let params = json!({"session_id":"s1", "ref":"e1", "value":"Shanghai"});
         assert_eq!(
-            with_context(Some(&params), None, &[], None, None).unwrap(),
+            ClientContext::default()
+                .prepare_params(&Method::ToolFill, Some(&params))
+                .unwrap(),
             Some(params.clone())
         );
-        let framed = with_context(
-            Some(&params),
-            Some("observed-context"),
-            &["@e2".into()],
-            None,
-            None,
-        )
-        .unwrap()
-        .unwrap();
+        let ctx = ClientContext {
+            context_id: Some("observed-context".into()),
+            depends_on: vec!["@e2".into()],
+            ..ClientContext::default()
+        };
+        let framed = ctx
+            .prepare_params(&Method::ToolFill, Some(&params))
+            .unwrap()
+            .unwrap();
         assert_eq!(framed["context_id"], "observed-context");
         assert_eq!(framed["depends_on"], json!(["@e2"]));
         assert_eq!(framed["value"], "Shanghai");
         assert!(params.get("context_id").is_none());
     }
+
     #[test]
     fn explicit_conditions_survive_without_implicit_context() {
         let params = json!({"session_id":"s1", "ref":"e1"});
         let checks = json!([{ "target":"#price", "field":"text", "equals":"$12" }]);
-        let framed = with_context(Some(&params), None, &[], Some("observed"), Some(&checks))
+        let ctx = ClientContext {
+            observation_id: Some("observed".into()),
+            expect: Some(checks.clone()),
+            ..ClientContext::default()
+        };
+        let framed = ctx
+            .prepare_params(&Method::ToolClick, Some(&params))
             .unwrap()
             .unwrap();
         assert_eq!(framed["observation_id"], "observed");
@@ -484,10 +782,313 @@ mod tests {
     #[test]
     fn conflicting_visual_and_action_observations_are_rejected() {
         let params = json!({"session_id":"s1", "observation_id":"visual"});
-        assert!(with_context(Some(&params), None, &[], Some("other"), None).is_err());
+        assert!(
+            ClientContext {
+                observation_id: Some("other".into()),
+                ..ClientContext::default()
+            }
+            .prepare_params(&Method::ToolClick, Some(&params))
+            .is_err()
+        );
         assert_eq!(
-            with_context(Some(&params), None, &[], Some("visual"), None).unwrap(),
+            ClientContext {
+                observation_id: Some("visual".into()),
+                ..ClientContext::default()
+            }
+            .prepare_params(&Method::ToolClick, Some(&params))
+            .unwrap(),
             Some(params)
         );
+    }
+
+    #[test]
+    fn accepts_action_metadata_enforced_per_method_and_tool_read_context_only() {
+        let ctx = ClientContext {
+            scope: Some("agent-1".into()),
+            context_id: Some("ctx-1".into()),
+            expect: Some(json!([{"target":"@e1","field":"exists","equals":true}])),
+            ..ClientContext::default()
+        };
+        assert!(
+            ctx.prepare_params(
+                &Method::ToolWaitForElement,
+                Some(json!({"session_id":"s1"}))
+            )
+            .is_err()
+        );
+        assert!(
+            ctx.prepare_params(&Method::TransferBegin, Some(json!({"session_id":"s1"})))
+                .is_err()
+        );
+        let stripped = ctx.without_action_metadata();
+        assert_eq!(stripped.scope.as_deref(), Some("agent-1"));
+        let (wait_params, wait_meta) = stripped
+            .prepare_envelope(
+                &Method::ToolWaitForElement,
+                Some(json!({"session_id":""})),
+                crate::ipc_client::IpcRequestMeta::default(),
+            )
+            .unwrap();
+        let wait_params = wait_params.unwrap();
+        assert!(wait_params.get("expect").is_none());
+        assert!(wait_params.get("context_id").is_none());
+        assert_eq!(wait_params, json!({"session_id": ""}));
+        assert_eq!(
+            wait_meta.caller_scope.as_deref(),
+            Some(
+                crate::daemon::scopes::resolve_caller_scope_from_env(Some("agent-1"), None)
+                    .as_str()
+            )
+        );
+
+        let mcp_ctx = ClientContext::for_mcp(Some("mcp:42:nonce"), None, None, vec![], None, None)
+            .without_action_metadata();
+        assert_eq!(mcp_ctx.mcp_scope.as_deref(), Some("mcp:42:nonce"));
+        assert!(mcp_ctx.scope.is_none());
+        assert_eq!(
+            mcp_ctx.resolved_caller_scope(),
+            crate::daemon::scopes::resolve_caller_scope_from_env(None, Some("mcp:42:nonce"))
+        );
+
+        let read_ctx = ClientContext {
+            context_id: Some("ctx-read".into()),
+            ..ClientContext::default()
+        };
+        let read_params = read_ctx
+            .prepare_params(&Method::ToolRead, Some(json!({"session_id":"s1"})))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_params["context_id"], "ctx-read");
+        assert!(
+            ctx.prepare_params(&Method::ToolRead, Some(json!({"session_id":"s1"})))
+                .is_err(),
+            "tool.read must reject expect/observation/depends_on"
+        );
+
+        for passive_method in [
+            Method::ToolSnapshot,
+            Method::ToolGetHtml,
+            Method::ToolExtract,
+            Method::ToolScreenshot,
+            Method::ToolConsole,
+            Method::ToolNetwork,
+            Method::ToolWaitForNavigation,
+            Method::ToolWaitForElement,
+        ] {
+            assert!(
+                read_ctx
+                    .prepare_params(&passive_method, Some(json!({"session_id":"s1"})))
+                    .is_err(),
+                "{} must reject caller-supplied context_id",
+                passive_method.wire_name()
+            );
+            let inline_params = ClientContext::default()
+                .prepare_params(
+                    &passive_method,
+                    Some(json!({"session_id":"s1","context_id":"ctx-inline"})),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(inline_params["context_id"], "ctx-inline");
+            assert!(
+                ctx.prepare_params(&passive_method, Some(json!({"session_id":"s1"})))
+                    .is_err(),
+                "{} must reject expect/observation/depends_on",
+                passive_method.wire_name()
+            );
+        }
+
+        // Param-sensitive guarded sub-modes (`observe --probe-hover` and `debug` guarded actions).
+        assert!(
+            read_ctx
+                .prepare_params(&Method::ToolObserve, Some(json!({"session_id":"s1"})))
+                .is_err()
+        );
+        let probe_params = ctx
+            .prepare_params(
+                &Method::ToolObserve,
+                Some(json!({"session_id":"s1","probe_hover":true})),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(probe_params["context_id"], "ctx-1");
+        assert!(
+            read_ctx
+                .prepare_params(
+                    &Method::ToolDebug,
+                    Some(json!({"session_id":"s1","action":"requests"})),
+                )
+                .is_err()
+        );
+        let replay_params = ctx
+            .prepare_params(
+                &Method::ToolDebug,
+                Some(json!({"session_id":"s1","action":"replay"})),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay_params["context_id"], "ctx-1");
+
+        assert!(
+            read_ctx
+                .prepare_params(&Method::TransferBegin, Some(json!({"session_id":"s1"})))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redirected_optimistic_sock_is_honored_by_post_rpc_cleanup_helpers() {
+        use crate::cli::ensure_daemon::ensure_daemon_optimistic;
+        use crate::daemon::info::{self as daemon_info, DaemonInfo};
+        use crate::daemon::paths::{BSK_HOME_ENV, ensure_bsk_home, test_env_lock};
+        use serde_json::Value;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let _lock = test_env_lock();
+        let tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let home = tmp.path().join("bsk-home");
+        unsafe {
+            std::env::set_var(BSK_HOME_ENV, &home);
+        }
+        ensure_bsk_home().unwrap();
+
+        let stale_sock = home.join("stale.sock");
+        // Bind and immediately drop so `stale.sock` exists on disk for the optimistic
+        // check, then deterministically fails `connect()` with `ConnectionRefused`.
+        drop(std::os::unix::net::UnixListener::bind(&stale_sock).unwrap());
+        let stale_info = DaemonInfo::now(std::process::id(), stale_sock.clone(), 52890, "0.5.0")
+            .with_protocol_version("2.0");
+        daemon_info::write(&stale_info).unwrap();
+
+        let optimistic_info = ensure_daemon_optimistic().unwrap();
+        assert_eq!(optimistic_info.sock_path, stale_sock);
+
+        // Replacement pre-envelope `2.0` daemon now serves at `fresh.sock`.
+        let fresh_sock = home.join("fresh.sock");
+        let fresh_sock_for_srv = fresh_sock.clone();
+        let fresh_sock_str = fresh_sock.to_string_lossy().into_owned();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
+        let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_srv = Arc::clone(&captured);
+
+        let srv_thread = std::thread::spawn(move || {
+            let srv_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            srv_rt.block_on(async move {
+                let listener = UnixListener::bind(&fresh_sock_for_srv).unwrap();
+                ready_tx.send(()).unwrap();
+                while let Ok((stream, _)) = listener.accept().await {
+                    let (read, mut write) = stream.into_split();
+                    let mut reader = BufReader::new(read);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                        let raw: Value = serde_json::from_str(line.trim_end()).unwrap();
+                        assert!(
+                            raw.get("meta").is_none(),
+                            "pre-envelope 2.0 fresh daemon must never receive wire `meta`: {raw}"
+                        );
+                        let method = raw["method"].as_str().unwrap_or("").to_string();
+                        captured_srv.lock().unwrap().push(raw.clone());
+                        let reply = match method.as_str() {
+                            "system.status" => json!({
+                                "id": raw["id"],
+                                "result": {
+                                    "daemon_version": "0.5.0",
+                                    "protocol_version": "2.0",
+                                    "pid": std::process::id(),
+                                    "uptime_secs": 1,
+                                    "ws_port": 52891,
+                                    "sock_path": fresh_sock_str,
+                                    "browsers": [],
+                                    "sessions": []
+                                }
+                            }),
+                            "system.ping" => json!({
+                                "id": raw["id"],
+                                "result": { "pong": true }
+                            }),
+                            "tool.screenshot_release" | "transfer.release" => json!({
+                                "id": raw["id"],
+                                "result": { "released": true }
+                            }),
+                            other => panic!("unexpected method on fresh.sock: {other}"),
+                        };
+                        let mut bytes = serde_json::to_vec(&reply).unwrap();
+                        bytes.push(b'\n');
+                        write.write_all(&bytes).await.unwrap();
+                        write.flush().await.unwrap();
+                        if method == "transfer.release" {
+                            return;
+                        }
+                        line.clear();
+                    }
+                }
+            });
+        });
+
+        ready_rx.recv().unwrap();
+        let fresh_info = DaemonInfo::now(std::process::id(), fresh_sock.clone(), 52891, "0.5.0")
+            .with_protocol_version("2.0");
+        daemon_info::write(&fresh_info).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ctx = ClientContext {
+            scope: Some("cleanup-scope".into()),
+            ..ClientContext::default()
+        };
+        rt.block_on(async {
+            let _: bsk_protocol::PingResult = ctx
+                .call_async(
+                    optimistic_info.sock_path.clone(),
+                    "ping",
+                    Method::SystemPing,
+                    None::<()>,
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+
+            // Still passing `&optimistic_info.sock_path` (`stale.sock`), just as
+            // `screenshot.rs` does after `call_envelope_async` redirected!
+            crate::cli::screenshot::release_full_page_async(
+                &optimistic_info.sock_path,
+                "",
+                "scope:cleanup-scope",
+                "cap-redirect-1",
+            )
+            .await
+            .unwrap();
+        });
+
+        // Synchronous `release_transfers` builds its own runtime, just as `upload.rs`
+        // and `download.rs` invoke it with `&info.sock_path` (`stale.sock`).
+        super::release_transfers(&optimistic_info.sock_path, ["tr-redirect-1"]).unwrap();
+
+        srv_thread.join().unwrap();
+        let frames = captured.lock().unwrap();
+        let ss_rel = frames
+            .iter()
+            .find(|f| f["method"] == "tool.screenshot_release")
+            .expect("screenshot_release reached redirected fresh.sock");
+        assert_eq!(ss_rel["params"]["capture_id"], "cap-redirect-1");
+        assert_eq!(ss_rel["params"]["_caller_scope"], "scope:cleanup-scope");
+        let tr_rel = frames
+            .iter()
+            .find(|f| f["method"] == "transfer.release")
+            .expect("transfer.release reached redirected fresh.sock");
+        assert_eq!(tr_rel["params"]["transfer_id"], "tr-redirect-1");
+
+        unsafe {
+            std::env::remove_var(BSK_HOME_ENV);
+        }
     }
 }

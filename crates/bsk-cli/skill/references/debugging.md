@@ -146,3 +146,5 @@ never send placeholders. Replacing the URL does not repair incomplete metadata.
 Reuse the same key after an uncertain result; a new key is a deliberate new attempt.
 Inspect the linked request/response. Replay does not repeat the page event handler
 or guarantee a UI update. Historical evidence never activates rules or replays.
+
+In MCP, use `bsk_debug` with `action` set to `capabilities`, `start`, `stop`, `status`, `export`, `operations`, `operation`, `requests`, `request`, `console`, `pages`, `performance`, `aggregate`, `duplicates`, `activity`, `wait`, `pin`, `unpin`, `rules`, `rule_add`, `rule_enable`, `rule_disable`, `rule_remove`, or `replay`.

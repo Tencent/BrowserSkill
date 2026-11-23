@@ -15,11 +15,10 @@ const RUNS = Number(process.env.BSK_RECIPE_RUNS ?? 2);
  */
 export async function runRecipeScenarios({ send, bsk, cli, env, base, requests }) {
   const directory = await mkdtemp(join(tmpdir(), "bsk-recipes-"));
-  const recipeEnv = { ...env, BSK_RECIPES: "1" };
   const recipe = async (args) => {
     try {
       const { stdout } = await exec(cli, ["recipe", ...args], {
-        env: recipeEnv,
+        env,
         timeout: 60000,
         maxBuffer: 2 ** 22,
       });

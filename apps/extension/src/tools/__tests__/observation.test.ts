@@ -1,9 +1,10 @@
 import { renderVom } from "@browser-skill/vom";
 import { describe, expect, it, vi } from "vitest";
+import { createFrameDocumentInfo, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { CAPTURE_SUPPRESS, type CaptureSuppressMessage } from "@/lib/capture-suppress-bridge";
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "@/lib/overlay-bridge";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import type { BuildVomSceneOptions, VomFrameDocument } from "../observation";
 import {
   buildFrameVomScene,
@@ -23,6 +24,30 @@ interface SceneFixture extends CapturedSceneInput {
   documents?: VomFrameDocument[];
 }
 
+function frameDoc(
+  input: Omit<VomFrameDocument, "handle" | "loaderId" | "processKey" | "isOutOfProcess"> & {
+    tabId?: number;
+    loaderId?: string;
+    processKey?: string;
+    isOutOfProcess?: boolean;
+  },
+): VomFrameDocument {
+  const {
+    tabId = 7,
+    loaderId = "",
+    processKey = "root",
+    isOutOfProcess = processKey !== "root",
+    ...rest
+  } = input;
+  return {
+    ...rest,
+    loaderId,
+    processKey,
+    isOutOfProcess,
+    handle: toFrameDocumentHandle(tabId, { frameId: rest.frameId, loaderId }),
+  };
+}
+
 // Only supplies the common root fixture; child documents declare their own ownership.
 function buildTestScene(
   axNodes: CdpAxNode[],
@@ -32,14 +57,13 @@ function buildTestScene(
   const rootFrameId = captured.rootFrameId ?? "root";
   return buildFrameVomScene(
     [
-      {
+      frameDoc({
         frameId: rootFrameId,
         contextScopeId: rootFrameId,
-        target: { tabId: 7 },
         url: options.pageUrl,
         domNodes: captured.nodes,
         axNodes,
-      },
+      }),
       ...(captured.documents ?? []),
     ],
     captured,
@@ -102,7 +126,13 @@ function makeFakeCdp(handlers: Record<string, (params?: object) => unknown>) {
     if (!handler) throw new Error(`unexpected CDP call ${method}`);
     return handler(params);
   });
-  return { cdp: { send, trackSessionTab: vi.fn() } as unknown as CdpRunner, sent };
+  return {
+    cdp: createStubCdpRunner({
+      send: send as unknown as CdpRunner["send"],
+      trackSessionTab: vi.fn(),
+    }),
+    sent,
+  };
 }
 
 describe("stripDataUrlPrefix", () => {
@@ -459,6 +489,55 @@ describe("handleScreenshot", () => {
     );
     expect(res).toMatchObject({ code: "cdp_failed", message: /capture refused/ });
   });
+
+  it("captures a visible ref on an unborrowed user tab without scrolling it", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, { tabId: 9 });
+    const { cdp, sent } = makeFakeCdp({
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 9 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 9, windowId: 200, active: true }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.tab_id).toBe(9);
+    expect(res.image_base64).toBe(TINY_PNG);
+    expect(sent.some((c) => c.method === "DOM.scrollIntoViewIfNeeded")).toBe(false);
+  });
+
+  it("refuses off-screen ref screenshot on an unborrowed user tab without scrolling", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, { tabId: 9 });
+    const { cdp, sent } = makeFakeCdp({
+      "DOM.getContentQuads": () => ({ quads: [[10, 2000, 110, 2000, 110, 2040, 10, 2040]] }),
+    });
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 9 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 9, windowId: 200, active: true }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "element_not_visible" },
+    });
+    expect(sent.some((c) => c.method === "DOM.scrollIntoViewIfNeeded")).toBe(false);
+    expect(sent.some((c) => c.method === "Page.captureScreenshot")).toBe(false);
+  });
 });
 
 describe("handleScreenshot overlay suppression", () => {
@@ -617,54 +696,53 @@ describe("buildFrameVomScene", () => {
     });
     const result = buildFrameVomScene(
       [
-        {
+        frameDoc({
           frameId: "main",
           contextScopeId: "main",
-          target: { tabId: 7 },
           domNodes: mainNodes,
           axNodes: [
             axNode("root", 1, "RootWebArea"),
             axNode("frame-1", 10, "Iframe", "root", "First"),
             axNode("frame-2", 20, "Iframe", "root", "Second"),
           ],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "first",
           contextScopeId: "first",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
-          target: { tabId: 7, sessionId: "session-first" },
+          processKey: "oopif:first",
           domNodes: firstNodes,
           axNodes: [
             axNode("root", 100, "RootWebArea"),
             axNode("button", 101, "button", "root", "First action"),
           ],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "second",
           contextScopeId: "second",
           parentFrameId: "main",
           ownerBackendNodeId: 20,
-          target: { tabId: 7, sessionId: "session-second" },
+          processKey: "oopif:second",
           domNodes: secondNodes,
           axNodes: [
             axNode("root", 200, "RootWebArea"),
             axNode("heading", 201, "heading", "root", "Second heading"),
             axNode("nested-frame", 210, "Iframe", "root", "Nested"),
           ],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "nested",
           contextScopeId: "nested",
           parentFrameId: "second",
           ownerBackendNodeId: 210,
-          target: { tabId: 7, sessionId: "session-nested" },
+          processKey: "oopif:nested",
           domNodes: nestedNodes,
           axNodes: [
             axNode("root", 300, "RootWebArea"),
             axNode("input", 301, "textbox", "root", "Nested field"),
           ],
-        },
+        }),
       ],
       captured,
     );
@@ -700,31 +778,32 @@ describe("buildFrameVomScene", () => {
     const owners = [owner(10), owner(20)];
     const result = buildFrameVomScene(
       [
-        {
+        frameDoc({
           frameId: "main",
           contextScopeId: "main",
-          target: { tabId: 7 },
           domNodes: owners,
           axNodes: [],
-        },
-        ...["left", "right"].map((frameId, i) => ({
-          frameId,
-          contextScopeId: frameId,
-          parentFrameId: "main",
-          ownerBackendNodeId: owners[i].backendNodeId,
-          target: { tabId: 7, sessionId: frameId },
-          excludedBackendNodeIds: new Set(i === 0 ? [7] : []),
-          domNodes: [],
-          axNodes: [
-            {
-              nodeId: "button",
-              frameId,
-              backendDOMNodeId: 7,
-              role: { type: "role", value: "button" },
-              name: { type: "computedString", value: frameId + " action" },
-            },
-          ],
-        })),
+        }),
+        ...["left", "right"].map((frameId, i) =>
+          frameDoc({
+            frameId,
+            contextScopeId: frameId,
+            parentFrameId: "main",
+            ownerBackendNodeId: owners[i].backendNodeId,
+            processKey: `oopif:${frameId}`,
+            excludedBackendNodeIds: new Set(i === 0 ? [7] : []),
+            domNodes: [],
+            axNodes: [
+              {
+                nodeId: "button",
+                frameId,
+                backendDOMNodeId: 7,
+                role: { type: "role", value: "button" },
+                name: { type: "computedString", value: frameId + " action" },
+              },
+            ],
+          }),
+        ),
       ],
       {
         nodes: owners,
@@ -760,18 +839,16 @@ describe("buildFrameVomScene", () => {
 
     const result = buildFrameVomScene(
       [
-        {
+        frameDoc({
           frameId: "main",
           contextScopeId: "main",
-          target: { tabId: 7 },
           domNodes: [],
           axNodes: [],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "child",
           contextScopeId: "child",
           parentFrameId: "main",
-          target: { tabId: 7 },
           domNodes: [childNode],
           axNodes: [
             {
@@ -782,7 +859,7 @@ describe("buildFrameVomScene", () => {
               name: { type: "computedString", value: "Child action" },
             },
           ],
-        },
+        }),
       ],
       captured,
     );
@@ -825,10 +902,9 @@ describe("buildFrameVomScene", () => {
 
     const result = buildFrameVomScene(
       [
-        {
+        frameDoc({
           frameId: "main",
           contextScopeId: "main",
-          target: { tabId: 7 },
           domNodes: mainNodes,
           axNodes: [
             {
@@ -844,13 +920,13 @@ describe("buildFrameVomScene", () => {
               name: { type: "computedString", value: "Remote" },
             },
           ],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "child",
           contextScopeId: "child",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
-          target: { tabId: 7, sessionId: "child-session" },
+          processKey: "oopif:child",
           domNodes: [],
           axNodes: [
             {
@@ -866,7 +942,7 @@ describe("buildFrameVomScene", () => {
               name: { type: "computedString", value: "AX fallback action" },
             },
           ],
-        },
+        }),
       ],
       captured,
     );
@@ -1113,12 +1189,11 @@ describe("buildFrameVomScene", () => {
         },
       ],
       documents: [
-        {
+        frameDoc({
           frameId: "child",
           contextScopeId: "child",
           parentFrameId: "root",
           ownerBackendNodeId: 20,
-          target: { tabId: 7 },
           axNodes: [],
           domNodes: [
             {
@@ -1142,7 +1217,7 @@ describe("buildFrameVomScene", () => {
               pointerEvents: "auto",
             },
           ],
-        },
+        }),
       ],
       excludedBackendNodeIds: new Set(),
     };
@@ -1216,12 +1291,11 @@ describe("buildFrameVomScene", () => {
         },
       ],
       documents: [
-        {
+        frameDoc({
           frameId: "child",
           contextScopeId: "child",
           parentFrameId: "root",
           ownerBackendNodeId: 20,
-          target: { tabId: 7 },
           axNodes: [axNodes[2]],
           domNodes: [
             {
@@ -1235,7 +1309,7 @@ describe("buildFrameVomScene", () => {
               pointerEvents: "auto",
             },
           ],
-        },
+        }),
       ],
       excludedBackendNodeIds: new Set(),
     };
@@ -1295,12 +1369,11 @@ describe("buildFrameVomScene", () => {
           },
         ],
         documents: [
-          {
+          frameDoc({
             frameId: "child",
             contextScopeId: "child",
             parentFrameId: "root",
             ownerBackendNodeId: 20,
-            target: { tabId: 7 },
             axNodes: [],
             domNodes: [
               {
@@ -1324,7 +1397,7 @@ describe("buildFrameVomScene", () => {
                 pointerEvents: "auto",
               },
             ],
-          },
+          }),
         ],
         excludedBackendNodeIds: new Set(),
       },
@@ -1376,12 +1449,11 @@ describe("buildFrameVomScene", () => {
           },
         ],
         documents: [
-          {
+          frameDoc({
             frameId: "child",
             contextScopeId: "child",
             parentFrameId: "root",
             ownerBackendNodeId: 20,
-            target: { tabId: 7 },
             axNodes: [],
             domNodes: [
               {
@@ -1405,7 +1477,7 @@ describe("buildFrameVomScene", () => {
                 pointerEvents: "auto",
               },
             ],
-          },
+          }),
         ],
         excludedBackendNodeIds: new Set(),
       },
@@ -2411,7 +2483,9 @@ describe("buildFrameVomScene", () => {
 
     expect(scene.nodes.find((node) => node.backendNodeId === 20)).toEqual(
       expect.objectContaining({
-        name: "Products [expanded]",
+        name: "Products",
+        hasPopup: true,
+        expanded: true,
         attrs: expect.objectContaining({
           "aria-expanded": "true",
           "aria-controls": "products-panel",
@@ -2421,11 +2495,488 @@ describe("buildFrameVomScene", () => {
     expect(scene.activeScopeBlocks).toEqual([
       {
         triggerId: scene.nodes.find((node) => node.backendNodeId === 20)!.id,
-        label: "Products [expanded]",
+        label: "Products",
         lines: ["Shoes Bags"],
       },
     ]);
+    expect(renderVom(scene).text).toContain('@e1 button "Products" [expanded]');
     expect(scene.nodes.find((node) => node.backendNodeId === 30)?.sensitive).toBe(true);
+  });
+
+  it("scopes hover surface probes and aria-controls active scopes by frameId and skips hidden scope descendants", () => {
+    const mainAx: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        name: { type: "computedString", value: "Shop App" },
+        backendDOMNodeId: 10,
+        childIds: ["2", "3", "4"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "button" },
+        name: { type: "computedString", value: "Main Products" },
+        backendDOMNodeId: 20,
+      },
+      {
+        nodeId: "3",
+        parentId: "1",
+        role: { type: "role", value: "tab" },
+        name: { type: "computedString", value: "Main Tab" },
+        backendDOMNodeId: 30,
+      },
+      {
+        nodeId: "4",
+        parentId: "1",
+        role: { type: "role", value: "Iframe" },
+        name: { type: "computedString", value: "Widget Frame" },
+        backendDOMNodeId: 40,
+      },
+    ];
+    const oopifAx: CdpAxNode[] = [
+      {
+        nodeId: "f1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 10,
+        childIds: ["f2", "f3", "f4"],
+      },
+      // Separate OOPIF renderer allocates the exact same backendNodeId 20 as main document!
+      {
+        nodeId: "f2",
+        parentId: "f1",
+        role: { type: "role", value: "button" },
+        name: { type: "computedString", value: "OOPIF Cart" },
+        backendDOMNodeId: 20,
+      },
+      {
+        nodeId: "f3",
+        parentId: "f1",
+        role: { type: "role", value: "tab" },
+        name: { type: "computedString", value: "Frame Tab" },
+        backendDOMNodeId: 30,
+      },
+      // Must NOT cross-link to main document's #main-only panel!
+      {
+        nodeId: "f4",
+        parentId: "f1",
+        role: { type: "role", value: "tab" },
+        name: { type: "computedString", value: "Orphan Frame Tab" },
+        backendDOMNodeId: 31,
+      },
+    ];
+
+    const scene = buildTestScene(
+      mainAx,
+      {
+        rootFrameId: "main",
+        viewport: { width: 1000, height: 800 },
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            frameId: "main",
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "button",
+            attrs: {},
+            rect: { x: 20, y: 20, w: 120, h: 40 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+          {
+            backendNodeId: 30,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "button",
+            attrs: { role: "tab", "aria-selected": "true", "aria-controls": "shared-panel" },
+            rect: { x: 20, y: 80, w: 100, h: 32 },
+            paintOrder: 2,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+          {
+            backendNodeId: 35,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "div",
+            attrs: { id: "shared-panel" },
+            rect: { x: 20, y: 120, w: 300, h: 80 },
+            paintOrder: 3,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+          {
+            backendNodeId: 36,
+            parentBackendNodeId: 35,
+            frameId: "main",
+            tag: "p",
+            attrs: {},
+            rect: { x: 20, y: 120, w: 200, h: 20 },
+            paintOrder: 4,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+            textContent: "Main Visible Summary",
+          },
+          // display:none descendant (rendered: false in Chrome DOMSnapshot) -> must be skipped!
+          {
+            backendNodeId: 37,
+            parentBackendNodeId: 35,
+            frameId: "main",
+            tag: "div",
+            attrs: { style: "display: none" },
+            rect: null,
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: false,
+            textContent: "Hidden Display None Text",
+          },
+          // visibility:hidden descendant with an explicit visibility:visible grandchild -> skip hidden, keep visible!
+          {
+            backendNodeId: 38,
+            parentBackendNodeId: 35,
+            frameId: "main",
+            tag: "div",
+            attrs: { style: "visibility: hidden" },
+            rect: { x: 20, y: 140, w: 200, h: 20 },
+            paintOrder: 5,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: false,
+            textContent: "Hidden Visibility Text",
+          },
+          {
+            backendNodeId: 39,
+            parentBackendNodeId: 38,
+            frameId: "main",
+            tag: "span",
+            attrs: { style: "visibility: visible" },
+            rect: { x: 20, y: 140, w: 120, h: 20 },
+            paintOrder: 6,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+            textContent: "Explicitly Visible Child",
+          },
+          {
+            backendNodeId: 41,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "div",
+            attrs: { id: "main-only" },
+            rect: { x: 20, y: 220, w: 200, h: 30 },
+            paintOrder: 7,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+            textContent: "Main Secret Panel",
+          },
+          {
+            backendNodeId: 40,
+            parentBackendNodeId: 10,
+            frameId: "main",
+            tag: "iframe",
+            attrs: { title: "Widget Frame" },
+            rect: { x: 20, y: 300, w: 400, h: 200 },
+            paintOrder: 8,
+            position: "static",
+            pointerEvents: "auto",
+            rendered: true,
+          },
+        ],
+        documents: [
+          frameDoc({
+            frameId: "oopif-1",
+            parentFrameId: "main",
+            ownerBackendNodeId: 40,
+            processKey: "oopif-proc",
+            isOutOfProcess: true,
+            contextScopeId: "oopif-1",
+            axNodes: oopifAx,
+            domNodes: [
+              {
+                backendNodeId: 10,
+                parentBackendNodeId: null,
+                frameId: "oopif-1",
+                tag: "body",
+                attrs: {},
+                rect: { x: 20, y: 300, w: 400, h: 200 },
+                paintOrder: 0,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+              },
+              {
+                backendNodeId: 20,
+                parentBackendNodeId: 10,
+                frameId: "oopif-1",
+                tag: "button",
+                attrs: {},
+                rect: { x: 40, y: 320, w: 120, h: 40 },
+                paintOrder: 1,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+              },
+              {
+                backendNodeId: 30,
+                parentBackendNodeId: 10,
+                frameId: "oopif-1",
+                tag: "button",
+                attrs: { role: "tab", "aria-selected": "true", "aria-controls": "shared-panel" },
+                rect: { x: 40, y: 370, w: 100, h: 32 },
+                paintOrder: 2,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+              },
+              {
+                backendNodeId: 31,
+                parentBackendNodeId: 10,
+                frameId: "oopif-1",
+                tag: "button",
+                attrs: { role: "tab", "aria-selected": "true", "aria-controls": "main-only" },
+                rect: { x: 150, y: 370, w: 120, h: 32 },
+                paintOrder: 3,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+              },
+              {
+                backendNodeId: 35,
+                parentBackendNodeId: 10,
+                frameId: "oopif-1",
+                tag: "div",
+                attrs: { id: "shared-panel" },
+                rect: { x: 40, y: 410, w: 300, h: 60 },
+                paintOrder: 4,
+                position: "static",
+                pointerEvents: "auto",
+                rendered: true,
+                textContent: "OOPIF Own Panel Content",
+              },
+            ],
+          }),
+        ],
+      },
+      {
+        surfaceProbes: [
+          {
+            triggerBackendNodeId: 20,
+            triggerFrameId: "main",
+            triggerAction: "hover",
+            subItems: ["Shoes", "Bags"],
+          },
+          {
+            triggerBackendNodeId: 20,
+            triggerFrameId: "oopif-1",
+            triggerAction: "hover",
+            subItems: ["Checkout", "Clear cart"],
+          },
+        ],
+      },
+    );
+
+    const mainProducts = scene.nodes.find(
+      (node) => node.frameId === "main" && node.backendNodeId === 20,
+    )!;
+    const oopifCart = scene.nodes.find(
+      (node) => node.frameId === "oopif-1" && node.backendNodeId === 20,
+    )!;
+    expect(scene.surfaces).toEqual([
+      { triggerId: mainProducts.id, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
+      { triggerId: oopifCart.id, triggerAction: "hover", subItems: ["Checkout", "Clear cart"] },
+    ]);
+
+    const mainTab = scene.nodes.find(
+      (node) => node.frameId === "main" && node.backendNodeId === 30,
+    )!;
+    const frameTab = scene.nodes.find(
+      (node) => node.frameId === "oopif-1" && node.backendNodeId === 30,
+    )!;
+    expect(scene.activeScopeBlocks).toEqual([
+      {
+        triggerId: mainTab.id,
+        label: "Main Tab",
+        lines: ["Main Visible Summary", "Explicitly Visible Child"],
+      },
+      {
+        triggerId: frameTab.id,
+        label: "Frame Tab",
+        lines: ["OOPIF Own Panel Content"],
+      },
+    ]);
+    const rendered = renderVom(scene).text;
+    expect(rendered).toContain('button "Main Products" [hover first: Shoes | Bags]');
+    expect(rendered).toContain('button "OOPIF Cart" [hover first: Checkout | Clear cart]');
+    expect(rendered).not.toContain("Hidden Display None Text");
+    expect(rendered).not.toContain("Hidden Visibility Text");
+    expect(rendered).not.toContain("Main Secret Panel");
+  });
+
+  it("isolates repeated shadow-root aria-controls panels and omits textarea/select form values from active scope blocks", () => {
+    const mk = (
+      id: number,
+      parent: number | null,
+      tag: string,
+      attrs: Record<string, string> = {},
+      textContent?: string,
+      extra: Partial<CapturedNode> = {},
+    ): CapturedNode => ({
+      backendNodeId: id,
+      parentBackendNodeId: parent,
+      frameId: "main",
+      tag,
+      attrs,
+      ...(textContent !== undefined ? { textContent } : {}),
+      rect: { x: 0, y: id * 10, w: 120, h: 20 },
+      rendered: true,
+      paintOrder: id,
+      position: "static",
+      pointerEvents: "auto",
+      ...extra,
+    });
+
+    const scene = buildTestScene([], {
+      rootFrameId: "main",
+      viewport: { width: 800, height: 600 },
+      excludedBackendNodeIds: new Set(),
+      nodes: [
+        mk(1, null, "body"),
+        // Shadow root A (stripped #document-fragment id 100)
+        mk(10, 1, "order-card"),
+        mk(11, 100, "button", {
+          role: "button",
+          "aria-expanded": "true",
+          "aria-controls": "details",
+          "aria-label": "Order A",
+        }),
+        mk(12, 100, "div", { id: "details" }, "Order A summary"),
+        mk(13, 12, "textarea", { "aria-label": "Delivery note" }, "Secret delivery pin 4829"),
+        mk(14, 12, "select", { "aria-label": "Secret tier" }),
+        mk(15, 14, "option", { value: "vip" }, "Secret VIP Option"),
+        // Shadow root B (stripped #document-fragment id 200) reuses id="details"
+        mk(20, 1, "order-card"),
+        mk(21, 200, "button", {
+          role: "button",
+          "aria-expanded": "true",
+          "aria-controls": "details",
+          "aria-label": "Order B",
+        }),
+        mk(22, 200, "div", { id: "details" }, "Order B summary"),
+      ],
+    });
+
+    expect(scene.activeScopeBlocks).toEqual([
+      expect.objectContaining({ label: "Order A", lines: ["Order A summary"] }),
+      expect.objectContaining({ label: "Order B", lines: ["Order B summary"] }),
+    ]);
+    const redacted = renderVom(scene, { redactValues: true }).text;
+    expect(redacted).toContain("Order A summary");
+    expect(redacted).toContain("Order B summary");
+    expect(redacted).not.toContain("Secret delivery pin 4829");
+    expect(redacted).not.toContain("Secret VIP Option");
+  });
+
+  it("isolates repeated Chrome DOMSnapshot shadow trees via shadowRootType without breaking slotted light-DOM aria-controls", () => {
+    const mk = (
+      id: number,
+      parent: number | null,
+      tag: string,
+      attrs: Record<string, string> = {},
+      textContent?: string,
+      shadowRootType?: string,
+    ): CapturedNode => ({
+      backendNodeId: id,
+      parentBackendNodeId: parent,
+      frameId: "main",
+      ...(shadowRootType ? { shadowRootType } : {}),
+      tag,
+      attrs,
+      ...(textContent !== undefined ? { textContent } : {}),
+      rect: { x: 0, y: id * 10, w: 120, h: 20 },
+      rendered: true,
+      paintOrder: id,
+      position: "static",
+      pointerEvents: "auto",
+    });
+
+    const scene = buildTestScene([], {
+      rootFrameId: "main",
+      viewport: { width: 800, height: 600 },
+      excludedBackendNodeIds: new Set(),
+      nodes: [
+        // Real Chrome DOMSnapshot omits `#document` (id 1) from normalized nodes; HTML points to 1.
+        mk(2, 1, "html"),
+        mk(3, 2, "body"),
+        // Light-DOM panel controlled by a light-DOM button slotted inside host A's shadow <slot>.
+        mk(4, 3, "div", { id: "details" }, "Light DOM details"),
+        // Shadow host A: direct shadow children point to host A (10) and carry shadowRootType="open".
+        mk(10, 3, "order-card"),
+        mk(11, 10, "div", { class: "wrap" }, undefined, "open"),
+        mk(
+          12,
+          11,
+          "button",
+          {
+            role: "button",
+            "aria-expanded": "true",
+            "aria-controls": "details",
+            "aria-label": "Shadow Card A",
+          },
+          undefined,
+          "open",
+        ),
+        mk(13, 11, "div", { id: "details" }, "Shadow A details", "open"),
+        mk(14, 11, "slot", {}, undefined, "open"),
+        // Light-DOM button slotted into <slot> (14): parentBackendNodeId is 14, shadowRootType is undefined!
+        mk(15, 14, "button", {
+          role: "button",
+          "aria-expanded": "true",
+          "aria-controls": "details",
+          "aria-label": "Slotted Light Trigger",
+        }),
+        // Shadow host B: reuses id="details" inside its own open shadow root.
+        mk(20, 3, "order-card"),
+        mk(
+          21,
+          20,
+          "button",
+          {
+            role: "button",
+            "aria-expanded": "true",
+            "aria-controls": "details",
+            "aria-label": "Shadow Card B",
+          },
+          undefined,
+          "open",
+        ),
+        mk(22, 20, "div", { id: "details" }, "Shadow B details", "open"),
+      ],
+    });
+
+    expect(scene.activeScopeBlocks).toEqual([
+      expect.objectContaining({ label: "Shadow Card A", lines: ["Shadow A details"] }),
+      expect.objectContaining({ label: "Slotted Light Trigger", lines: ["Light DOM details"] }),
+      expect.objectContaining({ label: "Shadow Card B", lines: ["Shadow B details"] }),
+    ]);
   });
 
   it("aggregates AX virtual text into unnamed structural nodes", () => {
@@ -2605,14 +3156,10 @@ describe("handleSnapshot", () => {
     };
     const send = vi.fn(sendImpl);
     const trackSessionTab = vi.fn();
-    const cdp = {
-      send: send as unknown as <T = unknown>(
-        tabId: number,
-        method: string,
-        params?: object,
-      ) => Promise<T>,
+    const cdp = createStubCdpRunner({
+      send: send as unknown as CdpRunner["send"],
       trackSessionTab,
-    };
+    });
     return {
       cdp,
       tabsApi: {
@@ -2728,14 +3275,10 @@ describe("handleSnapshot", () => {
       sm,
       { session_id: "aa11" },
       {
-        cdp: {
-          send: send as unknown as <T = unknown>(
-            tabId: number,
-            method: string,
-            params?: object,
-          ) => Promise<T>,
+        cdp: createStubCdpRunner({
+          send: send as unknown as CdpRunner["send"],
           trackSessionTab: vi.fn(),
-        },
+        }),
         tabsApi: {
           get: vi.fn(
             async (tabId: number) =>
@@ -2841,14 +3384,10 @@ describe("handleSnapshot", () => {
       sm,
       { session_id: "aa11", probe_hover: true },
       {
-        cdp: {
-          send: send as unknown as <T = unknown>(
-            tabId: number,
-            method: string,
-            params?: object,
-          ) => Promise<T>,
+        cdp: createStubCdpRunner({
+          send: send as unknown as CdpRunner["send"],
           trackSessionTab: vi.fn(),
-        },
+        }),
         tabsApi: {
           get: vi.fn(
             async (tabId: number) =>
@@ -2935,14 +3474,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected CDP method ${method}`);
     });
     const deps = {
-      cdp: {
-        send: send as unknown as <T = unknown>(
-          tabId: number,
-          method: string,
-          params?: object,
-        ) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -3132,14 +3667,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected CDP method ${method}`);
     });
     const deps = {
-      cdp: {
-        send: send as unknown as <T = unknown>(
-          tabId: number,
-          method: string,
-          params?: object,
-        ) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(),
         query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
@@ -3148,7 +3679,12 @@ describe("handleSnapshot", () => {
 
     const pending = handleSnapshot(sm, { session_id: "aa11" }, deps, controller.signal);
     await vi.waitFor(() =>
-      expect(send).toHaveBeenCalledWith(4, "DOMSnapshot.captureSnapshot", expect.any(Object)),
+      expect(send).toHaveBeenCalledWith(
+        4,
+        "DOMSnapshot.captureSnapshot",
+        expect.any(Object),
+        controller.signal,
+      ),
     );
     controller.abort();
     resolveCapture({ strings: [], documents: [] });
@@ -3166,13 +3702,9 @@ describe("handleSnapshot", () => {
     };
     const send = vi.fn(sendImpl);
     const deps = {
-      cdp: {
-        send: send as unknown as <T = unknown>(
-          tabId: number,
-          method: string,
-          params?: object,
-        ) => Promise<T>,
-      },
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -3194,10 +3726,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected CDP method ${method}`);
     });
     return {
-      cdp: {
-        send: send as unknown as <T>(t: number, m: string, p?: object) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -3447,7 +3979,7 @@ describe("handleSnapshot", () => {
       if (method === "Accessibility.getFullAXTree") return { nodes: mainAx };
       throw new Error(`unexpected root CDP method ${method}`);
     });
-    const sendToTarget = vi.fn(async (_target, method: string) => {
+    const sendToChildFrame = vi.fn(async (method: string) => {
       if (method === "Runtime.evaluate") return { result: { value: { width: 400, height: 300 } } };
       if (method === "Page.getLayoutMetrics" && ownerGeometry !== "unavailable")
         return {
@@ -3461,23 +3993,32 @@ describe("handleSnapshot", () => {
       if (method === "Accessibility.getFullAXTree") return { nodes: childAx };
       throw new Error(`unexpected child CDP method ${method}`);
     });
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: send as unknown as CdpRunner["send"],
-      sendToTarget: sendToTarget as unknown as NonNullable<CdpRunner["sendToTarget"]>,
-      getFrameGraph: vi.fn(async () => ({
+      getAttachmentId: () => undefined,
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "child",
+      sendToFrame: (async (handle, method, params, guard) => {
+        if (handle.frameId === "child") {
+          return sendToChildFrame(method);
+        }
+        return cdp.send(handle.tabId, method, params, guard?.signal);
+      }) as CdpRunner["sendToFrame"],
+      getFrameDocuments: vi.fn(async () => ({
         rootFrameId: "main",
         frames: [
-          { frameId: "main", target: { tabId: 4 } },
-          {
+          createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+          createFrameDocumentInfo({
+            tabId: 4,
             frameId: "child",
             parentFrameId: "main",
             ownerBackendNodeId: 12,
-            target: { tabId: 4, sessionId: "child-session" },
-          },
+            processKey: "oopif:child",
+            isOutOfProcess: true,
+          }),
         ],
       })),
       trackSessionTab: vi.fn(),
-    } satisfies CdpRunner;
+    });
     return {
       cdp,
       tabsApi: {
@@ -3533,12 +4074,12 @@ describe("handleSnapshot", () => {
       },
     ];
     const deps = makeOverlayDeps(ax, snapshot, VP_METRICS);
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       ...deps.cdp,
-      getFrameGraph: async () => {
+      getFrameDocuments: async () => {
         throw new Error("graph unavailable");
       },
-    };
+    });
     const result = await captureVomObservation(
       cdp,
       4,
@@ -3584,7 +4125,9 @@ describe("handleSnapshot", () => {
     });
     expect(result.rootFrameId).toBe("root");
     expect(result).not.toHaveProperty("frameDocuments");
-    expect(result.frames).toEqual([{ frameId: "root", target: { tabId: 4 } }]);
+    expect(result.frames).toEqual([
+      { frameId: "root", handle: { tabId: 4, frameId: "root", loaderId: "" } },
+    ]);
     expect(result.matchNodes.find((node) => node.backendNodeId === 13)).toMatchObject({
       frameId: "root",
       backendNodeId: 13,
@@ -3784,11 +4327,13 @@ describe("handleSnapshot", () => {
     ["Accessibility.getFullAXTree", "ax"],
   ])("reports partial capture when child %s fails", async (failedMethod, stage) => {
     const { cdp } = makeFrameAwareDeps("available");
-    const send = cdp.sendToTarget;
-    cdp.sendToTarget = async (target, method, params) => {
-      if (method === failedMethod) throw new Error("unavailable child data");
-      return send(target, method, params);
-    };
+    const send = cdp.sendToFrame;
+    cdp.sendToFrame = (async (handle, method, params, guard) => {
+      if (handle.frameId === "child" && method === failedMethod) {
+        throw new Error("unavailable child data");
+      }
+      return send(handle, method, params, guard);
+    }) as CdpRunner["sendToFrame"];
     for (const maxTokens of [undefined, 100, 0]) {
       const result = await captureVomObservation(cdp, 4, "https://example.com", { maxTokens });
       expect(result.text).toContain(`@warning observation incomplete: some ${stage} data`);
@@ -3810,7 +4355,11 @@ describe("handleSnapshot", () => {
     cdp.send = async (tabId, method, params) => {
       const result = await send(tabId, method, params);
       if (method === "DOMSnapshot.captureSnapshot") {
-        const child = await cdp.sendToTarget({ tabId, sessionId: "child-session" }, method, params);
+        const child = await cdp.sendToFrame(
+          toFrameDocumentHandle(tabId, { frameId: "child" }),
+          method,
+          params,
+        );
         (result as { documents: unknown[] }).documents.push(
           ...(child as { documents: unknown[] }).documents,
         );
@@ -3857,9 +4406,9 @@ describe("handleSnapshot", () => {
     expect(result.frames).toHaveLength(2);
     expect(result.frames.find((frame) => frame.frameId === "child")).toEqual({
       frameId: "child",
+      handle: { tabId: 4, frameId: "child", loaderId: "" },
       parentFrameId: "main",
       ownerBackendNodeId: 12,
-      target: { tabId: 4, sessionId: "child-session" },
     });
     expect(result.matchNodes.find((node) => node.backendNodeId === 22)).toMatchObject({
       frameId: "child",
@@ -3872,7 +4421,7 @@ describe("handleSnapshot", () => {
     });
   });
 
-  it("stores iframe refs with their owning CDP session", async () => {
+  it("stores iframe refs with their owning FrameNodeHandle", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     const deps = makeFrameAwareDeps();
@@ -3887,8 +4436,14 @@ describe("handleSnapshot", () => {
     expect(frameRef?.[1]).toMatchObject({
       tabId: 4,
       frameId: "child",
-      cdpSessionId: "child-session",
+      handle: {
+        tabId: 4,
+        frameId: "child",
+        loaderId: "",
+        backendNodeId: 22,
+      },
     });
+    expect("cdpSessionId" in (frameRef?.[1] ?? {})).toBe(false);
   });
 
   it("renders a blocking login overlay as the focused top layer", async () => {
@@ -4108,10 +4663,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected ${method}`);
     });
     const deps = {
-      cdp: {
-        send: send as unknown as <T>(t: number, m: string, p?: object) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -4317,10 +4872,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected ${method}`);
     });
     const deps = {
-      cdp: {
-        send: send as unknown as <T>(t: number, m: string, p?: object) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -4350,14 +4905,10 @@ describe("handleGetHtml", () => {
     const send = vi.fn(sendImpl);
     const trackSessionTab = vi.fn();
     // Cast to the generic CdpRunner.send signature for handleGetHtml.
-    const cdp = {
-      send: send as unknown as <T = unknown>(
-        tabId: number,
-        method: string,
-        params?: object,
-      ) => Promise<T>,
+    const cdp = createStubCdpRunner({
+      send: send as unknown as CdpRunner["send"],
       trackSessionTab,
-    };
+    });
     return {
       cdp,
       tabsApi: {
@@ -4406,23 +4957,28 @@ describe("handleGetHtml", () => {
     expect(deps.send).toHaveBeenCalledTimes(1);
   });
 
-  it("reads a frame ref through its child CDP session", async () => {
+  it("reads a frame ref through its child frame handle", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e7", 4242, {
       tabId: 4,
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
     });
     const deps = makeDeps({});
-    const sendToTarget = vi.fn(async (target, method, params) => {
-      expect(target).toEqual({ tabId: 4, sessionId: "child-session" });
+    const sendToFrame = vi.fn(async (handle, method, params) => {
+      expect(handle).toEqual({
+        tabId: 4,
+        frameId: "child-frame",
+        loaderId: "child-loader",
+        backendNodeId: 4242,
+      });
       expect(method).toBe("DOM.getOuterHTML");
       expect(params).toEqual({ backendNodeId: 4242 });
       return { outerHTML: "<button>frame</button>" };
     });
-    (deps.cdp as CdpRunner).sendToTarget = sendToTarget as unknown as NonNullable<
-      CdpRunner["sendToTarget"]
+    (deps.cdp as CdpRunner).sendToFrame = sendToFrame as unknown as NonNullable<
+      CdpRunner["sendToFrame"]
     >;
 
     const res = await handleGetHtml(sm, { session_id: "aa11", ref: "@e7" }, deps);
@@ -4606,4 +5162,49 @@ it.each([
   });
   expect(phases).toEqual(["begin", "end"]);
   expect(capture).not.toHaveBeenCalled();
+});
+
+it.each([
+  { os: "linux", active: false, windowState: "normal", expected: 1 },
+  { os: "win", active: true, windowState: "minimized", expected: 1 },
+  { os: "mac", active: false, windowState: "minimized", expected: 0 },
+] as const)("wakes hidden Aura surfaces during controlled handleScreenshot ($os, active=$active, window=$windowState)", async ({
+  os,
+  active,
+  windowState,
+  expected,
+}) => {
+  vi.stubGlobal("chrome", {
+    runtime: { getPlatformInfo: vi.fn(async () => ({ os })) },
+    windows: { get: vi.fn(async () => ({ id: 100, state: windowState })) },
+  });
+  try {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await manager.start("aa11");
+    ctx.agentCreatedTabs.add(7);
+    const { cdp, sent } = makeFakeCdp({
+      "Page.getFrameTree": () => ({ frameTree: { frame: { id: "main" } } }),
+      "Page.createIsolatedWorld": () => ({ executionContextId: 1 }),
+      "Runtime.evaluate": () => ({
+        result: { deepSerializedValue: { type: "node", value: { backendNodeId: 42 } } },
+      }),
+      "Runtime.releaseObjectGroup": () => ({}),
+      "Page.startScreencast": () => ({}),
+      "Page.stopScreencast": () => ({}),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+    cdp.getAttachmentId = () => "attachment";
+    cdp.onEvent = () => ({ dispose: () => {} });
+    const deps = makeScreenshotDeps({
+      cdp,
+      get: async () => ({ id: 7, windowId: 100, active }) as chrome.tabs.Tab,
+    });
+    deps.sendToTab = async () => {};
+    const res = await handleScreenshot(manager, { session_id: "aa11", tab_id: 7 }, deps);
+    expect(res).toMatchObject({ tab_id: 7, image_base64: TINY_PNG });
+    expect(sent.filter((call) => call.method === "Page.startScreencast")).toHaveLength(expected);
+    expect(sent.filter((call) => call.method === "Page.stopScreencast")).toHaveLength(expected);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

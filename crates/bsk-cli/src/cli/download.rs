@@ -7,15 +7,13 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
-use bsk_protocol::tools::{
-    DownloadParams, DownloadResult, TransferChunkParams, TransferChunkResult,
-};
+use bsk_protocol::tools::{DownloadParams, DownloadResult, TransferChunkResult};
 use bsk_protocol::{ErrorCode, Method};
 use clap::Args;
 use uuid::Uuid;
 
 use crate::cli::atomic_output;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::parse_timeout_ms;
@@ -31,7 +29,9 @@ pub struct DownloadArgs {
     #[arg(long)]
     pub out: PathBuf,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
     #[arg(long, default_value = "2m", value_parser = parse_timeout_ms)]
@@ -40,25 +40,36 @@ pub struct DownloadArgs {
     pub overwrite: bool,
 }
 
-pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: DownloadArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     if args.out.exists() && !args.overwrite {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "output already exists (pass --overwrite to replace it): {}",
-            args.out.display()
-        )));
+        return Err(output_exists(&args.out));
     }
+    let (ref_, selector) =
+        split_target(args.target, args.ref_, args.selector).map_err(|error| match error {
+            CliError::Local(error) => CliError::invalid_params(error),
+            error => error,
+        })?;
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
+    let aux_ctx = op_ctx.without_action_metadata();
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let params = DownloadParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
         browser_relative_dir: None,
         max_byte_size: None,
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
-    let reply: DownloadResult = crate::cli::business_rpc::call(
+    let reply: DownloadResult = op_ctx.call(
         info.sock_path.clone(),
         "download",
         Method::ToolDownload,
@@ -76,9 +87,20 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
         {
             let out = std::path::absolute(&args.out).unwrap_or_else(|_| args.out.clone());
             let mut command = vec![
-                "bsk".to_string(), "operation".into(), "await".into(), operation_id.into(),
-                "--session".into(), args.session.clone(), "--out".into(), out.to_string_lossy().into_owned(),
+                "bsk".to_string(),
+                "operation".into(),
+                "await".into(),
+                operation_id.into(),
             ];
+            if let Some(session) = &args.session {
+                command.push("--session".into());
+                command.push(session.clone());
+            } else if let Some(scope) = &args.scope {
+                command.push("--scope".into());
+                command.push(scope.clone());
+            }
+            command.push("--out".into());
+            command.push(out.to_string_lossy().into_owned());
             if args.overwrite { command.push("--overwrite".into()); }
             command.push("--json".into());
             data["download_output"] = serde_json::json!({
@@ -92,7 +114,13 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     let transfer_id = reply.transfer_id.clone().ok_or_else(|| {
         CliError::Local(anyhow::anyhow!("daemon returned no download transfer id"))
     })?;
-    let write_result = write_transfer(&info.sock_path, &transfer_id, &args.out, args.overwrite);
+    let write_result = write_transfer(
+        &info.sock_path,
+        &aux_ctx,
+        &transfer_id,
+        &args.out,
+        args.overwrite,
+    );
     let _ = crate::cli::business_rpc::release_transfers(&info.sock_path, [transfer_id.as_str()]);
     write_result?;
     match format {
@@ -110,18 +138,27 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
-pub(super) fn write_transfer(
+pub(crate) fn output_exists(out: &Path) -> CliError {
+    CliError::file_validation(
+        anyhow::anyhow!(
+            "output already exists (pass --overwrite to replace it): {}",
+            out.display()
+        ),
+        "choose a new --out path, or pass --overwrite to replace the existing file",
+    )
+}
+
+pub(crate) fn write_transfer(
     sock: &Path,
+    ctx: &crate::cli::business_rpc::ClientContext,
     id: &str,
     out: &Path,
     overwrite: bool,
 ) -> Result<(), CliError> {
     if out.exists() && !overwrite {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "output already exists (pass --overwrite to replace it): {}",
-            out.display()
-        )));
+        return Err(output_exists(out));
     }
+    let aux_ctx = ctx.without_action_metadata();
     let parent = out
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -136,14 +173,14 @@ pub(super) fn write_transfer(
             .map_err(CliError::Local)?;
         let mut offset = 0u64;
         loop {
-            let chunk: TransferChunkResult = crate::cli::business_rpc::call(
+            let chunk: TransferChunkResult = aux_ctx.call(
                 sock.to_path_buf(),
                 "transfer-read",
                 Method::TransferRead,
-                Some(TransferChunkParams {
+                Some(bsk_protocol::tools::TransferReadParams {
                     transfer_id: id.to_string(),
                     offset,
-                    data_base64: String::new(),
+                    data_base64: None,
                 }),
                 Duration::from_secs(30),
             )?;

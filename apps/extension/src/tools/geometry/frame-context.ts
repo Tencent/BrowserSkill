@@ -1,9 +1,11 @@
 import {
-  type CdpFrame,
-  type CdpFrameGraph,
-  type CdpTarget,
-  cdpTargetKey,
-} from "@/browser-driver/frame-graph";
+  type FrameDocumentGraph,
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  type FrameProcessBoundary,
+  frameProcessBoundary,
+  frameProcessIdentityKey,
+} from "@/browser-driver/frame-handles";
 import {
   type GeometryProjection,
   type Polygon,
@@ -14,10 +16,22 @@ import {
   type Size,
   viewportPolygon,
 } from "../geometry";
-import { type CdpRunner, sendToCdpTarget } from "../shared";
+import type { CdpRunner } from "../shared";
 import type { CoordinateOwner, CssViewport, SnapshotProjectionResult } from "./coordinate-types";
 
 import { readSnapshotOwnerSizes } from "./snapshot-owner-sizes";
+
+export type GeometryEndpoint = FrameDocumentHandle | FrameProcessBoundary;
+
+function isProcessEndpoint(endpoint: GeometryEndpoint): endpoint is FrameProcessBoundary {
+  return "processKey" in endpoint;
+}
+
+function geometryEndpointKey(endpoint: GeometryEndpoint): string {
+  return isProcessEndpoint(endpoint)
+    ? `${endpoint.tabId}:process:${endpoint.processKey}`
+    : `${endpoint.tabId}:handle:${endpoint.frameId}:${endpoint.loaderId}`;
+}
 
 export interface LayoutMetrics {
   cssVisualViewport?: {
@@ -81,20 +95,25 @@ export class GeometryContext {
   private readonly sizeBatches = new Map<string, () => Promise<Map<number, Size>>>();
   private active = 0;
   private readonly waiting: Array<() => void> = [];
-  private graphPromise?: Promise<CdpFrameGraph | null>;
-  private framesPromise?: Promise<Map<string, CdpFrame>>;
+  private graphPromise?: Promise<FrameDocumentGraph | null>;
+  private framesPromise?: Promise<Map<string, FrameDocumentInfo>>;
 
   constructor(
     private readonly cdp: CdpRunner,
     private readonly tabId: number,
-    graph?: CdpFrameGraph,
+    graph?: FrameDocumentGraph,
     private readonly signal?: AbortSignal,
+    private readonly frameHandles?: ReadonlyMap<string, FrameDocumentHandle>,
   ) {
     if (graph) this.graphPromise = Promise.resolve(graph);
   }
 
+  private endpointForFrame(frame: FrameDocumentInfo): GeometryEndpoint {
+    return this.frameHandles?.get(frame.frameId) ?? frameProcessBoundary(frame);
+  }
+
   private async request<T>(
-    target: CdpTarget,
+    endpoint: GeometryEndpoint,
     method: string,
     params: object,
     cleanup = false,
@@ -105,7 +124,18 @@ export class GeometryContext {
     try {
       if (!cleanup && this.signal?.aborted)
         throw new DOMException("geometry aborted", "AbortError");
-      return await sendToCdpTarget<T>(this.cdp, target, method, params);
+      if (isProcessEndpoint(endpoint)) {
+        return await this.cdp.sendToFrame<T>(endpoint.rootHandle, method, params, {
+          ignoreFrameNavigation: true,
+          ...(cleanup ? { allowReattach: false } : {}),
+        });
+      }
+      return await this.cdp.sendToFrame<T>(
+        endpoint,
+        method,
+        params,
+        cleanup ? { allowReattach: false, ignoreFrameNavigation: true } : undefined,
+      );
     } finally {
       const next = this.waiting.shift();
       if (next) next();
@@ -113,27 +143,26 @@ export class GeometryContext {
     }
   }
 
-  graph(): Promise<CdpFrameGraph | null> {
-    this.graphPromise ??=
-      this.cdp.getFrameGraph?.(this.tabId).catch(() => null) ?? Promise.resolve(null);
+  graph(): Promise<FrameDocumentGraph | null> {
+    this.graphPromise ??= this.cdp.getFrameDocuments(this.tabId).catch(() => null);
     return this.graphPromise;
   }
 
-  private frames(): Promise<Map<string, CdpFrame>> {
+  private frames(): Promise<Map<string, FrameDocumentInfo>> {
     this.framesPromise ??= this.graph().then(
       (graph) => new Map(graph?.frames.map((frame) => [frame.frameId, frame]) ?? []),
     );
     return this.framesPromise;
   }
 
-  async frame(frameId: string): Promise<CdpFrame | undefined> {
+  async frame(frameId: string): Promise<FrameDocumentInfo | undefined> {
     return (await this.frames()).get(frameId);
   }
 
   /** Topology only: safe to resolve before the caller scrolls frame owners. */
-  async ancestry(frameId: string): Promise<CdpFrame[] | null> {
+  async ancestry(frameId: string): Promise<FrameDocumentInfo[] | null> {
     const frames = await this.frames();
-    const path: CdpFrame[] = [];
+    const path: FrameDocumentInfo[] = [];
     const seen = new Set<string>();
     let current = frames.get(frameId);
     if (!current) return null;
@@ -148,8 +177,8 @@ export class GeometryContext {
     return path;
   }
 
-  layoutMetrics(target: CdpTarget): Promise<LayoutMetrics> {
-    const key = cdpTargetKey(target);
+  layoutMetrics(target: GeometryEndpoint): Promise<LayoutMetrics> {
+    const key = geometryEndpointKey(target);
     let promise = this.metrics.get(key);
     if (!promise) {
       promise = this.request<LayoutMetrics>(target, "Page.getLayoutMetrics", {});
@@ -158,7 +187,7 @@ export class GeometryContext {
     return promise;
   }
 
-  async viewport(target: CdpTarget): Promise<Size | null> {
+  async viewport(target: GeometryEndpoint): Promise<Size | null> {
     const { width, height } = cssViewport(await this.layoutMetrics(target));
     return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
       ? { width, height }
@@ -167,8 +196,8 @@ export class GeometryContext {
 
   /** The full OOPIF viewport maps to its owner's content quad. Layout metrics
    * exclude occupied scrollbars and remain the clipping boundary, not the scale. */
-  private frameViewport(target: CdpTarget): Promise<Size | null> {
-    const key = cdpTargetKey(target);
+  private frameViewport(target: GeometryEndpoint): Promise<Size | null> {
+    const key = geometryEndpointKey(target);
     let promise = this.frameViewports.get(key);
     if (!promise) {
       promise = this.request<{ result?: { value?: Size }; exceptionDetails?: unknown }>(
@@ -194,8 +223,8 @@ export class GeometryContext {
     return promise;
   }
 
-  ownerContent(target: CdpTarget, backendNodeId: number): Promise<Quad | null> {
-    const key = `${cdpTargetKey(target)}:${backendNodeId}`;
+  ownerContent(target: GeometryEndpoint, backendNodeId: number): Promise<Quad | null> {
+    const key = `${geometryEndpointKey(target)}:${backendNodeId}`;
     let promise = this.owners.get(key);
     if (!promise) {
       promise = this.request<{ model?: { content?: number[] } }>(target, "DOM.getBoxModel", {
@@ -213,15 +242,17 @@ export class GeometryContext {
     ancestorClips: Polygon[],
     viewport: Size,
     contentSize?: Size,
+    sourceEndpoint?: GeometryEndpoint,
   ): Promise<SnapshotProjectionResult> {
-    const key = `${cdpTargetKey(source.target)}:${ownerBackendNodeId}`;
+    const endpoint = sourceEndpoint ?? source.process;
+    const key = `${geometryEndpointKey(endpoint)}:${ownerBackendNodeId}`;
     let promise = this.snapshotOwners.get(key);
     if (!promise) {
       promise = contentSize
-        ? this.ownerContent(source.target, ownerBackendNodeId).then((quad) =>
+        ? this.ownerContent(endpoint, ownerBackendNodeId).then((quad) =>
             quad ? { quad, size: contentSize } : null,
           )
-        : this.snapshotOwner(source.target, ownerBackendNodeId);
+        : this.snapshotOwner(endpoint, ownerBackendNodeId);
       this.snapshotOwners.set(key, promise);
     }
     let owner: { quad: Quad; size: Size } | null;
@@ -256,13 +287,13 @@ export class GeometryContext {
 
   /** Register one target's snapshot owners; the batch starts only when a
    * projection actually needs a size. Single owners keep the cheaper old path. */
-  registerSnapshotOwners(target: CdpTarget, owners: ReadonlySet<number>): void {
-    const key = cdpTargetKey(target);
+  registerSnapshotOwners(process: FrameProcessBoundary, owners: ReadonlySet<number>): void {
+    const key = geometryEndpointKey(process);
     if (owners.size < 2 || this.sizeBatches.has(key)) return;
     let pending: Promise<Map<number, Size>> | undefined;
     this.sizeBatches.set(key, () => {
       pending ??= readSnapshotOwnerSizes(
-        (method, params, cleanup) => this.request(target, method, params, cleanup),
+        (method, params, cleanup) => this.request(process, method, params, cleanup),
         owners,
       ).catch((error) => {
         if (error && typeof error === "object" && "name" in error && error.name === "AbortError")
@@ -274,12 +305,14 @@ export class GeometryContext {
   }
 
   private async snapshotOwner(
-    target: CdpTarget,
+    target: GeometryEndpoint,
     backendNodeId: number,
   ): Promise<{ quad: Quad; size: Size } | null> {
     const quad = await this.ownerContent(target, backendNodeId);
     if (!quad) return null;
-    const batchSize = (await this.sizeBatches.get(cdpTargetKey(target))?.())?.get(backendNodeId);
+    const batchSize = (await this.sizeBatches.get(geometryEndpointKey(target))?.())?.get(
+      backendNodeId,
+    );
     if (this.signal?.aborted) throw new DOMException("geometry aborted", "AbortError");
     if (batchSize) return { quad, size: batchSize };
     const resolved = await this.request<{ object?: { objectId?: string } }>(
@@ -321,7 +354,29 @@ export class GeometryContext {
     }
   }
 
-  private targetRoot(frames: Map<string, CdpFrame>, frame: CdpFrame): CdpFrame | null {
+  private isDifferentTargetBoundary(
+    current: FrameDocumentInfo,
+    parent: FrameDocumentInfo,
+  ): boolean {
+    if (this.frameHandles?.has(current.frameId)) {
+      return this.cdp.hasOwnFrameTarget(this.tabId, current.frameId, parent.frameId);
+    }
+    return (
+      frameProcessIdentityKey({
+        tabId: this.tabId,
+        processKey: parent.processKey,
+      }) !==
+      frameProcessIdentityKey({
+        tabId: this.tabId,
+        processKey: current.processKey,
+      })
+    );
+  }
+
+  private targetRoot(
+    frames: Map<string, FrameDocumentInfo>,
+    frame: FrameDocumentInfo,
+  ): FrameDocumentInfo | null {
     const seen = new Set<string>();
     let current = frame;
     while (current.parentFrameId) {
@@ -329,16 +384,16 @@ export class GeometryContext {
       seen.add(current.frameId);
       const parent = frames.get(current.parentFrameId);
       if (!parent) return null;
-      if (cdpTargetKey(parent.target) !== cdpTargetKey(current.target)) break;
+      if (this.isDifferentTargetBoundary(current, parent)) break;
       current = parent;
     }
     return current;
   }
 
   private async clips(
-    frames: Map<string, CdpFrame>,
-    frame: CdpFrame,
-    root: CdpFrame,
+    frames: Map<string, FrameDocumentInfo>,
+    frame: FrameDocumentInfo,
+    root: FrameDocumentInfo,
   ): Promise<Polygon[] | null> {
     const clips: Polygon[] = [];
     let current = frame;
@@ -348,7 +403,10 @@ export class GeometryContext {
       seen.add(current.frameId);
       const parent = frames.get(current.parentFrameId);
       if (!parent || current.ownerBackendNodeId === undefined) return null;
-      const quad = await this.ownerContent(parent.target, current.ownerBackendNodeId);
+      const quad = await this.ownerContent(
+        this.endpointForFrame(parent),
+        current.ownerBackendNodeId,
+      );
       if (!quad) return null;
       clips.push(quad);
       current = parent;
@@ -366,13 +424,28 @@ export class GeometryContext {
     return promise;
   }
 
+  async targetViewport(frameId: string): Promise<Size | null> {
+    const frames = await this.frames();
+    const frame = frames.get(frameId);
+    if (!frame) return null;
+    const root = this.targetRoot(frames, frame);
+    return root ? this.viewport(this.endpointForFrame(root)) : null;
+  }
+
+  async topLayoutMetrics(fallback: FrameProcessBoundary): Promise<LayoutMetrics> {
+    if (!this.graphPromise) return this.layoutMetrics(fallback);
+    const graph = await this.graph();
+    const root = graph?.frames.find((frame) => frame.frameId === graph.rootFrameId);
+    return this.layoutMetrics(root ? this.endpointForFrame(root) : fallback);
+  }
+
   private async buildTargetProjection(frameId: string): Promise<GeometryProjection | null> {
     const frames = await this.frames();
     const frame = frames.get(frameId);
     if (!frame) return null;
     let root = this.targetRoot(frames, frame);
     if (!root) return null;
-    const sourceViewport = await this.viewport(root.target);
+    const sourceViewport = await this.viewport(this.endpointForFrame(root));
     if (!sourceViewport) return null;
     const sourceClips = await this.clips(frames, frame, root);
     if (!sourceClips) return null;
@@ -383,10 +456,14 @@ export class GeometryContext {
       seen.add(root.frameId);
       const parent = frames.get(root.parentFrameId);
       if (!parent || root.ownerBackendNodeId === undefined) return null;
-      const destinationQuad = await this.ownerContent(parent.target, root.ownerBackendNodeId);
+      const destinationQuad = await this.ownerContent(
+        this.endpointForFrame(parent),
+        root.ownerBackendNodeId,
+      );
       if (!destinationQuad) return null;
-      const source = await this.frameViewport(root.target);
-      const visible = await this.viewport(root.target);
+      const rootEndpoint = this.endpointForFrame(root);
+      const source = await this.frameViewport(rootEndpoint);
+      const visible = await this.viewport(rootEndpoint);
       const parentRoot = this.targetRoot(frames, parent);
       if (!source || !visible || !parentRoot) return null;
       const destinationClips = await this.clips(frames, parent, parentRoot);
@@ -399,7 +476,7 @@ export class GeometryContext {
       edges.push(edge);
       root = parentRoot;
     }
-    const topViewport = await this.viewport(root.target);
+    const topViewport = await this.viewport(this.endpointForFrame(root));
     return topViewport ? { sourceClips, edges, topViewport } : null;
   }
 }

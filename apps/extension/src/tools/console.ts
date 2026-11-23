@@ -1,11 +1,9 @@
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { readTimeoutDetails } from "@/browser-driver/command-deadline";
 import type { SessionManager } from "@/session-manager/manager";
 import type { ConsoleParams, ConsoleResult, RpcError } from "@/transport/types";
 import {
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
   isRpcError,
   lookupSession,
   parseBufferedReadBounds,
@@ -17,17 +15,10 @@ export interface ConsoleDeps {
   tabsApi: ChromeTabsApi;
 }
 
-function defaultConsoleDeps(): ConsoleDeps {
-  return {
-    cdp: new ChromiumCdp(),
-    tabsApi: chromeTabsApi,
-  };
-}
-
 export async function handleConsole(
   manager: SessionManager,
   params: ConsoleParams,
-  deps: ConsoleDeps = defaultConsoleDeps(),
+  deps: ConsoleDeps,
   signal?: AbortSignal,
 ): Promise<ConsoleResult | RpcError> {
   if (signal?.aborted) return { code: "cancelled", message: "console aborted" };
@@ -43,9 +34,9 @@ export async function handleConsole(
   }
 
   try {
+    deps.cdp.trackSessionTab?.(ctxOrErr.sessionId, target.tabId);
     await deps.cdp.ensureConsoleCapture(target.tabId, signal);
     if (signal?.aborted) return { code: "cancelled", message: "console aborted" };
-    deps.cdp.trackSessionTab?.(ctxOrErr.sessionId, target.tabId);
     return deps.cdp.consoleEntriesSince(
       target.tabId,
       bounds.since,

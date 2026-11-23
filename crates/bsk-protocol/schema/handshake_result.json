@@ -1,15 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "HandshakeResult",
-  "type": "object",
-  "required": [
-    "protocol_version",
-    "server",
-    "version"
-  ],
   "properties": {
+    "audit_ready": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "audit_version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "min_compatible_peer": {
-      "description": "**Deprecated** — legacy app-semver floor. New peers should use `min_compatible_protocol`; this field is optional and ignored.",
+      "description": "**Deprecated** — legacy app-semver floor. New peers should use\n`min_compatible_protocol`; this field is optional and ignored.",
       "type": [
         "string",
         "null"
@@ -31,5 +38,12 @@
     "version": {
       "type": "string"
     }
-  }
+  },
+  "required": [
+    "server",
+    "version",
+    "protocol_version"
+  ],
+  "title": "HandshakeResponse",
+  "type": "object"
 }

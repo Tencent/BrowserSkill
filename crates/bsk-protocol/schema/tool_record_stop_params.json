@@ -1,13 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "RecordStopParams",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
+  "additionalProperties": false,
   "properties": {
     "session_id": {
       "type": "string"
     }
-  }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "RecordStopParams",
+  "type": "object"
 }

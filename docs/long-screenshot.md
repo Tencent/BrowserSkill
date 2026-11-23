@@ -170,7 +170,7 @@ For the actual CLI → daemon → extension chain, build `bsk` and the extension
 ```sh
 cargo build -p bsk --locked
 pnpm ext:build
-BSK_LONG_SCREENSHOT_CHROME=/path/to/chrome BSK_LONG_SCREENSHOT_CLI="$PWD/target/debug/bsk" pnpm --filter @browser-skill/extension exec vitest run src/long-screenshot/agent.browser.test.ts
+BSK_TEST_CHROME=/path/to/chrome BSK_TEST_CLI="$PWD/target/debug/bsk" pnpm --filter @browser-skill/extension test:browser src/long-screenshot/agent.browser.test.ts
 ```
 
 This suite uses an isolated browser profile, daemon and child-process user home (including
@@ -196,7 +196,7 @@ Build and run the real extension in an isolated Chrome profile:
 
 ```sh
 pnpm ext:build
-BSK_LONG_SCREENSHOT_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension exec vitest run src/long-screenshot/long-screenshot.browser.test.ts
+BSK_TEST_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension test:browser src/long-screenshot/long-screenshot.browser.test.ts
 ```
 
 The extension tests cover automatic and manual capture, popup closure, pause/resume, early finish,
@@ -210,7 +210,7 @@ A standalone renderer suite exercises the production capture, OPFS store, PNG ex
 preview, including fractional/Retina scales, lazy loading and a 3,170 × 100,062-pixel result:
 
 ```sh
-BSK_LONG_SCREENSHOT_RENDERER=/path/to/chrome-headless-shell pnpm --filter @browser-skill/extension exec vitest run src/long-screenshot/renderer.browser.test.ts
+BSK_TEST_CHROME=/path/to/chrome-headless-shell pnpm --filter @browser-skill/extension test:browser src/long-screenshot/renderer.browser.test.ts
 ```
 
 Set `BSK_LONG_SCREENSHOT_OUTPUT` to retain PNGs and buffer measurements. The 100,062-pixel run used

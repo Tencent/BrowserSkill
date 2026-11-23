@@ -22,6 +22,7 @@ interface Entry {
   attachment: string;
   requests: Set<ScreencastRequest>;
   subscription: { dispose(): void };
+  releaseAttachment?: () => void;
   configuration: string;
 }
 
@@ -82,6 +83,7 @@ export class ScreencastCoordinator {
       let entry = this.entries.get(tabId);
       if (entry && entry.attachment !== attachment) {
         entry.subscription.dispose();
+        entry.releaseAttachment?.();
         this.entries.delete(tabId);
         entry = undefined;
       }
@@ -90,10 +92,11 @@ export class ScreencastCoordinator {
           attachment,
           requests: new Set(),
           configuration: "",
-          subscription: this.cdp.onEvent((source, method, params) => {
+          releaseAttachment: this.cdp.retainTabAttachment?.(tabId),
+          subscription: this.cdp.onEvent(tabId, (source, method, params) => {
             if (
               source.tabId !== tabId ||
-              source.sessionId ||
+              !source.isRootTarget ||
               method !== "Page.screencastFrame" ||
               this.cdp.getAttachmentId?.(tabId) !== attachment ||
               this.entries.get(tabId) !== created
@@ -149,6 +152,7 @@ export class ScreencastCoordinator {
     if (!entry.requests.size || this.cdp.getAttachmentId?.(tabId) !== entry.attachment) {
       this.entries.delete(tabId);
       entry.subscription.dispose();
+      entry.releaseAttachment?.();
       if (this.cdp.getAttachmentId?.(tabId) === entry.attachment)
         await bounded(this.cdp.send(tabId, "Page.stopScreencast"), 1000);
       return;

@@ -1,18 +1,30 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "ReadResult",
-  "type": "object",
-  "required": [
-    "captured_at",
-    "frame_id",
-    "frame_url",
-    "items",
-    "page_url",
-    "scope",
-    "tab_id",
-    "title",
-    "truncated"
-  ],
+  "definitions": {
+    "ReadItem": {
+      "properties": {
+        "redacted": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "values": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "ref",
+        "values",
+        "redacted"
+      ],
+      "type": "object"
+    }
+  },
   "properties": {
     "captured_at": {
       "type": "string"
@@ -24,10 +36,10 @@
       "type": "string"
     },
     "items": {
-      "type": "array",
       "items": {
         "$ref": "#/definitions/ReadItem"
-      }
+      },
+      "type": "array"
     },
     "page_url": {
       "type": "string"
@@ -37,8 +49,8 @@
       "type": "string"
     },
     "tab_id": {
-      "type": "integer",
-      "format": "int64"
+      "format": "int64",
+      "type": "integer"
     },
     "title": {
       "type": "string"
@@ -47,29 +59,17 @@
       "type": "boolean"
     }
   },
-  "definitions": {
-    "ReadItem": {
-      "type": "object",
-      "required": [
-        "redacted",
-        "ref",
-        "values"
-      ],
-      "properties": {
-        "redacted": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "ref": {
-          "type": "string"
-        },
-        "values": {
-          "type": "object",
-          "additionalProperties": true
-        }
-      }
-    }
-  }
+  "required": [
+    "tab_id",
+    "page_url",
+    "frame_url",
+    "frame_id",
+    "title",
+    "captured_at",
+    "items",
+    "truncated",
+    "scope"
+  ],
+  "title": "ReadResult",
+  "type": "object"
 }

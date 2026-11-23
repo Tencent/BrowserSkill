@@ -112,7 +112,11 @@
       "readFailed": "설정을 불러오지 못했습니다. 확장 프로그램을 다시 여세요.",
       "writeFailed": "저장하지 못했습니다. 설정은 변경되지 않았습니다. 다시 시도하세요.",
       "confirmTabBorrowInfoLabel": "탭 빌리기 확인 안내",
-      "requestHelpEnabledInfoLabel": "사용자 도움 요청 안내"
+      "requestHelpEnabledInfoLabel": "사용자 도움 요청 안내",
+      "openAgentWindowMinimized": "Agent 창을 최소화하여 열기",
+      "openAgentWindowMinimizedHint": "켜면 새 백그라운드 Agent 창이 화면에 나타나지 않고 처음부터 최소화된 상태로 열립니다. 끄면 포커스 없는 일반 창으로 열립니다.",
+      "openAgentWindowMinimizedScope": "이 브라우저 프로필에 자동 저장되며 새 백그라운드 Agent 창에 적용됩니다. 명시적인 포그라운드 세션과 작업 기록은 계속 화면에 표시된 상태로 열립니다.",
+      "openAgentWindowMinimizedInfoLabel": "Agent 창 최소화 열기 안내"
     },
     "remoteLocal": "로컬로 전환",
     "remotePairing": "페어링 링크",
@@ -154,7 +158,7 @@
       "unavailableHint": "지침을 복사하려면 이 브라우저 프로필을 bsk에 연결하세요.",
       "copyButton": "지침 복사",
       "copyFailed": "지침을 복사하지 못했습니다. 다시 시도해 주세요.",
-      "promptTemplate": "이 작업에는 브라우저 {{name}}(인스턴스 ID: {{instanceId}})의 BrowserSkill을 사용하세요. 이 작업의 새 세션을 시작할 때마다 해당 인터페이스를 사용하세요:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nDeepSeek Harness에서는 CLI 명령을 별도로 실행하지 말고 도구 호출을 사용하세요.\n이 인스턴스가 연결되어 있지 않으면 중단하고 이 프로필을 다시 연결해 달라고 요청하세요. --browser / browser를 생략하거나 다른 인스턴스로 전환하지 마세요.",
+      "promptTemplate": "이 작업에는 브라우저 {{name}}(인스턴스 ID: {{instanceId}})의 BrowserSkill을 사용하세요. 이 작업의 새 세션을 시작할 때마다 해당 인터페이스를 사용하세요:\nCLI: {{command}}\nMCP: {{toolCall}}\nMCP 도구를 사용할 때는 CLI 명령을 별도로 실행하지 말고 도구 호출을 사용하세요.\n이 인스턴스가 연결되어 있지 않으면 중단하고 이 프로필을 다시 연결해 달라고 요청하세요. --browser / browser를 생략하거나 다른 인스턴스로 전환하지 마세요.",
       "title": "현재 브라우저",
       "unnamed": "이름 없는 브라우저"
     },
@@ -191,7 +195,8 @@
       "skipConfirm": "로컬 프로그램이 bsk를 사칭하여 이 브라우저를 제어할 수 있습니다. bsk 측에서도 미검증 연결을 명시적으로 허용해야 합니다.",
       "confirmSkip": "건너뛰기 확인",
       "settingsFailed": "설정을 저장할 수 없습니다. 다시 시도하세요.",
-      "pairHint": "bsk daemon pair를 실행하고 링크를 붙여 넣으세요. 로컬 및 원격 링크를 자동으로 구분합니다.",
+      "pairHint": "bsk daemon pair 명령을 실행하세요\n출력된 전체 링크를 입력란에 붙여 넣으세요",
+      "pairInfoLabel": "페어링 링크 안내",
       "pairPreserves": "새 페어링이 성공할 때까지 현재 연결이 유지됩니다.",
       "replaceTitle": "현재 페어링을 교체할까요?",
       "replaceConfirm": "이 bsk는 이미 페어링되어 있습니다. 교체가 성공하면 현재 작업이 종료됩니다. 링크가 거부되면 기존 페어링이 유지됩니다.",
@@ -388,7 +393,21 @@
       "recordStop": "동작 녹화 종료",
       "recordAwait": "녹화 완료 대기",
       "resize": "창 크기 조절",
-      "emulate": "에뮬레이션 변경"
+      "emulate": "에뮬레이션 변경",
+      "cooperate": "공유 탭 동기화",
+      "sessionStart": "세션 시작",
+      "sessionStop": "세션 중지",
+      "screenshotFullPage": "전체 페이지 스크린샷 캡처",
+      "screenshotRead": "스크린샷 읽기",
+      "screenshotRelease": "스크린샷 해제",
+      "debug": "디버그 작업 실행",
+      "video": "동영상 녹화 관리",
+      "dialogStatus": "대화 상자 상태 확인",
+      "dialogAccept": "대화 상자 수락",
+      "dialogDismiss": "대화 상자 닫기",
+      "waitForElement": "요소 대기",
+      "operationAwait": "작업 대기",
+      "operationCancel": "작업 취소"
     }
   },
   "debug": {

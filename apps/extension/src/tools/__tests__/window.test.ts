@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { INTERACTION_STORAGE_KEY, InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSessionStart } from "../session";
-import type { CdpRunner, ChromeTabsApi } from "../shared";
+import { type CdpRunner, type ChromeTabsApi, createStubCdpRunner } from "../shared";
 import { handleWindowResize, type WindowResizeDeps } from "../window";
 
 function fakeAgentWindow(ids: number[]) {
@@ -56,12 +56,12 @@ function resizeFixture(
         state.viewport = { width: state.bounds.width, height: state.bounds.height - 143 };
     }),
   };
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: vi.fn(async () => ({
       cssLayoutViewport: { clientWidth: state.viewport.width, clientHeight: state.viewport.height },
       cssVisualViewport: { zoom: opts.zoom ?? 1 },
     })) as CdpRunner["send"],
-  };
+  });
   const wait = vi.fn(async () => {
     state.waits++;
     if (opts.delayViewport && state.waits === 2)
@@ -181,6 +181,116 @@ describe("handleWindowResize", () => {
       },
     });
     expect(f.wait).toHaveBeenCalledTimes(20);
+  });
+
+  it.each([
+    [0, 0],
+    [1, 1],
+    [-1, -1],
+    [2, -2],
+  ])("accepts a committed resize within DPI rounding (%s, %s)", async (dx, dy) => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 1100 + dx, height: 700 + dy } });
+    const result = await handleWindowResize(
+      sm,
+      { session_id: "aa11", width: 1100, height: 700 },
+      f.deps,
+    );
+    expect(result).toEqual({ window_id: 100, width: 1100 + dx, height: 700 + dy });
+    // Bounds that only differ by DIP rounding must not spend the settling budget.
+    expect(f.wait).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [40, 40],
+    [-40, 0],
+    [0, 12],
+  ])("still fails a genuinely constrained resize (%s, %s)", async (dx, dy) => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 1100 + dx, height: 700 + dy } });
+    const result = await handleWindowResize(
+      sm,
+      { session_id: "aa11", width: 1100, height: 700 },
+      f.deps,
+    );
+    expect(result).toMatchObject({
+      code: "protocol_error",
+      message: `Window resize requested 1100x700, but the browser reports ${1100 + dx}x${700 + dy}.`,
+      data: {
+        reason: "window_resize_constrained",
+        effect_state: "committed",
+        requested: { width: 1100, height: 700 },
+        actual_window: { width: 1100 + dx, height: 700 + dy },
+      },
+    });
+    expect(f.wait).toHaveBeenCalledTimes(20);
+  });
+
+  it("does not call a rounding-sized but stale viewport a constraint", async () => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 1101, height: 711 }, frozenViewport: true });
+    const params = { session_id: "aa11", width: 1100, height: 710 };
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        reason: "window_resize_viewport_unchanged",
+        effect_state: "committed",
+        actual_window: { width: 1101, height: 711 },
+      },
+    });
+    // Retrying the same request while the outer bounds remain DPI-rounded and the
+    // viewport is still frozen must keep failing instead of reporting false success.
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        reason: "window_resize_viewport_unchanged",
+        effect_state: "none",
+        actual_window: { width: 1101, height: 711 },
+      },
+    });
+    expect(f.windows.update).toHaveBeenCalledOnce();
+    f.state.viewport = { width: 1101, height: 568 };
+    expect(await handleWindowResize(sm, params, f.deps)).toEqual({
+      window_id: 100,
+      width: 1101,
+      height: 711,
+    });
+  });
+
+  it("keeps a failed post-resize read with DPI rounding from becoming false success", async () => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 1101, height: 711 }, frozenViewport: true });
+    const read = f.cdp.send;
+    let calls = 0;
+    f.cdp.send = (async (...args: Parameters<CdpRunner["send"]>) => {
+      if (++calls === 2) throw new Error("renderer unavailable");
+      return read(...args);
+    }) as CdpRunner["send"];
+    const params = { session_id: "aa11", width: 1100, height: 710 };
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      data: { reason: "window_resize_unconfirmed", effect_state: "unknown" },
+    });
+    f.cdp.send = read;
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      data: {
+        reason: "window_resize_viewport_unchanged",
+        effect_state: "none",
+        actual_window: { width: 1101, height: 711 },
+      },
+    });
+    expect(f.windows.update).toHaveBeenCalledOnce();
+  });
+
+  it("never reports success for a resize that was not committed", async () => {
+    const sm = await makeManager();
+    const f = resizeFixture({ throwOnUpdate: true });
+    const result = await handleWindowResize(
+      sm,
+      { session_id: "aa11", width: 1100, height: 700 },
+      f.deps,
+    );
+    expect(result).toMatchObject({ code: "protocol_error", data: { effect_state: "unknown" } });
+    expect(result).not.toHaveProperty("window_id");
   });
 
   it("reports a viewport that remains fixed despite the window changing", async () => {
@@ -439,7 +549,11 @@ describe("handleSessionStart window size", () => {
   ] as const)("legacy unattended leaves browser settings authoritative (%s, %s)", async (confirmTabBorrow, requestHelpEnabled, borrow_confirmation, request_help) => {
     const preferences = new InteractionPreferenceStore();
     vi.spyOn(preferences, "ready").mockResolvedValue();
-    vi.spyOn(preferences, "get").mockReturnValue({ confirmTabBorrow, requestHelpEnabled });
+    vi.spyOn(preferences, "get").mockReturnValue({
+      confirmTabBorrow,
+      requestHelpEnabled,
+      openAgentWindowMinimized: false,
+    });
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
     for (const unattended of [false, true]) {
       expect(
@@ -460,7 +574,10 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", { size: { width: 1280, height: 800 } });
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {
+      size: { width: 1280, height: 800 },
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("creates the window without size when width/height are omitted", async () => {
@@ -471,7 +588,9 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", {});
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("forwards focused: false to the Agent Window", async () => {
@@ -482,7 +601,41 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", { focused: false });
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {
+      focused: false,
+      excludeWindowIds: expect.any(Set),
+    });
+  });
+
+  it("forwards minimized: true for unfocused sessions when openAgentWindowMinimized is enabled", async () => {
+    const preferences = new InteractionPreferenceStore();
+    vi.spyOn(preferences, "ready").mockResolvedValue();
+    vi.spyOn(preferences, "get").mockReturnValue({
+      confirmTabBorrow: true,
+      requestHelpEnabled: true,
+      openAgentWindowMinimized: true,
+    });
+    const aw = fakeAgentWindow([100, 101, 102]);
+    const sm = new SessionManager({ agentWindow: aw });
+
+    await handleSessionStart(sm, { session_id: "bg-default" }, { preferences });
+    expect(aw.create).toHaveBeenNthCalledWith(1, "about:blank", {
+      minimized: true,
+      excludeWindowIds: expect.any(Set),
+    });
+
+    await handleSessionStart(sm, { session_id: "bg-explicit", focused: false }, { preferences });
+    expect(aw.create).toHaveBeenNthCalledWith(2, "about:blank", {
+      focused: false,
+      minimized: true,
+      excludeWindowIds: expect.any(Set),
+    });
+
+    await handleSessionStart(sm, { session_id: "fg-explicit", focused: true }, { preferences });
+    expect(aw.create).toHaveBeenNthCalledWith(3, "about:blank", {
+      focused: true,
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("rejects a lone width without height", async () => {

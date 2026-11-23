@@ -61,7 +61,7 @@ export class CdpReadTimeoutError extends Error {
     readonly method: string,
     readonly tabId: number | undefined,
     timeout: number,
-    readonly sessionId?: string,
+    readonly processKey?: string,
     readonly phase: "deadline" | "blocked" = "deadline",
   ) {
     super(
@@ -75,9 +75,9 @@ export class CdpReadTimeoutError extends Error {
   static stillPending(
     method: string,
     tabId: number | undefined,
-    sessionId?: string,
+    processKey?: string,
   ): CdpReadTimeoutError {
-    const error = new CdpReadTimeoutError(method, tabId, 0, sessionId, "blocked");
+    const error = new CdpReadTimeoutError(method, tabId, 0, processKey, "blocked");
     error.message = `Browser read ${method} refused: an earlier read on tab ${tabId} is still pending in Chrome. ${RECOVERY}`;
     return error;
   }
@@ -105,28 +105,44 @@ export function readTimeoutDetails(error: unknown): { data?: RpcErrorData } {
     : {};
 }
 
+type ReadGateTarget = CdpDebuggee | { readonly tabId?: number; readonly processKey?: string };
+
+function targetGateKey(target: ReadGateTarget): string {
+  if ("sessionId" in target && target.sessionId) return target.sessionId;
+  if ("processKey" in target && target.processKey) return target.processKey;
+  return "root";
+}
+
+function targetProcessKey(target: ReadGateTarget): string {
+  if ("processKey" in target && target.processKey) return target.processKey;
+  if ("sessionId" in target && target.sessionId) return `oopif:${target.sessionId}`;
+  return "root";
+}
+
 /** Only Chrome settling the original command (or detaching its session) opens
  * this gate. A caller timing out does not cancel that command. */
 export class CdpReadGate {
   private readonly tabs = new Map<number | undefined, Map<string, Set<CdpReadTimeoutError>>>();
 
   run<T>(
-    target: CdpDebuggee,
+    target: ReadGateTarget,
     method: string,
     run: () => Promise<T>,
     timeoutMs?: number,
     signal?: AbortSignal,
+    processKey = targetProcessKey(target),
+    blockGateOnAbort = true,
   ): Promise<T> {
     signal?.throwIfAborted();
     let sessions = this.tabs.get(target.tabId);
     if (!sessions) this.tabs.set(target.tabId, (sessions = new Map()));
-    const key = target.sessionId ?? "root";
+    const key = targetGateKey(target);
     let blocked = sessions.get(key);
     if (!blocked) sessions.set(key, (blocked = new Set()));
     const error = sessions.get("root")?.values().next().value ?? blocked.values().next().value;
     if (error && GUARDED_READS.has(method))
       return Promise.reject(
-        CdpReadTimeoutError.stillPending(method, target.tabId, error.sessionId),
+        CdpReadTimeoutError.stillPending(method, target.tabId, error.processKey),
       );
     let pending = true;
     let blocker: CdpReadTimeoutError | undefined;
@@ -136,17 +152,26 @@ export class CdpReadGate {
       blocked.add(error);
     };
     // Capture the set, so an old reply cannot modify a replacement attachment.
-    const work = runCdpCommand(target, method, run, timeoutMs, {
-      timedOut: blockUntilSettled,
-      settled: () => {
-        pending = false;
-        if (blocker) blocked.delete(blocker);
+    const work = runCdpCommand(
+      target,
+      method,
+      run,
+      timeoutMs,
+      {
+        timedOut: blockUntilSettled,
+        settled: () => {
+          pending = false;
+          if (blocker) blocked.delete(blocker);
+        },
       },
-    });
-    if (!signal) return work;
-    return waitForAbort(work, signal, () =>
-      blockUntilSettled(CdpReadTimeoutError.stillPending(method, target.tabId, target.sessionId)),
+      processKey,
     );
+    if (!signal) return work;
+    return waitForAbort(work, signal, () => {
+      if (blockGateOnAbort && GUARDED_READS.has(method)) {
+        blockUntilSettled(CdpReadTimeoutError.stillPending(method, target.tabId, processKey));
+      }
+    });
   }
 
   reset(tabId: number, sessionId?: string): void {
@@ -160,7 +185,7 @@ export class CdpReadGate {
 }
 
 /** Stop waiting on cancellation; native Chrome commands continue until they settle. */
-async function waitForAbort<T>(
+export async function waitForAbort<T>(
   work: Promise<T>,
   signal: AbortSignal,
   onAbort?: () => void,
@@ -171,6 +196,7 @@ async function waitForAbort<T>(
       work,
       new Promise<never>((_, reject) => {
         abort = () => {
+          void work.catch(() => {});
           onAbort?.();
           reject(signal.reason ?? new DOMException("Operation aborted", "AbortError"));
         };
@@ -184,7 +210,7 @@ async function waitForAbort<T>(
 }
 
 export async function runCdpCommand<T>(
-  target: CdpDebuggee,
+  target: ReadGateTarget,
   method: string,
   run: () => Promise<T>,
   timeoutMs = method === "Accessibility.disable"
@@ -195,12 +221,13 @@ export async function runCdpCommand<T>(
         ? READ_TIMEOUT_MS
         : undefined,
   lifecycle?: { timedOut(error: CdpReadTimeoutError): void; settled(): void },
+  processKey = targetProcessKey(target),
 ): Promise<T> {
   const started = Date.now();
   let timedOut = false;
   const details = () => ({
     tabId: target.tabId,
-    frameSessionId: target.sessionId,
+    frameSessionId: "sessionId" in target ? target.sessionId : undefined,
     method,
     elapsedMs: Date.now() - started,
   });
@@ -234,9 +261,10 @@ export async function runCdpCommand<T>(
       pending,
       new Promise<never>((_, reject) => {
         deadline = setTimeout(() => {
+          void pending.catch(() => {});
           timedOut = true;
           console.warn("[bsk cdp] read timed out", details());
-          const error = new CdpReadTimeoutError(method, target.tabId, timeoutMs, target.sessionId);
+          const error = new CdpReadTimeoutError(method, target.tabId, timeoutMs, processKey);
           lifecycle?.timedOut(error);
           reject(error);
         }, timeoutMs);

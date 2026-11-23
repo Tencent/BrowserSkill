@@ -1,7 +1,7 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { Button } from "@browser-skill/ui";
-import { RiErrorWarningLine } from "@remixicon/react";
 import { useState } from "react";
+import { LOCAL_PAIRING_MESSAGE } from "@/lib/local-pairing-bridge";
 import type { LocalAuthStatus } from "@/transport/local-auth";
 import { Switch } from "./switch";
 
@@ -10,7 +10,7 @@ export interface LocalPairingInfo {
   devices: { daemonId: string; deviceId: string; endpoint: string }[];
 }
 export async function localPairingRequest(request: Record<string, unknown>) {
-  const reply = await chrome.runtime.sendMessage({ kind: "bsk-local-pairing", ...request });
+  const reply = await chrome.runtime.sendMessage({ kind: LOCAL_PAIRING_MESSAGE, ...request });
   if (!reply || reply.error)
     throw Object.assign(new Error(reply?.error ?? "pairing_failed"), {
       browserId: reply?.browserId,
@@ -41,26 +41,22 @@ export function LocalPairingNotice({
       data-slot="local-pairing-notice"
       className={`mt-2 rounded-lg p-2 text-xs leading-relaxed ${status.state === "unverified_local" ? "border border-amber-400/40 bg-amber-400/10" : "bg-muted/60"}`}
     >
-      <div className="flex items-start gap-2">
-        <p className="flex-1">
-          {t(`popup.localAuth.message.${key}`, {
-            browser: status.browserId ?? instanceId,
-            instance: instanceId,
-          })}
-        </p>
-        {status.state === "unverified_local" && (
-          <a
-            href="https://browserskill.weixin.qq.com/#security"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="shrink-0 rounded-sm text-amber-600 focus-visible:outline-2 focus-visible:outline-ring dark:text-amber-400"
-            aria-label={t("popup.localAuth.whyPair")}
-            title={t("popup.localAuth.whyPair")}
-          >
-            <RiErrorWarningLine size={16} aria-hidden="true" />
-          </a>
-        )}
-      </div>
+      <p>
+        {t(`popup.localAuth.message.${key}`, {
+          browser: status.browserId ?? instanceId,
+          instance: instanceId,
+        })}
+      </p>
+      {status.state === "unverified_local" && (
+        <a
+          href="https://browserskill.weixin.qq.com/#security"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-1 inline-block rounded-sm underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-ring"
+        >
+          {t("popup.localAuth.whyPair")}
+        </a>
+      )}
       {key === "skip" && (
         <Button
           type="button"

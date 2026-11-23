@@ -28,6 +28,7 @@ use super::navigation::WaitUntil;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WaitForNavigationParams {
     pub session_id: String,
     /// Target tab. Defaults to the Agent Window's currently active tab.
@@ -40,6 +41,9 @@ pub struct WaitForNavigationParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u32>,
+    /// Optional cooperation context validated by the extension without renewing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
 }
 
 /// Outcome of a wait_for_navigation. `reached` is the wire name of the
@@ -129,6 +133,7 @@ impl ElementState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WaitForElementParams {
     pub session_id: String,
     /// Optional `@e<N>` ref from the latest snapshot or observe.
@@ -156,6 +161,9 @@ pub struct WaitForElementParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 16, max = 2000))]
     pub poll_ms: Option<u32>,
+    /// Optional cooperation context validated by the extension without renewing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
 }
 
 /// Outcome of a `wait_for_element`. A timeout returns `satisfied: false` and
@@ -186,6 +194,7 @@ pub struct WaitForElementResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WaitMsParams {
     pub duration_ms: u64,
 }
@@ -207,11 +216,13 @@ mod tests {
             tab_id: None,
             wait_until: None,
             timeout_ms: None,
+            context_id: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert!(v.get("tab_id").is_none());
         assert!(v.get("wait_until").is_none());
         assert!(v.get("timeout_ms").is_none());
+        assert!(v.get("context_id").is_none());
         let round: WaitForNavigationParams = serde_json::from_value(v).unwrap();
         assert_eq!(round, p);
     }
@@ -267,6 +278,7 @@ mod tests {
             tab_id: None,
             timeout_ms: None,
             poll_ms: None,
+            context_id: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["ref"], "@e3");

@@ -147,7 +147,7 @@ record protocol and key exchange to address.
 
 ## Release validation
 
-Extension 0.4.3 introduces optional pairing and removes obsolete migration state
+Extension 0.5.0 introduces optional pairing and removes obsolete migration state
 while retaining unpaired access. CLI and extension updates can arrive independently.
 
 Before release, verify new and upgraded profiles against both pre-pairing and

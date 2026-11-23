@@ -137,8 +137,8 @@ Without native TLS, the listener must be on loopback. Plain `ws://` public URLs 
    BSK_AUTO_START=0 bsk session stop <id>
    ```
 
-   With DSH, perform the same start, navigate, observe and stop lifecycle through
-   its injected browser tools. Server setup and pairing remain operator steps.
+   With MCP, perform the same start, navigate, observe and stop lifecycle through
+   the registered `bsk_*` tools. Server setup and pairing remain operator steps.
 
 Report only the stage verified by evidence:
 
@@ -221,9 +221,9 @@ cargo test --workspace
 pnpm --filter @browser-skill/extension test
 cargo build -p bsk
 pnpm --filter @browser-skill/extension build
-BSK_REMOTE_CLI=/absolute/path/to/target/debug/bsk \
-BSK_REMOTE_CHROME=/absolute/path/to/chrome-for-testing \
-  pnpm --filter @browser-skill/extension test src/transport/__tests__/remote-connection.browser.test.ts
+BSK_TEST_CLI=/absolute/path/to/target/debug/bsk \
+BSK_TEST_CHROME=/absolute/path/to/chrome-for-testing \
+  pnpm --filter @browser-skill/extension test:browser src/transport/__tests__/remote-connection.browser.test.ts
 ```
 
 The remote server integration tests cover credential exchange, rotation retries, stable device routing, replacement connections, revocation, connection capacity, file-lock contention and native TLS. Unit tests additionally cover rate-limit saturation, unavailable extension storage, local recovery, renewal retry frequency and popup authorization states. TLS fixtures contain a test-only private key and must never be used for deployment.

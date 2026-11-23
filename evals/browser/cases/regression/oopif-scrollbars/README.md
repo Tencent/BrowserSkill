@@ -15,7 +15,7 @@ or `none`.
 Run the numerical regression with Node 22+ and a local Chrome executable:
 
 ```sh
-BSK_GEOMETRY_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension exec vitest run \
+BSK_TEST_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension test:browser \
   src/tools/__tests__/snapshot-coordinates.browser.test.ts
 ```
 
@@ -27,8 +27,8 @@ The existing browser runner is shared with the snapshot-unit regression. The tes
 - Rejects fully clipped controls and checks snapshot measurement reuse per target.
 - Covers five device-scale/browser-zoom combinations plus single-axis and no-scrollbar cases.
 
-The runner creates and removes isolated browser profiles. It is opt-in and skipped
-in normal unit runs when `BSK_GEOMETRY_CHROME` is unset.
+The runner creates and removes isolated browser profiles under `test:browser`
+when `BSK_TEST_CHROME` is set.
 
 Run the CLI fixture smoke with a connected test extension:
 

@@ -1,9 +1,9 @@
 # Reading changing pages
 
-Use `bsk read` (MCP/DSH: `bsk_inspect` action `read`) for current DOM facts.
-`evaluate` remains arbitrary page execution, including writes and deferred work;
-it keeps its strict observation requirement. Repeated sync/evaluate on a carousel
-is therefore the wrong data path. Read the current facts, decide from those facts,
+Use `bsk read` (MCP: `bsk_inspect` action `read`) for current DOM facts.
+`evaluate` remains arbitrary page execution, including writes and deferred work.
+A script that states nothing keeps its strict observation requirement, so repeated
+sync/evaluate on a carousel is the wrong data path. Read the current facts, decide from those facts,
 and protect the decision with `expect` before DOM input.
 
 ```sh
@@ -24,9 +24,13 @@ inspect the current page after control changes; subsequent input must synchroniz
 | --- | --- |
 | read, snapshot, HTML, bounded extraction | Current document/attachment and exact node identity; no historical whole-page comparison. No page input. |
 | Target-policy DOM input | Reusable control context, exact pinned node, readiness, pointer hit/focus and explicit business `expect` facts immediately before input. |
-| Arbitrary evaluate | Single-use strict observation; scripts are opaque even if they look read-only. Dispatch cannot be rolled back. |
+| Arbitrary evaluate | Scripts are opaque even if they look read-only, and dispatch cannot be rolled back. In order of preference: stated facts (`expect` without `observation_id` under target policy, `depends_on` regions under strict) are checked and the rest of the page may change; with `observation_id`, a single-use strict observation of the whole page; `unverified` compares nothing about the page, keeps control and main-document checks, and returns `verified: false`. |
 | Visual input, untargeted keys, displacement-only drag | Strict observation and existing geometry/focus guards; a DOM read cannot refresh them. |
 | Strict-policy input | Existing single-use whole-page contract. read/extract do not renew it. |
+
+`evaluate --unverified` requires protocol `"2.0"` (both daemon and extension must speak
+`"2.0"`). Update the CLI, restart its daemon, and reload the matching extension together.
+Strict contexts still authorize only one action, including an unverified script.
 
 Unrelated clocks, counts, carousel DOM replacement/reordering, class/style changes,
 video state, Canvas drawing and unrelated child navigations can occur during data
@@ -42,8 +46,11 @@ recycled row IDs, button meaning, price, recipient and input values with `expect
 Check all facts needed for a comparison, not just one chosen candidate. Restored
 values can match again; this is a value check, not a promise of unbroken history.
 
-Main document navigation and SPA route changes invalidate old refs and context,
-including away-and-back and hash routes. Child-frame reads use that ref's exact
+Main document navigation and route-path SPA transitions invalidate
+old refs and context (including away-and-back and hash-router paths) without
+marking live document collectors unavailable, whereas same-pathname query or
+fragment updates preserve reusable target-policy DOM contexts (while still
+requiring a fresh strict observation for opaque untargeted actions). Child-frame reads use that ref's exact
 frame/session and current document identity. A changed or unavailable target
 document fails; unrelated unavailable frames need not make a main-document read
 stale. Selectors search the main document; use refs for nested frames and shadow
@@ -97,16 +104,14 @@ rechecked before publishing results/refs; output byte bounds also cover metadata
 
 | Client | Fields and limits |
 | --- | --- |
-| CLI | `bsk read --selector CSS` or `--ref @eN`; `--fields-json` array, `--max-nodes`, `--max-bytes`, `--timeout-ms` |
-| MCP | `bsk_inspect({action:"read", session, selector/ref, read_fields:[...], max_nodes, max_bytes, timeout_ms})` |
-| DSH | `bsk_inspect({action:"read", session, selector/ref, readFields:"[...]", maxNodes, maxBytes, readTimeoutMs})` |
+| CLI | `bsk read --selector CSS` or `--ref @eN`; `--fields-json` array, `--max-nodes`, `--max-bytes`, `--timeout-ms`, `--context` |
+| MCP | `bsk_inspect({action:"read", session, selector/ref, read_fields:[...], max_nodes, max_bytes, timeout_ms, context})` |
 
 The result has tab/frame identity, page/frame URLs, title, capture time, `scope:
 current_dom`, item refs/values/redactions and `truncated`. Machine errors retain
 reason/phase/effect_state/recovery; query failures have `phase: read` and no effect.
-New CLI/MCP require daemon protocol 1.9; the daemon checks extension protocol 1.9.
-Unsupported peers fail before forwarding this method. Compatible older 1.x clients
-retain existing action behavior; they cannot request a new method unknowingly.
+CLI and MCP share `ClientContext` and protocol `"2.0"` guarantees; peers below `"2.0"`
+fail handshake/request checks before forwarding this method.
 There is no downgrade to evaluate, no whitelist and no implicit resync/replay.
 
 `bsk plan` is not part of the 0.4.2 release. The plan client on main is
@@ -119,9 +124,10 @@ For measured results and untested boundaries, see the
 
 ## Reproduction
 
-Build the extension with `BSK_DAEMON_WS_URL=ws://127.0.0.1:52923`, build the CLI and
-DSH plugin, then run `evals/browser/cases/regression/cooperation/dynamic-read.mjs`
-with `BSK_COOP_CHROME` set to a Chromium executable. It owns an isolated profile,
+Build the extension with `BSK_DAEMON_WS_URL=ws://127.0.0.1:52923` and build the CLI,
+then run `evals/browser/cases/regression/cooperation/dynamic-read.mjs`
+with `BSK_TEST_CHROME` set to a Chromium executable (and optional `BSK_TEST_CLI`
+defaulting to `target/debug/bsk`). It owns an isolated profile,
 daemon and sessions. `BSK_DYNAMIC_OCEAN=1` adds real OceanEngine autoplay trials;
 `BSK_DYNAMIC_PLAN_CLI` optionally selects another plan binary; by default the
 runner exercises plan using the same CLI.

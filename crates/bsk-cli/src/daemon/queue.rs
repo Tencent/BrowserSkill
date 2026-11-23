@@ -40,6 +40,7 @@ use std::time::Duration;
 use bsk_protocol::tools::DebugActivity;
 use bsk_protocol::{
     ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError, RpcId,
+    WsCorrelation,
 };
 use rand::Rng;
 use serde_json::Value;
@@ -50,6 +51,7 @@ use super::abort::AbortToken;
 use super::browsers::BrowserRegistry;
 use super::inflight::{PromoteOutcome, ToolInflightEntry};
 use super::sessions::{SessionId, SessionRegistry};
+use super::tool_policy::{Outcome, execution_policy};
 
 /// Bounded queue capacity per session. Picked per design §5 ("tokio
 /// mpsc channel(64)"). A queue overflowing this many in-flight jobs
@@ -72,6 +74,7 @@ pub const CANCEL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct ToolJob {
     pub method: Method,
     pub params: Value,
+    pub correlation: WsCorrelation,
     pub timeout: Duration,
     pub respond: oneshot::Sender<Result<Value, RpcError>>,
     /// Inflight handle pre-registered by the IPC handler before the
@@ -142,11 +145,17 @@ pub enum DispatchError {
 
 impl DispatchError {
     fn with_session_end_reason(self, entry: Option<&ToolInflightEntry>) -> Self {
-        if entry.and_then(ToolInflightEntry::cancel_reason)
-            != Some(super::inflight::CancelReason::UserMovedTab)
-        {
-            return self;
-        }
+        let terminal_reason = match entry.and_then(ToolInflightEntry::cancel_reason) {
+            Some(super::inflight::CancelReason::UserMovedTab) => {
+                bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
+            }
+            Some(super::inflight::CancelReason::SessionEnded(reason))
+                if reason != bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str() =>
+            {
+                reason
+            }
+            _ => return self,
+        };
         // Apply the terminal cause when returning to the caller, including when
         // the outer wait expires before the worker finishes cancellation cleanup.
         let mut error = self.into_rpc();
@@ -156,7 +165,7 @@ impl DispatchError {
         } else if !data.is_object() {
             *data = serde_json::json!({ "details": data.take() });
         }
-        data["reason"] = serde_json::json!(crate::rpc_reason::SESSION_USER_MOVED_TAB);
+        data["reason"] = serde_json::json!(terminal_reason);
         Self::Rpc(error)
     }
 
@@ -214,7 +223,9 @@ fn session_busy_rpc() -> RpcError {
     RpcError {
         code: ErrorCode::Timeout,
         message: "session already has an unfinished command".into(),
-        data: Some(serde_json::json!({ "reason": crate::rpc_reason::SESSION_BUSY })),
+        data: Some(
+            serde_json::json!({ "reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str() }),
+        ),
     }
 }
 
@@ -321,6 +332,47 @@ impl ToolQueueRegistry {
         });
     }
 
+    /// Spawn the worker task for `sid` only if `sid` is still live in
+    /// [`SessionRegistry`], holding the queue map lock across the liveness check.
+    ///
+    /// Because `teardown_session` removes `sid` from `SessionRegistry` *before*
+    /// calling `tool_queues.remove(sid)` (and never holds `SessionRegistry`'s
+    /// lock while locking `queues`), any concurrent teardown either:
+    /// 1. removes `sid` from `SessionRegistry` first -> this method sees
+    ///    `!contains(sid)` and spawns nothing (preserving the `ended` tombstone),
+    /// 2. or runs `tool_queues.remove(sid)` after this method releases `queues`
+    ///    -> removes the just-inserted queue so the worker exits immediately.
+    pub fn spawn_if_live(&self, sid: SessionId) -> bool {
+        let (tx, rx) = mpsc::channel::<ToolJob>(QUEUE_CAPACITY);
+        let state = Arc::new(Mutex::new(QueueState::default()));
+        let previous = {
+            let mut guard = self.queues.lock().expect("tool queue registry poisoned");
+            if !self.sessions.contains(&sid) {
+                return false;
+            }
+            guard.insert(
+                sid.clone(),
+                QueueEntry {
+                    sender: tx,
+                    accepting: true,
+                    state: Arc::clone(&state),
+                },
+            )
+        };
+        if previous.is_some() {
+            warn!(
+                session = %sid,
+                "tool queue respawned; previous worker will drain remaining jobs and exit"
+            );
+        }
+        let browsers = Arc::clone(&self.browsers);
+        let sessions = Arc::clone(&self.sessions);
+        tokio::spawn(async move {
+            run_worker(sid, rx, state, browsers, sessions).await;
+        });
+        true
+    }
+
     /// Drop the sender for `sid`. The worker observes the closed
     /// channel and exits after finishing any job already taken from
     /// the queue. Returns `true` if a queue was actually removed.
@@ -354,6 +406,26 @@ impl ToolQueueRegistry {
         timeout: Duration,
         inflight: Option<Arc<ToolInflightEntry>>,
     ) -> Result<Value, DispatchError> {
+        self.dispatch_with_context(
+            sid,
+            method,
+            params,
+            WsCorrelation::default(),
+            timeout,
+            inflight,
+        )
+        .await
+    }
+
+    pub async fn dispatch_with_context(
+        &self,
+        sid: &SessionId,
+        method: Method,
+        params: Value,
+        correlation: WsCorrelation,
+        timeout: Duration,
+        inflight: Option<Arc<ToolInflightEntry>>,
+    ) -> Result<Value, DispatchError> {
         let (sender, state) = {
             let guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get(sid) else {
@@ -370,9 +442,7 @@ impl ToolQueueRegistry {
             queue_state.active = Some(DebugActivity {
                 state: "running".into(),
                 command_id: inflight.as_ref().map(|entry| entry.cli_rpc_id.clone()),
-                method: serde_json::to_value(&method)
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_owned)),
+                method: Some(method.wire_name().to_owned()),
                 started_at: Some(epoch_ms()),
                 elapsed_ms: Some(0),
                 wait_complete: None,
@@ -387,6 +457,7 @@ impl ToolQueueRegistry {
             sid.clone(),
             method,
             params,
+            correlation,
             timeout,
             false,
             inflight.clone(),
@@ -431,6 +502,7 @@ impl ToolQueueRegistry {
         milliseconds: u32,
         cancel: AbortToken,
     ) -> Result<DebugActivity, DispatchError> {
+        let _activity_lease = self.sessions.begin_activity(sid);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(milliseconds.into());
         loop {
             let mut activity = self.activity(sid)?;
@@ -461,6 +533,26 @@ impl ToolQueueRegistry {
         timeout: Duration,
         inflight: Option<Arc<ToolInflightEntry>>,
     ) -> Result<Value, DispatchError> {
+        self.dispatch_unlocked_with_context(
+            sid,
+            method,
+            params,
+            WsCorrelation::default(),
+            timeout,
+            inflight,
+        )
+        .await
+    }
+
+    pub async fn dispatch_unlocked_with_context(
+        &self,
+        sid: &SessionId,
+        method: Method,
+        params: Value,
+        correlation: WsCorrelation,
+        timeout: Duration,
+        inflight: Option<Arc<ToolInflightEntry>>,
+    ) -> Result<Value, DispatchError> {
         {
             let guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get(sid) else {
@@ -470,10 +562,12 @@ impl ToolQueueRegistry {
                 return Err(DispatchError::SessionStopping);
             }
         }
+        let _activity_lease = self.sessions.begin_activity(sid);
         let (respond_tx, _respond_rx) = oneshot::channel();
         let job = ToolJob {
             method,
             params,
+            correlation,
             timeout,
             respond: respond_tx,
             inflight,
@@ -522,6 +616,7 @@ impl ToolQueueRegistry {
             sid.clone(),
             method,
             params,
+            WsCorrelation::default(),
             timeout,
             true,
             None,
@@ -539,17 +634,19 @@ async fn dispatch_with_sender(
     session_id: SessionId,
     method: Method,
     params: Value,
+    correlation: WsCorrelation,
     timeout: Duration,
     wait_for_capacity: bool,
     inflight: Option<Arc<ToolInflightEntry>>,
     lifecycle_cancel: Option<AbortToken>,
     cancel_cleanup_timeout: Duration,
 ) -> Result<Value, DispatchError> {
-    let deadline_cleanup = waits_for_deadline_cleanup(&method);
+    let deadline_cleanup = waits_for_deadline_cleanup(&method, &params);
     let (respond_tx, respond_rx) = oneshot::channel();
     let job = ToolJob {
         method,
         params,
+        correlation,
         timeout,
         respond: respond_tx,
         inflight,
@@ -558,6 +655,7 @@ async fn dispatch_with_sender(
         session_id,
     };
     let lifecycle_cancellable = job.lifecycle_cancel.is_some();
+    let inflight_cancellable = job.inflight.is_some();
     let dialog_changes = job
         .inflight
         .as_ref()
@@ -586,10 +684,13 @@ async fn dispatch_with_sender(
             mpsc::error::TrySendError::Closed(_) => DispatchError::QueueClosed,
         });
     }
-    // Lifecycle teardown, page actions and effect-aware transfers keep the worker busy
-    // for bounded compensation after their original deadline. Keep the outer
-    // waiter alive for the same grace period so it cannot abandon reconciliation.
-    let response_grace = if lifecycle_cancellable || deadline_cleanup {
+    // Lifecycle teardown, page actions, effect-aware transfers, AND any
+    // cancellable inflight tool keep the worker busy for bounded compensation
+    // (`cancel_cleanup_timeout`) after cancellation or deadline. Keep the outer
+    // waiter alive for the same grace period so cancelling a non-`cancel_at_deadline`
+    // tool near its deadline cannot return a premature `Timeout` while the worker
+    // is still cleaning up (leaving `busy == true`).
+    let response_grace = if lifecycle_cancellable || deadline_cleanup || inflight_cancellable {
         cancel_cleanup_timeout
     } else {
         Duration::ZERO
@@ -651,37 +752,40 @@ async fn forward_one(
             .as_ref()
             .is_some_and(AbortToken::is_cancelled)
     {
-        return Err(cancelled_error(
+        return Err(tag_not_dispatched(cancelled_error(
             job.inflight.as_deref(),
             "tool dispatch cancelled before forwarding",
-        ));
+        )));
     }
     let Some(session) = sessions.get(sid) else {
-        return Err(RpcError {
+        return Err(tag_not_dispatched(RpcError {
             code: ErrorCode::NotFound,
             message: format!("session {sid} no longer exists"),
             data: None,
-        });
+        }));
     };
     let Some(client) = browsers.get(&session.browser_id) else {
-        return Err(RpcError {
+        return Err(tag_not_dispatched(RpcError {
             code: ErrorCode::NotFound,
             message: "owning browser is no longer connected".into(),
             data: None,
-        });
+        }));
     };
     // The browser is registered but has stopped answering; a call would
     // only hang until its own deadline. Nothing has been sent yet, so this
     // is the one place where "not executed" is certain.
     if client.is_unresponsive() {
-        return Err(super::browsers::extension_unresponsive_error());
+        return Err(tag_not_dispatched(
+            super::browsers::extension_unresponsive_error(),
+        ));
     }
     let rpc_id = next_rpc_id("tool");
-    let request = RequestFrame {
-        id: rpc_id.clone(),
-        method: job.method.clone(),
-        params: Some(job.params.clone()),
-    };
+    let request = RequestFrame::for_extension_ws(
+        rpc_id.clone(),
+        job.method.clone(),
+        job.params.clone(),
+        &job.correlation,
+    );
     // Promote the inflight entry to "forwarded" AND hand the WS request
     // frame to the socket inside the same critical section (review round 2
     // C1). The closure runs while the entry's inner lock is held, so a
@@ -708,10 +812,10 @@ async fn forward_one(
             match outcome {
                 PromoteOutcome::Promoted => Some(entry.cancel_token()),
                 PromoteOutcome::Cancelled => {
-                    return Err(cancelled_error(
+                    return Err(tag_not_dispatched(cancelled_error(
                         Some(entry),
                         "tool dispatch cancelled before forwarding",
-                    ));
+                    )));
                 }
                 PromoteOutcome::SendFailed => return Err(not_dispatched_error(dispatched)),
             }
@@ -725,10 +829,10 @@ async fn forward_one(
                 .as_ref()
                 .is_some_and(AbortToken::is_cancelled)
             {
-                return Err(cancelled_error(
+                return Err(tag_not_dispatched(cancelled_error(
                     None,
                     "session lifecycle cancelled before forwarding",
-                ));
+                )));
             }
             dispatched = Some(client.dispatch(request));
             if dispatched.as_ref().is_some_and(Result::is_err) {
@@ -749,6 +853,8 @@ async fn forward_one(
             id: format!("cancel-{rpc_id}"),
             method: Method::Cancel,
             params: Some(serde_json::json!({ "rpc_id": rpc_id })),
+            audit_id: None,
+            operation_id: None,
         });
         if let Err(err) = client.sink.send(cancel) {
             warn!(%rpc_id, ?err, "failed to forward session lifecycle cancel");
@@ -765,11 +871,13 @@ async fn forward_one(
                 id: format!("deadline-cancel-{rpc_id}"),
                 method: Method::Cancel,
                 params: Some(serde_json::json!({ "rpc_id": rpc_id })),
+                audit_id: None,
+                operation_id: None,
             }))
             .is_ok()
     };
     let deadline_cancel: Option<&(dyn Fn() -> bool + Sync)> =
-        waits_for_deadline_cleanup(&job.method).then_some(&send_deadline_cancel);
+        waits_for_deadline_cleanup(&job.method, &job.params).then_some(&send_deadline_cancel);
     let waited = await_with_dialog_cancel(
         job.timeout,
         job.cancel_cleanup_timeout,
@@ -789,17 +897,18 @@ async fn forward_one(
         waited,
         WaitOutcome::Timeout | WaitOutcome::CleanupTimeout | WaitOutcome::TimeoutCleanupFailed
     ) && client.note_unresponsive_if_silent();
-    let response = match with_link_contract(&job.method, waited) {
+    let policy = execution_policy(&job.method, &job.params);
+    let response = match with_link_contract(&job.method, &job.params, waited) {
         WaitOutcome::Response(resp) => resp,
-        WaitOutcome::CancelledAfterResponse(resp) => {
-            if matches!(job.method, Method::ToolSessionStop | Method::ToolTabBorrow)
-                && let ResponseBody::Ok(value) = &resp.body
+        WaitOutcome::CancelledAfterResponse(resp) => match policy.outcome {
+            Outcome::SessionStop | Outcome::TabBorrow
+                if matches!(resp.body, ResponseBody::Ok(_)) =>
             {
                 // The extension completed teardown or committed the borrow
                 // before cancellation. Preserve its confirmed result.
-                return Ok(value.clone());
+                resp
             }
-            if is_effect_aware_action(&job.method) {
+            Outcome::EffectAwareInput | Outcome::EffectAwarePage => {
                 if let ResponseBody::Err(err) = &resp.body
                     && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
                 {
@@ -811,16 +920,17 @@ async fn forward_one(
                 );
                 error.data = Some(input_effect_data(
                     &job.method,
+                    policy.outcome,
                     Some(&resp.body),
                     "execution",
                 ));
                 return Err(error);
             }
-            // File transfer commits are irreversible. A late cancel cannot
-            // overwrite a confirmed success, and an unknown transfer effect
-            // must remain explicit so callers do not retry or release upload
-            // staging as though nothing happened.
-            if is_effect_aware_transfer(&job.method) {
+            Outcome::FileTransfer => {
+                // File transfer commits are irreversible. A late cancel cannot
+                // overwrite a confirmed success, and an unknown transfer effect
+                // must remain explicit so callers do not retry or release upload
+                // staging as though nothing happened.
                 match &resp.body {
                     ResponseBody::Ok(_) => resp,
                     ResponseBody::Err(err)
@@ -834,14 +944,48 @@ async fn forward_one(
                     {
                         return Err(err.clone());
                     }
-                    ResponseBody::Err(_) => {
-                        return Err(cancelled_error(
+                    ResponseBody::Err(err) => {
+                        let mut cancelled = cancelled_error(
                             job.inflight.as_deref(),
                             "tool dispatch cancelled after extension cleanup",
-                        ));
+                        );
+                        let terminal_reason = cancelled
+                            .data
+                            .as_ref()
+                            .and_then(|d| d.get("reason"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        let mut data = if transfer_effect(err) == Some("none") {
+                            err.data
+                                .clone()
+                                .filter(Value::is_object)
+                                .unwrap_or_else(|| serde_json::json!({ "effect_state": "none" }))
+                        } else {
+                            let mut data = err
+                                .data
+                                .clone()
+                                .filter(Value::is_object)
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            data["reason"] = serde_json::json!("transfer_outcome_unknown");
+                            data["effect_state"] = serde_json::json!("unknown");
+                            if data.get("phase").is_none() {
+                                data["phase"] = serde_json::json!("execution");
+                            }
+                            data
+                        };
+                        if let Some(reason) = terminal_reason {
+                            data["reason"] = serde_json::json!(reason);
+                        }
+                        cancelled.data = Some(data);
+                        return Err(cancelled);
                     }
                 }
-            } else {
+            }
+            Outcome::Ordinary
+            | Outcome::SessionStop
+            | Outcome::TabBorrow
+            | Outcome::RequestHelp
+            | Outcome::FullPageCapture => {
                 // For ordinary tools cancellation keeps the existing verdict,
                 // while non-cancel errors still expose compensation failures.
                 if let ResponseBody::Err(err) = resp.body
@@ -854,9 +998,9 @@ async fn forward_one(
                     "tool dispatch cancelled after extension cleanup",
                 ));
             }
-        }
-        WaitOutcome::TimedOutAfterResponse(resp) => match resp.body {
-            body if is_effect_aware_action(&job.method) => {
+        },
+        WaitOutcome::TimedOutAfterResponse(resp) => match (policy.outcome, resp.body) {
+            (Outcome::EffectAwareInput | Outcome::EffectAwarePage, body) => {
                 if let ResponseBody::Err(err) = &body
                     && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
                 {
@@ -865,35 +1009,47 @@ async fn forward_one(
                 return Err(RpcError {
                     code: ErrorCode::Timeout,
                     message: format!("tool RPC timed out after {:?}", job.timeout),
-                    data: Some(input_effect_data(&job.method, Some(&body), "execution")),
+                    data: Some(input_effect_data(
+                        &job.method,
+                        policy.outcome,
+                        Some(&body),
+                        "execution",
+                    )),
                 });
             }
-            ResponseBody::Ok(value)
-                if matches!(
-                    job.method,
-                    Method::ToolSessionStop | Method::ToolTabBorrow | Method::ToolRequestHelp
-                ) || is_effect_aware_transfer(&job.method) =>
-            {
+            (
+                Outcome::SessionStop
+                | Outcome::TabBorrow
+                | Outcome::RequestHelp
+                | Outcome::FileTransfer,
+                ResponseBody::Ok(value),
+            ) => {
                 // Preserve a completed operation or a settled human-help
                 // outcome received during deadline cleanup.
                 return Ok(value);
             }
-            ResponseBody::Err(err)
-                if !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted) =>
-            {
+            (
+                Outcome::Ordinary
+                | Outcome::SessionStop
+                | Outcome::TabBorrow
+                | Outcome::RequestHelp
+                | Outcome::FullPageCapture
+                | Outcome::FileTransfer,
+                ResponseBody::Err(err),
+            ) if !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted) => {
                 return Err(err);
             }
-            ResponseBody::Err(err) if is_effect_aware_transfer(&job.method) => {
+            (Outcome::FileTransfer, ResponseBody::Err(err)) => {
                 return Err(timed_out_transfer_error(&err));
             }
-            _ if matches!(job.method, Method::ToolTabBorrow | Method::ToolRequestHelp) => {
+            (Outcome::TabBorrow | Outcome::RequestHelp, _) => {
                 return Err(RpcError {
                     code: ErrorCode::Timeout,
                     message: "The human interaction deadline expired; the extension cancelled the request".into(),
                     data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
                 });
             }
-            _ => {
+            (Outcome::Ordinary | Outcome::SessionStop | Outcome::FullPageCapture, _) => {
                 return Err(RpcError {
                     code: ErrorCode::Timeout,
                     message: format!("tool RPC timed out after {:?}", job.timeout),
@@ -903,120 +1059,187 @@ async fn forward_one(
         },
         WaitOutcome::CleanupTimeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
-            if job.method == Method::ToolTabBorrow {
-                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            match policy.outcome {
+                Outcome::TabBorrow => return Err(unknown_borrow_error(ErrorCode::Timeout)),
+                Outcome::FileTransfer => {
+                    return Err(unknown_transfer_error(
+                        ErrorCode::Timeout,
+                        "cancelled file transfer did not confirm its outcome before cleanup timed out",
+                        "cleanup",
+                        true,
+                    ));
+                }
+                Outcome::EffectAwareInput | Outcome::EffectAwarePage => {
+                    return Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message: format!(
+                            "cancelled tool did not finish cleanup within {:?}",
+                            job.cancel_cleanup_timeout
+                        ),
+                        data: Some(input_effect_data(
+                            &job.method,
+                            policy.outcome,
+                            None,
+                            "cleanup",
+                        )),
+                    });
+                }
+                Outcome::Ordinary
+                | Outcome::SessionStop
+                | Outcome::RequestHelp
+                | Outcome::FullPageCapture => {
+                    return Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message: format!(
+                            "cancelled tool did not finish cleanup within {:?}",
+                            job.cancel_cleanup_timeout
+                        ),
+                        data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
+                    });
+                }
             }
-            if is_effect_aware_transfer(&job.method) {
-                return Err(unknown_transfer_error(
-                    ErrorCode::Timeout,
-                    "cancelled file transfer did not confirm its outcome before cleanup timed out",
-                    "cleanup",
-                    true,
-                ));
-            }
-            return Err(RpcError {
-                code: ErrorCode::Timeout,
-                message: format!(
-                    "cancelled tool did not finish cleanup within {:?}",
-                    job.cancel_cleanup_timeout
-                ),
-                data: Some(if is_effect_aware_action(&job.method) {
-                    input_effect_data(&job.method, None, "cleanup")
-                } else {
-                    serde_json::json!({ "reason": "cancel_cleanup_timeout" })
-                }),
-            });
         }
         WaitOutcome::TimeoutCleanupFailed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
-            if job.method == Method::ToolTabBorrow {
-                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            match policy.outcome {
+                Outcome::TabBorrow => return Err(unknown_borrow_error(ErrorCode::Timeout)),
+                Outcome::RequestHelp => {
+                    return Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message: "request-help timed out and cleanup could not be confirmed".into(),
+                        data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
+                    });
+                }
+                Outcome::EffectAwarePage => {
+                    return Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message: "page operation timed out and extension cleanup could not be confirmed; page effects may have occurred".into(),
+                        data: Some(input_effect_data(
+                            &job.method,
+                            policy.outcome,
+                            None,
+                            "cleanup",
+                        )),
+                    });
+                }
+                Outcome::EffectAwareInput => {
+                    return Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message: "input timed out and extension cleanup could not be confirmed"
+                            .into(),
+                        data: Some(input_effect_data(
+                            &job.method,
+                            policy.outcome,
+                            None,
+                            "cleanup",
+                        )),
+                    });
+                }
+                Outcome::FullPageCapture => {
+                    return Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message:
+                            "full-page screenshot timed out and extension cleanup could not be confirmed"
+                                .into(),
+                        data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
+                    });
+                }
+                Outcome::FileTransfer => {
+                    return Err(unknown_transfer_error(
+                        ErrorCode::Timeout,
+                        "file transfer timed out and cleanup could not be confirmed",
+                        "cleanup",
+                        true,
+                    ));
+                }
+                Outcome::Ordinary | Outcome::SessionStop => {
+                    return Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message: format!(
+                            "tool RPC timed out after {:?} and extension cleanup could not be confirmed",
+                            job.timeout
+                        ),
+                        data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
+                    });
+                }
             }
-            if job.method == Method::ToolRequestHelp {
-                return Err(RpcError {
-                    code: ErrorCode::Timeout,
-                    message: "request-help timed out and cleanup could not be confirmed".into(),
-                    data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
-                });
-            }
-            if is_effect_aware_action(&job.method) || job.method == Method::ToolScreenshotFullPage {
-                return Err(RpcError {
-                    code: ErrorCode::Timeout,
-                    message: if matches!(
-                        job.method,
-                        Method::ToolEvaluate
-                            | Method::ToolNavigate
-                            | Method::ToolNavigateBack
-                            | Method::ToolNavigateForward
-                            | Method::ToolReload
-                    ) {
-                        "page operation timed out and extension cleanup could not be confirmed; page effects may have occurred".into()
-                    } else if is_effect_aware_action(&job.method) {
-                        "input timed out and extension cleanup could not be confirmed".into()
-                    } else {
-                        "full-page screenshot timed out and extension cleanup could not be confirmed".into()
-                    },
-                    data: Some(if is_effect_aware_action(&job.method) {
-                        input_effect_data(&job.method, None, "cleanup")
-                    } else {
-                        serde_json::json!({ "reason": "cancel_cleanup_timeout" })
-                    }),
-                });
-            }
-            return Err(unknown_transfer_error(
-                ErrorCode::Timeout,
-                "file transfer timed out and cleanup could not be confirmed",
-                "cleanup",
-                true,
-            ));
         }
         WaitOutcome::WaiterClosed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
-            if job.method == Method::ToolTabBorrow {
-                return Err(unknown_borrow_error(ErrorCode::ProtocolError));
+            match policy.outcome {
+                Outcome::TabBorrow => return Err(unknown_borrow_error(ErrorCode::ProtocolError)),
+                Outcome::FileTransfer => {
+                    return Err(unknown_transfer_error(
+                        ErrorCode::ProtocolError,
+                        "file transfer transport closed after dispatch; outcome is unknown",
+                        "transport",
+                        false,
+                    ));
+                }
+                Outcome::EffectAwareInput | Outcome::EffectAwarePage => {
+                    return Err(RpcError {
+                        code: ErrorCode::ProtocolError,
+                        message: "transport closed mid-call".into(),
+                        data: Some(input_effect_data(
+                            &job.method,
+                            policy.outcome,
+                            None,
+                            "transport",
+                        )),
+                    });
+                }
+                Outcome::Ordinary
+                | Outcome::SessionStop
+                | Outcome::RequestHelp
+                | Outcome::FullPageCapture => {
+                    return Err(RpcError {
+                        code: ErrorCode::ProtocolError,
+                        message: "transport closed mid-call".into(),
+                        data: Some(super::browsers::extension_disconnected_data()),
+                    });
+                }
             }
-            if is_effect_aware_transfer(&job.method) {
-                return Err(unknown_transfer_error(
-                    ErrorCode::ProtocolError,
-                    "file transfer transport closed after dispatch; outcome is unknown",
-                    "transport",
-                    false,
-                ));
-            }
-            return Err(RpcError {
-                code: ErrorCode::ProtocolError,
-                message: "transport closed mid-call".into(),
-                data: Some(if is_effect_aware_action(&job.method) {
-                    input_effect_data(&job.method, None, "transport")
-                } else {
-                    super::browsers::extension_disconnected_data()
-                }),
-            });
         }
         WaitOutcome::Timeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
-            if job.method == Method::ToolTabBorrow {
-                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            match policy.outcome {
+                Outcome::TabBorrow => return Err(unknown_borrow_error(ErrorCode::Timeout)),
+                Outcome::FileTransfer => {
+                    return Err(unknown_transfer_error(
+                        ErrorCode::Timeout,
+                        "file transfer timed out after dispatch; outcome is unknown",
+                        "transport",
+                        false,
+                    ));
+                }
+                Outcome::EffectAwareInput | Outcome::EffectAwarePage => {
+                    return Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message: format!("tool RPC timed out after {:?}", job.timeout),
+                        data: Some(input_effect_data(
+                            &job.method,
+                            policy.outcome,
+                            None,
+                            "transport",
+                        )),
+                    });
+                }
+                Outcome::Ordinary
+                | Outcome::SessionStop
+                | Outcome::RequestHelp
+                | Outcome::FullPageCapture => {
+                    // Only a method with nothing to report about side effects can
+                    // trade its timeout for the connection diagnosis.
+                    if silent {
+                        return Err(super::browsers::extension_unresponsive_error());
+                    }
+                    return Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message: format!("tool RPC timed out after {:?}", job.timeout),
+                        data: None,
+                    });
+                }
             }
-            if is_effect_aware_transfer(&job.method) {
-                return Err(unknown_transfer_error(
-                    ErrorCode::Timeout,
-                    "file transfer timed out after dispatch; outcome is unknown",
-                    "transport",
-                    false,
-                ));
-            }
-            // Only a method with nothing to report about side effects can
-            // trade its timeout for the connection diagnosis.
-            if silent && !is_effect_aware_action(&job.method) {
-                return Err(super::browsers::extension_unresponsive_error());
-            }
-            return Err(RpcError {
-                code: ErrorCode::Timeout,
-                message: format!("tool RPC timed out after {:?}", job.timeout),
-                data: is_effect_aware_action(&job.method)
-                    .then(|| input_effect_data(&job.method, None, "transport")),
-            });
         }
     };
     match response.body {
@@ -1030,18 +1253,20 @@ async fn forward_one(
 /// stage — plain wait, cancel cleanup or deadline cleanup — so it is
 /// converted once, here, and every arm below then handles an error that
 /// already carries this method's effect contract.
-fn with_link_contract(method: &Method, waited: WaitOutcome) -> WaitOutcome {
-    fn settle(method: &Method, frame: ResponseFrame) -> ResponseFrame {
+fn with_link_contract(method: &Method, params: &Value, waited: WaitOutcome) -> WaitOutcome {
+    fn settle(method: &Method, params: &Value, frame: ResponseFrame) -> ResponseFrame {
+        let outcome = execution_policy(method, params).outcome;
         match frame.body {
             ResponseBody::Err(err) if super::browsers::is_link_failure(&err) => ResponseFrame {
                 id: frame.id,
-                body: ResponseBody::Err(link_failure_error(method, err)),
+                body: ResponseBody::Err(link_failure_error(method, outcome, err)),
             },
             ResponseBody::Err(mut err)
-                if err.code == ErrorCode::Timeout && is_effect_aware_action(method) =>
+                if err.code == ErrorCode::Timeout && outcome.is_effect_aware_action() =>
             {
                 err.data = Some(input_effect_data(
                     method,
+                    outcome,
                     Some(&ResponseBody::Err(err.clone())),
                     "execution",
                 ));
@@ -1054,12 +1279,12 @@ fn with_link_contract(method: &Method, waited: WaitOutcome) -> WaitOutcome {
         }
     }
     match waited {
-        WaitOutcome::Response(frame) => WaitOutcome::Response(settle(method, frame)),
+        WaitOutcome::Response(frame) => WaitOutcome::Response(settle(method, params, frame)),
         WaitOutcome::CancelledAfterResponse(frame) => {
-            WaitOutcome::CancelledAfterResponse(settle(method, frame))
+            WaitOutcome::CancelledAfterResponse(settle(method, params, frame))
         }
         WaitOutcome::TimedOutAfterResponse(frame) => {
-            WaitOutcome::TimedOutAfterResponse(settle(method, frame))
+            WaitOutcome::TimedOutAfterResponse(settle(method, params, frame))
         }
         other => other,
     }
@@ -1068,24 +1293,44 @@ fn with_link_contract(method: &Method, waited: WaitOutcome) -> WaitOutcome {
 /// The request was already on the wire when the connection went away, so
 /// the extension may well have run it. Methods with a side effect keep
 /// their machine-readable "outcome unknown" contract; nothing is replayed.
-fn link_failure_error(method: &Method, err: RpcError) -> RpcError {
-    if is_effect_aware_action(method) {
-        return RpcError {
+fn link_failure_error(method: &Method, outcome: Outcome, err: RpcError) -> RpcError {
+    match outcome {
+        Outcome::EffectAwareInput | Outcome::EffectAwarePage => RpcError {
             code: err.code,
             message: err.message,
-            data: Some(input_effect_data(method, None, "transport")),
-        };
-    }
-    if is_effect_aware_transfer(method) {
-        return unknown_transfer_error(
+            data: Some(input_effect_data(method, outcome, None, "transport")),
+        },
+        Outcome::FileTransfer => unknown_transfer_error(
             err.code,
             "extension reconnected; file transfer outcome is unknown",
             "transport",
             false,
-        );
+        ),
+        Outcome::TabBorrow => unknown_borrow_error(err.code),
+        Outcome::Ordinary
+        | Outcome::SessionStop
+        | Outcome::RequestHelp
+        | Outcome::FullPageCapture => err,
     }
-    if matches!(method, Method::ToolTabBorrow) {
-        return unknown_borrow_error(err.code);
+}
+
+/// Stamp structured pre-dispatch absence proof onto errors returned strictly
+/// before `BrowserClient::dispatch` places any frame onto the browser socket.
+fn tag_not_dispatched(mut err: RpcError) -> RpcError {
+    let data = err.data.get_or_insert_with(|| serde_json::json!({}));
+    if data.is_null() {
+        *data = serde_json::json!({});
+    } else if !data.is_object() {
+        *data = serde_json::json!({ "details": data.take() });
+    }
+    data["dispatched"] = serde_json::json!(false);
+    data["effect_state"] = serde_json::json!("none");
+    if data.get("phase").is_none() {
+        data["phase"] = serde_json::json!("precondition");
+    }
+    if err.code == ErrorCode::Cancelled && data.get("reason").is_none() {
+        data["reason"] =
+            serde_json::json!(bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str());
     }
     err
 }
@@ -1095,43 +1340,39 @@ fn link_failure_error(method: &Method, err: RpcError) -> RpcError {
 fn not_dispatched_error(
     dispatched: Option<Result<oneshot::Receiver<ResponseFrame>, super::browsers::SendError>>,
 ) -> RpcError {
-    match dispatched {
+    let err = match dispatched {
         Some(Err(super::browsers::SendError::Terminated(cause))) => cause,
         _ => RpcError {
             code: ErrorCode::ProtocolError,
             message: "browser sink closed before request was queued".into(),
             data: Some(super::browsers::extension_disconnected_data()),
         },
-    }
-}
-
-fn is_effect_aware_action(method: &Method) -> bool {
-    matches!(
-        method,
-        Method::ToolClick
-            | Method::ToolPress
-            | Method::ToolWheel
-            | Method::ToolDrag
-            | Method::ToolFill
-            | Method::ToolSelect
-            | Method::ToolFocus
-            | Method::ToolBlur
-            | Method::ToolHover
-            | Method::ToolScrollTo
-            | Method::ToolEvaluate
-            | Method::ToolNavigate
-            | Method::ToolNavigateBack
-            | Method::ToolNavigateForward
-            | Method::ToolReload
-    )
+    };
+    tag_not_dispatched(err)
 }
 
 // Preserve the extension's knowledge of whether input was sent. A missing
 // cleanup response cannot establish that replaying the input would be safe.
-fn input_effect_data(method: &Method, response: Option<&ResponseBody>, phase: &str) -> Value {
+fn input_effect_data(
+    method: &Method,
+    outcome: Outcome,
+    response: Option<&ResponseBody>,
+    phase: &str,
+) -> Value {
     let mut data = match response {
         Some(ResponseBody::Err(err)) => err.data.clone().filter(Value::is_object),
-        _ => None,
+        Some(ResponseBody::Ok(val)) => {
+            let mut obj = serde_json::json!({});
+            if let Some(tid) = val
+                .get("tab_id")
+                .and_then(Value::as_i64)
+                .or_else(|| val.pointer("/dialog/tab_id").and_then(Value::as_i64))
+            {
+                obj["tab_id"] = serde_json::json!(tid);
+            }
+            Some(obj)
+        }
+        None => None,
     }
     .unwrap_or_else(|| serde_json::json!({}));
     if !matches!(
@@ -1142,14 +1383,8 @@ fn input_effect_data(method: &Method, response: Option<&ResponseBody>, phase: &s
     }
     if data.get("reason").is_none() {
         data["reason"] = serde_json::json!(if phase == "cleanup"
-            && matches!(
-                method,
-                Method::ToolEvaluate
-                    | Method::ToolNavigate
-                    | Method::ToolNavigateBack
-                    | Method::ToolNavigateForward
-                    | Method::ToolReload
-            ) {
+            && outcome == Outcome::EffectAwarePage
+        {
             "cancel_cleanup_timeout"
         } else if data["effect_state"] == "unknown" {
             "input_outcome_unknown"
@@ -1167,12 +1402,8 @@ fn input_effect_data(method: &Method, response: Option<&ResponseBody>, phase: &s
 // Page actions and full-page screenshots must cancel at the daemon deadline: local
 // deadlines cannot account for transit delays. Keep the queue held for cleanup.
 // Human interaction deadlines also dismiss their pending UI before releasing the queue.
-fn waits_for_deadline_cleanup(method: &Method) -> bool {
-    matches!(
-        method,
-        Method::ToolScreenshotFullPage | Method::ToolTabBorrow | Method::ToolRequestHelp
-    ) || is_effect_aware_action(method)
-        || is_effect_aware_transfer(method)
+fn waits_for_deadline_cleanup(method: &Method, params: &Value) -> bool {
+    execution_policy(method, params).cancel_at_deadline
 }
 
 fn unknown_borrow_error(code: ErrorCode) -> RpcError {
@@ -1185,10 +1416,6 @@ fn unknown_borrow_error(code: ErrorCode) -> RpcError {
             serde_json::json!({ "reason": "borrow_outcome_unknown", "effect_state": "unknown" }),
         ),
     }
-}
-
-fn is_effect_aware_transfer(method: &Method) -> bool {
-    matches!(method, Method::ToolUpload | Method::ToolDownload)
 }
 
 fn transfer_effect(err: &RpcError) -> Option<&str> {
@@ -1387,29 +1614,13 @@ async fn await_with_dialog_cancel(
 /// the result falls back to the legacy `Cancelled` code with
 /// `default_msg`.
 fn cancelled_error(entry: Option<&ToolInflightEntry>, default_msg: &str) -> RpcError {
-    use super::inflight::CancelReason;
-    let (code, message) = match entry.and_then(|e| e.cancel_reason()) {
-        Some(CancelReason::UserAborted) => (
-            ErrorCode::UserAborted,
-            "tool dispatch interrupted by user".to_string(),
-        ),
-        Some(CancelReason::UserMovedTab) => {
-            return RpcError {
-                code: ErrorCode::UserAborted,
-                message:
-                    "session ended because the user moved a controlled tab out of its Agent Window"
-                        .into(),
-                data: Some(
-                    serde_json::json!({ "reason": crate::rpc_reason::SESSION_USER_MOVED_TAB }),
-                ),
-            };
-        }
-        Some(CancelReason::Cancelled) | None => (ErrorCode::Cancelled, default_msg.to_string()),
-    };
-    RpcError {
-        code,
-        message,
-        data: None,
+    match entry {
+        Some(entry) => entry.cancel_error(default_msg),
+        None => RpcError {
+            code: ErrorCode::Cancelled,
+            message: default_msg.to_string(),
+            data: None,
+        },
     }
 }
 
@@ -1664,7 +1875,7 @@ mod forward_one_cancel_reason_tests {
         assert_eq!(error.code, ErrorCode::UserAborted);
         assert_eq!(
             error.data.unwrap()["reason"],
-            crate::rpc_reason::SESSION_USER_MOVED_TAB
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
         );
         assert!(error.message.contains("session ended"));
     }
@@ -1694,6 +1905,7 @@ mod tool_job_session_id_tests {
         let job = ToolJob {
             method: Method::ToolTabList,
             params: serde_json::json!({}),
+            correlation: WsCorrelation::default(),
             timeout: Duration::from_secs(1),
             respond: tx,
             inflight: None,
@@ -1761,11 +1973,19 @@ mod link_error_tests {
     }
 
     fn settled(method: Method, stage: fn(ResponseFrame) -> WaitOutcome) -> RpcError {
+        settled_with_params(method, &serde_json::Value::Null, stage)
+    }
+
+    fn settled_with_params(
+        method: Method,
+        params: &serde_json::Value,
+        stage: fn(ResponseFrame) -> WaitOutcome,
+    ) -> RpcError {
         let frame = ResponseFrame {
             id: "rpc".into(),
             body: ResponseBody::Err(reconnected()),
         };
-        match with_link_contract(&method, stage(frame)) {
+        match with_link_contract(&method, params, stage(frame)) {
             WaitOutcome::Response(frame)
             | WaitOutcome::CancelledAfterResponse(frame)
             | WaitOutcome::TimedOutAfterResponse(frame) => match frame.body {
@@ -1794,6 +2014,21 @@ mod link_error_tests {
             assert_eq!(upload["reason"], "transfer_outcome_unknown");
             assert_eq!(upload["effect_state"], "unknown");
 
+            let debug_replay = settled_with_params(
+                Method::ToolDebug,
+                &serde_json::json!({ "action": "replay" }),
+                stage,
+            );
+            let debug_replay = debug_replay.data.unwrap();
+            assert_eq!(debug_replay["effect_state"], "unknown");
+
+            let debug_list = settled_with_params(
+                Method::ToolDebug,
+                &serde_json::json!({ "action": "requests" }),
+                stage,
+            );
+            assert_eq!(debug_list.data.unwrap()["reason"], "extension_reconnected");
+
             let borrow = settled(Method::ToolTabBorrow, stage);
             assert_eq!(borrow.data.unwrap()["reason"], "borrow_outcome_unknown");
 
@@ -1812,7 +2047,11 @@ mod link_error_tests {
                 data: Some(serde_json::json!({ "reason": "navigation_timeout" })),
             }),
         };
-        match with_link_contract(&Method::ToolClick, WaitOutcome::Response(frame)) {
+        match with_link_contract(
+            &Method::ToolClick,
+            &serde_json::Value::Null,
+            WaitOutcome::Response(frame),
+        ) {
             WaitOutcome::Response(ResponseFrame {
                 body: ResponseBody::Err(err),
                 ..
@@ -1827,21 +2066,20 @@ mod link_error_tests {
 #[cfg(test)]
 mod ended_session_dispatch_tests {
     use super::{super::sessions::SessionEnd, DispatchError};
-    use crate::rpc_reason;
-    use bsk_protocol::ErrorCode;
+    use bsk_protocol::{ErrorCode, RpcErrorReason};
 
     #[test]
     fn ended_session_surfaces_reason_and_timestamp() {
         let rpc = DispatchError::SessionNotFound {
             ended: Some(SessionEnd {
-                reason: rpc_reason::SESSION_IDLE_TIMEOUT,
+                reason: RpcErrorReason::SessionIdleTimeout.as_str(),
                 ended_unix_ms: 1_760_000_000_000,
             }),
         }
         .into_rpc();
         assert_eq!(rpc.code, ErrorCode::NotFound);
         let data = rpc.data.expect("ended session must carry data");
-        assert_eq!(data["reason"], rpc_reason::SESSION_IDLE_TIMEOUT);
+        assert_eq!(data["reason"], RpcErrorReason::SessionIdleTimeout.as_str());
         assert_eq!(data["ended_unix_ms"], 1_760_000_000_000i64);
     }
 
@@ -1876,7 +2114,7 @@ mod action_timeout_tests {
             browser_name: "chrome".into(),
             browser_version: "1".into(),
             extension_version: "0.4.1".into(),
-            extension_protocol_version: "1.8".into(),
+            extension_protocol_version: "2.0".into(),
             label: String::new(),
             sink: BrowserSink { tx },
             pending: Mutex::new(Pending::default()),
@@ -1904,6 +2142,7 @@ mod action_timeout_tests {
                 &ToolJob {
                     method,
                     params: json!({"session_id": sid.0}),
+                    correlation: WsCorrelation::default(),
                     timeout: Duration::from_millis(20),
                     respond,
                     inflight: None,

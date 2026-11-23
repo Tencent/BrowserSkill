@@ -41,8 +41,10 @@ and [Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 
 ## Tools and workflow
 
-The server exposes `bsk_session`, `bsk_page`, `bsk_inspect`, `bsk_interact`,
-`bsk_plan`, `bsk_tabs`, and `bsk_assist`. Each tool except `bsk_plan` has an
+The server exposes 11 first-class base tools (`bsk_session`, `bsk_page`,
+`bsk_inspect`, `bsk_interact`, `bsk_plan`, `bsk_tabs`, `bsk_assist`,
+`bsk_ledger`, `bsk_debug`, `bsk_video`, and `bsk_record`), plus opt-in `bsk_recipe`
+when enabled by `--recipes`. Each tool except `bsk_plan` has an
 `action` field; its schema and description list the available arguments. For example, use these MCP tool calls:
 
 1. `bsk_session` with `{"action":"browsers"}` to select the required browser
@@ -72,7 +74,7 @@ See [plan](plan.md) for its rules.
 With `BSK_RECIPES=1` in the server's environment, `bsk_recipe` also appears. It replays a
 saved flow by name and returns its outputs, so a repeated task takes about two turns. See
 [recipes](recipes.md). The tool stays out of `tools/list` otherwise, so clients pay nothing
-for it.
+for it; the CLI's `bsk recipe` needs no switch.
 
 `bsk_inspect` can return a screenshot as MCP image content, as well as bounded
 observations, HTML, console/network entries, and loaded-DOM extraction. Screenshots
@@ -91,12 +93,13 @@ request token before passing `request_id` to `start`, then use `request_claim`,
 available but has no durable client-side recovery journal. Session cleanup is
 explicit; closing the MCP connection does not close all existing sessions.
 
-This adapter currently covers the operations in its tool schemas. It does not
-yet expose every CLI operation, including file upload/download, recording or
-full-page screenshot export. Sensitive-value/keychain input is not implemented;
-avoid passing credentials in tool arguments when the client logs them.
+The MCP adapter provides 100% parity with CLI automation, inspection, file transfer
+(`upload`/`download`), emulation, dialog/cooperation control, ledger management,
+debugging, video recording, and trace v3 recording/export. Sensitive-value/keychain
+input is not implemented; avoid passing credentials in tool arguments when the client
+logs them. Protocol `"2.0"` is required across client, daemon, and extension.
 
-## Dynamic page reads (protocol 1.9)
+## Dynamic page reads (protocol 2.0)
 
 Use `bsk_inspect` with action=read, selector (main document) or ref (exact frame/
 shadow node), and optional read_fields, e.g.
@@ -106,5 +109,6 @@ Fixed synchronous isolated-world code accepts no JavaScript or deferred work.
 Returns current title/URLs, refs/values, redactions and truncation. max_nodes
 is 100 by default, at most 1000; max_bytes is 262144 by default, at most 1048576.
 Reads never renew contexts or observations; use explicit expect before input.
-Old peers fail explicitly; evaluate keeps strict guards. See
-[dynamic reading](dynamic-reading.md).
+Old peers fail explicitly. A script is checked against the `expect` facts it states,
+or the whole page when it passes `observation`; `params.unverified=true` is the last resort
+and returns `verified=false`. See [dynamic reading](dynamic-reading.md).

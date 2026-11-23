@@ -3,15 +3,6 @@ use indexmap::IndexMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub const DOM_READ_PROTOCOL: &str = "1.9";
-pub fn supports_dom_read(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, DOM_READ_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadField {
@@ -42,6 +33,9 @@ pub struct ReadParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<i64>,
+    /// Optional cooperation context validated by the extension without renewing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
     /// CSS in the main document. All matches, up to max_nodes; no selector means the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 2048))]
@@ -103,14 +97,5 @@ mod tests {
             serde_json::from_value::<ReadField>(json!({"key":"x","read":"text","expression":"x"}))
                 .is_err()
         );
-    }
-    #[test]
-    fn version_is_explicit_and_compatible() {
-        for p in ["1.8", "2.0", "bad"] {
-            assert!(!supports_dom_read(p));
-        }
-        for p in ["1.9", "1.10"] {
-            assert!(supports_dom_read(p));
-        }
     }
 }

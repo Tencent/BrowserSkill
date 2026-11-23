@@ -1,11 +1,10 @@
 # One action, several decided actions, and a reusable observation
 
 Use `step` when one action is already decided from current evidence. It invokes
-that action exactly once, optionally waits for a known main-document selector to
-be visible, then synchronizes. It uses the session's negotiated guard policy;
-target policy requires compatible protocol 1.x peers at version 1.8 or later. With a current CLI
-and an older extension, pass `--policy strict` on every step for its post-action sync. Choose
-strict with an explicit sync before the action; a post-sync failure does not undo a completed action.
+that action exactly once, optionally waits for a known CSS selector to
+be visible, then synchronizes. It uses the session's negotiated guard policy under
+protocol 2.0 (`target` by default, or `strict` when the session selected
+`--policy strict` on its initial sync); a post-sync failure does not undo a completed action.
 
 ```sh
 bsk step --session SID --context CURRENT --action click \
@@ -102,8 +101,9 @@ all literal matching line numbers (including duplicates), the shown line range,
 local omissions and original truncation. It returns `source_context_id`, never
 an actionable `context_id`. A no-match is not proof of absence from the live page.
 A cache cannot recover content missing from the original capture. Prefer an
-uncapped capture for large pages, then local views; raising a later sync's token
-budget does not force an unchanged page to be recaptured.
+uncapped capture for large pages, then local views (`view` accepts saved `step`,
+`cooperate sync`, or `bsk sync --json` files); changing `--max-tokens` on a later
+sync invalidates cached VOM reuse and triggers `baseline_reason: "token_budget_changed"`.
 
 To carry a saved baseline through an unchanged sync:
 
@@ -116,8 +116,26 @@ bsk cooperate sync --session SID --baseline /absolute/new-step.json \
 the same session and tab, complete activity history, `kind:unchanged` and no field
 changes. The CLI adds the existing VOM to that reply and marks its original capture
 context with `observation_origin.kind:reused`. The newly issued context still comes
-only from the live sync. Mismatches, deltas, filtered files and missing history do
-not reuse the cached text; inspect the returned state. A new baseline always wins.
+only from the live sync. Mismatches, field deltas, filtered files and missing history
+do not reuse the cached text; inspect the returned state. A new baseline always wins.
+
+Under target policy a sync may also answer `kind:delta` with `observation_patch.lines`
+when the only page activity since the predecessor replaced visible text in place.
+`changes` then lists each `kind:text` replacement with its `previous_value`, `value`
+and the 1-based VOM `lines` it touched, and `previous_observation_id` names the exact
+version the patch applies to. With `--baseline` pointing at that version the CLI applies
+the patch, saves the merged observation through `--save-full`
+(`observation_origin.kind:merged`, `cache_reuse.reason:exact_text_delta_predecessor`)
+and leaves the page text out of stdout (`cache_reuse.observation:saved`); read it with
+`view`. Chain the next sync from the newly saved file. Without the exact predecessor
+nothing is merged: apply the line patch yourself or sync again for a baseline.
+
+Anything the extension cannot express as such a patch returns a fresh `baseline` with
+a `baseline_reason`, for example `structure_changed`, `refs_replaced`, `frame_replaced`,
+`focus_changed`, `human_activity`, `text_log_gap`, `text_outside_observation`,
+`text_ambiguous`, `token_budget_changed` or `token_budget_shift`. Pass the same
+`--max-tokens` on `step` and `plan` as well as `sync` across calls you want patched.
+Pages with child frames, and text inside controls, headings, labels, form fields, table rows or list items, always take the baseline path.
 
 For readonly date pickers, click to open the picker instead of filling it. If VOM
 exposes only a containing control, inspect that observed ref with `get-html --ref`

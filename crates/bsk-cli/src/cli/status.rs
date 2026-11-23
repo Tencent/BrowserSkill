@@ -65,7 +65,7 @@ fn render_human(s: &StatusResult) {
         let bold = "\x1b[1m";
         let reset = "\x1b[0m";
         eprintln!(
-            "{bold}{yellow}note:{reset} {} browser(s) report a different protocol version; still usable — continue, and run `bsk update` soon{reset}",
+            "{bold}{yellow}note:{reset} {} browser(s) report a different protocol version; run `bsk doctor` for upgrade guidance{reset}",
             s.version_skew_browsers.len()
         );
         for skew in &s.version_skew_browsers {
@@ -75,7 +75,7 @@ fn render_human(s: &StatusResult) {
                 skew.label.clone()
             };
             eprintln!(
-                "  {} ({}) — protocol ext {} vs CLI {} (app ext v{}, CLI v{}) — still usable; please upgrade",
+                "  {} ({}) — protocol ext {} vs daemon {} (app ext v{}, daemon v{})",
                 skew.instance_id,
                 label,
                 display_protocol(&skew.client_protocol_version),
@@ -148,6 +148,6 @@ mod tests {
     #[test]
     fn display_protocol_uses_unknown_for_legacy_empty_values() {
         assert_eq!(display_protocol(""), "unknown");
-        assert_eq!(display_protocol("1.0"), "1.0");
+        assert_eq!(display_protocol("2.0"), "2.0");
     }
 }

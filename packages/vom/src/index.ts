@@ -1,11 +1,14 @@
 export {
   applyVomInteractionRecovery,
+  encodeVomNameContent,
+  inspectVomLine,
   isVomReferenceNode,
   isVomStructuralRole,
   prepareObservationRender,
   type RenderRow,
   renderVom,
   selectionMarker,
+  VOM_DERIVED_NAME_CAP,
 } from "./render";
 export { estimateLineTokens, estimateTokens, TOKEN_ESTIMATOR } from "./tokens";
 export type {
@@ -17,9 +20,11 @@ export type {
   RenderedRef,
   Viewport,
   VisualEntry,
+  VomLineMetadata,
   VomNode,
   VomOptions,
   VomRef,
   VomResult,
   VomScene,
+  VomSelectOption,
 } from "./types";

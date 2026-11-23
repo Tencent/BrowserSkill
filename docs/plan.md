@@ -26,6 +26,21 @@ optional `expect`. Actions are `click`, `fill`, `select`, `press`, `hover`, `scr
 for a condition that later steps need. `_` and `-` are interchangeable in these names.
 A plan holds 1 to 20 steps.
 
+`bsk plan` and `bsk_plan` are available by default. In MCP, call `bsk_plan` directly:
+
+```json
+{"session":"abcd","context":"CURRENT","steps":[
+  {"action":"fill","ref":"@e3","value":"Ada"},
+  {"action":"select","ref":"@e4","values":["CN"]}
+]}
+```
+
+Use `context` and, for an untargeted first step, `observation` on the outer `bsk_plan`
+call. Steps use protocol names such as `ref` and `timeout_ms`; put `expect` on the
+step it protects. `until_visible`, `wait_timeout_ms`, and `max_tokens` (`--max-tokens`
+on CLI) work on `bsk_plan` as with `bsk_interact`; `--save-full` and `--baseline` are
+CLI options on `bsk plan`.
+
 ## Reply
 
 ```json

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CdpDebuggee } from "@/browser-driver/chromium-cdp";
+import { rootEventSource, type TabEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDebug, validateDebugParams } from "@/tools/debug";
+import { createStubCdpRunner } from "@/tools/shared";
 import type { DebugArchive } from "../archive";
 import { mergeRequest } from "../journal";
 import { DEBUG_START_TIMEOUT_MS, DebugManager } from "../manager";
@@ -20,12 +21,12 @@ async function fixture(archive?: DebugArchive) {
   const context = await sessions.start("s1");
   context.agentCreatedTabs.add(7);
   let now = 10_000;
-  let listener: ((source: CdpDebuggee, method: string, params: unknown) => void) | undefined;
+  let listener: ((source: TabEventSource, method: string, params: unknown) => void) | undefined;
   const dispose = vi.fn(() => {
     listener = undefined;
   });
-  const sendAttached = vi.fn(
-    async (_target: CdpDebuggee, method: string): Promise<unknown> =>
+  const sendToEventSource = vi.fn(
+    async (_target: TabEventSource, method: string): Promise<unknown> =>
       method === "Accessibility.getFullAXTree"
         ? {
             nodes: [
@@ -37,15 +38,25 @@ async function fixture(archive?: DebugArchive) {
           ? { body: '{"ok":false}' }
           : {},
   );
-  const cdp = {
-    send: vi.fn(),
-    sendAttached: sendAttached as never,
-    ensureNetworkCapture: vi.fn(async () => {}),
-    onEvent: vi.fn((fn: typeof listener) => {
-      listener = fn;
-      return { dispose };
+  const ensureNetworkCapture = vi.fn(async () => {});
+  const onEvent = vi.fn((_tabId: number, fn: NonNullable<typeof listener>) => {
+    listener = fn;
+    return { dispose };
+  });
+  const cdp = Object.assign(
+    createStubCdpRunner({
+      send: vi.fn(),
+      sendToEventSource: sendToEventSource as never,
     }),
-  };
+    {
+      sendToEventSource: sendToEventSource as never,
+      discoverChildEventSources: undefined as
+        | ((tabId: number) => Promise<TabEventSource[]>)
+        | undefined,
+      ensureNetworkCapture,
+      onEvent,
+    },
+  );
   const tabs = {
     get: vi.fn(
       async (id: number) =>
@@ -60,7 +71,8 @@ async function fixture(archive?: DebugArchive) {
     query: vi.fn(async () => [{ id: 7, windowId: 100, active: true }] as chrome.tabs.Tab[]),
   };
   const manager = new DebugManager(sessions, cdp, tabs, () => now, archive);
-  const event = (method: string, data: object, tabId = 7) => listener?.({ tabId }, method, data);
+  const event = (method: string, data: object, tabId = 7) =>
+    listener?.(rootEventSource(tabId), method, data);
   const request = (id: string) =>
     event("Network.requestWillBeSent", {
       requestId: id,
@@ -71,7 +83,7 @@ async function fixture(archive?: DebugArchive) {
     sessions,
     context,
     cdp,
-    sendAttached,
+    sendToEventSource,
     tabs,
     dispose,
     event,
@@ -120,8 +132,8 @@ describe("task-scoped debug lifecycle", () => {
   it("enables Runtime on the root tab before installing the observer", async () => {
     const f = await fixture();
     active.push(f.manager);
-    const normal = f.sendAttached.getMockImplementation()!;
-    f.sendAttached.mockImplementation(async (target, method) =>
+    const normal = f.sendToEventSource.getMockImplementation()!;
+    f.sendToEventSource.mockImplementation(async (target, method) =>
       method === "Page.getFrameTree"
         ? { frameTree: { frame: { id: "root" } } }
         : method === "Page.createIsolatedWorld"
@@ -129,8 +141,8 @@ describe("task-scoped debug lifecycle", () => {
           : normal(target, method),
     );
     await f.manager.start("s1", 7);
-    const rootCalls = f.sendAttached.mock.calls
-      .filter(([target]) => target.sessionId === undefined)
+    const rootCalls = f.sendToEventSource.mock.calls
+      .filter(([target]) => target.isRootTarget)
       .map(([, method]) => method);
     expect(rootCalls).toContain("Runtime.enable");
     expect(rootCalls).toContain("Log.enable");
@@ -159,8 +171,8 @@ describe("task-scoped debug lifecycle", () => {
   it("keeps debug capture usable when browser log capture is unavailable", async () => {
     const f = await fixture();
     active.push(f.manager);
-    const normal = f.sendAttached.getMockImplementation()!;
-    f.sendAttached.mockImplementation(async (target, method) => {
+    const normal = f.sendToEventSource.getMockImplementation()!;
+    f.sendToEventSource.mockImplementation(async (target, method) => {
       if (method === "Log.enable") throw new Error("restricted");
       return normal(target, method);
     });
@@ -196,7 +208,7 @@ describe("task-scoped debug lifecycle", () => {
     expect(f.dispose).toHaveBeenCalledTimes(1);
     resolve();
     await Promise.resolve();
-    expect(f.sendAttached).not.toHaveBeenCalled();
+    expect(f.sendToEventSource).not.toHaveBeenCalled();
     expect((await f.manager.start("s1", 7)).state).toBe("capturing");
   });
 
@@ -207,14 +219,15 @@ describe("task-scoped debug lifecycle", () => {
     f.cdp.ensureNetworkCapture.mockImplementationOnce(
       () => new Promise<void>((done) => setTimeout(done, 8000)),
     );
+    const prevDiscover = f.cdp.discoverChildEventSources;
     const graph = vi.fn(() => new Promise<never>(() => {}));
-    Object.assign(f.cdp, { getFrameGraph: graph });
+    f.cdp.discoverChildEventSources = graph;
     const starting = expect(f.manager.start("s1", 7)).rejects.toThrow("debug start timeout");
     await vi.advanceTimersByTimeAsync(DEBUG_START_TIMEOUT_MS);
     await starting;
     expect(graph).toHaveBeenCalledTimes(1);
     expect((await f.manager.read({ session_id: "s1", action: "status" })).runs).toEqual([]);
-    Object.assign(f.cdp, { getFrameGraph: undefined });
+    f.cdp.discoverChildEventSources = prevDiscover;
     expect((await f.manager.start("s1", 7)).state).toBe("capturing");
   });
 
@@ -222,7 +235,7 @@ describe("task-scoped debug lifecycle", () => {
     const f = await fixture();
     active.push(f.manager);
     let resolve!: (value: object) => void;
-    f.sendAttached.mockImplementation(async (_target, method) =>
+    f.sendToEventSource.mockImplementation(async (_target, method) =>
       method === "Page.getFrameTree"
         ? new Promise((done) => {
             resolve = done;
@@ -238,10 +251,10 @@ describe("task-scoped debug lifecycle", () => {
     await starting;
     resolve({ frameTree: { frame: { id: "root" } } });
     await Promise.resolve();
-    expect(f.sendAttached.mock.calls.map(([, method]) => method)).not.toContain(
+    expect(f.sendToEventSource.mock.calls.map(([, method]) => method)).not.toContain(
       "Runtime.addBinding",
     );
-    expect(f.sendAttached.mock.calls.map(([, method]) => method)).not.toContain(
+    expect(f.sendToEventSource.mock.calls.map(([, method]) => method)).not.toContain(
       "Page.addScriptToEvaluateOnNewDocument",
     );
   });
@@ -250,7 +263,7 @@ describe("task-scoped debug lifecycle", () => {
     const f = await fixture();
     active.push(f.manager);
     let resolve!: (value: object) => void;
-    f.sendAttached.mockImplementation(async (_target, method) => {
+    f.sendToEventSource.mockImplementation(async (_target, method) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
       if (method === "Page.addScriptToEvaluateOnNewDocument")
         return new Promise((done) => {
@@ -267,13 +280,13 @@ describe("task-scoped debug lifecycle", () => {
     await starting;
     resolve({ identifier: "late-script" });
     await vi.waitFor(() =>
-      expect(f.sendAttached).toHaveBeenCalledWith(
-        { tabId: 7 },
+      expect(f.sendToEventSource).toHaveBeenCalledWith(
+        rootEventSource(7),
         "Page.removeScriptToEvaluateOnNewDocument",
         { identifier: "late-script" },
       ),
     );
-    expect(f.sendAttached.mock.calls.map(([, method]) => method)).not.toContain(
+    expect(f.sendToEventSource.mock.calls.map(([, method]) => method)).not.toContain(
       "Page.createIsolatedWorld",
     );
   });
@@ -301,10 +314,10 @@ describe("task-scoped debug lifecycle", () => {
     vi.useFakeTimers();
     const f = await fixture();
     active.push(f.manager);
-    const normal = f.sendAttached.getMockImplementation()!;
+    const normal = f.sendToEventSource.getMockImplementation()!;
     const expressions: string[] = [];
-    f.sendAttached.mockImplementation((async (
-      target: CdpDebuggee,
+    f.sendToEventSource.mockImplementation((async (
+      target: TabEventSource,
       method: string,
       params?: { expression?: string },
     ) => {
@@ -383,7 +396,7 @@ describe("task-scoped debug lifecycle", () => {
       }),
     ).toBeUndefined();
     expect(f.cdp.onEvent).not.toHaveBeenCalled();
-    expect(f.cdp.sendAttached).not.toHaveBeenCalled();
+    expect(f.cdp.sendToEventSource).not.toHaveBeenCalled();
     expect(f.tabs.query).not.toHaveBeenCalled();
   });
   it("requires task ownership even in local mode and isolates evidence between sessions", async () => {
@@ -446,9 +459,9 @@ describe("task-scoped debug lifecycle", () => {
     expect(result.console).toHaveLength(1);
     expect(result.operation?.before?.text).toBe("Save failed");
     expect(result.operation?.after?.state).toBe("available");
-    const calls = f.sendAttached.mock.calls.length;
+    const calls = f.sendToEventSource.mock.calls.length;
     await f.manager.read({ action: "operation", session_id: "s1", id: list.operations![0].id });
-    expect(f.cdp.sendAttached).toHaveBeenCalledTimes(calls);
+    expect(f.cdp.sendToEventSource).toHaveBeenCalledTimes(calls);
   });
   it("closes the previous observation window when the next action begins", async () => {
     vi.useFakeTimers();
@@ -525,7 +538,7 @@ describe("task-scoped debug lifecycle", () => {
     f.manager.stopTab(7, "requested");
     resolve();
     expect((await starting).state).toBe("stopped");
-    expect(f.cdp.sendAttached).not.toHaveBeenCalled();
+    expect(f.cdp.sendToEventSource).not.toHaveBeenCalled();
   });
   it("cleans up failed starts and ignores evidence from unrelated tabs and replayed console messages", async () => {
     const f = await fixture();
@@ -964,14 +977,14 @@ describe("persistent debugging records", () => {
     expect((await f.manager.read({ action: "status", session_id: "s1" })).runs).toEqual([]);
     const restored = new DebugManager(f.sessions, f.cdp, f.tabs, () => 11000, archive);
     active.push(restored);
-    const calls = f.sendAttached.mock.calls.length;
+    const calls = f.sendToEventSource.mock.calls.length;
     const result = await restored.readHistory({ action: "export", run_id: run.id, session_id: "" });
     expect(result.recording?.run.stop_reason).toBe("session_ended");
     expect(result.recording?.requests[0].state).toBe("interrupted");
     expect(result.recording?.console[0].text).toBe("Save failed");
     expect(result.recording?.pages[0].title).toBe("App");
     expect(JSON.stringify(result)).not.toContain("private");
-    expect(f.sendAttached).toHaveBeenCalledTimes(calls);
+    expect(f.sendToEventSource).toHaveBeenCalledTimes(calls);
     const request = await restored.readHistory({
       action: "request",
       run_id: run.id,
@@ -1057,7 +1070,10 @@ describe("persistent debugging records", () => {
     const f = await fixture(new MemoryArchive());
     active.push(f.manager);
     const run = await f.manager.start("s1", 7);
+    expect(f.cdp.onEvent).toHaveBeenCalledWith(7, expect.any(Function));
+    expect(f.dispose).not.toHaveBeenCalled();
     f.manager.releaseSession("s1");
+    expect(f.dispose).toHaveBeenCalledOnce();
     await expect(
       f.manager.read({ action: "export", session_id: "s1", run_id: run.id }),
     ).rejects.toThrow("not found");

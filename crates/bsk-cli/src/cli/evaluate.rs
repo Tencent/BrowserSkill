@@ -18,9 +18,9 @@ use bsk_protocol::Method;
 use bsk_protocol::tools::{EvaluateParams, EvaluateResult};
 use clap::Args;
 
-use crate::cli::business_rpc::ipc_timeout;
+use crate::cli::business_rpc::{self, ipc_timeout};
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic_with_protocol as ensure_daemon_with_protocol;
 use crate::cli::error::{CliError, Format};
 use crate::cli::navigate::parse_timeout_ms;
 
@@ -32,9 +32,13 @@ pub struct EvaluateArgs {
     /// statement's).
     pub expression: String,
 
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -53,28 +57,57 @@ pub struct EvaluateArgs {
     /// Hard timeout (default 30s). Accepts `30s`, `1m`, `1500ms`.
     #[arg(long, default_value = "30s", value_parser = parse_timeout_ms)]
     pub timeout: u32,
+
+    /// Run without comparing the page with any observation: no --observation
+    /// is needed and nothing is refused because the page changed. Control,
+    /// the document and tab ownership are still checked. Last resort: first
+    /// state what the script relies on with --expect and no --observation
+    /// (target policy) or --depends-on (strict policy), which keeps a real
+    /// check and also runs on pages that keep changing. The script should check its own
+    /// preconditions and throw; the result carries `verified: false`.
+    #[arg(long)]
+    pub unverified: bool,
 }
 
-pub fn dispatch(args: EvaluateArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
+pub fn dispatch(
+    args: EvaluateArgs,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
+    // Asking for a page check and for none at once is a contradiction, not a
+    // stricter request. Refuse before anything reaches the daemon.
+    if args.unverified && op_ctx.verification_requested() {
+        return Err(CliError::invalid_params(anyhow::anyhow!(
+            "--unverified skips page verification; omit --expect, --observation and --depends-on, or omit --unverified to have them checked"
+        )));
+    }
+    let (info, protocol) = ensure_daemon_with_protocol().context("ensure daemon is running")?;
+    business_rpc::check_daemon_protocol(&protocol)?;
     let params = EvaluateParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         expression: args.expression,
         tab_id: args.tab_id,
         await_promise: Some(args.await_promise),
         return_by_value: Some(args.return_by_value),
         timeout_ms: Some(args.timeout),
+        unverified: args.unverified.then_some(true),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
-    let reply = call(info.sock_path, params, args.timeout)?;
+    let reply = call(info.sock_path, &op_ctx, params, args.timeout)?;
     render(&reply, format)
 }
 
 fn call(
     sock: PathBuf,
+    ctx: &business_rpc::ClientContext,
     params: EvaluateParams,
     timeout_ms: u32,
 ) -> Result<EvaluateResult, CliError> {
-    crate::cli::business_rpc::call::<EvaluateParams, EvaluateResult>(
+    ctx.call::<EvaluateParams, EvaluateResult>(
         sock,
         "evaluate",
         Method::ToolEvaluate,
@@ -120,6 +153,9 @@ fn render(reply: &EvaluateResult, format: Format) -> Result<(), CliError> {
                 eprintln!("evaluate failed: ok=false with no error payload");
             }
             print_dialog_summaries(&reply.dialogs);
+            if reply.verified == Some(false) {
+                eprintln!("note: ran unverified; the page was not compared with any observation");
+            }
         }
     }
     Ok(())

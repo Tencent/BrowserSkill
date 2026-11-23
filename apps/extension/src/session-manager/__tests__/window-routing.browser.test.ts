@@ -1,5 +1,5 @@
 // @vitest-environment node
-// BSK_BACKGROUND_CHROME=/path/to/chrome uses an isolated headed Chrome/profile.
+// BSK_TEST_CHROME=/path/to/chrome uses an isolated headed Chrome/profile.
 // BSK_BACKGROUND_SOAK=1 additionally runs six minutes with Energy Saver enabled.
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -39,7 +39,7 @@ import { withTaskPopups } from '@/session-manager/task-popups';
 import { beginTabCreation } from '@/session-manager/tab-creation';
 import { handleTabCreate } from '@/tools/tabs';
 import { handleClick } from '@/tools/interaction';
-import { handleSnapshot } from '@/tools/observation';
+import { handleScreenshot, handleSnapshot } from '@/tools/observation';
 import { handleNavigate } from '@/tools/navigation';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const check=(ok,message)=>{if(!ok)throw new Error(message)};
@@ -55,7 +55,7 @@ globalThis.run=async(url,soak)=>{
  const [control]=await chrome.tabs.query({windowId:user.id,active:true});
  await chrome.tabs.update(control.id,{url:url+'/control'});
  await chrome.windows.update(user.id,{focused:true,left:0,top:0,width:1400,height:1000});
- await wait(async()=>(await chrome.tabs.get(control.id)).status==='complete','control load');
+ await wait(async()=>(await chrome.tabs.get(control.id)).status==='complete'&&(await chrome.windows.get(user.id)).focused,'control load');
  let humanAssistance=false;
  const router=new AgentWindowRouting(manager,chrome,()=>humanAssistance);
  await sleep(300);
@@ -91,8 +91,9 @@ globalThis.run=async(url,soak)=>{
   const snapshot=await handleSnapshot(manager,params,deps);
   check(!snapshot.code&&JSON.stringify(snapshot).includes('Completed'),label+' snapshot');
   globalThis.phase=label+' screenshot';
-  const screenshot=await cdp.send(id,'Page.captureScreenshot',{format:'png',fromSurface:true});
-  const bitmap=await createImageBitmap(new Blob([Uint8Array.from(atob(screenshot.data),c=>c.charCodeAt(0))],{type:'image/png'}));
+  const screenshot=await handleScreenshot(manager,params,{...deps,captureApi:chrome.tabs,sendToTab:async()=>{}});
+  check(!screenshot.code,JSON.stringify(screenshot));
+  const bitmap=await createImageBitmap(new Blob([Uint8Array.from(atob(screenshot.image_base64),c=>c.charCodeAt(0))],{type:'image/png'}));
   const canvas=new OffscreenCanvas(bitmap.width,bitmap.height),context=canvas.getContext('2d');
   context.drawImage(bitmap,0,0);bitmap.close();
   const pixels=context.getImageData(0,0,Math.min(400,canvas.width),Math.min(150,canvas.height)).data;
@@ -110,12 +111,14 @@ globalThis.run=async(url,soak)=>{
   // The larger foreground user window completely covers the Agent Window.
   await chrome.windows.update(task.agentWindowId,{left:60,top:60,width:800,height:600,focused:false});
   await chrome.windows.update(user.id,{focused:true});
-  const cover=await chrome.windows.get(user.id),covered=await chrome.windows.get(task.agentWindowId);
-  check(cover.focused&&cover.left<=covered.left&&cover.top<=covered.top&&
-   cover.left+cover.width>=covered.left+covered.width&&cover.top+cover.height>=covered.top+covered.height,
-   'covered window geometry');
+  await wait(async()=>{
+   const cover=await chrome.windows.get(user.id),covered=await chrome.windows.get(task.agentWindowId);
+   return cover.focused&&cover.left<=covered.left&&cover.top<=covered.top&&
+    cover.left+cover.width>=covered.left+covered.width&&cover.top+cover.height>=covered.top+covered.height;
+  },'covered window geometry');
   await exercise('covered');
   await chrome.windows.update(task.agentWindowId,{state:'minimized'});
+  await wait(async()=>(await chrome.windows.get(task.agentWindowId)).state==='minimized','minimized window state');
   await exercise('minimized');
   if(soak){
    const idle=await chrome.tabs.create({windowId:user.id,url:url+'/idle',active:false});
@@ -159,7 +162,8 @@ globalThis.run=async(url,soak)=>{
   const finishCreation=beginTabCreation(task);
   let external;
   try {
-   external=await chrome.tabs.create({windowId:task.agentWindowId,url:url+'/external-background',active:true});
+   external=await chrome.tabs.create({windowId:task.agentWindowId,url:url+'/external-background',active:false});
+   await chrome.tabs.update(external.id,{active:true});
    await wait(async()=>(await chrome.tabs.get(external.id)).status==='complete','external fixture load');
    check(task.pendingRoutingTabs.has(external.id),'external tab is not pending routing');
    const defaults={session_id:task.sessionId};
@@ -183,7 +187,8 @@ globalThis.run=async(url,soak)=>{
   check(!(await chrome.windows.get(task.agentWindowId)).focused,'routing stole focus');
   // Let the host open a URL through Chrome's process singleton, as external
   // applications do. Deliberately view the task first to reproduce misrouting.
-  await chrome.windows.update(task.agentWindowId,{focused:true});
+  await chrome.windows.update(task.agentWindowId,{state:'normal',focused:true});
+  await wait(async()=>(await chrome.windows.get(task.agentWindowId)).focused,'task foreground');
   globalThis.phase='native external link';
   await wait(async()=>(await chrome.tabs.query({url:url+'/external-native'})).some(t=>t.windowId===user.id),'native external routing');
   await wait(async()=>(await chrome.windows.get(user.id)).focused,'external link foreground');
@@ -200,7 +205,8 @@ globalThis.run=async(url,soak)=>{
   // Include a fresh task home: an external URL must not be confused with
   // agent navigation just because the selected page is still about:blank.
   await chrome.tabs.update([...task.agentCreatedTabs][0],{active:true});
-  await chrome.windows.update(task.agentWindowId,{focused:true});
+  await chrome.windows.update(task.agentWindowId,{state:'normal',focused:true});
+  await wait(async()=>(await chrome.windows.get(task.agentWindowId)).focused,'task fallback foreground');
   globalThis.phase='native fallback link';
   let nativeFallback;
   await wait(async()=>{
@@ -258,7 +264,7 @@ globalThis.run=async(url,soak)=>{
  } finally {router.dispose();await cdp.detachAll();cdp.dispose();}
 };`;
 
-describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regression", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("Agent Window browser regression", () => {
   it.each(
     process.env.BSK_BACKGROUND_SOAK === "1" ? [false, true] : [false],
   )("works in the background and routes tabs (six-minute Energy Saver: %s)", async (soak) => {
@@ -316,7 +322,7 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regres
       );
       await writeFile(
         path.join(directory, "regression.html"),
-        '<!doctype html><script src="regression.js"></script>',
+        '<!doctype html><meta charset="utf-8"><script src="regression.js"></script>',
       );
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -328,7 +334,7 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regres
       );
       await withChrome(
         {
-          executable: process.env.BSK_BACKGROUND_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           extensionPath: directory,
@@ -414,7 +420,7 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regres
                   !launched.has(phase)
                 ) {
                   launched.add(phase);
-                  await promisify(execFile)(process.env.BSK_BACKGROUND_CHROME!, [
+                  await promisify(execFile)(process.env.BSK_TEST_CHROME!, [
                     `--user-data-dir=${profile}`,
                     `${url}/${phase === "native external link" ? "external-native" : "external-native-fallback"}`,
                   ]);

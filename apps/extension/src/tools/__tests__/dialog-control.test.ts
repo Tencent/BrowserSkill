@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { CooperationController } from "@/cooperation/controller";
 import { SessionManager } from "@/session-manager/manager";
 import type { PendingJavaScriptDialog } from "@/transport/types";
@@ -85,7 +86,7 @@ describe("native dialog control", () => {
     ).toMatchObject({ dialog: { handled: "accepted" } });
     expect(cdp.resolveDialog).toHaveBeenCalledWith(pending.id, true, text, {
       signal: undefined,
-      onDispatch: undefined,
+      onDispatch: expect.any(Function),
     });
     expect(cdp.send).not.toHaveBeenCalled();
   });
@@ -182,5 +183,184 @@ describe("native dialog control", () => {
       ).toMatchObject({ code: "invalid_params" });
     }
     expect(cdp.resolveDialog).not.toHaveBeenCalled();
+  });
+
+  it("attaches effect_state none on pre-CDP rejections and unknown with tab_id when CDP fails mid-resolution", async () => {
+    const { sessions, cdp } = await fixture();
+    expect(
+      await handleDialog(
+        sessions,
+        "tool.dialog_accept",
+        { session_id: "owner", dialog_id: "missing-dialog" },
+        cdp,
+      ),
+    ).toMatchObject({
+      code: "not_found",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+
+    const preAborted = new AbortController();
+    preAborted.abort();
+    expect(
+      await handleDialog(
+        sessions,
+        "tool.dialog_accept",
+        { session_id: "owner", dialog_id: pending.id },
+        cdp,
+        { signal: preAborted.signal },
+      ),
+    ).toMatchObject({
+      code: "cancelled",
+      data: {
+        dispatched: false,
+        effect_state: "none",
+        phase: "precondition",
+        tab_id: 7,
+      },
+    });
+
+    const failingCdp = {
+      ...cdp,
+      resolveDialog: vi.fn(async (_id, _accept, _text, guard) => {
+        guard?.onDispatch?.();
+        throw new Error("WebSocket closed mid-handleJavaScriptDialog");
+      }),
+    } as unknown as CdpRunner;
+
+    expect(
+      await handleDialog(
+        sessions,
+        "tool.dialog_accept",
+        { session_id: "owner", dialog_id: pending.id },
+        failingCdp,
+      ),
+    ).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        effect_state: "unknown",
+        phase: "execution",
+        tab_id: 7,
+      },
+    });
+  });
+
+  it("reports effect_state none when ChromiumCdp rejects before Page.handleJavaScriptDialog dispatch", async () => {
+    const { sessions } = await fixture();
+    let eventListener: ((source: CdpDebuggee, method: string, params: unknown) => void) | undefined;
+    let resolveCanControl!: (allowed: boolean) => void;
+    let canControlCount = 0;
+    const sendCommand = vi.fn(async (_target: CdpDebuggee, method: string) => {
+      if (method === "Page.handleJavaScriptDialog") {
+        throw new Error("should not dispatch");
+      }
+      return {};
+    });
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand,
+      onEvent: {
+        addListener: (cb: (source: CdpDebuggee, method: string, params: unknown) => void) => {
+          eventListener = cb;
+        },
+        removeListener: () => {},
+      } as unknown as CdpDebuggerApi["onEvent"],
+      onDetach: {
+        addListener: () => {},
+        removeListener: () => {},
+      } as unknown as CdpDebuggerApi["onDetach"],
+    };
+    const realCdp = new ChromiumCdp(api, {
+      canControlDialog: async () => {
+        canControlCount += 1;
+        if (canControlCount === 1) return true;
+        return new Promise<boolean>((resolve) => {
+          resolveCanControl = resolve;
+        });
+      },
+    });
+    await realCdp.ensureAttached(7);
+    eventListener?.({ tabId: 7 }, "Page.javascriptDialogOpening", {
+      type: "confirm",
+      message: "Proceed?",
+    });
+    await vi.waitFor(() => expect(realCdp.pendingDialogs(7)).toHaveLength(1));
+    const dialogId = realCdp.pendingDialogs(7)[0]!.id;
+
+    // Case 1: User dismisses the dialog while canControlDialog is still awaiting.
+    const raceCall = handleDialog(
+      sessions,
+      "tool.dialog_accept",
+      { session_id: "owner", dialog_id: dialogId },
+      realCdp as unknown as CdpRunner,
+    );
+    await vi.waitFor(() => expect(canControlCount).toBe(2));
+    eventListener?.({ tabId: 7 }, "Page.javascriptDialogClosed", { result: false });
+    resolveCanControl(true);
+    expect(await raceCall).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+        tab_id: 7,
+      },
+    });
+    expect(sendCommand).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "Page.handleJavaScriptDialog",
+      expect.anything(),
+    );
+
+    // Case 2: Pre-dispatch permission failure (`canControlDialog` returns false).
+    canControlCount = 0;
+    eventListener?.({ tabId: 7 }, "Page.javascriptDialogOpening", {
+      type: "confirm",
+      message: "Second?",
+    });
+    await vi.waitFor(() => expect(realCdp.pendingDialogs(7)).toHaveLength(1));
+    const secondId = realCdp.pendingDialogs(7)[0]!.id;
+    const permCall = handleDialog(
+      sessions,
+      "tool.dialog_accept",
+      { session_id: "owner", dialog_id: secondId },
+      realCdp as unknown as CdpRunner,
+    );
+    await vi.waitFor(() => expect(canControlCount).toBe(2));
+    resolveCanControl(false);
+    expect(await permCall).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+        tab_id: 7,
+      },
+    });
+
+    // Case 3: Cancelled while awaiting pre-dispatch canControlDialog check.
+    const abort = new AbortController();
+    const cancelCall = handleDialog(
+      sessions,
+      "tool.dialog_accept",
+      { session_id: "owner", dialog_id: secondId },
+      realCdp as unknown as CdpRunner,
+      { signal: abort.signal },
+    );
+    await vi.waitFor(() => expect(canControlCount).toBe(3));
+    abort.abort();
+    resolveCanControl(true);
+    expect(await cancelCall).toMatchObject({
+      code: "cancelled",
+      data: {
+        reason: "cancelled_before_dispatch",
+        dispatched: false,
+        effect_state: "none",
+        phase: "precondition",
+        tab_id: 7,
+      },
+    });
+    realCdp.dispose();
   });
 });

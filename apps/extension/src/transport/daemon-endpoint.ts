@@ -1,7 +1,9 @@
+import { DEFAULT_DAEMON_PORT as PROTOCOL_DEFAULT_DAEMON_PORT } from "./generated/methods";
+
 /** Build-time default WebSocket URL (see wxt.config.ts). */
 const base = new URL(__BSK_DAEMON_WS_URL__);
 
-export const DEFAULT_DAEMON_PORT = Number(base.port) || 52800;
+export const DEFAULT_DAEMON_PORT = Number(base.port) || PROTOCOL_DEFAULT_DAEMON_PORT;
 
 const MIN_PORT = 1;
 const MAX_PORT = 65535;

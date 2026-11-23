@@ -5,30 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::ErrorCode;
 
-/// Protocol 1.3 makes browser Automation settings authoritative.
-pub const INTERACTION_POLICY_PROTOCOL: &str = "1.3";
-
-/// Protocol 1.4 supports explicitly requested incognito Agent Windows.
-pub const INCOGNITO_SESSION_PROTOCOL: &str = "1.4";
-
-pub fn supports_incognito_sessions(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, INCOGNITO_SESSION_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
-}
-
-/// Stay within protocol major 1, matching handshake compatibility. A future
-/// major version must explicitly establish support rather than inherit it.
-pub fn supports_interaction_policy(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, INTERACTION_POLICY_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BorrowConfirmationPolicy {
@@ -50,6 +26,7 @@ pub struct InteractionPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SessionStartParams {
     pub session_id: String,
     /// Caller-supplied display labels, not an authenticated identity.
@@ -129,11 +106,12 @@ pub struct SessionStartResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SessionStopParams {
     pub session_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReturnFailure {
     pub tab_id: i64,
     pub code: ErrorCode,
@@ -146,6 +124,15 @@ pub struct SessionStopResult {
     pub returned_tab_ids: Vec<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub return_failures: Vec<ReturnFailure>,
+}
+
+/// Full extension response, including whether a window was left with the user.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionStopOutcome {
+    #[serde(flatten)]
+    pub returned: SessionStopResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_released: Option<bool>,
 }
 
 #[cfg(test)]
@@ -222,18 +209,12 @@ mod tests {
             )
             .is_err()
         );
-        for protocol in ["1.0", "1.3", "2.0", "invalid"] {
-            assert!(!supports_incognito_sessions(protocol), "{protocol}");
-        }
-        for protocol in ["1.4", "1.5"] {
-            assert!(supports_incognito_sessions(protocol), "{protocol}");
-        }
     }
 
     #[test]
     fn legacy_unattended_is_accepted_but_never_forwarded() {
-        let schema = schemars::schema_for!(SessionStartParams);
-        let object = schema.schema.object.unwrap();
+        let schema = crate::catalog::schema_for::<SessionStartParams>();
+        let object = schema.as_object().unwrap();
         for unattended in [false, true] {
             let params: SessionStartParams = serde_json::from_value(json!({
                 "session_id": "abcd", "unattended": unattended
@@ -241,24 +222,20 @@ mod tests {
             .unwrap();
             let encoded = serde_json::to_value(params).unwrap();
             assert_eq!(encoded, json!({"session_id": "abcd"}));
-            for required in &object.required {
+            for required in object["required"].as_array().unwrap() {
+                let required = required.as_str().unwrap();
                 assert!(
                     encoded.get(required).is_some(),
                     "schema requires omitted field {required}"
                 );
             }
         }
-        assert!(!object.properties.contains_key("unattended"));
-    }
-
-    #[test]
-    fn interaction_policy_requires_a_compatible_protocol() {
-        for protocol in ["1.0", "1.1", "1.2", "2.0", "invalid"] {
-            assert!(!supports_interaction_policy(protocol), "{protocol}");
-        }
-        for protocol in ["1.3", "1.4"] {
-            assert!(supports_interaction_policy(protocol), "{protocol}");
-        }
+        assert!(
+            !object["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("unattended")
+        );
         let legacy: SessionStartParams =
             serde_json::from_value(json!({"session_id": "abcd"})).unwrap();
         assert!(!legacy.unattended);

@@ -1,19 +1,6 @@
-export interface ReadField {
-  key: string;
-  read: "text" | "attribute" | "value" | "checked" | "exists";
-  selector?: string;
-  attribute?: string;
-}
-export interface ReadParams {
-  session_id: string;
-  tab_id?: number;
-  selector?: string;
-  ref?: string;
-  fields?: ReadField[];
-  max_nodes?: number;
-  max_bytes?: number;
-  timeout_ms?: number;
-}
+import type { ReadField, ReadParams } from "@/transport/types";
+
+export type { ReadField, ReadParams } from "@/transport/types";
 export interface ReadOptions {
   selector?: string;
   fields: ReadField[];
@@ -21,6 +8,7 @@ export interface ReadOptions {
   max_bytes: number;
   timeout_ms: number;
   sensitive: string;
+  excludedAncestors?: string;
 }
 export interface RawRead {
   frame_url: string;

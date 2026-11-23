@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { nodeContentRegion } from "../element-geometry";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 describe("nodeContentRegion", () => {
   it("rejects invalid content quads before using the box model fallback", async () => {
@@ -12,7 +12,9 @@ describe("nodeContentRegion", () => {
       throw new Error(`unexpected CDP call ${method}`);
     };
 
-    await expect(nodeContentRegion({ send: send as CdpRunner["send"] }, 7, 555)).resolves.toEqual([
+    await expect(
+      nodeContentRegion(createStubCdpRunner({ send: send as CdpRunner["send"] }), 7, 555),
+    ).resolves.toEqual([
       [
         { x: 5, y: 10 },
         { x: 25, y: 10 },
@@ -29,9 +31,9 @@ describe("nodeContentRegion", () => {
         [15, 50, 90, 50, 90, 80, 15, 80],
       ],
     });
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: send as CdpRunner["send"],
-    };
+    });
 
     await expect(nodeContentRegion(cdp, 7, 555)).resolves.toEqual([
       [
@@ -66,7 +68,7 @@ describe("nodeContentRegion", () => {
           throw new Error(`unexpected CDP call ${method}`);
       }
     };
-    const cdp = { send: send as CdpRunner["send"] };
+    const cdp = createStubCdpRunner({ send: send as CdpRunner["send"] });
 
     await expect(nodeContentRegion(cdp, 7, 555)).resolves.toEqual([
       [
@@ -81,6 +83,7 @@ describe("nodeContentRegion", () => {
       "DOM.getContentQuads",
       "DOM.resolveNode",
       "Runtime.callFunctionOn",
+      "Runtime.releaseObject",
     ]);
   });
 });

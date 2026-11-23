@@ -18,11 +18,11 @@ export interface BuildSemanticGraphInput {
 }
 
 function domNodeId(frameId: string, backendNodeId: number): SemanticNodeId {
-  return JSON.stringify([frameId, "dom", backendNodeId]);
+  return `${frameId.length}:${frameId}:d:${backendNodeId}`;
 }
 
 function axNodeId(frameId: string, nodeId: string): SemanticNodeId {
-  return JSON.stringify([frameId, "ax", nodeId]);
+  return `${frameId.length}:${frameId}:a:${nodeId}`;
 }
 
 export function buildSemanticGraph(input: BuildSemanticGraphInput): SemanticGraph {
@@ -40,12 +40,14 @@ export function buildSemanticGraph(input: BuildSemanticGraphInput): SemanticGrap
   for (const [frameOrder, document] of input.documents.entries()) {
     frames.set(document.frameId, {
       frameId: document.frameId,
+      ...(document.loaderId !== undefined ? { loaderId: document.loaderId } : {}),
       ...(document.parentFrameId ? { parentFrameId: document.parentFrameId } : {}),
       ...(document.ownerBackendNodeId !== undefined
         ? { ownerBackendNodeId: document.ownerBackendNodeId }
         : {}),
       contextScopeId: document.contextScopeId,
-      target: document.target,
+      handle: document.handle,
+      processKey: document.processKey,
       ...(document.url ? { url: document.url } : {}),
       order: frameOrder,
     });

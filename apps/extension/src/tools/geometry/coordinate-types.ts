@@ -1,9 +1,9 @@
-import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import { type FrameProcessBoundary, frameProcessIdentityKey } from "@/browser-driver/frame-handles";
 import type { GeometryProjection, ViewportRect } from "../geometry";
 import { projectRectToViewport } from "../geometry";
 
 export interface CoordinateOwner {
-  target: CdpTarget;
+  process: FrameProcessBoundary;
   frameId?: string;
 }
 
@@ -115,7 +115,8 @@ export function projectSnapshotRect(
 ): ViewportRect | null {
   if (
     input.owner.frameId !== projection.source.frameId ||
-    cdpTargetKey(input.owner.target) !== cdpTargetKey(projection.source.target)
+    frameProcessIdentityKey(input.owner.process) !==
+      frameProcessIdentityKey(projection.source.process)
   ) {
     return null;
   }

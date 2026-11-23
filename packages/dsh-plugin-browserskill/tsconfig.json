@@ -1,17 +1,14 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "jsx": "react-jsx",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "noEmit": true,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "lib",
+    "declaration": true,
     "strict": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "verbatimModuleSyntax": true
   },
-  "include": ["src/**/*", "tests/**/*", "tsdown.config.ts", "vitest.config.ts"]
+  "include": ["src/**/*.mts"]
 }

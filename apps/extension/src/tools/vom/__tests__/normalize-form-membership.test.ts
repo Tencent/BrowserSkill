@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { rootProcessBoundary, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { normalizeDocument } from "../normalize";
 import { buildSemanticVomScene } from "../semantic-graph";
 import { BASIC_SNAPSHOT, type SnapshotProfile, VISUAL_SNAPSHOT } from "../snapshot";
@@ -37,7 +38,7 @@ async function normalize(input: Spec[], profile: SnapshotProfile = BASIC_SNAPSHO
     },
     strings,
     {
-      target: { tabId: 1 },
+      process: rootProcessBoundary(1),
       frameId: "main",
       ownerFrameBackendNodeId: null,
       projection: null,
@@ -79,8 +80,11 @@ describe("custom progress form membership", () => {
       documents: [
         {
           frameId: "main",
+          loaderId: "",
+          processKey: "root",
+          isOutOfProcess: false,
           contextScopeId: "main",
-          target: { tabId: 1 },
+          handle: toFrameDocumentHandle(1, { frameId: "main" }),
           axNodes: [],
           domNodes: normalized.nodes,
         },

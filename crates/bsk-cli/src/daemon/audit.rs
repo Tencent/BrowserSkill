@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use bsk_protocol::{ErrorCode, Method, ResponseBody};
-use serde::{Deserialize, Serialize};
+pub use bsk_protocol::system::{AuditEvent, AuditRun};
+use bsk_protocol::{AuditContextEvent, ErrorCode, Method, ResponseBody};
 use serde_json::{Value, json};
 
 use super::sessions::Session;
@@ -19,33 +19,9 @@ const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_RUN_BYTES: u64 = 16 * 1024 * 1024;
 const PAGE_SIZE: usize = 100;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditEvent {
-    pub at: i64,
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<String>,
-    pub data: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditRun {
-    pub id: String,
-    pub browser_id: String,
-    pub session_id: String,
-    pub started_at: i64,
-    pub recorded_at: i64,
-    pub updated_at: i64,
-    pub status: String,
-    pub name: Option<String>,
-    pub site: Option<String>,
-    pub operations: usize,
-    pub errors: usize,
-    pub partial: bool,
-}
-
 #[derive(Debug, Clone)]
 struct LiveSession {
+    live_id: u64,
     session: Session,
     run_id: Option<String>,
     name: Option<String>,
@@ -62,9 +38,12 @@ pub struct Ticket {
 #[derive(Debug, Default)]
 struct Inner {
     loaded: bool,
+    next_live_id: u64,
     enabled: HashSet<String>,
+    pending_pause_browsers: HashSet<String>,
     epochs: HashMap<String, u64>,
     sessions: HashMap<String, LiveSession>,
+    closing_sessions: HashMap<u64, LiveSession>,
     runs: BTreeMap<String, AuditRun>,
     pending: HashMap<String, Ticket>,
     last_error: HashMap<String, String>,
@@ -73,6 +52,7 @@ struct Inner {
 #[derive(Debug)]
 pub struct AuditStore {
     root: Option<PathBuf>,
+    io_lock: Mutex<()>,
     inner: Mutex<Inner>,
 }
 
@@ -87,6 +67,7 @@ impl AuditStore {
     pub fn new(root: Option<PathBuf>) -> Self {
         Self {
             root,
+            io_lock: Mutex::new(()),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -97,44 +78,92 @@ impl AuditStore {
             .context("Audit directory is unavailable")
     }
 
-    fn load(&self, inner: &mut Inner) -> Result<()> {
-        if inner.loaded {
+    /// Lock-free-of-disk fast check: returns `true` only when `session_id` belongs to a
+    /// live session whose browser currently has local audit collection enabled.
+    pub fn needs_begin(&self, session_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .sessions
+            .get(session_id)
+            .is_some_and(|live| inner.enabled.contains(&live.session.browser_id.0))
+    }
+
+    /// Fast in-memory check for inbound `AuditContext` events from `ws.rs`.
+    pub fn needs_context(&self, browser: &str, operation_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.pending.get(operation_id).is_some_and(|ticket| {
+            ticket.browser_id == browser
+                && inner.enabled.contains(browser)
+                && inner.epochs.get(browser).copied().unwrap_or(0) == ticket.epoch
+        })
+    }
+
+    /// Fast in-memory check for session audit markers.
+    pub fn needs_marker(&self, session_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.sessions.get(session_id).is_some_and(|live| {
+            live.run_id.is_some() && inner.enabled.contains(&live.session.browser_id.0)
+        })
+    }
+
+    fn ensure_loaded_unlocked(&self) -> Result<()> {
+        if self.inner.lock().unwrap().loaded {
             return Ok(());
         }
         let root = self.directory()?;
+        let mut loaded_runs = BTreeMap::new();
         if root.exists() {
             for entry in fs::read_dir(root)? {
-                let entry = entry?;
-                if !entry.file_type()?.is_file() {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        tracing::warn!(%err, "skipping unreadable audit directory entry");
+                        continue;
+                    }
+                };
+                let file_type = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %entry.path().display(),
+                            %err,
+                            "skipping audit entry with unreadable file type"
+                        );
+                        continue;
+                    }
+                };
+                if !file_type.is_file() {
                     continue;
                 }
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                     continue;
                 }
-                let events = read_events(&path)?;
-                let Some(first) = events.first() else {
-                    continue;
-                };
-                if first.kind != "started" {
-                    bail!("Invalid audit file header");
+                match load_run_file(&path) {
+                    Ok(Some(run)) => {
+                        loaded_runs.insert(run.id.clone(), run);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %err,
+                            "skipping corrupt or unexpected audit file"
+                        );
+                    }
                 }
-                let mut run: AuditRun = serde_json::from_value(first.data.clone())?;
-                if path.file_stem().and_then(|s| s.to_str()) != Some(&run.id) {
-                    bail!("Invalid audit file identity");
-                }
-                for event in events.iter().skip(1) {
-                    project(&mut run, event);
-                }
-                // A daemon restart cannot prove the old browser task completed.
-                if run.status == "running" {
-                    run.status = "interrupted".into();
-                }
-                inner.runs.insert(run.id.clone(), run);
             }
         }
-        inner.loaded = true;
-        self.prune(inner, now_ms())
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if !inner.loaded {
+                for (id, run) in loaded_runs {
+                    inner.runs.entry(id).or_insert(run);
+                }
+                inner.loaded = true;
+            }
+        }
+        self.prune_unlocked(now_ms())
     }
 
     fn path(&self, id: &str) -> Result<PathBuf> {
@@ -148,7 +177,7 @@ impl AuditStore {
         Ok(self.directory()?.join(format!("{id}.jsonl")))
     }
 
-    fn append(&self, inner: &mut Inner, id: &str, event: AuditEvent) -> Result<()> {
+    fn write_event_to_disk(&self, id: &str, event: &AuditEvent) -> Result<()> {
         let root = self.directory()?;
         fs::create_dir_all(root)?;
         #[cfg(unix)]
@@ -184,34 +213,39 @@ impl AuditStore {
                 bail!("Audit file has an incomplete trailing record");
             }
         }
-        let mut line = serde_json::to_vec(&event)?;
+        let mut line = serde_json::to_vec(event)?;
         line.push(b'\n');
         file.write_all(&line)?;
         file.sync_data()?;
+        Ok(())
+    }
+
+    fn append_unlocked(&self, id: &str, event: AuditEvent) -> Result<()> {
+        self.write_event_to_disk(id, &event)?;
+        let mut inner = self.inner.lock().unwrap();
         if let Some(run) = inner.runs.get_mut(id) {
             project(run, &event);
         }
         Ok(())
     }
 
-    fn ensure_run(
-        &self,
-        inner: &mut Inner,
-        session_id: &str,
-        partial: bool,
-    ) -> Result<Option<String>> {
-        let Some(live) = inner.sessions.get(session_id).cloned() else {
-            return Ok(None);
+    fn ensure_run_unlocked(&self, session_id: &str, partial: bool) -> Result<Option<String>> {
+        let live = {
+            let inner = self.inner.lock().unwrap();
+            let Some(live) = inner.sessions.get(session_id).cloned() else {
+                return Ok(None);
+            };
+            if !inner.enabled.contains(&live.session.browser_id.0) {
+                return Ok(None);
+            }
+            if let Some(id) = live.run_id {
+                return Ok(Some(id));
+            }
+            live
         };
-        if !inner.enabled.contains(&live.session.browser_id.0) {
-            return Ok(None);
-        }
-        if let Some(id) = live.run_id {
-            return Ok(Some(id));
-        }
-        self.load(inner)?;
+        self.ensure_loaded_unlocked()?;
         let at = now_ms();
-        self.prune(inner, at)?;
+        self.prune_unlocked(at)?;
         let id = format!("{at}-{}", uuid::Uuid::new_v4());
         let run = AuditRun {
             id: id.clone(),
@@ -227,69 +261,129 @@ impl AuditStore {
             errors: 0,
             partial,
         };
-        self.append(
-            inner,
-            &id,
-            event("started", None, serde_json::to_value(&run)?),
-        )?;
+        let started = event("started", None, serde_json::to_value(&run)?);
+        self.write_event_to_disk(&id, &started)?;
+        let mut inner = self.inner.lock().unwrap();
         inner.runs.insert(id.clone(), run);
-        inner.sessions.get_mut(session_id).unwrap().run_id = Some(id.clone());
+        if let Some(live_mut) = inner
+            .sessions
+            .get_mut(session_id)
+            .filter(|l| l.live_id == live.live_id)
+        {
+            live_mut.run_id = Some(id.clone());
+        } else if let Some(closing_mut) = inner.closing_sessions.get_mut(&live.live_id) {
+            closing_mut.run_id = Some(id.clone());
+        }
         Ok(Some(id))
     }
 
-    pub fn session_started(&self, session: &Session) {
+    /// Record a live session in memory without touching `io_lock`. Returns
+    /// `true` when audit is enabled for the session's browser and the caller
+    /// should invoke [`Self::ensure_session_started`] (e.g. on `spawn_blocking`).
+    pub fn register_session_in_memory(&self, session: &Session) -> bool {
         let mut inner = self.inner.lock().unwrap();
+        inner.next_live_id = inner.next_live_id.wrapping_add(1);
+        let live_id = inner.next_live_id;
         inner.sessions.insert(
             session.id.0.clone(),
             LiveSession {
+                live_id,
                 session: session.clone(),
                 run_id: None,
                 name: None,
             },
         );
-        if self.ensure_run(&mut inner, &session.id.0, false).is_err() {
-            inner
+        inner.enabled.contains(&session.browser_id.0)
+    }
+
+    pub fn ensure_session_started(&self, session_id: &str, browser_id: &str) {
+        let _io = self.io_lock.lock().unwrap();
+        if self.ensure_run_unlocked(session_id, false).is_err() {
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
-                .insert(session.browser_id.0.clone(), "write_failed".into());
+                .insert(browser_id.to_owned(), "write_failed".into());
+        }
+    }
+
+    pub fn session_started(&self, session: &Session) {
+        if self.register_session_in_memory(session) {
+            self.ensure_session_started(&session.id.0, &session.browser_id.0);
         }
     }
 
     pub fn set_name(&self, session_id: &str, name: &str) {
-        let mut inner = self.inner.lock().unwrap();
         let name = safe_text(name);
-        let Some(live) = inner.sessions.get_mut(session_id) else {
-            return;
+        let needs_disk = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(live) = inner.sessions.get_mut(session_id) else {
+                return;
+            };
+            live.name = Some(name.clone());
+            let browser = live.session.browser_id.0.clone();
+            inner.enabled.contains(&browser)
         };
-        live.name = Some(name.clone());
-        let id = live.run_id.clone();
-        let browser = live.session.browser_id.0.clone();
-        if inner.enabled.contains(&browser)
-            && let Some(id) = id
+        if !needs_disk {
+            return;
+        }
+        let _io = self.io_lock.lock().unwrap();
+        let target = {
+            let inner = self.inner.lock().unwrap();
+            inner.sessions.get(session_id).and_then(|live| {
+                let browser = live.session.browser_id.0.clone();
+                inner
+                    .enabled
+                    .contains(&browser)
+                    .then_some(live.run_id.clone().map(|id| (id, browser)))
+                    .flatten()
+            })
+        };
+        if let Some((id, browser)) = target
             && self
-                .append(&mut inner, &id, event("named", None, json!({"name": name})))
+                .append_unlocked(&id, event("named", None, json!({"name": name})))
                 .is_err()
         {
-            inner.last_error.insert(browser, "write_failed".into());
+            self.inner
+                .lock()
+                .unwrap()
+                .last_error
+                .insert(browser, "write_failed".into());
         }
     }
 
-    pub fn session_ended(&self, session_id: &str, status: &str) {
+    /// Detach `session_id` from active in-memory tracking without touching
+    /// `io_lock`. Returns `Some(live_id)` when a blocking disk flush via
+    /// [`Self::finish_session_end`] is needed to finalize an active audit run.
+    pub fn prepare_session_end(&self, session_id: &str) -> Option<u64> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(live) = inner.sessions.remove(session_id)
-            && let Some(id) = live.run_id
-        {
+        let live = inner.sessions.remove(session_id)?;
+        let needs_io = live.run_id.is_some() || inner.enabled.contains(&live.session.browser_id.0);
+        if !needs_io {
+            return None;
+        }
+        let live_id = live.live_id;
+        inner.closing_sessions.insert(live_id, live);
+        Some(live_id)
+    }
+
+    pub fn finish_session_end(&self, live_id: u64, status: &str) {
+        let _io = self.io_lock.lock().unwrap();
+        let removed = self
+            .inner
+            .lock()
+            .unwrap()
+            .closing_sessions
+            .remove(&live_id)
+            .and_then(|live| live.run_id.map(|id| (id, live.session.browser_id.0)));
+        if let Some((id, browser_id)) = removed {
             // Even while recording is paused, close the history's lifecycle.
             if self
-                .append(
-                    &mut inner,
-                    &id,
-                    event("ended", None, json!({"status": status})),
-                )
+                .append_unlocked(&id, event("ended", None, json!({"status": status})))
                 .is_err()
             {
-                inner
-                    .last_error
-                    .insert(live.session.browser_id.0, "write_failed".into());
+                let mut inner = self.inner.lock().unwrap();
+                inner.last_error.insert(browser_id, "write_failed".into());
                 if let Some(run) = inner.runs.get_mut(&id) {
                     run.status = "interrupted".into();
                 }
@@ -297,24 +391,58 @@ impl AuditStore {
         }
     }
 
-    pub fn configure(&self, browser: &str, enabled: bool) -> Result<Value> {
+    pub fn session_ended(&self, session_id: &str, status: &str) {
+        if let Some(live_id) = self.prepare_session_end(session_id) {
+            self.finish_session_end(live_id, status);
+        }
+    }
+
+    /// Immediately apply an opt-out in memory without touching `io_lock`.
+    /// Called synchronously when `configure(enabled = false)` arrives on WS so
+    /// no subsequent tool RPC can start recording while earlier audit worker
+    /// items (e.g. a 16 MiB `audit.request(get)`) are still running. Records
+    /// `pending_pause_browsers` so the queued `configure(false)` still emits
+    /// the `"paused"` event on existing runs once it reaches the worker.
+    pub fn disable_in_memory(&self, browser: &str) {
         let mut inner = self.inner.lock().unwrap();
-        let previous = inner.enabled.contains(browser);
-        // Apply the privacy preference before any fallible I/O. A broken disk
-        // must never prevent the user from stopping collection.
-        if enabled {
-            inner.enabled.insert(browser.into());
-        } else {
-            inner.enabled.remove(browser);
-        }
-        if previous != enabled {
+        if inner.enabled.remove(browser) {
             *inner.epochs.entry(browser.into()).or_default() += 1;
+            inner.pending_pause_browsers.insert(browser.into());
         }
-        let result = (|| -> Result<Value> {
-            if enabled || previous {
-                self.load(&mut inner)?;
-            }
+    }
+
+    pub fn configure(&self, browser: &str, enabled: bool) -> Result<Value> {
+        let _io = self.io_lock.lock().unwrap();
+        let (transitioned, sessions) = {
+            let mut inner = self.inner.lock().unwrap();
+            let previous = inner.enabled.contains(browser);
+            let was_pending_pause = inner.pending_pause_browsers.remove(browser);
+            // Apply the privacy preference before any fallible I/O. A broken disk
+            // must never prevent the user from stopping collection.
             if enabled {
+                inner.enabled.insert(browser.into());
+            } else {
+                inner.enabled.remove(browser);
+            }
+            if previous != enabled {
+                *inner.epochs.entry(browser.into()).or_default() += 1;
+            }
+            let transitioned = if enabled {
+                !previous
+            } else {
+                previous || was_pending_pause
+            };
+            let sessions: Vec<_> = inner
+                .sessions
+                .iter()
+                .filter(|(_, l)| l.session.browser_id.0 == browser)
+                .map(|(id, live)| (id.clone(), live.run_id.clone()))
+                .collect();
+            (transitioned, sessions)
+        };
+        let result = (|| -> Result<Value> {
+            if enabled {
+                self.ensure_loaded_unlocked()?;
                 let root = self.directory()?;
                 fs::create_dir_all(root)?;
                 #[cfg(unix)]
@@ -327,30 +455,30 @@ impl AuditStore {
                 probe.write_all(b"audit-ready\n")?;
                 probe.as_file().sync_data()?;
             }
-            let sessions: Vec<_> = inner
-                .sessions
-                .iter()
-                .filter(|(_, l)| l.session.browser_id.0 == browser)
-                .map(|(id, live)| (id.clone(), live.run_id.clone()))
-                .collect();
             for (sid, run) in sessions {
-                if let Some(id) = run.filter(|_| previous != enabled) {
-                    self.append(
-                        &mut inner,
+                if let Some(id) = run.filter(|_| transitioned) {
+                    self.append_unlocked(
                         &id,
                         event(if enabled { "resumed" } else { "paused" }, None, json!({})),
                     )?;
                 } else if enabled {
-                    self.ensure_run(&mut inner, &sid, true)?;
+                    self.ensure_run_unlocked(&sid, true)?;
                 }
             }
-            if inner.loaded {
-                self.prune(&mut inner, now_ms())?;
+            if enabled && self.inner.lock().unwrap().loaded {
+                self.prune_unlocked(now_ms())?;
             }
-            Ok(json!({"enabled": enabled, "directory": self.directory()?, "retention_days": 30}))
+            let directory = if enabled {
+                Some(self.directory()?.to_path_buf())
+            } else {
+                self.root.clone()
+            };
+            Ok(json!({"enabled": enabled, "directory": directory, "retention_days": 30}))
         })();
         if result.is_err() {
-            inner
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
                 .insert(browser.into(), "write_failed".into());
         }
@@ -365,121 +493,168 @@ impl AuditStore {
         method: &Method,
         params: &Value,
     ) -> Result<Option<Ticket>> {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(id) = self.ensure_run(&mut inner, session_id, true)? else {
+        if !self.needs_begin(session_id) {
+            return Ok(None);
+        }
+        let _io = self.io_lock.lock().unwrap();
+        let Some(id) = self.ensure_run_unlocked(session_id, true)? else {
             return Ok(None);
         };
-        let browser = inner.runs[&id].browser_id.clone();
-        let ticket = Ticket {
-            run_id: id,
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            epoch: *inner.epochs.get(&browser).unwrap_or(&0),
-            browser_id: browser.clone(),
+        let ticket = {
+            let inner = self.inner.lock().unwrap();
+            let browser = inner.runs[&id].browser_id.clone();
+            Ticket {
+                run_id: id,
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                epoch: *inner.epochs.get(&browser).unwrap_or(&0),
+                browser_id: browser,
+            }
         };
         let mut data = safe_params(params);
         data["method"] = serde_json::to_value(method)?;
         if self
-            .append(
-                &mut inner,
+            .append_unlocked(
                 &ticket.run_id,
                 event("operation_started", Some(&ticket.operation_id), data),
             )
             .is_err()
         {
-            inner.last_error.insert(browser, "write_failed".into());
+            self.inner
+                .lock()
+                .unwrap()
+                .last_error
+                .insert(ticket.browser_id, "write_failed".into());
             bail!("Operation audit could not be saved; action was not dispatched");
         }
-        inner
+        self.inner
+            .lock()
+            .unwrap()
             .pending
             .insert(ticket.operation_id.clone(), ticket.clone());
         Ok(Some(ticket))
     }
 
     pub fn finish(&self, ticket: Ticket, body: &ResponseBody) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.pending.remove(&ticket.operation_id);
-        // A disable/re-enable during the call leaves the result explicitly unknown.
-        if !inner.enabled.contains(&ticket.browser_id)
-            || inner.epochs.get(&ticket.browser_id).copied().unwrap_or(0) != ticket.epoch
-        {
+        let _io = self.io_lock.lock().unwrap();
+        let should_append = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.pending.remove(&ticket.operation_id);
+            // A disable/re-enable during the call leaves the result explicitly unknown.
+            inner.enabled.contains(&ticket.browser_id)
+                && inner.epochs.get(&ticket.browser_id).copied().unwrap_or(0) == ticket.epoch
+        };
+        if !should_append {
             return;
         }
         let data = safe_outcome(body);
         if self
-            .append(
-                &mut inner,
+            .append_unlocked(
                 &ticket.run_id,
                 event("operation_finished", Some(&ticket.operation_id), data),
             )
             .is_err()
         {
-            inner
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
                 .insert(ticket.browser_id, "write_failed".into());
         }
     }
 
-    pub fn context(&self, browser: &str, data: &Value) {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(ticket) = data
-            .get("operation_id")
-            .and_then(Value::as_str)
-            .and_then(|id| inner.pending.get(id))
-            .cloned()
-        else {
-            return;
-        };
+    /// Capture the matching in-flight audit ticket without touching `io_lock`.
+    /// Callers on the WS pump loop call this synchronously before reading the
+    /// next frame so a subsequent `Frame::Response` cannot race `finish()`
+    /// ahead of context capture.
+    pub fn prepare_context(&self, browser: &str, data: &AuditContextEvent) -> Option<Ticket> {
+        let inner = self.inner.lock().unwrap();
+        let ticket = inner.pending.get(&data.operation_id)?;
         if ticket.browser_id != browser
             || !inner.enabled.contains(browser)
             || inner.epochs.get(browser).copied().unwrap_or(0) != ticket.epoch
         {
-            return;
+            return None;
+        }
+        Some(ticket.clone())
+    }
+
+    pub fn write_context_with_ticket(&self, ticket: Ticket, data: &AuditContextEvent) {
+        let _io = self.io_lock.lock().unwrap();
+        {
+            let inner = self.inner.lock().unwrap();
+            if !inner.enabled.contains(&ticket.browser_id)
+                || inner.epochs.get(&ticket.browser_id).copied().unwrap_or(0) != ticket.epoch
+                || !inner.runs.contains_key(&ticket.run_id)
+            {
+                return;
+            }
         }
         let mut metadata = json!({});
-        if let Some(url) = data.get("url").and_then(Value::as_str).and_then(safe_url) {
+        if let Some(url) = data.url.as_deref().and_then(safe_url) {
             metadata["page_url"] = json!(url);
         }
-        if let Some(target) = data.get("target").and_then(Value::as_str) {
+        if let Some(target) = data.target.as_deref() {
             metadata["target"] = json!(safe_text(target));
         }
-        if let Some(tab) = data.get("tab_id").and_then(Value::as_i64) {
+        if let Some(tab) = data.tab_id {
             metadata["tab_id"] = json!(tab);
         }
         if self
-            .append(
-                &mut inner,
+            .append_unlocked(
                 &ticket.run_id,
                 event("context", Some(&ticket.operation_id), metadata),
             )
             .is_err()
         {
-            inner
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
-                .insert(browser.into(), "write_failed".into());
+                .insert(ticket.browser_id, "write_failed".into());
+        }
+    }
+
+    pub fn context(&self, browser: &str, data: &AuditContextEvent) {
+        if let Some(ticket) = self.prepare_context(browser, data) {
+            self.write_context_with_ticket(ticket, data);
         }
     }
 
     pub fn marker(&self, session_id: &str, kind: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(live) = inner.sessions.get(session_id).cloned() else {
+        if !self.needs_marker(session_id) {
             return;
+        }
+        let _io = self.io_lock.lock().unwrap();
+        let target = {
+            let inner = self.inner.lock().unwrap();
+            let Some(live) = inner.sessions.get(session_id).cloned() else {
+                return;
+            };
+            inner
+                .enabled
+                .contains(&live.session.browser_id.0)
+                .then_some(live.run_id.map(|id| (id, live.session.browser_id.0)))
+                .flatten()
         };
-        if inner.enabled.contains(&live.session.browser_id.0)
-            && let Some(id) = live.run_id
+        if let Some((id, browser_id)) = target
             && self
-                .append(&mut inner, &id, event(kind, None, json!({})))
+                .append_unlocked(&id, event(kind, None, json!({})))
                 .is_err()
         {
-            inner
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
-                .insert(live.session.browser_id.0, "write_failed".into());
+                .insert(browser_id, "write_failed".into());
         }
     }
 
     pub fn list(&self, browser: &str, offset: usize, limit: usize) -> Result<Value> {
-        let mut inner = self.inner.lock().unwrap();
-        self.load(&mut inner)?;
-        self.prune(&mut inner, now_ms())?;
+        let _io = self.io_lock.lock().unwrap();
+        self.ensure_loaded_unlocked()?;
+        self.prune_unlocked(now_ms())?;
+        let directory = self.directory()?;
+        let inner = self.inner.lock().unwrap();
         let mut runs: Vec<_> = inner
             .runs
             .values()
@@ -495,55 +670,162 @@ impl AuditStore {
             .collect();
         Ok(
             json!({"runs": page, "total": total, "enabled": inner.enabled.contains(browser),
-            "error": inner.last_error.get(browser), "directory": self.directory()?, "retention_days": 30}),
+            "error": inner.last_error.get(browser), "directory": directory, "retention_days": 30}),
         )
     }
 
     pub fn get(&self, browser: &str, id: &str, offset: usize, limit: usize) -> Result<Value> {
-        let mut inner = self.inner.lock().unwrap();
-        self.load(&mut inner)?;
-        let run = inner
-            .runs
-            .get(id)
-            .filter(|run| run.browser_id == browser)
-            .context("Audit task not found")?;
+        let _io = self.io_lock.lock().unwrap();
+        self.ensure_loaded_unlocked()?;
+        let (run, pending_operations, error) = {
+            let inner = self.inner.lock().unwrap();
+            let run = inner
+                .runs
+                .get(id)
+                .filter(|run| run.browser_id == browser)
+                .cloned()
+                .context("Audit task not found")?;
+            let pending_operations: Vec<String> = inner
+                .pending
+                .values()
+                .filter(|ticket| {
+                    ticket.run_id == id
+                        && inner.enabled.contains(browser)
+                        && inner.epochs.get(browser).copied().unwrap_or(0) == ticket.epoch
+                })
+                .map(|ticket| ticket.operation_id.clone())
+                .collect();
+            let error = inner.last_error.get(browser).cloned();
+            (run, pending_operations, error)
+        };
         let events = read_events(&self.path(id)?)?;
         let total = events.len();
-        let pending_operations: Vec<_> = inner
-            .pending
-            .values()
-            .filter(|ticket| {
-                ticket.run_id == id
-                    && inner.enabled.contains(browser)
-                    && inner.epochs.get(browser).copied().unwrap_or(0) == ticket.epoch
-            })
-            .map(|ticket| &ticket.operation_id)
-            .collect();
         let page: Vec<_> = events
             .into_iter()
             .skip(offset)
             .take(limit.clamp(1, 500))
             .collect();
         Ok(json!({"run": run, "events": page, "total": total,
-                "pending_operations": pending_operations, "error": inner.last_error.get(browser)}))
+                "pending_operations": pending_operations, "error": error}))
     }
 
     pub fn delete(&self, browser: &str, id: &str) -> Result<Value> {
-        let mut inner = self.inner.lock().unwrap();
-        self.load(&mut inner)?;
-        let run = inner
-            .runs
-            .get(id)
-            .filter(|run| run.browser_id == browser)
-            .context("Audit task not found")?;
-        if run.status == "running" || inner.pending.values().any(|ticket| ticket.run_id == id) {
-            bail!("Cannot delete an active audit task");
+        let _io = self.io_lock.lock().unwrap();
+        self.ensure_loaded_unlocked()?;
+        {
+            let inner = self.inner.lock().unwrap();
+            let run = inner
+                .runs
+                .get(id)
+                .filter(|run| run.browser_id == browser)
+                .context("Audit task not found")?;
+            if run.status == "running" || inner.pending.values().any(|ticket| ticket.run_id == id) {
+                bail!("Cannot delete an active audit task");
+            }
         }
-        fs::remove_file(self.path(id)?)?;
-        inner.runs.remove(id);
+        match fs::remove_file(self.path(id)?) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+        self.inner.lock().unwrap().runs.remove(id);
         Ok(json!({"deleted": true}))
     }
 
+    fn prune_unlocked(&self, now: i64) -> Result<()> {
+        let cutoff_ms = now.saturating_sub(RETENTION_MS);
+        let expired: Vec<_> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .runs
+                .values()
+                .filter(|run| {
+                    run.status != "running"
+                        && run.updated_at < cutoff_ms
+                        && !inner.pending.values().any(|ticket| ticket.run_id == run.id)
+                })
+                .map(|run| run.id.clone())
+                .collect()
+        };
+        for id in expired {
+            let remove_res = self
+                .path(&id)
+                .and_then(|path| match fs::remove_file(&path) {
+                    Ok(()) => Ok(()),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(err) => Err(err.into()),
+                });
+            match remove_res {
+                Ok(()) => {
+                    self.inner.lock().unwrap().runs.remove(&id);
+                }
+                Err(err) => {
+                    tracing::warn!(audit_id = %id, %err, "failed to prune expired audit file");
+                }
+            }
+        }
+        // Also enforce the 30-day retention cap on unindexed/corrupt `*.jsonl`
+        // files skipped during `ensure_loaded_unlocked()`, using filesystem mtime.
+        if let Ok(root) = self.directory()
+            && root.exists()
+            && let Ok(entries) = fs::read_dir(root)
+        {
+            let protected: HashSet<String> = {
+                let inner = self.inner.lock().unwrap();
+                inner
+                    .runs
+                    .keys()
+                    .cloned()
+                    .chain(inner.sessions.values().filter_map(|s| s.run_id.clone()))
+                    .chain(
+                        inner
+                            .closing_sessions
+                            .values()
+                            .filter_map(|s| s.run_id.clone()),
+                    )
+                    .chain(inner.pending.values().map(|ticket| ticket.run_id.clone()))
+                    .collect()
+            };
+            for entry in entries.flatten() {
+                if !entry.file_type().is_ok_and(|ft| ft.is_file()) {
+                    continue;
+                }
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if protected.contains(stem) {
+                    continue;
+                }
+                let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
+                    continue;
+                };
+                let modified_ms = match modified.duration_since(UNIX_EPOCH) {
+                    Ok(dur) => i64::try_from(dur.as_millis()).unwrap_or(i64::MAX),
+                    Err(_) => 0,
+                };
+                if modified_ms < cutoff_ms {
+                    match fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                %err,
+                                "failed to prune expired unindexed audit file"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn prune(&self, inner: &mut Inner, now: i64) -> Result<()> {
         let expired: Vec<_> = inner
             .runs
@@ -555,11 +837,40 @@ impl AuditStore {
             if inner.pending.values().any(|ticket| ticket.run_id == id) {
                 continue;
             }
-            fs::remove_file(self.path(&id)?)?;
-            inner.runs.remove(&id);
+            match fs::remove_file(self.path(&id)?) {
+                Ok(()) => {
+                    inner.runs.remove(&id);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    inner.runs.remove(&id);
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
         Ok(())
     }
+}
+
+fn load_run_file(path: &Path) -> Result<Option<AuditRun>> {
+    let events = read_events(path)?;
+    let Some(first) = events.first() else {
+        return Ok(None);
+    };
+    if first.kind != "started" {
+        bail!("Invalid audit file header");
+    }
+    let mut run: AuditRun = serde_json::from_value(first.data.clone())?;
+    if path.file_stem().and_then(|s| s.to_str()) != Some(&run.id) {
+        bail!("Invalid audit file identity");
+    }
+    for event in events.iter().skip(1) {
+        project(&mut run, event);
+    }
+    // A daemon restart cannot prove the old browser task completed.
+    if run.status == "running" {
+        run.status = "interrupted".into();
+    }
+    Ok(Some(run))
 }
 
 fn event(kind: &str, operation_id: Option<&str>, data: Value) -> AuditEvent {
@@ -680,10 +991,10 @@ fn safe_outcome(body: &ResponseBody) -> Value {
                     data[key] = value.clone();
                 }
             }
-            if let Some(outcome) = value.get("outcome").and_then(Value::as_str) {
-                if ["done", "cancelled", "timeout", "disabled", "completed"].contains(&outcome) {
-                    data["outcome"] = json!(outcome);
-                }
+            if let Some(outcome) = value.get("outcome").and_then(Value::as_str)
+                && ["done", "cancelled", "timeout", "disabled", "completed"].contains(&outcome)
+            {
+                data["outcome"] = json!(outcome);
             }
             if let Some(dialogs) = value.get("dialogs").and_then(Value::as_array) {
                 data["dialogs_handled"] = json!(dialogs.len());
@@ -776,9 +1087,22 @@ mod tests {
         let ticket = store.begin("abcd", &Method::ToolFill, &json!({"ref":"@e2", "value":"raw-password", "selector":"[value=raw-password]", "url":"https://user:raw-password@example.com/private-path?token=raw-password#raw-password"})).unwrap().unwrap();
         store.context(
             "browser-b",
-            &json!({"operation_id":ticket.operation_id, "target":"foreign-target"}),
+            &AuditContextEvent {
+                operation_id: ticket.operation_id.clone(),
+                tab_id: None,
+                url: None,
+                target: Some("foreign-target".into()),
+            },
         );
-        store.context("browser-a", &json!({"operation_id":ticket.operation_id, "target":"Search", "url":"https://example.com/private-path"}));
+        store.context(
+            "browser-a",
+            &AuditContextEvent {
+                operation_id: ticket.operation_id.clone(),
+                tab_id: None,
+                url: Some("https://example.com/private-path".into()),
+                target: Some("Search".into()),
+            },
+        );
         store.finish(
             ticket,
             &ResponseBody::Ok(json!({"value":"raw-password", "text":"private-page", "ok":true})),
@@ -1001,5 +1325,51 @@ mod tests {
         );
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(store.get("browser-a", &id, 0, 100).unwrap()["total"], 1);
+    }
+
+    #[test]
+    fn prune_removes_expired_corrupt_jsonl_while_keeping_fresh_and_healthy_files() {
+        let (_temp, writer, session) = fixture();
+        writer.configure("browser-a", true).unwrap();
+        writer.session_started(&session);
+        writer.session_ended("abcd", "completed");
+        let healthy_id = run_id(&writer);
+        let root = writer.directory().unwrap().to_path_buf();
+
+        let expired_corrupt = root.join("corrupt-expired.jsonl");
+        {
+            let mut file = fs::File::create(&expired_corrupt).unwrap();
+            file.write_all(b"{truncated corrupt json\n").unwrap();
+            let old = SystemTime::now() - std::time::Duration::from_secs(31 * 24 * 60 * 60);
+            file.set_modified(old).unwrap();
+        }
+        let fresh_corrupt = root.join("corrupt-fresh.jsonl");
+        fs::write(&fresh_corrupt, b"{recent corrupt json\n").unwrap();
+        let unrelated_old = root.join("notes.txt");
+        {
+            let mut file = fs::File::create(&unrelated_old).unwrap();
+            file.write_all(b"keep me").unwrap();
+            let old = SystemTime::now() - std::time::Duration::from_secs(31 * 24 * 60 * 60);
+            file.set_modified(old).unwrap();
+        }
+
+        // Fresh store loads directory and runs `prune_unlocked(now_ms())`.
+        let reader = AuditStore::new(Some(root.to_path_buf()));
+        let listed = reader.list("browser-a", 0, 50).unwrap();
+        assert_eq!(listed["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["runs"][0]["id"], healthy_id);
+
+        assert!(
+            !expired_corrupt.exists(),
+            "corrupt .jsonl older than 30 days must be pruned"
+        );
+        assert!(
+            fresh_corrupt.exists(),
+            "recent corrupt .jsonl within 30 days should not be pruned prematurely"
+        );
+        assert!(
+            unrelated_old.exists(),
+            "non-.jsonl files must not be touched by audit retention pruning"
+        );
     }
 }

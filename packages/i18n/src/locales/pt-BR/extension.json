@@ -112,7 +112,11 @@
       "readFailed": "Não foi possível carregar as configurações. Reabra a extensão.",
       "writeFailed": "Não foi possível salvar. Suas configurações não foram alteradas. Tente novamente.",
       "confirmTabBorrowInfoLabel": "Sobre a confirmação de empréstimo de guia",
-      "requestHelpEnabledInfoLabel": "Sobre as solicitações de ajuda humana"
+      "requestHelpEnabledInfoLabel": "Sobre as solicitações de ajuda humana",
+      "openAgentWindowMinimized": "Abrir janelas do agente minimizadas",
+      "openAgentWindowMinimizedHint": "Quando ativado, novas janelas do agente em segundo plano iniciam diretamente minimizadas em vez de aparecer na tela. Quando desativado, abrem como janelas normais sem foco.",
+      "openAgentWindowMinimizedScope": "Salvo automaticamente para este perfil do navegador. Aplica-se a novas janelas do agente em segundo plano; sessões explícitas em primeiro plano e a gravação de ações continuam abrindo de forma visível.",
+      "openAgentWindowMinimizedInfoLabel": "Sobre abrir janelas do agente minimizadas"
     },
     "remoteLocal": "Mudar para local",
     "remotePairing": "Link de pareamento",
@@ -154,7 +158,7 @@
       "unavailableHint": "Conecte este perfil do navegador ao bsk para copiar as instruções.",
       "copyButton": "Copiar instruções",
       "copyFailed": "Não foi possível copiar as instruções. Tente novamente.",
-      "promptTemplate": "Para esta tarefa, use o BrowserSkill no navegador {{name}} (ID da instância: {{instanceId}}). Inicie cada nova sessão desta tarefa com a interface apropriada:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNo DeepSeek Harness, chame a ferramenta sem executar o comando CLI separadamente.\nSe esta instância não estiver conectada, pare e peça que eu reconecte este perfil. Não omita --browser / browser nem mude para outra instância.",
+      "promptTemplate": "Para esta tarefa, use o BrowserSkill no navegador {{name}} (ID da instância: {{instanceId}}). Inicie cada nova sessão desta tarefa com a interface apropriada:\nCLI: {{command}}\nMCP: {{toolCall}}\nCom ferramentas MCP, chame a ferramenta sem executar o comando CLI separadamente.\nSe esta instância não estiver conectada, pare e peça que eu reconecte este perfil. Não omita --browser / browser nem mude para outra instância.",
       "title": "Navegador atual",
       "unnamed": "Navegador sem nome"
     },
@@ -191,7 +195,8 @@
       "skipConfirm": "Qualquer programa local pode se passar pelo bsk e controlar este navegador. O bsk também deve permitir explicitamente conexões não verificadas.",
       "confirmSkip": "Confirmar",
       "settingsFailed": "Não foi possível salvar esta configuração. Tente novamente.",
-      "pairHint": "Execute bsk daemon pair e cole o link aqui. Links locais e remotos são reconhecidos automaticamente.",
+      "pairHint": "Execute o comando bsk daemon pair\nCole no campo o link completo exibido",
+      "pairInfoLabel": "Sobre o link de pareamento",
       "pairPreserves": "A conexão atual permanece disponível até que o novo pareamento seja concluído.",
       "replaceTitle": "Substituir pareamento?",
       "replaceConfirm": "Este bsk já está pareado. Uma substituição bem-sucedida encerrará as tarefas atuais. Se o link for rejeitado, o pareamento atual continuará válido.",
@@ -388,7 +393,21 @@
       "recordStop": "Parar gravação de operações",
       "recordAwait": "Aguardar gravação",
       "resize": "Redimensionar janela",
-      "emulate": "Alterar configurações de emulação"
+      "emulate": "Alterar configurações de emulação",
+      "cooperate": "Sincronizar guia compartilhada",
+      "sessionStart": "Iniciar sessão",
+      "sessionStop": "Encerrar sessão",
+      "screenshotFullPage": "Capturar tela inteira",
+      "screenshotRead": "Ler captura de tela",
+      "screenshotRelease": "Liberar captura de tela",
+      "debug": "Executar ação de depuração",
+      "video": "Gerenciar gravação de vídeo",
+      "dialogStatus": "Verificar estado do diálogo",
+      "dialogAccept": "Aceitar diálogo",
+      "dialogDismiss": "Dispensar diálogo",
+      "waitForElement": "Aguardar elemento",
+      "operationAwait": "Aguardar operação",
+      "operationCancel": "Cancelar operação"
     }
   },
   "debug": {

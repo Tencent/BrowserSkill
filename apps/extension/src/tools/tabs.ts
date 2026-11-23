@@ -1,4 +1,39 @@
+import { sendTabMessageBounded } from "@/lib/runtime-content-scripts";
 import { withUiTeardown } from "@/session-manager/ui-activity";
+import type {
+  TabBorrowParams,
+  TabBorrowResult,
+  TabCloseParams,
+  TabCloseResult,
+  TabCreateParams,
+  TabCreateResult,
+  TabInfo,
+  TabListParams,
+  TabListResult,
+  TabReturnParams,
+  TabReturnResult,
+  TabScope,
+  TabSelectParams,
+  TabSelectResult,
+} from "@/transport/types";
+
+export type {
+  TabBorrowParams,
+  TabBorrowResult,
+  TabCloseParams,
+  TabCloseResult,
+  TabCreateParams,
+  TabCreateResult,
+  TabInfo,
+  TabListParams,
+  TabListResult,
+  TabReturnParams,
+  TabReturnResult,
+  TabScope,
+  TabSelectParams,
+  TabSelectResult,
+} from "@/transport/types";
+
 // Tab-tool handlers. M6 wired `tool.tab_list`; M8 adds the rest of
 // the tab namespace: `tab_create`, `tab_close`, `tab_select`,
 // `tab_borrow`, `tab_return`. The dispatcher routes each method to a
@@ -22,98 +57,6 @@ import { detectBrowserMeta } from "@/transport/handshake";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { type CdpRunner, cdpBlockedUrlReason, isRpcError, lookupSession } from "./shared";
-
-export type TabScope = "user" | "agent" | "all";
-
-/**
- * Mirror of bsk-protocol `TabInfo` (see
- * crates/bsk-protocol/src/tools/tabs.rs).
- */
-export interface TabInfo {
-  tab_id: number;
-  title?: string;
-  url?: string;
-  window_id?: number;
-  active?: boolean;
-  /**
-   * Where the tab sits relative to the requesting session: tabs in any
-   * window other than an Agent Window are `user`; tabs in this
-   * session's own Agent Window are `agent`. Tabs in *other* sessions'
-   * Agent Windows are filtered out entirely (cross-session isolation,
-   * design §6).
-   */
-  scope?: "user" | "agent";
-}
-
-export interface TabListParams {
-  session_id: string;
-  scope?: TabScope;
-}
-
-export interface TabListResult {
-  tabs: TabInfo[];
-}
-
-// --- M8 payload mirrors (bsk-protocol/src/tools/tabs.rs) ---
-
-export interface TabCreateParams {
-  session_id: string;
-  url?: string;
-  active?: boolean;
-  index?: number;
-}
-
-export interface TabCreateResult {
-  tab_id: number;
-  window_id: number;
-  url: string;
-}
-
-export interface TabCloseParams {
-  session_id: string;
-  tab_id: number;
-}
-
-export interface TabCloseResult {
-  tab_id: number;
-}
-
-export interface TabSelectParams {
-  session_id: string;
-  tab_id: number;
-}
-
-export interface TabSelectResult {
-  tab_id: number;
-  window_id: number;
-}
-
-export interface TabBorrowParams {
-  session_id: string;
-  tab_id: number;
-  /** Legacy input, ignored. The browser preference decides confirmation. */
-  confirm?: boolean;
-  confirmation_timeout_ms?: number;
-}
-
-export interface TabBorrowResult {
-  tab_id: number;
-  original_window_id: number;
-  original_index: number;
-  agent_window_id: number;
-}
-
-export interface TabReturnParams {
-  session_id: string;
-  tab_id: number;
-}
-
-export interface TabReturnResult {
-  tab_id: number;
-  returned_to_window_id: number;
-  returned_to_index: number;
-  fallback?: boolean;
-}
 
 const TAB_SCOPES = new Set<TabScope>(["user", "agent", "all"]);
 
@@ -153,8 +96,44 @@ export interface TabMutationApi {
   group?(options: chrome.tabs.GroupOptions): Promise<number>;
 }
 
+class TabCreateActivationCleanupError extends Error {
+  readonly tabId: number;
+  readonly activationError: unknown;
+  readonly cleanupError: unknown;
+
+  constructor(tabId: number, activationError: unknown, cleanupError: unknown) {
+    const primary =
+      activationError instanceof Error ? activationError.message : String(activationError);
+    const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+    super(`tab_create failed to activate tab ${tabId} (${primary}) and cleanup failed: ${cleanup}`);
+    this.name = "TabCreateActivationCleanupError";
+    this.tabId = tabId;
+    this.activationError = activationError;
+    this.cleanupError = cleanupError;
+  }
+}
+
 export const chromeTabMutationApi: TabMutationApi = {
-  create: (p) => chrome.tabs.create(p),
+  create: async (p) => {
+    if (p.active ?? true) {
+      // Creating an active tab directly in a background window steals OS window focus on macOS Chromium.
+      const tab = await chrome.tabs.create({ ...p, active: false });
+      if (typeof tab.id === "number") {
+        try {
+          return (await chrome.tabs.update(tab.id, { active: true })) ?? tab;
+        } catch (err) {
+          try {
+            await chrome.tabs.remove(tab.id);
+          } catch (cleanupErr) {
+            throw new TabCreateActivationCleanupError(tab.id, err, cleanupErr);
+          }
+          throw err;
+        }
+      }
+      return tab;
+    }
+    return chrome.tabs.create(p);
+  },
   remove: (id) => chrome.tabs.remove(id),
   update: (id, p) => chrome.tabs.update(id, p),
   get: (id) => chrome.tabs.get(id),
@@ -228,7 +207,7 @@ export const chromeAgentOverlayResetApi: AgentOverlayResetApi = {
       sessionId,
       ...nextOverlayVersion(),
     };
-    await chrome.tabs.sendMessage(tabId, message);
+    await sendTabMessageBounded(tabId, message);
   },
 };
 
@@ -349,20 +328,24 @@ export interface TabManagementDeps {
   /** Clears Agent-scoped overlays after a borrowed tab is returned. */
   agentOverlayReset?: AgentOverlayResetApi;
   /** Releases this session's CDP claim after a borrowed tab is returned. */
-  cdp?: Pick<CdpRunner, "acquireBackgroundExecution" | "releaseSessionTab" | "runBrowserMutation">;
+  cdp?: Partial<
+    Pick<CdpRunner, "acquireBackgroundExecution" | "releaseSessionTab" | "runBrowserMutation">
+  >;
   /** Runs after tab_return validation, before moving the borrowed tab. */
   beforeReturn?: (sessionId: string, tabId: number) => Promise<void>;
   /**
    * Reports whether `windowId` is any live session's Agent Window.
-   * `tab_return`'s fallback window picker uses this to avoid moving a
-   * returned borrowed tab into *another* session's Agent Window (Agent
-   * Windows are created with `type: "normal"`, so they otherwise match
-   * the `getLastFocused({ windowTypes: ["normal"] })` query). Production
-   * callers derive this from the `SessionManager`; the `() => false`
-   * default only preserves legacy behaviour for direct/test callers.
+   * `tab_return`'s fallback window picker requires this predicate so returning
+   * a borrowed tab can never move it into another session's Agent Window
+   * (Agent Windows are created with `type: "normal"`, so they otherwise match
+   * the `getLastFocused({ windowTypes: ["normal"] })` query).
    */
   isAgentWindowId?: (windowId: number) => boolean;
 }
+
+export type ReturnBorrowedTabDeps = TabManagementDeps & {
+  isAgentWindowId: (windowId: number) => boolean;
+};
 
 function mutateBrowser<T>(deps: TabManagementDeps, operation: () => Promise<T>): Promise<T> {
   return deps.cdp?.runBrowserMutation ? deps.cdp.runBrowserMutation(operation) : operation();
@@ -389,10 +372,6 @@ function getTabGroupsApi(deps: TabManagementDeps): ChromeTabGroupsApi | undefine
     };
   }
   return undefined;
-}
-
-function getIsAgentWindowId(deps: TabManagementDeps): (windowId: number) => boolean {
-  return deps.isAgentWindowId ?? (() => false);
 }
 
 function getAgentOverlayResetApi(deps: TabManagementDeps): AgentOverlayResetApi {
@@ -484,6 +463,19 @@ async function createAndClaimTab(
       return getTabsApi(deps).create(createProps);
     });
   } catch (err) {
+    if (err instanceof TabCreateActivationCleanupError) {
+      if (deps.isSessionLive?.() !== false) {
+        // Retain ownership when compensating removal failed so AgentWindowRouting
+        // never routes the orphan tab to user windows and session_stop can retry closing it.
+        ctx.agentCreatedTabs.add(err.tabId);
+      }
+      const cancelled = aborted(deps.signal, "tab_create", deps.isSessionLive);
+      if (cancelled && deps.isSessionLive?.() === false) return cancelled;
+      return rpcError("protocol_error", "cleanup_failed", err.message, {
+        resource_type: "tab",
+        resource_id: err.tabId,
+      });
+    }
     const cancelled = aborted(deps.signal, "tab_create", deps.isSessionLive);
     if (cancelled) return cancelled;
     return {
@@ -636,12 +628,6 @@ async function authoriseAgentTab(
   if (typeof tab.id !== "number" || typeof tab.windowId !== "number") {
     return { code: "not_found", message: `tab ${tabId} not found` };
   }
-  if (ctx.remote && !isAgentControlledTab(ctx, tabId)) {
-    return {
-      code: "permission_denied",
-      message: `${toolName}: borrow this tab before controlling it remotely`,
-    };
-  }
   const otherBorrower = manager.findBorrowingSession(tabId, ctx.sessionId);
   if (otherBorrower) {
     return rpcError(
@@ -650,14 +636,29 @@ async function authoriseAgentTab(
       `${toolName}: tab ${tabId} is borrowed by session ${otherBorrower}`,
     );
   }
-  if (tab.windowId === ctx.agentWindowId) {
-    return tab;
+  if (tab.windowId !== ctx.agentWindowId) {
+    if (ctx.remote && !isAgentControlledTab(ctx, tabId)) {
+      return {
+        code: "permission_denied",
+        message: `${toolName}: borrow this tab before controlling it remotely`,
+      };
+    }
+    return rpcError(
+      "permission_denied",
+      "agent_window_scope",
+      `${toolName}: tab ${tabId} is not in Agent Window ${ctx.agentWindowId}`,
+    );
   }
-  return rpcError(
-    "permission_denied",
-    "agent_window_scope",
-    `${toolName}: tab ${tabId} is not in Agent Window ${ctx.agentWindowId}`,
-  );
+  if (!isAgentControlledTab(ctx, tabId)) {
+    return rpcError(
+      "permission_denied",
+      "agent_window_scope",
+      ctx.remote
+        ? `${toolName}: borrow this tab before controlling it remotely`
+        : `${toolName}: tab ${tabId} is not controlled by this session`,
+    );
+  }
+  return tab;
 }
 
 // ---------------------------------------------------------------------------
@@ -716,6 +717,7 @@ export async function handleTabClose(
     // tab that's already gone (design §3.1).
     ctx.agentCreatedTabs.delete(params.tab_id);
     ctx.observedTabs?.delete(params.tab_id);
+    ctx.temporaryInputTabs?.delete(params.tab_id);
   } catch (err) {
     return {
       code: "protocol_error",
@@ -755,6 +757,7 @@ export async function handleTabSelect(
   }
   try {
     await mutateBrowser(deps, () => getTabsApi(deps).update(params.tab_id, { active: true }));
+    ctx.temporaryInputTabs?.delete(params.tab_id);
   } catch (err) {
     return {
       code: "protocol_error",
@@ -1145,6 +1148,18 @@ async function executeBorrowCore(
   if (p.manager.get(p.ctx.sessionId) !== p.ctx || aborted(p.signal, "tab_borrow")) {
     return { code: "cancelled", message: "tab_borrow session ended" };
   }
+  try {
+    await p.manager.stageBorrowedTab(p.ctx.sessionId, { tabId: p.tabId, ...snapshot });
+  } catch (err) {
+    return {
+      code: "protocol_error",
+      message: `tab_borrow: failed to persist return destination before move: ${describeError(err)}`,
+    };
+  }
+  if (p.manager.get(p.ctx.sessionId) !== p.ctx || aborted(p.signal, "tab_borrow")) {
+    await p.manager.unstageBorrowedTab(p.ctx.sessionId, p.tabId);
+    return { code: "cancelled", message: "tab_borrow session ended" };
+  }
   const moveErr = await moveTabForBorrow(
     p.tabsApi,
     p.tabId,
@@ -1155,7 +1170,13 @@ async function executeBorrowCore(
     p.signal,
     p.mutate,
   );
-  if (moveErr) return moveErr;
+  if (moveErr) {
+    const moveData = moveErr.data as { reason?: string; effect_state?: string } | undefined;
+    if (moveData?.reason !== "borrow_outcome_unknown" && moveData?.effect_state !== "unknown") {
+      await p.manager.unstageBorrowedTab(p.ctx.sessionId, p.tabId);
+    }
+    return moveErr;
+  }
 
   return snapshot;
 }
@@ -1280,6 +1301,7 @@ export async function handleTabBorrow(
           { effect_state: "unknown", tab_id: params.tab_id },
         );
       }
+      await manager.unstageBorrowedTab(ctx.sessionId, params.tab_id);
       return {
         code: "cancelled",
         message: `tab_borrow claim could not be committed: ${describeError(err)}`,
@@ -1309,7 +1331,9 @@ export async function handleTabBorrow(
       const rollback = await returnBorrowedTab(ctx, params.tab_id, {
         ...deps,
         // Returning an already moved tab is this transaction's rollback, not new input.
-        cdp: { releaseSessionTab: deps.cdp?.releaseSessionTab?.bind(deps.cdp) },
+        cdp: deps.cdp?.releaseSessionTab
+          ? { releaseSessionTab: deps.cdp.releaseSessionTab.bind(deps.cdp) }
+          : undefined,
         signal: undefined,
         isSessionLive: () => manager.get(ctx.sessionId) === ctx,
         isAgentWindowId: (id) => manager.findByWindowId(id) !== null,
@@ -1788,7 +1812,7 @@ async function restoreReturnedTabAttributes(
 export async function returnBorrowedTab(
   ctx: SessionContext,
   tabId: number,
-  deps: TabManagementDeps,
+  deps: ReturnBorrowedTabDeps,
 ): Promise<ReturnOutcome | RpcError> {
   return withUiTeardown(ctx, tabId, () => returnBorrowedTabCore(ctx, tabId, deps));
 }
@@ -1796,7 +1820,7 @@ export async function returnBorrowedTab(
 async function returnBorrowedTabCore(
   ctx: SessionContext,
   tabId: number,
-  deps: TabManagementDeps,
+  deps: ReturnBorrowedTabDeps,
 ): Promise<ReturnOutcome | RpcError> {
   const entry = ctx.borrowedTabs.get(tabId);
   if (!entry) {
@@ -1808,7 +1832,7 @@ async function returnBorrowedTabCore(
   const tabsApi = getTabsApi(deps);
   const windowsApi = getWindowsApi(deps);
   const tabGroupsApi = getTabGroupsApi(deps);
-  const isAgentWindowId = getIsAgentWindowId(deps);
+  const { isAgentWindowId } = deps;
   const alreadyCancelled = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (alreadyCancelled) return alreadyCancelled;
 

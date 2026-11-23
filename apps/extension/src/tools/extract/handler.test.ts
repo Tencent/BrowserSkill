@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { handleExtract } from "../extract";
 import type { RawCapture } from "./types";
 
@@ -51,15 +52,29 @@ async function setup() {
     }
     throw new Error("Unexpected CDP call: " + method);
   });
-  const cdp: CdpRunner = {
-    send: send as CdpRunner["send"],
-    getAttachmentId: () => state.attachment,
-    ensureAttachedToUrl: vi.fn(async () => {}),
-    getFrameGraph: vi.fn(async () => ({
-      rootFrameId: "root",
-      frames: [{ frameId: "root", target: { tabId: 7 }, url: tab.url }],
-    })),
-  };
+  const ensureAttachedToUrl = vi.fn(async () => {});
+  const getFrameDocuments = vi.fn<CdpRunner["getFrameDocuments"]>(async () => ({
+    rootFrameId: "root",
+    frames: [
+      {
+        handle: toFrameDocumentHandle(7, { frameId: "root", loaderId: "" }),
+        frameId: "root",
+        loaderId: "",
+        url: tab.url,
+        processKey: "root",
+        isOutOfProcess: false,
+      },
+    ],
+  }));
+  const cdp = Object.assign(
+    createStubCdpRunner({
+      send: send as CdpRunner["send"],
+      getAttachmentId: () => state.attachment,
+      ensureAttachedToUrl,
+      getFrameDocuments,
+    }),
+    { ensureAttachedToUrl, getFrameDocuments },
+  );
   const tabsApi = { get: vi.fn(async () => tab), query: vi.fn(async () => [tab]) };
   const run = (params: object = {}, signal?: AbortSignal) =>
     handleExtract(
@@ -152,5 +167,124 @@ describe("extraction lifecycle", () => {
     };
     expect(await h.run()).toMatchObject({ data: { reason: "extract_target_stale" } });
     expect(h.send.mock.calls.at(-1)?.[1]).toBe("Runtime.releaseObjectGroup");
+  });
+
+  it("searches child frames for --selector and rejects cross-frame selector ambiguity", async () => {
+    const h = await setup();
+    const rootHandle = toFrameDocumentHandle(7, { frameId: "root", loaderId: "L-root" });
+    const childHandle = toFrameDocumentHandle(7, { frameId: "child", loaderId: "L-child" });
+    h.cdp.getFrameDocuments.mockResolvedValue({
+      rootFrameId: "root",
+      frames: [
+        {
+          handle: rootHandle,
+          frameId: "root",
+          loaderId: "L-root",
+          url: "https://example.test/",
+          processKey: "root",
+          isOutOfProcess: false,
+        },
+        {
+          handle: childHandle,
+          frameId: "child",
+          parentFrameId: "root",
+          loaderId: "L-child",
+          ownerBackendNodeId: 55,
+          url: "https://child.example.test/",
+          processKey: "oopif:child",
+          isOutOfProcess: true,
+        },
+      ],
+    });
+
+    let rootMatches = false;
+    h.cdp.sendToFrame = vi.fn(async (handle, method, args) => {
+      if (method === "Page.createIsolatedWorld") {
+        return { executionContextId: handle.frameId === "child" ? 9 : 3 };
+      }
+      if (method === "Runtime.releaseObjectGroup") return {};
+      if (method === "Runtime.evaluate") {
+        return {
+          result: {
+            deepSerializedValue: {
+              type: "node",
+              value: { backendNodeId: handle.frameId === "child" ? 200 : 1 },
+            },
+          },
+        };
+      }
+      if (method === "DOM.resolveNode") return { object: { objectId: "owner-obj" } };
+      if (method === "Runtime.callFunctionOn") {
+        const params = args as { arguments?: unknown[]; functionDeclaration?: string };
+        if (params.functionDeclaration?.includes("checkVisibility")) {
+          return { result: { value: true } };
+        }
+        if (!params.arguments) {
+          return {
+            result: {
+              deepSerializedValue: {
+                type: "node",
+                value: { backendNodeId: handle.frameId === "child" ? 200 : 1 },
+              },
+            },
+          };
+        }
+        if (handle.frameId === "root" && !rootMatches) {
+          return {
+            result: {
+              value: {
+                frame_url: "https://example.test/",
+                title: "root",
+                captured_at: "2026-10-01T00:00:00Z",
+                rows: [],
+                items: [],
+                item_sources: [],
+                warnings: [],
+                truncated: false,
+                targets: [],
+                error: { reason: "selector_not_found", message: "not in root" },
+              },
+            },
+          };
+        }
+        return {
+          result: {
+            value: {
+              frame_url:
+                handle.frameId === "child"
+                  ? "https://child.example.test/"
+                  : "https://example.test/",
+              title: handle.frameId,
+              captured_at: "2026-10-01T00:00:00Z",
+              columns: [{ name: "Order", index: 0 }],
+              rows: [{ cells: ["#1001"] }],
+              items: [],
+              item_sources: [],
+              warnings: [],
+              truncated: false,
+              targets: [],
+            },
+          },
+        };
+      }
+      throw new Error(`Unexpected sendToFrame: ${method}`);
+    }) as CdpRunner["sendToFrame"];
+
+    const childOnly = await h.run({ action: "table", selector: "#orders-shadow-table" });
+    expect(childOnly).toMatchObject({
+      kind: "table",
+      source: {
+        frame_id: "child",
+        frame_url: "https://child.example.test/",
+        selector: "#orders-shadow-table",
+      },
+    });
+
+    // When both root and child frames match the same selector, extract rejects ambiguity cleanly.
+    rootMatches = true;
+    const ambiguous = await h.run({ action: "table", selector: "#orders-shadow-table" });
+    expect(ambiguous).toMatchObject({
+      data: { reason: "extract_target_ambiguous" },
+    });
   });
 });

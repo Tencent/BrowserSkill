@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_DAEMON_WS_URL } from "@/transport/generated/methods";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import { WSTransport } from "@/transport/ws-transport";
 import { ConnectionController } from "../connection-controller";
@@ -55,7 +56,7 @@ async function flush() {
 function setup(cleanup = vi.fn(async () => {})) {
   const sockets: Socket[] = [];
   const transport = new WSTransport({
-    url: "ws://127.0.0.1:52800",
+    url: DEFAULT_DAEMON_WS_URL,
     webSocketFactory: (url) => {
       const socket = new Socket(url);
       sockets.push(socket);
@@ -168,7 +169,7 @@ describe("connection reconfiguration with WSTransport", () => {
     gate.resolve();
     await Promise.all([first, last]);
     expect(s.sockets.map((socket) => socket.url)).toEqual([
-      "ws://127.0.0.1:52800",
+      DEFAULT_DAEMON_WS_URL,
       "ws://127.0.0.1:53300",
     ]);
     await s.configure(53300);
@@ -331,5 +332,41 @@ describe("connection reconfiguration with WSTransport", () => {
     await flush();
     expect(s.controller.snapshot().state).toBe("connected");
     expect(s.controller.snapshot().lastError).toBeNull();
+  });
+
+  it("resets local authentication backoff immediately when reconfiguring to a new port or remote endpoint", async () => {
+    const sockets: Socket[] = [];
+    const authenticate = vi.fn().mockRejectedValue(new Error("server_unverified"));
+    const transport = new WSTransport({
+      url: DEFAULT_DAEMON_WS_URL,
+      authenticate,
+      webSocketFactory: (url) => {
+        const socket = new Socket(url);
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+    });
+    const controller = new ConnectionController();
+    await controller.attach(transport, { name: "Chrome", version: "125" }, true);
+    sockets[0].open();
+    await flush();
+
+    // Transport is now in 30s+ auth backoff on the old local endpoint.
+    await expect(transport.connect()).rejects.toThrow("backoff");
+
+    // Reconfiguring to a remote endpoint (or different local port) clears auth backoff immediately.
+    authenticate.mockResolvedValue(undefined);
+    const remoteUrl = "wss://gateway.example/api/v1/local-browser/extension";
+    await controller.reconfigureTransport(`remote:${remoteUrl}`, () => {
+      transport.setUrl(remoteUrl);
+    });
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1].url).toBe(remoteUrl);
+    sockets[1].open();
+    await flush();
+    sockets[1].reply();
+    await flush();
+    expect(controller.snapshot().state).toBe("connected");
+    expect(controller.snapshot().lastError).toBeNull();
   });
 });

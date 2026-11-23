@@ -28,7 +28,7 @@ use crate::daemon::{
     browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT, EXTENSION_CONNECT_WAIT},
     info as daemon_info, ipc, lockfile, paths,
     probe::{self, PROBE_TIMEOUT, Probe},
-    sessions::{StopSessionError, forget_session, stop_session},
+    sessions::StopSessionError,
     state::{DaemonState, PROTOCOL_VERSION},
     ws,
 };
@@ -174,7 +174,7 @@ pub(crate) fn start_detached(exe: &Path, args: &StartArgs) -> Result<daemon_info
         return Ok(daemon.info);
     }
 
-    start_background_at(exe, args, deadline)
+    start_background_at(exe, args, deadline).map(|(info, _)| info)
 }
 
 /// Whether this process can start a daemon that outlives it, as
@@ -221,7 +221,7 @@ pub(crate) fn start_owned(
 pub(crate) fn start_background(
     args: &StartArgs,
     deadline: Instant,
-) -> Result<daemon_info::DaemonInfo> {
+) -> Result<(daemon_info::DaemonInfo, String)> {
     let exe = std::env::current_exe().context("locate daemon executable")?;
     start_background_at(&exe, args, deadline)
 }
@@ -230,7 +230,7 @@ fn start_background_at(
     exe: &Path,
     args: &StartArgs,
     deadline: Instant,
-) -> Result<daemon_info::DaemonInfo> {
+) -> Result<(daemon_info::DaemonInfo, String)> {
     anyhow::ensure!(
         Instant::now() < deadline,
         "daemon startup deadline exceeded"
@@ -243,7 +243,7 @@ fn wait_for_background(
     mut child: DaemonChild,
     args: &StartArgs,
     deadline: Instant,
-) -> Result<daemon_info::DaemonInfo> {
+) -> Result<(daemon_info::DaemonInfo, String)> {
     let result = probe::wait_for_ready(deadline.saturating_duration_since(Instant::now()));
     let daemon = match result {
         Ok(daemon) => daemon,
@@ -270,7 +270,7 @@ fn wait_for_background(
             daemon.status.ws_port
         );
     }
-    Ok(daemon.info)
+    Ok((daemon.info, daemon.status.protocol_version))
 }
 
 // Automatic startup now makes the daemon a direct child of a business CLI.
@@ -506,6 +506,7 @@ enum StopReason {
     Signal,
     Idle,
     Handover,
+    WsServerExited(anyhow::Error),
 }
 
 /// The auto-update a daemon is applying. Its blocking steps store each result
@@ -587,6 +588,7 @@ fn serve(
             .context("initialize transfer staging")?;
         let session_idle_task = spawn_session_idle_reaper(Arc::clone(&state));
         let browser_liveness_task = spawn_browser_liveness_reaper(Arc::clone(&state));
+        let log_prune_task = spawn_daily_log_pruner();
         let ws_addr = SocketAddr::new(cfg.listen_ip(), cfg.ws_port);
         let ws_handle = ws::WsServer::new(Arc::clone(&state))
             .bind(ws_addr)
@@ -611,7 +613,9 @@ fn serve(
             ws_port,
             env!("CARGO_PKG_VERSION"),
         )
-        .with_host_managed(!cfg.detached);
+        .with_host_managed(!cfg.detached)
+        .with_protocol_version(crate::daemon::state::PROTOCOL_VERSION)
+        .with_ipc_envelope(true);
         daemon_info::write(&info).context("write daemon.json")?;
         info!(
             pid = info.pid,
@@ -673,7 +677,7 @@ fn serve(
             daemon_version: env!("CARGO_PKG_VERSION"),
             protocol_version: PROTOCOL_VERSION,
         };
-        let handler = ipc::full_handler(status, Arc::clone(&state));
+        let handler = ipc::full_envelope_handler(status, Arc::clone(&state));
 
         let ipc_activity = {
             let activity = activity.clone();
@@ -751,6 +755,8 @@ fn serve(
         // check task is never missed (Notify stores one permit).
         let restart_notified = restart_notify.notified();
         tokio::pin!(restart_notified);
+        let ws_shutdown = ws_handle.shutdown;
+        let mut ws_task = ws_handle.task;
 
         let reason = tokio::select! {
             _ = wait_for_shutdown() => {
@@ -767,6 +773,14 @@ fn serve(
                 info!("bsk daemon releasing its endpoints to the replacement (auto-update)");
                 StopReason::Handover
             }
+            ws_res = &mut ws_task => {
+                let err = match ws_res {
+                    Ok(()) => anyhow::anyhow!("WS server task exited unexpectedly"),
+                    Err(join_err) => anyhow::anyhow!("WS server task failed: {join_err}"),
+                };
+                error!(error = %err, "bsk daemon shutting down because WS server exited");
+                StopReason::WsServerExited(err)
+            }
         };
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
 
@@ -776,14 +790,23 @@ fn serve(
         let _ = session_idle_task.await;
         browser_liveness_task.abort();
         let _ = browser_liveness_task.await;
+        log_prune_task.abort();
+        let _ = log_prune_task.await;
         update_check_task.abort();
         let _ = update_check_task.await;
-        ws_handle.shutdown.notify_waiters();
-        let _ = ws_handle.task.await;
+        if !matches!(reason, StopReason::WsServerExited(_)) {
+            // There is one accept loop. Retain a permit if it is between accepts
+            // or has not polled yet; notify_waiters would lose that shutdown.
+            ws_shutdown.notify_one();
+            let _ = ws_task.await;
+        }
 
         let _ = daemon_info::remove();
         let _ = std::fs::remove_file(&sock_path);
-        Result::<StopReason>::Ok(reason)
+        match reason {
+            StopReason::WsServerExited(err) => Err(err),
+            other => Result::<StopReason>::Ok(other),
+        }
         }
     });
     // Dropping the runtime waits for blocking update steps still running, so
@@ -858,9 +881,10 @@ pub(crate) fn spawn_browser_liveness_reaper(
                         idle_secs = client.idle_for().as_secs(),
                         "reaping unresponsive browser (no heartbeat within liveness window)"
                     );
+                    client.close();
                     state.purge_sessions_of_browser(
                         &client.id,
-                        crate::rpc_reason::BROWSER_DISCONNECTED,
+                        bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
                         "purged session on browser liveness timeout",
                     );
                 }
@@ -895,36 +919,24 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                 {
                     continue;
                 }
-                match stop_session(
-                    &state.browsers,
-                    &state.sessions,
-                    &state.tool_queues,
-                    &state.session_interrupts,
-                    &session_id,
-                    Duration::from_secs(10),
-                    None,
-                )
-                .await
+                let idle_reason = bsk_protocol::RpcErrorReason::SessionIdleTimeout.as_str();
+                match state
+                    .stop_session_with_reason(
+                        &session_id,
+                        idle_reason,
+                        Duration::from_secs(10),
+                        None,
+                    )
+                    .await
                 {
                     Ok(_) => {
-                        state.transfers.release_session(&session_id.0);
-                        state
-                            .sessions
-                            .remember_end(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
                         info!(session = %session_id, "idle session stopped");
                     }
                     Err(StopSessionError::SessionBusy | StopSessionError::Stopping) => {
                         debug!(session = %session_id, "idle session still active; retrying later");
                     }
                     Err(StopSessionError::NotFound | StopSessionError::BrowserGone) => {
-                        forget_session(
-                            &state.sessions,
-                            &state.tool_queues,
-                            &state.session_interrupts,
-                            &session_id,
-                            None,
-                        );
-                        state.transfers.release_session(&session_id.0);
+                        state.teardown_session(&session_id, idle_reason);
                     }
                     Err(err) => {
                         warn!(session = %session_id, error = %err, "failed to stop idle session");
@@ -1064,6 +1076,7 @@ fn spawn_update_check_task(
                                 exe_path.as_deref(),
                                 &transaction,
                                 &stopping,
+                                &state.sessions,
                             )
                         },
                     )?;
@@ -1073,6 +1086,17 @@ fn spawn_update_check_task(
             };
             let (outcome, not_writable, last_attempt) = match result {
                 Ok(Ok(checked)) => checked,
+                Ok(Err(err))
+                    if err
+                        .chain()
+                        .any(|cause| cause.is::<update::DeferredForActiveSessions>()) =>
+                {
+                    info!(
+                        sessions = state.sessions.len(),
+                        "auto-update postponed: agent session(s) became active during download; will retry on the next tick"
+                    );
+                    continue;
+                }
                 Ok(Err(err)) => {
                     warn!(error = %format_args!("{err:#}"), "periodic update check failed");
                     continue;
@@ -1155,9 +1179,10 @@ fn spawn_update_check_task(
                     );
                     let exe = exe_path.clone();
                     let config = state.config.clone();
+                    let sessions = Arc::clone(&state.sessions);
                     let transaction = Arc::clone(&transaction);
                     let started = tokio::task::spawn_blocking(move || {
-                        start_replacement(&transaction, exe.as_deref(), &config, ws_port)
+                        start_replacement(&transaction, exe.as_deref(), &config, ws_port, &sessions)
                     })
                     .await;
                     match started {
@@ -1183,38 +1208,51 @@ struct Prepared {
 
 /// Install and self-check `candidate` under the update lock, leaving the
 /// result in `transaction`. Blocking. Installs nothing once the daemon
-/// started stopping; any later stop finds the result in `transaction`.
+/// started stopping or agent sessions became active during download; any later
+/// stop finds the result in `transaction`.
 fn prepare_handover(
     candidate: &crate::cli::update::UpdateCandidate,
     exe: Option<&Path>,
     transaction: &TransactionSlot,
     stopping: &std::sync::atomic::AtomicBool,
+    sessions: &crate::daemon::sessions::SessionRegistry,
 ) -> Result<()> {
     use crate::cli::update::{
-        self,
+        self, InstallAbort,
         state::{UpdateLock, UpdateRecord, UpdateSource},
     };
     let exe = exe.context("current executable unknown")?;
     let lock = UpdateLock::try_acquire(exe)?;
     let mut record = UpdateRecord::start(UpdateSource::Daemon, &candidate.latest, exe);
     record.save();
-    let cancelled = || stopping.load(std::sync::atomic::Ordering::SeqCst);
-    let installed = update::self_install_candidate(candidate, exe, &mut record, lock, &cancelled)?;
+    let abort = || {
+        if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            Some(InstallAbort::Stopping)
+        } else if !sessions.is_empty() {
+            Some(InstallAbort::SessionsActive)
+        } else {
+            None
+        }
+    };
+    let installed = update::self_install_candidate(candidate, exe, &mut record, lock, &abort)?;
     *lock_slot(transaction) = Some(Transaction::Installed(Prepared { installed, record }));
     Ok(())
 }
 
 /// Spawn the replacement daemon from the new executable, on the port this
-/// daemon serves, and leave it in `transaction`. If it cannot even be
-/// started, restore the previous executable and keep serving. Returns
-/// whether a replacement waits for the lock. Blocking.
+/// daemon serves, and leave it in `transaction`. Re-checks under the session
+/// registry lock that zero sessions became active during install/self-check;
+/// if sessions are active, restores the previous executable cleanly without
+/// triggering a restart or failure cooldown. If the replacement cannot be
+/// started, restores the previous executable and keeps serving. Blocking.
 fn start_replacement(
     transaction: &TransactionSlot,
     exe: Option<&Path>,
     config: &DaemonConfig,
     ws_port: u16,
+    sessions: &crate::daemon::sessions::SessionRegistry,
 ) -> bool {
-    use crate::cli::update::state::{Recovery, UpdateStage};
+    use crate::cli::update::state::{Recovery, UpdateRecord, UpdateStage};
     let mut slot = lock_slot(transaction);
     let Some(Transaction::Installed(Prepared {
         installed,
@@ -1223,6 +1261,23 @@ fn start_replacement(
     else {
         return false;
     };
+    if !sessions.try_begin_handover() {
+        info!(
+            sessions = sessions.len(),
+            "auto-update handover deferred: agent session(s) became active during install; restoring previous executable"
+        );
+        match installed.restore() {
+            Ok(()) => UpdateRecord::clear(),
+            Err(err) => {
+                warn!(
+                    error = %format_args!("{err:#}"),
+                    "could not restore previous executable after deferring handover"
+                );
+                record.fail(&err, installed.restore_failed());
+            }
+        }
+        return false;
+    }
     record.enter(UpdateStage::Handover);
     let spawned = exe
         .context("current executable unknown")
@@ -1248,6 +1303,7 @@ fn start_replacement(
             true
         }
         Err(err) => {
+            sessions.cancel_handover();
             warn!(
                 error = %format_args!("{err:#}"),
                 "could not start the replacement daemon; restoring the previous executable and serving on"
@@ -1359,6 +1415,71 @@ fn record_ipc_close(activity: &Arc<Mutex<IpcActivityState>>) {
     lock_activity(activity).closed(Instant::now());
 }
 
+/// Maximum number of daily rotated `daemon.log.YYYY-MM-DD` files retained.
+const MAX_DAEMON_LOG_FILES: usize = 14;
+
+fn is_daily_daemon_log_name(name: &str) -> bool {
+    let Some(date) = name.strip_prefix("daemon.log.") else {
+        return false;
+    };
+    let bytes = date.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(idx, byte)| idx == 4 || idx == 7 || byte.is_ascii_digit())
+}
+
+/// Prune daily rotated `daemon.log.YYYY-MM-DD` files beyond `max_files` on
+/// startup (`tracing-appender`'s `max_log_files` only prunes on midnight
+/// rollover, which idle-exiting local daemons rarely cross).
+fn prune_old_daemon_logs(dir: &Path, max_files: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut rotated: Vec<(String, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_file() {
+                return None;
+            }
+            let name = entry.file_name().into_string().ok()?;
+            is_daily_daemon_log_name(&name).then(|| (name, entry.path()))
+        })
+        .collect();
+    if rotated.len() <= max_files {
+        return;
+    }
+    rotated.sort_by(|a, b| a.0.cmp(&b.0));
+    let excess = rotated.len() - max_files;
+    for (_, path) in rotated.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Periodic daily cleanup task for long-running daemons (e.g. `--mode server`)
+/// so daily rotated `daemon.log.YYYY-MM-DD` files stay capped at
+/// [`MAX_DAEMON_LOG_FILES`] without deleting unrelated `daemon.log.*` files.
+fn spawn_daily_log_pruner() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let day = Duration::from_secs(24 * 60 * 60);
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + day, day);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if let Ok(dir) = paths::log_dir() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    prune_old_daemon_logs(&dir, MAX_DAEMON_LOG_FILES);
+                })
+                .await;
+            }
+        }
+    })
+}
+
 /// Initialise tracing for the daemon: write a daily-rotated file in
 /// `~/.bsk/` and (best-effort) also mirror to stderr. Returns the
 /// non-blocking writer guard which must outlive the daemon loop.
@@ -1371,14 +1492,26 @@ fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let (file_layer, guard) = if let Some(dir) = log_dir {
-        let appender = tracing_appender::rolling::daily(&dir, "daemon.log");
-        let (writer, guard) = tracing_appender::non_blocking(appender);
-        let layer = fmt::layer()
-            .with_writer(writer)
-            .with_ansi(false)
-            .with_target(true)
-            .json();
-        (Some(layer), Some(guard))
+        // Deliberately avoid `tracing-appender`'s prefix-based `max_log_files`
+        // (which can prune unrelated `daemon.log.*` files); prune strictly
+        // date-stamped `daemon.log.YYYY-MM-DD` files here and daily in `serve`.
+        match tracing_appender::rolling::Builder::new()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("daemon.log")
+            .build(&dir)
+        {
+            Ok(appender) => {
+                prune_old_daemon_logs(&dir, MAX_DAEMON_LOG_FILES);
+                let (writer, guard) = tracing_appender::non_blocking(appender);
+                let layer = fmt::layer()
+                    .with_writer(writer)
+                    .with_ansi(false)
+                    .with_target(true)
+                    .json();
+                (Some(layer), Some(guard))
+            }
+            Err(_) => (None, None),
+        }
     } else {
         (None, None)
     };
@@ -1805,6 +1938,103 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn background_start_losing_race_preserves_winner_protocol_and_legacy_envelope_mode() {
+        use serde_json::{Value, json};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::background_start_losing_race_preserves_winner_protocol_and_legacy_envelope_mode"
+            ),
+            || {
+                let home = paths::bsk_home().unwrap();
+                let winner_sock = home.join("winner-legacy.sock");
+                let winner_sock_for_srv = winner_sock.clone();
+                let winner_sock_str = winner_sock.to_string_lossy().into_owned();
+                let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
+                let srv = std::thread::spawn(move || {
+                    let srv_rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    srv_rt.block_on(async move {
+                        let listener = UnixListener::bind(&winner_sock_for_srv).unwrap();
+                        ready_tx.send(()).unwrap();
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let (read, mut write) = stream.into_split();
+                        let mut reader = BufReader::new(read);
+                        let mut line = String::new();
+                        reader.read_line(&mut line).await.unwrap();
+                        let raw: Value = serde_json::from_str(line.trim_end()).unwrap();
+                        assert_eq!(raw["method"], "system.status");
+                        // Concurrent pre-envelope winner advertises protocol "2.1" and omits `ipc_envelope`.
+                        let reply = json!({
+                            "id": raw["id"],
+                            "result": {
+                                "daemon_version": "0.5.0",
+                                "protocol_version": "2.1",
+                                "pid": std::process::id(),
+                                "uptime_secs": 1,
+                                "ws_port": 52892,
+                                "sock_path": winner_sock_str,
+                                "browsers": [],
+                                "sessions": []
+                            }
+                        });
+                        let mut bytes = serde_json::to_vec(&reply).unwrap();
+                        bytes.push(b'\n');
+                        write.write_all(&bytes).await.unwrap();
+                        write.flush().await.unwrap();
+                    });
+                });
+
+                ready_rx.recv().unwrap();
+                let winner_info = daemon_info::DaemonInfo::now(
+                    std::process::id(),
+                    winner_sock.clone(),
+                    52892,
+                    "0.5.0",
+                )
+                .with_protocol_version("2.1");
+                daemon_info::write(&winner_info).unwrap();
+
+                // Simulate our losing launcher child exiting on `daemon.lock` while the
+                // concurrent pre-envelope winner answers `wait_for_ready`.
+                let losing_child = std::process::Command::new("/bin/sh")
+                    .args(["-c", "exit 0"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+
+                // Seed stale `true` beforehand to prove `wait_for_background` -> `probe`
+                // records `false` and `ensure_daemon_with_protocol` never clobbers it back to `true`.
+                crate::ipc_client::record_endpoint_ipc_envelope(&winner_sock, true);
+
+                let (resolved_info, resolved_proto) = wait_for_background(
+                    losing_child,
+                    &StartArgs::default(),
+                    Instant::now() + Duration::from_secs(3),
+                )
+                .unwrap();
+                srv.join().unwrap();
+
+                assert_eq!(resolved_info.sock_path, winner_sock);
+                assert_eq!(resolved_proto, "2.1");
+                assert!(
+                    !crate::ipc_client::endpoint_supports_ipc_envelope(&winner_sock),
+                    "winning pre-envelope daemon must keep ipc_envelope=false"
+                );
+            },
+        );
+    }
+
     #[test]
     fn stopping_rejects_replacement_metadata_with_or_without_a_held_lock() {
         crate::daemon::test_support::isolated(
@@ -1883,7 +2113,7 @@ mod tests {
         }
         .server_config()
         .unwrap();
-        assert!(restart_start_args(&cfg, 52800).is_err());
+        assert!(restart_start_args(&cfg, bsk_protocol::DEFAULT_DAEMON_PORT).is_err());
     }
 
     #[test]
@@ -1917,5 +2147,77 @@ mod tests {
         activity.touch(request_at);
         assert!(!activity.should_exit_for_idle(request_at + Duration::from_secs(9), idle));
         assert!(activity.should_exit_for_idle(request_at + idle, idle));
+    }
+
+    #[test]
+    fn prune_old_daemon_logs_keeps_newest_daily_files_and_preserves_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for day in 1..=20 {
+            let name = format!("daemon.log.2026-11-{day:02}");
+            std::fs::write(dir.path().join(name), b"line\n").unwrap();
+        }
+        std::fs::write(dir.path().join("other.log"), b"keep\n").unwrap();
+        std::fs::write(dir.path().join("daemon.log.custom"), b"keep\n").unwrap();
+
+        prune_old_daemon_logs(dir.path(), MAX_DAEMON_LOG_FILES);
+
+        for day in 1..=6 {
+            assert!(
+                !dir.path()
+                    .join(format!("daemon.log.2026-11-{day:02}"))
+                    .exists(),
+                "oldest daily log day {day} should have been pruned"
+            );
+        }
+        for day in 7..=20 {
+            assert!(
+                dir.path()
+                    .join(format!("daemon.log.2026-11-{day:02}"))
+                    .exists(),
+                "recent daily log day {day} should be retained"
+            );
+        }
+        assert!(dir.path().join("other.log").exists());
+        assert!(dir.path().join("daemon.log.custom").exists());
+    }
+
+    #[test]
+    fn handover_gate_blocks_restart_when_sessions_active_and_rejects_new_starts_when_draining() {
+        use crate::daemon::browsers::BrowserId;
+        use crate::daemon::sessions::{Session, SessionId, SessionRegistry};
+
+        let sessions = SessionRegistry::new();
+        sessions.insert(Session {
+            controller: None,
+            interaction: None,
+            id: SessionId("live".into()),
+            browser_id: BrowserId("b1".into()),
+            agent_window_id: Some(1),
+            created_at_ms: 0,
+        });
+        assert!(
+            !sessions.try_begin_handover(),
+            "handover must defer when a session became active during update download/install"
+        );
+
+        sessions.remove(&SessionId("live".into()));
+        assert!(
+            sessions.try_begin_handover(),
+            "handover gate must arm once zero sessions remain"
+        );
+        assert!(
+            sessions
+                .reserve_id(BrowserId("b1".into()), 8, || 0)
+                .is_none(),
+            "new session starts must be rejected while handover is draining"
+        );
+
+        sessions.cancel_handover();
+        assert!(
+            sessions
+                .reserve_id(BrowserId("b1".into()), 8, || 0)
+                .is_some(),
+            "cancelling handover after spawn failure must restore session creation"
+        );
     }
 }

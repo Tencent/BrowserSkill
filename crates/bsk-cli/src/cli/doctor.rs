@@ -486,6 +486,9 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
     if !details.is_empty() {
         details.insert(0, format!("bundled bsk v{}", env!("CARGO_PKG_VERSION")));
     }
+    if !report.updated.is_empty() {
+        details.push("reload the updated BrowserSkill skill in the agent, or start a new agent conversation; an existing conversation may retain old instructions".into());
+    }
     let detail = details.join("; ");
 
     if !report.errors.is_empty() {
@@ -570,24 +573,35 @@ fn check_version_compatible(status: Option<&StatusResult>) -> CheckResult {
     let Some(status) = status else {
         return CheckResult::fail(name, "daemon status unavailable", "start the daemon first");
     };
-    let ok = status.protocol_version == PROTOCOL_VERSION;
-    if ok {
-        CheckResult::ok(
+    match bsk_protocol::evaluate_handshake_compat(
+        &status.protocol_version,
+        None,
+        PROTOCOL_VERSION,
+        bsk_protocol::catalog::MIN_COMPATIBLE_PROTOCOL,
+    ) {
+        bsk_protocol::HandshakeCompat::Ok => CheckResult::ok(
             name,
             format!(
                 "daemon protocol {} (app {})",
                 status.protocol_version, status.daemon_version
             ),
-        )
-    } else {
-        CheckResult::fail(
+        ),
+        bsk_protocol::HandshakeCompat::Skew => CheckResult::warn(
+            name,
+            format!(
+                "daemon protocol {} and CLI protocol {} differ within compatible minor range",
+                status.protocol_version, PROTOCOL_VERSION
+            ),
+            "upgrade and restart the older component if any newer option is unavailable",
+        ),
+        bsk_protocol::HandshakeCompat::Reject { reason } => CheckResult::fail(
             name,
             format!(
                 "daemon protocol {} (expected {}), app {}",
                 status.protocol_version, PROTOCOL_VERSION, status.daemon_version
             ),
-            "upgrade or restart bsk so CLI and daemon speak the same protocol version",
-        )
+            format!("{reason}; update bsk and restart its daemon (`bsk daemon stop`)"),
+        ),
     }
 }
 
@@ -824,7 +838,7 @@ mod m2_tests {
         StatusResult {
             local_auth: None,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
-            protocol_version: "1.0".into(),
+            protocol_version: "2.0".into(),
             pid: 1,
             uptime_secs: 0,
             ws_port: 0,
@@ -832,6 +846,7 @@ mod m2_tests {
             browsers,
             sessions: Vec::new(),
             version_skew_browsers: skew,
+            ipc_envelope: true,
         }
     }
 
@@ -1251,7 +1266,7 @@ mod m2_tests {
             session_count: 1,
             connected_at_ms: 1,
             version_skew: false,
-            extension_protocol_version: "1.0".into(),
+            extension_protocol_version: "2.0".into(),
             unresponsive: true,
         };
         let status = fake_status(vec![entry.clone()], Vec::new());
@@ -1289,7 +1304,7 @@ mod m2_tests {
                 session_count: 0,
                 connected_at_ms: 1,
                 version_skew: false,
-                extension_protocol_version: "1.0".into(),
+                extension_protocol_version: "2.0".into(),
                 unresponsive: false,
             }],
             Vec::new(),
@@ -1311,7 +1326,7 @@ mod m2_tests {
                 session_count: 0,
                 connected_at_ms: 1,
                 version_skew: true,
-                extension_protocol_version: "1.1".into(),
+                extension_protocol_version: "2.1".into(),
                 unresponsive: false,
             }],
             vec![VersionSkewEntry {
@@ -1320,8 +1335,8 @@ mod m2_tests {
                 label: "Personal".into(),
                 server_version: env!("CARGO_PKG_VERSION").into(),
                 client_version: "0.0.9".into(),
-                server_protocol_version: "1.0".into(),
-                client_protocol_version: "1.1".into(),
+                server_protocol_version: "2.0".into(),
+                client_protocol_version: "2.1".into(),
             }],
         );
         let check = check_browsers_protocol_compatible(Some(&status));

@@ -112,7 +112,11 @@
       "readFailed": "Impossible de charger les paramètres. Rouvrez l'extension.",
       "writeFailed": "Enregistrement impossible. Vos paramètres n'ont pas changé. Réessayez.",
       "confirmTabBorrowInfoLabel": "À propos de la confirmation d'emprunt d'onglet",
-      "requestHelpEnabledInfoLabel": "À propos des demandes d'aide humaine"
+      "requestHelpEnabledInfoLabel": "À propos des demandes d'aide humaine",
+      "openAgentWindowMinimized": "Ouvrir les fenêtres de l'agent réduites",
+      "openAgentWindowMinimizedHint": "Si activé, les nouvelles fenêtres de l'agent en arrière-plan démarrent directement réduites au lieu d'apparaître à l'écran. Si désactivé, elles s'ouvrent comme des fenêtres normales sans focus.",
+      "openAgentWindowMinimizedScope": "Enregistré automatiquement pour ce profil de navigateur. S'applique aux nouvelles fenêtres de l'agent en arrière-plan ; les sessions explicites au premier plan et l'enregistrement d'actions s'ouvrent toujours visiblement.",
+      "openAgentWindowMinimizedInfoLabel": "À propos de l'ouverture réduite des fenêtres de l'agent"
     },
     "remoteLocal": "Basculer en local",
     "remotePairing": "Lien de couplage",
@@ -154,7 +158,7 @@
       "unavailableHint": "Connectez ce profil de navigateur à bsk pour copier ses instructions.",
       "copyButton": "Copier les instructions",
       "copyFailed": "Impossible de copier les instructions. Réessayez.",
-      "promptTemplate": "Pour cette tâche, utilise BrowserSkill dans le navigateur {{name}} (ID d’instance : {{instanceId}}). Démarre chaque nouvelle session de cette tâche avec l'interface appropriée :\nCLI : {{command}}\nDeepSeek Harness : {{toolCall}}\nDans DeepSeek Harness, appelle l'outil sans exécuter séparément la commande CLI.\nSi cette instance n'est pas connectée, arrête-toi et demande-moi de reconnecter ce profil. N'omets pas --browser / browser et ne passe pas à une autre instance.",
+      "promptTemplate": "Pour cette tâche, utilise BrowserSkill dans le navigateur {{name}} (ID d’instance : {{instanceId}}). Démarre chaque nouvelle session de cette tâche avec l'interface appropriée :\nCLI : {{command}}\nMCP : {{toolCall}}\nAvec les outils MCP, appelle l'outil sans exécuter séparément la commande CLI.\nSi cette instance n'est pas connectée, arrête-toi et demande-moi de reconnecter ce profil. N'omets pas --browser / browser et ne passe pas à une autre instance.",
       "title": "Navigateur actuel",
       "unnamed": "Navigateur sans nom"
     },
@@ -191,7 +195,8 @@
       "skipConfirm": "Un programme local pourrait se faire passer pour bsk et contrôler ce navigateur. bsk doit aussi autoriser explicitement les connexions non vérifiées.",
       "confirmSkip": "Confirmer",
       "settingsFailed": "Impossible d’enregistrer ce réglage. Réessayez.",
-      "pairHint": "Exécutez bsk daemon pair et collez le lien ici. Les liens locaux et distants sont reconnus automatiquement.",
+      "pairHint": "Exécutez la commande bsk daemon pair\nCollez dans le champ le lien complet affiché",
+      "pairInfoLabel": "À propos du lien de couplage",
       "pairPreserves": "La connexion actuelle reste disponible jusqu’à la réussite de la nouvelle association.",
       "replaceTitle": "Remplacer l’association ?",
       "replaceConfirm": "Ce bsk est déjà associé. Un remplacement réussi mettra fin aux tâches en cours. Si le lien est refusé, l’association actuelle reste valide.",
@@ -388,7 +393,21 @@
       "recordStop": "Arrêter l'enregistrement des opérations",
       "recordAwait": "Attendre l'enregistrement",
       "resize": "Redimensionner la fenêtre",
-      "emulate": "Modifier les paramètres d'émulation"
+      "emulate": "Modifier les paramètres d'émulation",
+      "cooperate": "Synchroniser l'onglet partagé",
+      "sessionStart": "Démarrer la session",
+      "sessionStop": "Arrêter la session",
+      "screenshotFullPage": "Capturer la page entière",
+      "screenshotRead": "Lire la capture",
+      "screenshotRelease": "Libérer la capture",
+      "debug": "Exécuter une action de débogage",
+      "video": "Gérer l'enregistrement vidéo",
+      "dialogStatus": "Vérifier l'état du dialogue",
+      "dialogAccept": "Accepter le dialogue",
+      "dialogDismiss": "Ignorer le dialogue",
+      "waitForElement": "Attendre l'élément",
+      "operationAwait": "Attendre l'opération",
+      "operationCancel": "Annuler l'opération"
     }
   },
   "debug": {

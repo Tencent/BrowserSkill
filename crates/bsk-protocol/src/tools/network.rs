@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkParams {
     pub session_id: String,
     /// Optional target tab. Defaults to the Agent Window's currently active tab.
@@ -20,6 +21,9 @@ pub struct NetworkParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_text_chars: Option<u32>,
+    /// Optional cooperation context validated by the extension without renewing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -60,7 +64,7 @@ pub struct NetworkEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NetworkResult {
     pub tab_id: i64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub entries: Vec<NetworkEntry>,
     pub next_since: u64,
     #[serde(default)]
@@ -80,6 +84,7 @@ mod tests {
             since: None,
             limit: None,
             max_text_chars: None,
+            context_id: None,
         };
         let value = serde_json::to_value(&params).unwrap();
         assert_eq!(value["session_id"], "aa11");

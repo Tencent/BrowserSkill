@@ -15,12 +15,12 @@ protocol 1.5 components. The extension's port must match the private test daemon
 ```sh
 cargo build --locked -p bsk --bin bsk
 BSK_DAEMON_WS_URL=ws://127.0.0.1:52837 pnpm --filter @browser-skill/extension build
-BSK_DIALOG_CHROME='/absolute/path/to/Chrome for Testing' \
+BSK_TEST_CHROME='/absolute/path/to/Chrome for Testing' \
   BSK_DIALOG_TEST_TIMEOUT=1 \
   node evals/browser/cases/regression/js-dialog-control/run.mjs
 ```
 
-Set `BSK_DIALOG_BSK` and `BSK_DIALOG_EXTENSION` to override the default binary and
+Set `BSK_TEST_CLI` and `BSK_DIALOG_EXTENSION` to override the default binary and
 build paths. `BSK_DIALOG_OUTPUT` defaults to the ignored
 `evals/browser/results/js-dialog-control` directory. `BSK_DIALOG_TEST_TIMEOUT=1`
 adds the real 60-second unanswered-dialog test; omit it for the shorter run.
@@ -59,8 +59,8 @@ debug hooks would otherwise block.
 
 This is an executable regression with agent-selected test answers. It verifies
 that the agent has the controls to decide; it does not benchmark how an LLM
-chooses an answer on arbitrary websites. DSH model-facing action routing and
-preservation of receipt identities have separate plugin tests.
+chooses an answer on arbitrary websites. MCP model-facing action routing and
+preservation of receipt identities are covered by the MCP server tests.
 
 The CI browser-video job also builds the isolated dialog extension and runs this
 regression under a virtual display, including the real 60-second decision deadline.

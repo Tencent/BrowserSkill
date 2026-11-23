@@ -1,18 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "RecordStartParams",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
+  "additionalProperties": false,
   "properties": {
     "max_page_tokens": {
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     },
     "purpose": {
       "type": [
@@ -29,28 +25,12 @@
     "session_id": {
       "type": "string"
     },
-    "supports_tab_switch_steps": {
-      "description": "Client can decode the v3 `switch_tab` step variant.",
+    "tab_id": {
+      "format": "int64",
       "type": [
-        "boolean",
+        "integer",
         "null"
       ]
-    },
-    "tab_id": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "int64"
-    },
-    "trace_version": {
-      "description": "Desired trace export format. Omitted means v2; `3` requests v3.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
     },
     "url": {
       "type": [
@@ -58,5 +38,10 @@
         "null"
       ]
     }
-  }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "RecordStartParams",
+  "type": "object"
 }
