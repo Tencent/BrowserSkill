@@ -1,31 +1,14 @@
+import { openCredentialDatabase } from "./credential-db";
 import { REMOTE_ENDPOINT_KEY, type RemoteEndpoint, readRemoteEndpoint } from "./remote-endpoint";
 
 /** Only this non-secret revision is exposed through chrome.storage.local. */
 export const REMOTE_CONNECTION_REVISION = "bsk_remote_connection_revision";
 export const REMOTE_CONNECTION_MODE = "bsk_connection_mode";
-const DATABASE = "bsk-remote-authorization";
 const STORE = "connection";
 const MIGRATING = "bsk_remote_storage_migrating";
 
-function openDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(STORE);
-    request.onerror = () => reject(request.error);
-    let blocked = false;
-    request.onblocked = () => {
-      blocked = true;
-      reject(new Error("Remote authorization storage is blocked"));
-    };
-    request.onsuccess = () => {
-      if (blocked) request.result.close();
-      else resolve(request.result);
-    };
-  });
-}
-
 async function storedEndpoint(write?: { value: RemoteEndpoint | null }): Promise<unknown> {
-  const database = await openDatabase();
+  const database = await openCredentialDatabase();
   try {
     return await new Promise((resolve, reject) => {
       const transaction = database.transaction(STORE, write ? "readwrite" : "readonly");
@@ -81,8 +64,7 @@ export async function writeRemoteConnection(endpoint: RemoteEndpoint | null): Pr
       [REMOTE_CONNECTION_MODE]: "local",
       [REMOTE_CONNECTION_REVISION]: crypto.randomUUID(),
     });
-    // A stale private record cannot become active while local mode is selected.
-    await storedEndpoint({ value: null }).catch(() => {});
+    // Keep the private grant so switching back before expiry needs no new link.
   }
 }
 
@@ -106,4 +88,10 @@ export function initializeRemoteStorage(): Promise<void> {
     throw error;
   });
   return initialization;
+}
+
+/** Read inactive remote authorization without selecting it or renewing it. */
+export async function readSavedRemoteConnection(): Promise<RemoteEndpoint | null> {
+  await initializeRemoteStorage();
+  return readRemoteEndpoint(await storedEndpoint());
 }

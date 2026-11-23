@@ -7,12 +7,10 @@ import {
 import {
   isRecordFrameStartMessage,
   RECORD_FRAME_PORT,
-  RECORD_FRAME_QUERY,
-  RECORD_FRAME_START,
   type RecordFramePortMessage,
-  type RecordFrameQueryResponse,
   type RecordFrameStartMessage,
 } from "@/lib/recording/frame-bridge";
+import { isExtensionOverlayNode, scanSubtreeForShadowRootsAndSubframes } from "../dom-primitives";
 import { type RecordCaptureController, startRecordCapture } from "../record-capture";
 import { RecordStepDelivery } from "../record-step-delivery";
 
@@ -23,6 +21,8 @@ interface ActiveFrameRecording {
   delivery: RecordStepDelivery;
   capture: RecordCaptureController;
   marker: RecordingDocumentMarker;
+  subframeObserver: MutationObserver;
+  stopped: boolean;
 }
 
 const RECORD_FRAME_REGISTER_TIMEOUT_MS = 5_000;
@@ -35,7 +35,11 @@ export class RecordFrameAgent {
   async start(
     message: RecordFrameStartMessage,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
-    if (this.#active?.requestId === message.requestId) return { ok: true };
+    if (this.#active?.requestId === message.requestId) {
+      return this.#active.stopped
+        ? { ok: false, error: "recording document is stopping" }
+        : { ok: true };
+    }
     if (this.#disposed) return { ok: false, error: "recording document is disposed" };
     if (this.#startPromise) {
       await this.#startPromise;
@@ -54,15 +58,27 @@ export class RecordFrameAgent {
   cancel(requestId: string): void {
     const active = this.#active;
     if (!active || active.requestId !== requestId) return;
-    active.capture.dispose();
-    active.marker.restore();
-    active.port.disconnect();
-    this.#active = null;
+    this.#teardown(active, true);
   }
 
   dispose(): void {
     this.#disposed = true;
     if (this.#active) this.cancel(this.#active.requestId);
+  }
+
+  #teardown(active: ActiveFrameRecording, disconnectPort: boolean): void {
+    if (this.#active !== active) return;
+    this.#active = null;
+    active.subframeObserver.disconnect();
+    active.capture.dispose();
+    active.marker.restore();
+    if (disconnectPort) {
+      try {
+        active.port.disconnect();
+      } catch {
+        // Ignore already-closed ports.
+      }
+    }
   }
 
   async #start(
@@ -95,6 +111,43 @@ export class RecordFrameAgent {
       },
       { captureNavigation: window.top === window },
     );
+    let subframeNotifyScheduled = false;
+    const observedSubframeRoots = new WeakSet<Node>();
+    const observeSubframeRoot = (shadowOrRoot: Node) => {
+      if (observedSubframeRoots.has(shadowOrRoot)) return;
+      observedSubframeRoots.add(shadowOrRoot);
+      subframeObserver.observe(shadowOrRoot, { childList: true, subtree: true });
+    };
+    const subframeObserver = new MutationObserver((records) => {
+      const visited = new Set<Node>();
+      let addedSubframe = false;
+      for (const record of records) {
+        if (record.type !== "childList" || isExtensionOverlayNode(record.target)) continue;
+        for (const node of record.addedNodes) {
+          if (!(node instanceof Element) || isExtensionOverlayNode(node)) continue;
+          if (scanSubtreeForShadowRootsAndSubframes(node, observeSubframeRoot, visited)) {
+            addedSubframe = true;
+          }
+        }
+      }
+      if (subframeNotifyScheduled || !addedSubframe) return;
+      subframeNotifyScheduled = true;
+      queueMicrotask(() => {
+        subframeNotifyScheduled = false;
+        if (this.#active !== active) return;
+        try {
+          active.port.postMessage({
+            type: "subframe_added",
+            requestId: active.requestId,
+            producerId: active.producerId,
+          } satisfies RecordFramePortMessage);
+        } catch {
+          // Disconnected ports are cleaned up by `onDisconnect`.
+        }
+      });
+    });
+    observeSubframeRoot(root);
+    scanSubtreeForShadowRootsAndSubframes(root, observeSubframeRoot, new Set<Node>());
     const active: ActiveFrameRecording = {
       requestId: message.requestId,
       producerId,
@@ -102,29 +155,35 @@ export class RecordFrameAgent {
       delivery,
       capture,
       marker,
+      subframeObserver,
+      stopped: false,
     };
     this.#active = active;
     port.onMessage.addListener((raw: unknown) => {
       const command = raw as Partial<RecordFramePortMessage>;
       if (command.type === "stop" && command.requestId === active.requestId) {
         void this.#stop(active, command.commandId);
+      } else if (command.type === "cleanup" && command.requestId === active.requestId) {
+        this.#cleanup(active);
       } else if (command.type === "cancel" && command.requestId === active.requestId) {
         this.cancel(active.requestId);
       }
     });
     port.onDisconnect.addListener(() => {
-      if (this.#active !== active) return;
-      active.capture.dispose();
-      active.marker.restore();
-      this.#active = null;
+      this.#teardown(active, false);
     });
     return { ok: true };
   }
 
   async #stop(active: ActiveFrameRecording, commandId: string | undefined): Promise<void> {
     if (!commandId || this.#active !== active) return;
-    active.capture.dispose();
+    active.stopped = true;
+    active.subframeObserver.disconnect();
+    // Stop event capture and commit any dirty fill, but preserve password
+    // redaction markers and document identity until trailing VOM capture ends.
+    active.capture.stop();
     const succeeded = await active.delivery.flush();
+    if (this.#active !== active) return;
     try {
       active.port.postMessage({
         type: "stopped",
@@ -134,12 +193,26 @@ export class RecordFrameAgent {
         ...(succeeded ? {} : { error: "failed to deliver one or more recorded steps" }),
       } satisfies RecordFramePortMessage);
     } catch {
-      return;
+      // Disconnected ports are cleaned up by `onDisconnect`.
     }
-    if (!succeeded || this.#active !== active) return;
-    active.marker.restore();
-    this.#active = null;
-    active.port.disconnect();
+  }
+
+  #cleanup(active: ActiveFrameRecording): void {
+    if (this.#active !== active) return;
+    this.#teardown(active, false);
+    try {
+      active.port.postMessage({
+        type: "cleaned",
+        requestId: active.requestId,
+      } satisfies RecordFramePortMessage);
+    } catch {
+      // Ignore already-closed ports.
+    }
+    try {
+      active.port.disconnect();
+    } catch {
+      // Ignore already-closed ports.
+    }
   }
 }
 
@@ -192,17 +265,6 @@ export function attachRecordFrameAgent(): () => void {
     return true;
   };
   chrome.runtime.onMessage.addListener(onMessage);
-  void chrome.runtime
-    .sendMessage({ type: RECORD_FRAME_QUERY })
-    .then((response: RecordFrameQueryResponse | undefined) => {
-      if (!response?.active || !response.requestId || response.startedAtMs === undefined) return;
-      return agent.start({
-        type: RECORD_FRAME_START,
-        requestId: response.requestId,
-        startedAtMs: response.startedAtMs,
-      });
-    })
-    .catch(() => {});
   return () => {
     chrome.runtime.onMessage.removeListener(onMessage);
     agent.dispose();

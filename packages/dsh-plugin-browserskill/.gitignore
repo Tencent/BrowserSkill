@@ -1,5 +1,7 @@
-lib/
-src/client/bsk-ui.nomodule.css
-.bsk-ui.input.css
-.bsk-ui.raw.css
-src/skill-content.generated.ts
+/lib/
+/skill/
+/install.sh
+/install.ps1
+/AGENT_INSTALL.md
+/LICENSE
+/src/skill-content.generated.mts

@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { RECORD_FRAME_PORT, RECORD_FRAME_QUERY } from "../recording/frame-bridge";
-import { RecordFrameCoordinator } from "../recording/frame-coordinator";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RECORD_FRAME_PORT } from "../recording/frame-bridge";
+import {
+  RECORD_SUBFRAME_DEBOUNCE_MS,
+  RecordFrameCoordinator,
+} from "../recording/frame-coordinator";
 
 class ListenerSet<T extends (...args: never[]) => unknown> {
   readonly listeners = new Set<T>();
@@ -46,34 +49,71 @@ describe("RecordFrameCoordinator", () => {
     });
   });
 
-  it("answers child-document queries for the initial tab before it is armed", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("injects runtime record-frame before armTab and coalesces subframe bursts within 50ms", async () => {
+    vi.useFakeTimers();
+    let notifyFrameNavigation:
+      | ((frame: {
+          tabId: number;
+          frameId: number;
+          documentId?: string;
+          lifecycle: "committed" | "completed";
+        }) => void)
+      | undefined;
+    const frames = [{ frameId: 0, documentId: "top-document" }];
+    const getAllFrames = vi.fn(async () => [...frames]);
+    const sendToDocument = vi.fn(async () => ({ ok: true }));
+    const ensureInjected = vi.fn(async () => {});
     const coordinator = new RecordFrameCoordinator({
-      getAllFrames: async () => [],
-      sendToDocument: async () => ({ ok: true }),
+      getAllFrames,
+      sendToDocument,
+      ensureInjected,
+      subscribeFrameNavigation(listener) {
+        notifyFrameNavigation = listener;
+        return () => {};
+      },
     });
     coordinator.attach();
     coordinator.begin("rec-1", 10, 3);
+    await coordinator.armTab("rec-1", 3);
+    expect(ensureInjected).toHaveBeenCalledExactlyOnceWith(3);
 
-    const query = (tabId: number) => {
-      let response: unknown;
-      for (const listener of onMessage.listeners) {
-        listener(
-          { type: RECORD_FRAME_QUERY },
-          {
-            tab: { id: tabId },
-            frameId: 7,
-            documentId: "child-document",
-          } as chrome.runtime.MessageSender,
-          (value) => {
-            response = value;
-          },
-        );
-      }
-      return response;
-    };
+    const topPort = fakePort({
+      tab: { id: 3 },
+      frameId: 0,
+      documentId: "top-document",
+    } as chrome.runtime.MessageSender);
+    for (const listener of onConnect.listeners) listener(topPort.port);
+    topPort.receive({ type: "ready", requestId: "rec-1", producerId: "producer-top" });
 
-    expect(query(3)).toEqual({ active: true, requestId: "rec-1", startedAtMs: 10 });
-    expect(query(4)).toEqual({ active: false });
+    ensureInjected.mockClear();
+    getAllFrames.mockClear();
+    sendToDocument.mockClear();
+
+    // Simulate 5 dynamic about:blank / child iframes added & committed in a single burst:
+    for (let i = 1; i <= 5; i++) {
+      frames.push({ frameId: i, documentId: `child-${i}` });
+      topPort.receive({
+        type: "subframe_added",
+        requestId: "rec-1",
+        producerId: "producer-top",
+      });
+      notifyFrameNavigation?.({
+        tabId: 3,
+        frameId: i,
+        documentId: `child-${i}`,
+        lifecycle: "committed",
+      });
+    }
+    expect(getAllFrames).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(RECORD_SUBFRAME_DEBOUNCE_MS);
+    expect(ensureInjected).toHaveBeenCalledExactlyOnceWith(3);
+    expect(getAllFrames).toHaveBeenCalledExactlyOnceWith(3);
+    expect(sendToDocument).toHaveBeenCalledTimes(5);
   });
 
   it("starts a child Document that appears after the initial frame snapshot", async () => {
@@ -184,6 +224,13 @@ describe("RecordFrameCoordinator", () => {
     });
     await expect(stopping).resolves.toBe(true);
     expect(coordinator.sourceFor("rec-1", "producer-1", sender)).toBeNull();
+    expect(frame.port.disconnect).not.toHaveBeenCalled();
+
+    const cleaning = coordinator.cleanup("rec-1");
+    expect(frame.messages).toContainEqual({ type: "cleanup", requestId: "rec-1" });
+    frame.receive({ type: "cleaned", requestId: "rec-1" });
+    await expect(cleaning).resolves.toBeUndefined();
+    expect(frame.port.disconnect).toHaveBeenCalledOnce();
   });
 
   it("rejects a producer used from another Document", async () => {
@@ -209,5 +256,30 @@ describe("RecordFrameCoordinator", () => {
         documentId: "other-document",
       }),
     ).toBeNull();
+  });
+
+  it("default coordinator co-injects cooperation.js alongside record-frame.js across all frames", async () => {
+    const executeScript = vi.fn(async () => []);
+    vi.stubGlobal("chrome", {
+      runtime: { onConnect, onMessage },
+      scripting: { executeScript },
+      webNavigation: {
+        getAllFrames: vi.fn(async () => [{ frameId: 0, documentId: "top-document" }]),
+        onCommitted: new ListenerSet(),
+        onCompleted: new ListenerSet(),
+      },
+      tabs: {
+        sendMessage: vi.fn(async () => ({ ok: true })),
+      },
+    });
+    const coordinator = new RecordFrameCoordinator();
+    coordinator.attach();
+    coordinator.begin("rec-co-inject", 10, 9);
+    await expect(coordinator.armTab("rec-co-inject", 9)).resolves.toBe(true);
+    expect(executeScript).toHaveBeenCalledExactlyOnceWith({
+      target: { tabId: 9, allFrames: true },
+      files: ["content-scripts/cooperation.js", "content-scripts/record-frame.js"],
+      injectImmediately: true,
+    });
   });
 });

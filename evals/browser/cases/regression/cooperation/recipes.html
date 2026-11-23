@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Recipe regression</title>
+<style>
+  body { font: 16px system-ui; padding: 40px; }
+  label { display: block; margin: 8px 0; }
+  button { padding: 10px; margin: 8px; }
+  dialog[open], .modal {
+    position: fixed; inset: 15%; margin: 0; background: white;
+    border: 1px solid #333; padding: 24px; z-index: 10;
+  }
+</style>
+<main id="app"></main>
+<script>
+  // One page that drifts on request, as a real site changes between two runs.
+  const search = new URLSearchParams(location.search);
+  const drift = search.get('drift') || 'none';
+  const delay = Number(search.get('delay') || (drift === 'slow' ? 5000 : 150));
+  const app = document.querySelector('#app');
+  const id = (name) => (drift === 'ids' ? `x${Math.random().toString(36).slice(2)}` : name);
+  const send = (path, body) => fetch(path, { method: 'POST', body: JSON.stringify(body) });
+
+  function field(label, control) {
+    const wrapper = document.createElement('label');
+    wrapper.textContent = label;
+    wrapper.append(control);
+    return wrapper;
+  }
+  function select(values) {
+    const control = document.createElement('select');
+    control.id = id('select');
+    for (const value of ['', ...values]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value || '请选择';
+      control.append(option);
+    }
+    return control;
+  }
+  function button(label, onclick) {
+    const control = document.createElement('button');
+    control.type = 'button';
+    control.id = id('button');
+    control.className = id('primary');
+    control.textContent = label;
+    control.onclick = onclick;
+    return control;
+  }
+  function heading(text) {
+    const title = document.createElement('h1');
+    title.textContent = text;
+    return title;
+  }
+
+  function login() {
+    document.title = '登录';
+    const user = document.createElement('input');
+    app.append(heading('登录'), field('账号', user), button('登录', () => {}));
+  }
+
+  function report() {
+    const region = select(['east', 'north']);
+    const quarter = select(['Q1', 'Q2', 'Q3', 'Q4']);
+    const status = document.createElement('output');
+    status.setAttribute('role', 'status');
+    const fields = [
+      field('地区', region),
+      field(drift === 'label' ? '统计周期' : '季度', quarter),
+    ];
+    if (drift === 'order') fields.reverse();
+    const required = document.createElement('input');
+    const query = async () => {
+      if (drift === 'required' && !required.value) {
+        status.textContent = '请填写部门';
+        return;
+      }
+      window.queries = (window.queries || 0) + 1;
+      await send('/recipe/query', { region: region.value, quarter: quarter.value });
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      const total = 100 * (quarter.selectedIndex + (region.value === 'north' ? 10 : 0));
+      status.textContent = `合计金额 ¥${total}`;
+      if (!document.querySelector('[data-export]')) {
+        const save = button('导出', () => send('/recipe/export', {}));
+        save.dataset.export = '1';
+        app.append(save);
+      }
+    };
+    app.append(heading('销售报表'));
+    if (drift === 'order') {
+      const note = document.createElement('p');
+      note.textContent = '新增的说明文字，与流程无关。';
+      app.append(note, button('帮助', () => {}));
+    }
+    app.append(...fields);
+    if (drift === 'required') app.append(field('部门', required));
+    if (drift === 'semantics') {
+      app.append(button('保存草稿', () => send('/recipe/draft', {})));
+    } else {
+      const go = button('查询', query);
+      app.append(go);
+      // Like a typeahead: choosing a value replaces the controls next to it, once.
+      if (drift === 'rerender') {
+        let current = go;
+        quarter.addEventListener('change', () => setTimeout(() => {
+          const next = button('查询', query);
+          current.replaceWith(next);
+          current = next;
+        }, 0), { once: true });
+      }
+    }
+    if (drift === 'duplicate') app.append(button('查询', () => send('/recipe/wrong', {})));
+    app.append(status);
+    if (search.get('human')) {
+      const human = button('人工操作', () => { window.humanChanged = true; });
+      human.id = 'human';
+      app.append(human);
+    }
+    if (drift === 'popup' || drift === 'unknown-popup') {
+      const dialog = document.createElement('dialog');
+      dialog.setAttribute('aria-label', drift === 'popup' ? '订阅优惠' : '调查问卷');
+      dialog.append(button(drift === 'popup' ? '关闭' : '稍后', () => dialog.close()));
+      app.append(dialog);
+      dialog.showModal();
+    }
+  }
+
+  function form() {
+    app.append(heading('开户申请'));
+    for (const label of ['公司名称', '联系人', '手机号', '邮箱']) {
+      const input = document.createElement('input');
+      input.dataset.field = label;
+      app.append(field(label, input));
+    }
+    const province = select(['浙江', '江苏']);
+    const city = select(['杭州', '南京']);
+    const industry = select(['制造', '零售']);
+    const agree = document.createElement('input');
+    agree.type = 'checkbox';
+    const preview = document.createElement('output');
+    preview.setAttribute('role', 'status');
+    app.append(
+      field('省份', province),
+      field('城市', city),
+      field('行业', industry),
+      field('我已阅读说明', agree),
+      button('预览', () => {
+        const values = [...document.querySelectorAll('input[data-field]')].map((i) => i.value);
+        preview.textContent = `预览 ${values.join('/')} ${province.value}/${city.value}/${industry.value} ${agree.checked}`;
+      }),
+      preview,
+    );
+  }
+
+  const render = () => {
+    if (location.pathname.endsWith('/login')) login();
+    else if (location.pathname.endsWith('/form')) form();
+    else if (drift === 'login') login();
+    else if (drift === 'redirect') location.replace(search.get('to'));
+    else report();
+  };
+  // A single-page app has nothing to act on when the load event fires.
+  if (drift === 'late') setTimeout(render, 800);
+  else render();
+</script>
+</html>

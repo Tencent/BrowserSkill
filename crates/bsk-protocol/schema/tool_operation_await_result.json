@@ -1,0 +1,203 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ErrorCode": {
+      "description": "Stable daemon/extension error codes (§4.5).",
+      "oneOf": [
+        {
+          "enum": [
+            "unknown_method",
+            "unsupported",
+            "invalid_params",
+            "not_found",
+            "permission_denied",
+            "timeout",
+            "cdp_failed",
+            "protocol_error",
+            "cancelled",
+            "user_aborted",
+            "version_too_old",
+            "multiple_browsers_online",
+            "no_browser_connected",
+            "pairing_required"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "dialog_pending",
+          "description": "The original operation is still running and needs an agent dialog decision.",
+          "type": "string"
+        }
+      ]
+    },
+    "Method": {
+      "enum": [
+        "tool.cooperate",
+        "local_auth.pair",
+        "local_auth.devices",
+        "local_auth.revoke",
+        "local_auth.rotate",
+        "local_auth.set_mode",
+        "audit.request",
+        "ledger.request",
+        "system.handshake",
+        "system.ping",
+        "system.status",
+        "session.start",
+        "session.start_tracked",
+        "session.request",
+        "session.stop",
+        "session.stop_all",
+        "session.list",
+        "session.run_log",
+        "browser.list",
+        "tool.session_start",
+        "tool.session_stop",
+        "tool.window_resize",
+        "tool.emulate",
+        "tool.tab_list",
+        "tool.tab_create",
+        "tool.tab_close",
+        "tool.tab_borrow",
+        "tool.tab_return",
+        "tool.tab_select",
+        "tool.navigate",
+        "tool.navigate_back",
+        "tool.navigate_forward",
+        "tool.reload",
+        "tool.click",
+        "tool.hover",
+        "tool.drag",
+        "tool.wheel",
+        "tool.scroll_to",
+        "tool.focus",
+        "tool.blur",
+        "tool.fill",
+        "tool.press",
+        "tool.select",
+        "tool.upload",
+        "tool.download",
+        "tool.snapshot",
+        "tool.observe",
+        "tool.get_html",
+        "tool.read",
+        "tool.extract",
+        "tool.screenshot",
+        "tool.screenshot_full_page",
+        "tool.screenshot_read",
+        "tool.screenshot_release",
+        "tool.console",
+        "tool.debug",
+        "tool.network",
+        "tool.evaluate",
+        "tool.dialog_status",
+        "tool.dialog_accept",
+        "tool.dialog_dismiss",
+        "tool.operation_await",
+        "tool.operation_cancel",
+        "tool.wait_for_navigation",
+        "tool.wait_for_element",
+        "tool.wait_ms",
+        "tool.request_help",
+        "tool.record_start",
+        "tool.record_stop",
+        "tool.record_await",
+        "tool.video",
+        "transfer.begin",
+        "transfer.chunk",
+        "transfer.finish",
+        "transfer.read",
+        "transfer.release",
+        "cancel"
+      ],
+      "type": "string"
+    },
+    "RpcError": {
+      "description": "Wire-format JSON-RPC error object carried inside [`crate::frame::ResponseFrame`].",
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "data": true,
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Retained or still-running status returned by `tool.operation_await`.",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "$ref": "#/definitions/Method"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "result": true,
+        "state": {
+          "const": "completed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "operation_id",
+        "method",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "error": {
+          "$ref": "#/definitions/RpcError"
+        },
+        "method": {
+          "$ref": "#/definitions/Method"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "state": {
+          "const": "failed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "operation_id",
+        "method",
+        "error"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "$ref": "#/definitions/Method"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "state": {
+          "const": "running",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "operation_id",
+        "method"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "OperationAwaitResult"
+}

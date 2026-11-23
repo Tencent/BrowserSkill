@@ -19,6 +19,8 @@
    Keep this after the equally specific host blocking rule above. */
 :host([data-bsk-overlay-surface][data-bsk-input-passthrough]),
 :host([data-bsk-input-passthrough]) [data-slot="control-overlay-blocker"],
+:host([data-bsk-input-passthrough]) [data-slot="cooperation-toolbar"],
+:host([data-bsk-input-passthrough]) [data-slot="cooperation-toolbar"] *,
 :host([data-bsk-input-passthrough]) [data-slot="control-overlay-card"],
 :host([data-bsk-input-passthrough]) [data-slot="control-overlay-card"] * {
   pointer-events: none !important;
@@ -93,6 +95,7 @@
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 14px;
+  padding-right: 28px;
   font-size: 11px;
 }
 
@@ -238,6 +241,37 @@
 
 .bsk-cooperation button svg {
   flex-shrink: 0;
+}
+
+.bsk-cooperation .bsk-cooperation-minimize {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  flex-shrink: 0;
+  width: 24px;
+  min-height: 24px;
+  padding: 4px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--bsk-coop-muted);
+}
+
+.bsk-cooperation[data-minimized="true"] {
+  right: 0;
+  width: 32px;
+  padding: 0;
+  border-right: 0;
+  border-radius: 12px 0 0 12px;
+  box-shadow: 0 2px 8px var(--bsk-coop-shadow);
+}
+
+.bsk-cooperation .bsk-cooperation-expand {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 4px;
+  border-radius: inherit;
+  background: var(--bsk-coop-soft);
+  color: var(--bsk-coop-ink);
 }
 
 .bsk-cooperation-primary {

@@ -51,6 +51,8 @@ export interface HeartbeatOptions {
 export interface HeartbeatHandle {
   /** Stop beating and detach the active-state listener. */
   dispose(): void;
+  /** Emit one application-level heartbeat frame immediately. */
+  beat(): void;
   /** Test hook: emit one heartbeat frame right now. */
   beatForTest(): void;
 }
@@ -105,6 +107,7 @@ export function startHeartbeat(options: HeartbeatOptions): HeartbeatHandle {
       unsubscribe();
       stop();
     },
+    beat,
     beatForTest: beat,
   };
 }

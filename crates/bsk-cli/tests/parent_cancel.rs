@@ -149,7 +149,7 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
                         let params = req.params.clone().unwrap_or_default();
                         let body = match req.method {
                             Method::SystemStatus => ResponseBody::Ok(json!({
-                                "daemon_version": "0.2.0", "protocol_version": "1.1",
+                                "daemon_version": "0.5.0", "protocol_version": "2.0",
                                 "pid": std::process::id(), "uptime_secs": 0,
                                 "ws_port": 0, "sock_path": name,
                                 "browsers": [], "sessions": [], "version_skew_browsers": []

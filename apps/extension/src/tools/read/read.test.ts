@@ -1,0 +1,359 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { type FrameDocumentGraph, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
+import { SessionManager } from "@/session-manager/manager";
+import { handleRead } from "../read";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
+import { collectDomRead } from "./collector";
+import type { ReadParams } from "./types";
+import { validateRead } from "./validation";
+
+const fields = [{ key: "label", read: "text" as const }];
+describe("declarative DOM reads", () => {
+  beforeEach(() => {
+    document.body.innerHTML =
+      '<article id="row" data-id="42"><span>A</span><input value="v"><input type="checkbox" checked></article>';
+  });
+  const collect = (patch: Partial<ReadParams> = {}) =>
+    collectDomRead.call(
+      document.documentElement,
+      validateRead({ session_id: "s", selector: "#row", ...patch }),
+    );
+  it("reads exact text, native values and attributes, not arbitrary properties", () => {
+    const result = collect({
+      fields: [
+        { key: "id", read: "attribute", attribute: "data-id" },
+        { key: "text", read: "text", selector: "span" },
+        { key: "value", read: "value", selector: "input:not([type])" },
+        { key: "checked", read: "checked", selector: "input[type=checkbox]" },
+        { key: "missing", read: "exists", selector: ".missing" },
+      ],
+    });
+    expect(result.items[0].values).toEqual({
+      id: "42",
+      text: "A",
+      value: "v",
+      checked: true,
+      missing: false,
+    });
+    for (const patch of [
+      { expression: "fetch('/write')" },
+      { readonly: true },
+      { fields: [{ key: "x", read: "onclick" }] },
+      { fields: [{ key: "x", read: "text", callback: "setTimeout(x)" }] },
+      { expect: [] },
+    ])
+      expect(() => validateRead({ session_id: "s", ...patch } as ReadParams)).toThrow();
+  });
+  it("handles bounds, ambiguous fields and invalid selectors without partial success", () => {
+    expect(collect({ selector: "input", max_nodes: 1 }).truncated).toBe(true);
+    expect(
+      collect({ fields: [{ key: "v", read: "value", selector: "input" }] }).error?.reason,
+    ).toBe("read_field_ambiguous");
+    expect(collect({ selector: "[" }).error?.reason).toBe("read_selector_invalid");
+    document.querySelector("span")!.textContent = "x".repeat(2048);
+    const limited = collect({ max_bytes: 1024 });
+    expect(limited).toMatchObject({ items: [], error: { reason: "read_limit" } });
+  });
+  it("redacts sensitive fields and their ancestor text without letting void inputs blank containers", () => {
+    document.body.innerHTML =
+      '<div id="row"><textarea autocomplete="section-auth one-time-code">secret</textarea></div>';
+    expect(collect().items[0]).toMatchObject({ values: { text: null }, redacted: ["text"] });
+    expect(
+      collect({
+        selector: "textarea",
+        fields: [
+          { key: "x", read: "value" },
+          { key: "attr", read: "attribute", attribute: "autocomplete" },
+        ],
+      }).items[0],
+    ).toMatchObject({ values: { x: null, attr: null }, redacted: ["x", "attr"] });
+    document.body.innerHTML = '<div data-bsk-overlay-host><div id="row">overlay-ui</div></div>';
+    expect(collect().items[0]).toMatchObject({ values: { text: null }, redacted: ["text"] });
+
+    // Mainstream forms include CSRF <input type="hidden">, password, and file inputs;
+    // void <input> .value never appears in textContent and must not blank container text.
+    // Excluded descendant subtrees like <script> / <style> are omitted from container text.
+    document.body.innerHTML =
+      '<form id="row"><input type="hidden" name="_csrf" value="csrf-secret"><input type="password" value="pw-secret"><input type="file"><script type="application/json">{"csrf":"csrf-secret"}</script><span>Order #1024</span></form>';
+    expect(collect().items[0]).toMatchObject({ values: { text: "Order #1024" }, redacted: [] });
+    // Direct reads on those sensitive inputs remain redacted.
+    expect(
+      collect({
+        selector: 'input[type="hidden"]',
+        fields: [
+          { key: "val", read: "value" },
+          { key: "attr", read: "attribute", attribute: "value" },
+          { key: "txt", read: "text" },
+        ],
+      }).items[0],
+    ).toMatchObject({
+      values: { val: null, attr: null, txt: null },
+      redacted: ["val", "attr", "txt"],
+    });
+  });
+
+  it("reads ARIA checked state on custom switch, checkbox, and radio controls", () => {
+    document.body.innerHTML =
+      '<div id="row"><button id="sw" role="switch" aria-checked="true"></button><div id="cb" role="checkbox" aria-checked="false"></div><span id="mx" role="checkbox" aria-checked="mixed"></span></div>';
+    expect(
+      collect({
+        fields: [
+          { key: "sw", read: "checked", selector: "#sw" },
+          { key: "cb", read: "checked", selector: "#cb" },
+          { key: "mx", read: "checked", selector: "#mx" },
+        ],
+      }).items[0].values,
+    ).toEqual({ sw: true, cb: false, mx: null });
+  });
+  it("does not quietly redirect a detached node to a replacement", () => {
+    const node = document.querySelector("#row")!;
+    node.replaceWith(node.cloneNode(true));
+    expect(collectDomRead.call(node, validateRead({ session_id: "s", fields })).error?.reason).toBe(
+      "read_target_stale",
+    );
+  });
+});
+
+async function fixture() {
+  const manager = new SessionManager({
+    agentWindow: {
+      create: vi.fn(async () => ({ windowId: 100, initialTabIds: [] })),
+      remove: vi.fn(async () => {}),
+      ensureActiveTab: vi.fn(async () => 7),
+    },
+  });
+  await manager.start("s");
+  const tab = {
+    id: 7,
+    windowId: 100,
+    active: true,
+    url: "https://test.example/",
+  } as chrome.tabs.Tab;
+  const state = { root: 1, attachment: "a", afterCapture: async () => {} };
+  const rootReply = () => ({
+    result: { deepSerializedValue: { type: "node", value: { backendNodeId: state.root } } },
+  });
+  const send = vi.fn(async (_tab: number, method: string, args?: object): Promise<unknown> => {
+    if (method === "Page.getFrameTree")
+      return { frameTree: { frame: { id: "root", url: tab.url } } };
+    if (method === "Page.createIsolatedWorld") return { executionContextId: 3 };
+    if (method === "Runtime.releaseObjectGroup") return {};
+    if (method === "Runtime.evaluate") return rootReply();
+    if (method === "DOM.resolveNode") return { object: { objectId: "node" } };
+    if (method === "Runtime.callFunctionOn") {
+      if (!(args as { arguments?: unknown[] }).arguments) return rootReply();
+      await state.afterCapture();
+      return {
+        result: {
+          value: {
+            frame_url: tab.url,
+            title: "Test",
+            captured_at: "now",
+            truncated: false,
+            items: [{ node: { backendNodeId: 2 }, values: { label: "A" }, redacted: [] }],
+          },
+        },
+      };
+    }
+    throw new Error(method);
+  });
+  const ensureAttachedToUrl = vi.fn(async () => {});
+  const getFrameDocuments = vi.fn(
+    async (): Promise<FrameDocumentGraph> => ({
+      rootFrameId: "root",
+      frames: [
+        {
+          handle: toFrameDocumentHandle(7, { frameId: "root", loaderId: "" }),
+          frameId: "root",
+          loaderId: "",
+          url: tab.url,
+          processKey: "root",
+          isOutOfProcess: false,
+        },
+      ],
+    }),
+  );
+  const cdp = Object.assign(
+    createStubCdpRunner({
+      send: send as CdpRunner["send"],
+      getAttachmentId: () => state.attachment,
+      ensureAttachedToUrl,
+      getFrameDocuments,
+    }),
+    { ensureAttachedToUrl, getFrameDocuments },
+  );
+  const run = (patch: object = {}, signal?: AbortSignal) =>
+    handleRead(
+      manager,
+      { session_id: "s", fields, ...patch },
+      { cdp, tabsApi: { get: vi.fn(async () => ({ ...tab })), query: vi.fn(async () => [tab]) } },
+      signal,
+    );
+  return { manager, state, tab, run, send, cdp };
+}
+describe("DOM read identity and lifecycle", () => {
+  it.each([
+    "root",
+    "child",
+  ] as const)("reports a missing %s document element as stale without publishing a read", async (frame) => {
+    const h = await fixture();
+    const original = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, args) => {
+      if (method === "Page.createIsolatedWorld")
+        return { executionContextId: (args as { frameId: string }).frameId === "child" ? 4 : 3 };
+      if (
+        method === "Runtime.evaluate" &&
+        (args as { contextId: number }).contextId === (frame === "child" ? 4 : 3)
+      )
+        return { result: { deepSerializedValue: { type: "null" } } };
+      return original(tabId, method, args);
+    });
+    const store = h.manager.get("s")!.refStore;
+    if (frame === "child") {
+      store.set("e1", 2, { tabId: 7, frameId: "child", loaderId: "child-loader" });
+      vi.mocked(h.cdp.getFrameDocuments).mockResolvedValue({
+        rootFrameId: "root",
+        frames: [
+          {
+            handle: toFrameDocumentHandle(7, { frameId: "child", loaderId: "child-loader" }),
+            frameId: "child",
+            loaderId: "child-loader",
+            processKey: "oopif:child",
+            isOutOfProcess: true,
+          },
+        ],
+      });
+    }
+    const size = store.size();
+    expect(await h.run(frame === "child" ? { ref: "@e1" } : {})).toMatchObject({
+      code: "not_found",
+      data: { reason: "read_target_stale", phase: "read", effect_state: "none" },
+    });
+    expect(store.size()).toBe(size);
+    expect(h.send).not.toHaveBeenCalledWith(7, "Runtime.callFunctionOn", expect.anything());
+    expect(h.send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", expect.anything());
+  });
+  it("does not collect or depend on unrelated child renderers for a main-document read", async () => {
+    const h = await fixture();
+    vi.mocked(h.cdp.getFrameDocuments).mockRejectedValue(
+      new Error("unrelated OOPIF cannot be observed"),
+    );
+    expect(await h.run()).toMatchObject({ scope: "current_dom" });
+    expect(h.cdp.getFrameDocuments).not.toHaveBeenCalled();
+  });
+  it("rejects invalid read capabilities before touching CDP", async () => {
+    const h = await fixture();
+    expect(await h.run({ expression: "document.body.remove()", readonly: true })).toMatchObject({
+      code: "invalid_params",
+      data: { effect_state: "none" },
+    });
+    expect(h.send).not.toHaveBeenCalled();
+  });
+  it.each([
+    "root",
+    "attachment",
+    "route",
+    "refs",
+    "session",
+    "cancel",
+  ])("does not publish stale results or refs after %s changes", async (kind) => {
+    const h = await fixture();
+    const abort = new AbortController();
+    h.state.afterCapture = async () => {
+      if (kind === "root") h.state.root++;
+      if (kind === "attachment") h.state.attachment = "new";
+      if (kind === "route") h.tab.url += "other";
+      if (kind === "refs") h.manager.get("s")!.refStore.invalidateTab(7);
+      if (kind === "session") await h.manager.stop("s");
+      if (kind === "cancel") abort.abort();
+    };
+    const reply = await h.run({}, abort.signal);
+    expect(reply).toMatchObject({
+      code: kind === "cancel" ? "cancelled" : "not_found",
+      data: { effect_state: "none" },
+    });
+    expect(h.manager.get("s")?.refStore.size() ?? 0).toBe(0);
+    expect(h.send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", expect.anything());
+  });
+  it("publishes a current sample with stable refs without replacing an observation", async () => {
+    const h = await fixture();
+    const store = h.manager.get("s")!.refStore;
+    store.enableStableRefs();
+    const token = store.observationId;
+    const revision = store.revision;
+    const first = await h.run();
+    expect(await h.run()).toEqual(first);
+    expect(store.observationId).toBe(token);
+    expect(store.revision).toBe(revision);
+    expect(first).toMatchObject({
+      scope: "current_dom",
+      items: [{ ref: expect.stringMatching(/^@e\d+$/), values: { label: "A" } }],
+    });
+  });
+
+  it("preserves existing rowAnchor and name when reusing an observed ref in target mode", async () => {
+    const h = await fixture();
+    const store = h.manager.get("s")!.refStore;
+    store.enableStableRefs();
+    const observed = {
+      backendNodeId: 2,
+      tabId: 7,
+      frameId: "root",
+      loaderId: "",
+      documentElementBackendNodeId: 1,
+      name: "Delete",
+      rowAnchor: "Order #42",
+    };
+    const observedRef = store.allocateRef(observed);
+    store.replace([[observedRef, observed]]);
+
+    const res = await h.run();
+    expect(res).toMatchObject({ items: [{ ref: `@${observedRef}`, values: { label: "A" } }] });
+    expect(store.resolveEntry(observedRef)).toMatchObject({
+      kind: "dom",
+      backendNodeId: 2,
+      name: "Delete",
+      rowAnchor: "Order #42",
+    });
+  });
+
+  it("does not mutate RefStore identities or nextRef when max_bytes validation fails", async () => {
+    const h = await fixture();
+    const store = h.manager.get("s")!.refStore;
+    store.enableStableRefs();
+    const original = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, args) => {
+      if (method === "Runtime.callFunctionOn" && (args as { arguments?: unknown[] }).arguments) {
+        return {
+          result: {
+            value: {
+              frame_url: h.tab.url,
+              title: "Test",
+              captured_at: "now",
+              truncated: false,
+              items: [
+                {
+                  node: { backendNodeId: 2 },
+                  values: { label: "x".repeat(1200) },
+                  redacted: [],
+                },
+              ],
+            },
+          },
+        };
+      }
+      return original(tabId, method, args);
+    });
+
+    const failed = await h.run({ max_bytes: 1024 });
+    expect(failed).toMatchObject({
+      code: "unsupported",
+      data: { reason: "read_limit", effect_state: "none" },
+    });
+    expect(store.size()).toBe(0);
+    // Ref numbering was never advanced by the failed read.
+    expect(store.allocateRef({ tabId: 7, backendNodeId: 99, frameId: "root", loaderId: "" })).toBe(
+      "e1",
+    );
+  });
+});

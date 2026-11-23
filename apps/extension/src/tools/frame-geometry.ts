@@ -1,8 +1,15 @@
-import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import {
+  type FrameNodeHandle,
+  isStaleFrameHandleError,
+  rootProcessBoundary,
+  StaleFrameHandleError,
+} from "@/browser-driver/frame-handles";
 import type { RpcError } from "@/transport/types";
 import { nodeContentRegion, scrollNodeIntoView } from "./element-geometry";
+import { rpcError } from "./errors";
 import {
   clipPolygon,
+  type GeometryProjection,
   type Point,
   type Polygon,
   polygonArea,
@@ -11,17 +18,14 @@ import {
   type Region,
   rectPolygon,
   regionBounds,
+  unprojectPoint,
   type ViewportRect,
 } from "./geometry";
 import type { CssViewport } from "./geometry/coordinate-types";
 import { cssViewport, GeometryContext } from "./geometry/frame-context";
-import { type CdpRunner, cdpRunnerForTarget, isRpcError } from "./shared";
+import { type CdpRunner, cdpRunnerForFrame, isRpcError } from "./shared";
 
-export interface NodeAddress {
-  target: CdpTarget;
-  backendNodeId: number;
-  frameId?: string;
-}
+export type NodeAddress = FrameNodeHandle;
 
 export interface ResolvedNodeGeometry {
   /** The same top-level measurement used by projection, for screenshot coordinate adaptation. */
@@ -52,7 +56,7 @@ async function scrollFrameOwners(
       return geometryError(`could not resolve frame owner for ${child.frameId}`);
     }
     const error = await scrollNodeIntoView(
-      cdpRunnerForTarget(cdp, parent.target),
+      cdpRunnerForFrame(cdp, parent.handle),
       tabId,
       child.ownerBackendNodeId,
     );
@@ -64,40 +68,45 @@ async function scrollFrameOwners(
 async function scrollElementWithContext(
   cdp: CdpRunner,
   tabId: number,
-  target: CdpTarget,
-  backendNodeId: number,
-  frameId: string | undefined,
+  handle: FrameNodeHandle,
   context: GeometryContext,
 ): Promise<RpcError | null> {
-  if (frameId) {
-    const frame = await context.frame(frameId);
-    if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(target)) {
-      return geometryError("node frame does not belong to its target");
+  const frame = handle.frameId ? await context.frame(handle.frameId) : undefined;
+  if (handle.frameId) {
+    if (!frame) {
+      throw new StaleFrameHandleError(handle, `frame ${handle.frameId} is no longer attached`);
     }
-    const error = await scrollFrameOwners(cdp, tabId, context, frameId);
+    if (handle.loaderId && frame.loaderId && frame.loaderId !== handle.loaderId) {
+      throw new StaleFrameHandleError(
+        handle,
+        `frame ${handle.frameId} navigated (${handle.loaderId} -> ${frame.loaderId})`,
+      );
+    }
+    const error = await scrollFrameOwners(cdp, tabId, context, handle.frameId);
     if (error) return error;
-  } else if (target.sessionId) {
-    return geometryError("an OOPIF node address requires frameId");
   }
-  return scrollNodeIntoView(cdpRunnerForTarget(cdp, target), tabId, backendNodeId);
+  return scrollNodeIntoView(cdpRunnerForFrame(cdp, handle), tabId, handle.backendNodeId);
 }
 
 export async function scrollElementAndFramesIntoView(
   cdp: CdpRunner,
   tabId: number,
-  target: CdpTarget,
-  backendNodeId: number,
-  frameId?: string,
+  handle: FrameNodeHandle,
 ): Promise<RpcError | null> {
-  if (target.tabId !== tabId) return geometryError("node target belongs to another tab");
-  return scrollElementWithContext(
-    cdp,
-    tabId,
-    target,
-    backendNodeId,
-    frameId,
-    new GeometryContext(cdp, tabId),
-  );
+  if (handle.tabId !== tabId) return geometryError("node target belongs to another tab");
+  try {
+    return await scrollElementWithContext(cdp, tabId, handle, new GeometryContext(cdp, tabId));
+  } catch (error) {
+    if (isStaleFrameHandleError(error)) {
+      return rpcError("not_found", "ref_not_found", error.message);
+    }
+    return geometryError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function cleanProjectedCoord(value: number): number {
+  const snapped = Math.round(value * 1e6) / 1e6;
+  return Math.abs(value - snapped) < 1e-9 ? snapped : value;
 }
 
 function largestRegion(regions: Region): Polygon | null {
@@ -117,70 +126,57 @@ export async function resolveNodeGeometry(
   options: { scrollIntoView?: boolean } = {},
 ): Promise<ResolvedNodeGeometry | RpcError> {
   try {
-    if (address.target.sessionId && !address.frameId) {
-      return geometryError("an OOPIF node address requires frameId");
-    }
-    if (address.target.tabId !== tabId) return geometryError("node target belongs to another tab");
+    if (address.tabId !== tabId) return geometryError("node target belongs to another tab");
     const context = new GeometryContext(cdp, tabId);
     const graph = address.frameId ? await context.graph() : null;
-    if (address.frameId && graph) {
-      const frame = await context.frame(address.frameId);
-      if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(address.target)) {
-        return geometryError("node frame does not belong to its target");
-      }
-    }
+    const frame = address.frameId && graph ? await context.frame(address.frameId) : undefined;
     if (address.frameId && !graph) {
       return geometryError(`could not resolve frame graph for ${address.frameId}`);
     }
+    if (address.frameId && !frame) {
+      return rpcError(
+        "not_found",
+        "ref_not_found",
+        `Stale frame handle for frame ${address.frameId}: frame is no longer attached`,
+      );
+    }
+    if (
+      address.frameId &&
+      frame &&
+      address.loaderId &&
+      frame.loaderId &&
+      frame.loaderId !== address.loaderId
+    ) {
+      return rpcError(
+        "not_found",
+        "ref_not_found",
+        `Stale frame handle for frame ${address.frameId}: frame navigated (${address.loaderId} -> ${frame.loaderId})`,
+      );
+    }
 
     if (options.scrollIntoView) {
-      const scrollError = await scrollElementWithContext(
-        cdp,
-        tabId,
-        address.target,
-        address.backendNodeId,
-        address.frameId,
-        context,
-      );
+      const scrollError = await scrollElementWithContext(cdp, tabId, address, context);
       if (scrollError) return scrollError;
     }
 
     // Only topology was read above. Begin live measurements after scrolling.
     const localRegion = await nodeContentRegion(
-      cdpRunnerForTarget(cdp, address.target),
+      cdpRunnerForFrame(cdp, address),
       tabId,
       address.backendNodeId,
     );
     if (isRpcError(localRegion)) return localRegion;
 
+    const isOopifTarget = Boolean(frame?.isOutOfProcess);
     let topVisibleRegions: Region;
-    let targetActionPoint: Point | null = null;
-    if (address.frameId && graph) {
-      const projection = await context.targetProjection(address.frameId);
+    let projection: GeometryProjection | null = null;
+    if (address.frameId && graph && frame) {
+      projection = await context.targetProjection(address.frameId);
       if (!projection)
         return geometryError(`could not resolve frame geometry for ${address.frameId}`);
       topVisibleRegions = projectRegionToViewport(localRegion, projection);
-      if (address.target.sessionId) {
-        const localViewport = await context.viewport(address.target);
-        if (!localViewport) return geometryError("could not resolve target viewport geometry");
-        const localVisibleRegions = localRegion
-          .map((polygon) =>
-            clipPolygon(
-              polygon,
-              rectPolygon({
-                x: 0,
-                y: 0,
-                w: localViewport.width,
-                h: localViewport.height,
-              }),
-            ),
-          )
-          .filter((polygon) => polygon.length >= 3);
-        const localActionRegion = largestRegion(localVisibleRegions);
-        targetActionPoint = localActionRegion ? polygonCentroid(localActionRegion) : null;
-      }
     } else {
-      const viewport = await context.viewport(address.target);
+      const viewport = await context.viewport(rootProcessBoundary(tabId));
       if (!viewport) return geometryError("could not resolve top viewport geometry");
       topVisibleRegions = localRegion
         .map((polygon) =>
@@ -193,20 +189,42 @@ export async function resolveNodeGeometry(
     const actionRegion = largestRegion(topVisibleRegions);
     const actionPoint = actionRegion ? polygonCentroid(actionRegion) : null;
     if (!topBounds || !actionPoint) {
-      return { code: "permission_denied", message: "element not visible" };
+      return rpcError("permission_denied", "element_not_visible", "element not visible");
     }
-    if (address.target.sessionId && !targetActionPoint) {
-      return { code: "permission_denied", message: "element not visible in its target" };
+    // Derive the OOPIF-local point by unprojecting the already top/ancestor-clipped
+    // actionPoint back through every target boundary, so parent viewport clips and
+    // nested iframe clips are preserved consistently with pointReachesTarget.
+    let targetActionPoint: Point = actionPoint;
+    if (isOopifTarget) {
+      let local: Point | null = projection ? actionPoint : null;
+      if (projection) {
+        for (let index = projection.edges.length - 1; index >= 0 && local; index--) {
+          local = unprojectPoint(local, projection.edges[index]);
+        }
+      }
+      if (!local) {
+        return rpcError(
+          "permission_denied",
+          "element_not_visible",
+          "element not visible in its target",
+        );
+      }
+      targetActionPoint = {
+        x: cleanProjectedCoord(local.x),
+        y: cleanProjectedCoord(local.y),
+      };
     }
-    targetActionPoint ??= actionPoint;
     return {
       topVisibleRegions,
       topBounds,
       actionPoint,
       targetActionPoint,
-      topViewport: cssViewport(await context.layoutMetrics({ tabId })),
+      topViewport: cssViewport(await context.topLayoutMetrics(rootProcessBoundary(tabId))),
     };
   } catch (error) {
+    if (isStaleFrameHandleError(error)) {
+      return rpcError("not_found", "ref_not_found", error.message);
+    }
     return geometryError(error instanceof Error ? error.message : String(error));
   }
 }

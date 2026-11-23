@@ -4,18 +4,544 @@ All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the same PR.
 
-Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
+The CLI and extension may release separately. Protocol compatibility
+determines which versions can connect.
 
 ## [Unreleased]
 
 ### Added
 
+- **MCP 100% parity**: Added `bsk_ledger`, `bsk_debug`, `bsk_video`, and `bsk_record` first-class tools alongside full CLI parity on existing tools (`session open/stop --all`, `sync` waits/filters, `wait_ms`, `view`, full-page `screenshot` / `extract` `--out`/`--overwrite`/`--format`/`--csv-safe`, `read` `context`, `upload`/`download`, `tab_borrow`, full `emulate`, and `operation_await --out/--overwrite`), unified behind request-scoped `ClientContext`.
+- **Compile-time `MethodSpec` & `RpcErrorReason` SSOT**: Defined exhaustive `bsk_protocol::method::MethodSpec` metadata across all 77 RPC methods (exported to TypeScript `transport/generated/`) and exhaustive `RpcErrorReason` variants with dual CLI/MCP recovery hints (`cli_hint` / `mcp_hint`).
+- DeepSeek Harness (`dsh`) is now a first-class skill installation target via
+  `bsk install-skill --harness dsh` (honoring `$DSH_HOME`, defaulting to
+  `~/.dsh/skills`), `DSH_SESSION_ID` is recognized as an automatic host
+  subagent scope in `ImplicitScopeRegistry`, and MCP `bsk_session(action="start")`
+  now accepts `agent_name`, `project`, and `controller_color` controller identity
+  labels matching `bsk session start` (#731).
+- Added an **Open Agent Windows minimized** preference under popup Automation
+  settings (`bsk_interaction_preferences.openAgentWindowMinimized`, off by
+  default) so background Agent Windows can start directly in the minimized state
+  without flashing a normal window frame on screen, while keeping explicit
+  foreground sessions (`--focus`) and action recording visible ([#649](https://github.com/Tencent/BrowserSkill/issues/649)).
+
+### Changed
+
+- Building the Rust workspace from source now requires Rust 1.89.0. This covers both the locked dependencies and file locking in the update regression tests.
+- **Complete `browser-driver/` boundary encapsulation, strict `CdpRunner` RAII contract, unified `--selector` DOM predicates, and structured VOM metadata**: Sealed `CdpTarget`, `CdpFrame`, `CdpFrameGraph`, `sendToTarget`, `sendGuarded`, `sendAttached`, and `getFrameGraph` inside `apps/extension/src/browser-driver/` behind `FrameDocumentHandle`, `FrameNodeHandle`, `FrameProcessBoundary`, and `TabEventSource` across all remaining upper-layer modules (`read`, `extract`, `waits`, `wheel`, `drag`, `action-guard`, `vom/facts`, `AccessibilityLease`, `debug/`, `recording-runtime`, and `geometry/frame-context`); promoted all `CdpRunner` methods to a non-optional interface backed by `delegateCdpRunner`, `createStubCdpRunner`, and deterministic RAII `withObjectGroup` / `withRemoteObject` V8 handle release (`handleSelect`, `handleFill`, `handleFocus`/`handleBlur`, `action-checks`, `file-input-transaction`, `file-drop-transaction`, `waits`, `element-geometry`, `cdpRunnerForFrame`, and `evaluate` with `return_by_value: false`, without resurrecting detached tabs or masking pre-dispatch errors); unified cross-frame, open Shadow DOM, `[data-bsk-overlay]` / `[data-bsk-overlay-host]` exclusion, sensitive `autocomplete`, and interactive ARIA role predicates across `interaction`, `CooperationController`, `human-loop`, `read`, `extract`, and `content/dom-primitives`; and converged `cooperate sync` and `observe` onto structured `@browser-skill/vom` `VomLineMetadata` (`inspectVomLine` and `VOM_DERIVED_NAME_CAP`).
+- **Lightweight `@wxg-prc-cpg/browser-skill-dsh-plugin` on the unified `bsk` CLI runtime**: Replaced the ~22k-LOC bespoke `bsk_*` wrapper and Web UI bundle in `packages/dsh-plugin-browserskill` with a lightweight Cordis plugin (free of `@deepseek-ai/dsh-*` host `rc` peer locks) that packages the canonical `crates/bsk-cli/skill` bundle, automatically heals host `PATH` for `~/.local/bin` (`$BSK_INSTALL_DIR`) and configured `bskPath`, and bundles an on-demand cross-platform `bsk` CLI + browser extension setup workflow (`bin/install-bsk.mjs` + `AGENT_INSTALL.md`) sharing the standard `bsk` CLI and `DSH_SESSION_ID` daemon scoping alongside restored `dsh-plugin-v*` release automation.
+- **Zero-tax Chrome MV3 `registration: "runtime"` dual-tier content script injection, SW-startup orphan Agent Window reaping, and shared `content/dom-primitives.ts`**: Migrated all four MV3 content-script entrypoints (`content`, `cooperation.content`, `record-frame.content`, and `long-screenshot-page.content`) out of static `manifest.json` `content_scripts` into idempotent runtime injection (`claimIdempotentContentScript`) with `noScriptStartedPostMessage: true` so ordinary browsing incurs zero content-script, `window.postMessage`, or React 19 overhead; injected Tier A (`content.js` and `long-screenshot-page.js`) per `tabId`/`documentId` via idempotent `ensureOverlayInjected` across controlled task tabs, `webNavigation.onCommitted` (including Speculation Rules prerender outermost frames, sequenced strictly after Tier B `cooperation.js` arming/repair), pre-confirmation `tab_borrow` candidate user tabs, `request_help`, `record`, and active `video` overlays while skipping uninjected tabs on `hidden` / `CAPTURE_SUPPRESS` / `INPUT_PASSTHROUGH`; dynamically registered/unregistered pure-TypeScript Tier B (`cooperation.js` and `record-frame.js`) with `persistAcrossSessions: false` when active sessions or recordings transition between `0` and `>= 1`, loading silently at `document_start` with 0 DOM listeners and 0 startup IPC until armed by Background (`COOPERATION_ARM_FRAME` / `RECORD_FRAME_START` plus 50ms per-tab subframe coalescing, `cooperation.js` co-injection in `injectRecordFrameAllFrames`, and non-destructive per-frame `injectCooperationAllFrames` repair across `tab_borrow`, `ack === undefined` frames, and dynamically inserted light-DOM or open/closed `ShadowRoot` `about:blank` / `srcdoc` subframes); tracked dedicated Agent Window `ownedTabIds` in `chrome.storage.session` (`bsk.orphan_agent_windows`) to reap orphaned pure Agent Windows on Service Worker restart without ever closing windows containing user, borrowed, or human-preserved tabs; and extracted `apps/extension/src/content/dom-primitives.ts`.
+- **Single daemon `tool_pipeline`, 4-module `daemon/ipc` decomposition, non-blocking persistence, and shared `cli::orchestration` kernel**: Decomposed 3,489-line `daemon/ipc.rs` into `daemon/tool_pipeline.rs` (single unified `tool.*` pipeline with RAII `AuditTicketGuard`, `SessionActivityGuard`, `ToolInflightRegistry`, `IntentWal`, and post-settlement scope/run-log reconciliation), `daemon/ipc_sessions.rs`, `daemon/ipc_transport.rs`, and a slim `daemon/ipc.rs` router; promoted exhaustive `OutcomeKind` (`bsk-protocol`) / `Outcome` (`daemon/tool_policy.rs`) routing in `daemon/queue.rs`; moved `TransferRegistry` staging/import/session-teardown I/O, `AuditStore` JSONL `sync_data()` writes (including `session.user_interrupt` markers), and monotonic-sequence `IntentWal` flushes/atomic `sync_data()` compactions out of global state `Mutex`es and Tokio worker threads via `spawn_blocking`; and extracted `cli/orchestration.rs` to share Canvas screenshot point-click validation, `open`/`sync`/action/positive timeout bounds, explicit `--session` + `--browser` conflict checks, cached VOM hydration, and 2-second `CANCEL_RESPONSE_GRACE` settlement across `bsk` CLI and `bsk mcp`.
+- **100% strongly typed `bsk-protocol` contracts, typed `EventFrame` payloads, out-of-band WS correlation, and native `ActionMetadata` SSOT**: Replaced all 19 remaining `serde_json::Value` RPC contracts in `Method::contract_meta` (`ToolCooperate`, `LocalAuth*`, `AuditRequest`, `LedgerRequest`, `Session*`, `BrowserList`, `ToolOperationAwait`, and `Transfer*`) with strict Rust/JSON Schema structs, replaced untyped `EventFrame.payload: Value` across Rust and TypeScript with an exhaustive 10-variant `EventFrame` discriminated union, moved `_audit_id` and `_operation_id` out of business `params` into top-level `RequestFrame` envelope fields (deleting in-place `params` mutation and `stripEnvelopeParams`), embedded `ActionMetadata` / passive `context_id` natively with `#[serde(deny_unknown_fields)]` across all 23 `Full` and 9 passive-read `*Params` structs (eliminating post-hoc `catalog.rs` JSON Schema surgery and manual 4-key copy/re-insertion in `daemon/ipc.rs`), and unified `MethodSpec.action_metadata` (`Full` / `ContextOnly` / `TabBindingContext` / `Dynamic` / `None`) as the single source of truth across `bsk-protocol` and `bsk-cli`.
+- **Unified daemon session teardown, strongly typed `IpcEnvelope`, and MCP host-scope lifecycle**: Converged all 6 session teardown paths across `state.rs`, `ws.rs`, `ipc.rs`, `start.rs`, `session_requests.rs`, and `sessions.rs` into `DaemonState::teardown_session(session_id, reason)` covering all 12 session-associated state tables, promoted `HOST_AGENT_ENV_KEYS` ahead of transient `mcp:<pid>:<nonce>` scopes so `bsk mcp` and `bsk` CLI within the same host agent thread share one implicit session (while immediately stopping orphan sessions on `stdio` EOF or disconnect read errors only for exclusive transient `mcp:` scopes), added 256-entry LRU eviction for inactive scope tombstones and idle `start_locks`, and replaced private `_`-prefixed IPC JSON fields with strongly typed `IpcEnvelope` metadata (`IpcRequestMeta` / `IpcResponseMeta`) negotiated via `StatusResult.ipc_envelope` and `DaemonInfo.ipc_envelope` (preserving bidirectional rolling-upgrade compatibility with pre-envelope `"2.0"` `bsk mcp`, CLI, and daemon processes) plus explicit extension-WS `WsCorrelation`.
+- **Single `TabAttachment` state machine & `FrameNodeHandle` addressing**: Collapsed `ChromiumCdp`'s 33 parallel per-tab `Map`/`Set` fields into a single `Map<TabId, TabAttachment>` discriminated union (`detached | attaching | attached | soft_detached`), made `onEvent(tabId, handler)` a tab-scoped `Disposable` subscription holding an automatic idle lease, and sealed all transient `cdpSessionId` routing inside `browser-driver/` behind `FrameNodeHandle` and `FrameDocumentHandle` across `RefStore`, VOM visual observation and capture mappings, `read`, `extract`, `observation`, `interaction`, `waits`, `human-loop`, `recording`, and `CooperationController`.
+- **Protocol `2.0` baseline**: Raised `PROTOCOL_VERSION` and `MIN_COMPATIBLE_PROTOCOL` to `"2.0"`, eliminated extension/daemon legacy version drift, and slimmed `apps/extension/src/transport/generated/validators.js` by over 60% (`~992 KB` -> `<= 390 KB`).
+- **Daemon & extension routing consolidation**: Replaced 9 independent handwritten method tables and `OnceLock` process globals with generated/exhaustive `MethodSpec` tables and explicit `ClientContext` request state.
+- Unified all real-browser test and regression harnesses onto `BSK_TEST_CHROME`
+  and `BSK_TEST_CLI` (resolving Windows `.exe` binaries and stripping host agent
+  scope env vars in isolated daemon fixtures), separated `.browser.test.ts` and
+  `.bench.ts` from the unit Vitest configuration into
+  `apps/extension/vitest.browser.config.ts` and `scripts/run-browser-tests.mjs`
+  (routing `pnpm --filter @browser-skill/extension test:browser` through the
+  runner and enforcing `skipped === 0`, non-empty suite assertions, and
+  per-target suite coverage), and wired every extension `.browser.test.ts` suite
+  plus `eval:browser:check` and `eval:browser:dynamic-read` into CI (#731, #732).
+- Converged scattered default daemon ports, WebSocket URLs, pairing/auth protocol constants, instance ID length, JSON-RPC standard error codes, and `BASE_TOOL_NAMES` into `bsk-protocol` / `bsk` SSOT exports (eliminating hand-maintained duplicates and brittle collection-length assertions), consolidated Rust integration test binaries from 51 to 6 while adding `debug = "line-tables-only"` for `dev`/`test` profiles, split extension Vitest unit runs into `unit-node` and `unit-dom` projects under `threads` pool while removing dead/trivial tests and consolidating single-helper files, replaced fixed wall-clock test sleeps with deterministic clock/mtime/readiness control, added `copyIsolatedExtension` to eliminate redundant per-port `ext:build` CI steps, and added Rust Cargo cache and batched CI steps in `.github/workflows/ci.yml`.
+
+### Fixed
+
+- On Windows, `daemon stop`, daemon status checks, the post-update wait and
+  leftover cleanup no longer treat a running process the CLI cannot open, such as
+  one started from an elevated terminal, as exited.
+- Bounded Chrome debugger attachment waits to 10 seconds, returned a clear error when an attach does not answer, and fenced late attach completions so they are detached before a retry (#452).
+- Hardened daemon WebSocket lifecycle, audit resilience, dynamic `tool.debug` mutation policy, auto-update handover, and file-transfer/operational hygiene:
+  - Added an explicit `Pending` close/cancellation token (`BrowserClient::close()`) and listener-wide shutdown `AbortToken` + task drain wired into `run_accept_loop`, `drive_connection`, `spawn_browser_liveness_reaper`, reconnect eviction, and WS accept-loop shutdown (preventing in-flight handshakes from registering after `WsHandle` exits) alongside TCP keepalive (`SO_KEEPALIVE` / Unix keepalive timers), bounded WS write timeouts, and periodic server-side WS Pings so evicted or half-open browser sockets immediately wake pending waiters and release Tokio tasks, file descriptors, and 64-connection semaphore permits; replaced per-connection 1 Hz `remote-authorization.json` disk polling with a single shared metadata-cached gateway monitor that parks when idle and eliminated redundant double JSON deserialization on every inbound WS frame.
+  - Made the remote gateway `TcpListener::accept()` loop log and back off on transient errors (breaking only on fatal socket errors or shutdown, matching sibling listeners) and wired `WsHandle.task` exit monitoring into `daemon/start.rs` so the daemon never lingers as a zombie if its WS listener terminates.
+  - Isolated corrupt, truncated, or mismatched `.jsonl` files during `AuditStore` load with warnings instead of bricking all `tool.*` RPCs, extended `prune_unlocked()` to also delete unindexed/corrupt `.jsonl` files past the 30-day mtime retention window while treating externally removed files (`ErrorKind::NotFound`) as already deleted, and skipped `ensure_loaded_unlocked()`/`prune_unlocked()` during `configure(false)` so users can always disable audit to recover.
+  - Offloaded `SessionRegistry` audit start/end persistence to `spawn_blocking` (via `register_session_in_memory` + `ensure_session_started` and `prepare_session_end` + `finish_session_end` with `closing_sessions` race isolation) and decoupled inbound `audit.context`, `session.user_interrupt` audit markers, and `audit.request` disk I/O from the WS `select!` pump loop onto a bounded per-connection FIFO worker (applying `configure(false)` opt-out immediately in memory before enqueueing while still emitting `"paused"` on the worker) so 16 MiB audit reads never head-of-line-block tool RPCs, cancel frames, or heartbeats.
+  - Resolved `effect`, `outcome`, `cancel_at_deadline`, and `is_mutating` dynamically for mutating `tool.debug` sub-actions (`replay`, `rule_add`, `rule_enable`, `rule_disable`, `rule_remove`) across `bsk-protocol`, `tool_policy.rs`, `queue.rs`, `tool_pipeline.rs`, `intent_wal.rs`, and `run_log.rs` so clean pre-dispatch cancels preserve `effect_state: "none"` without locking `intent_wal`, timeouts forward WS `cancel` and stamp `effect_state: "unknown"`, disconnects clear stale implicit context, `Ok` `tool.debug(replay)` results with `replay.state` in `"failed" | "interrupted"` classify as `IntentState::Unknown` / `LoggedStep::Uncertain`, and `run_log` records uncertain debug mutations.
+  - Eliminated the auto-update handover TOCTOU race by checking for newly started sessions before overwriting the binary and atomically acquiring a `SessionRegistry::try_begin_handover()` drain gate before spawning the replacement daemon (restoring the previous binary cleanly without failure cooldown if sessions became active), and resolved symlink executables on Unix/macOS (`resolve_symlink_target`) so self-update and rollback preserve Homebrew and custom symlinks.
+  - Closed browser-disconnect races in `session.start` and `session.start_tracked` (`CleanupFailed`) via atomic `ToolQueueRegistry::spawn_if_live` so torn-down sessions never leak orphan queue workers or mask `ended` tombstones; extended outer dispatch grace for cancelled non-`cancel_at_deadline` tools to cover the 2 s cleanup window; made `scope_start_lock` waits cancellable; resolved `tab_id_for_context` when clearing implicit multi-tab context on errors/navigation; made `begin_download` reserve its advertised `MAX_TRANSFER_BYTES` budget upfront against concurrent uploads (shrinking to actual copied size on commit), made `import_download` tolerate non-fatal source-cleanup failures (`ENOTEMPTY`/AV locks), and rejected remote-mode `transfer.*` staging upfront before writing to disk; and closed reconnect ghost-session windows (`evict_for_reconnect` ahead of `audit.configure`), ignored late `session.user_interrupt` for ended sessions, capped daily rotated `daemon.log` retention to 14 files via strict date-filtered startup and daily pruning, added an RAII `ConnectionCloseGuard` for IPC `active_connections`, and reopened session queues if `tool.session_stop` response deserialization fails.
+- Fixed CLI, MCP, orchestration, recording, and recipe contract gaps across `bsk`: exposed `observation`, `expect`, and `depends_on` on MCP `bsk_inspect` (unblocking `screenshot` with `full_page=true` and `observe` with `probe_hover=true` under cooperation mode) and added missing cooperation metadata (`context`/`observation`/`expect`/`depends_on`) on `bsk_session(open)`, `bsk_page`, `bsk_tabs(close)`, and `bsk_assist(resize|emulate)` while keeping non-guarded siblings failing closed offline; aligned CLI `bsk debug` cooperation-metadata gating with `DebugAction::cooperation_guarded()` (unblocking `rule_add`, `rule_enable`, `rule_disable`, `rule_remove`, and `replay`) and honored protocol `implicit_session: Always` + `--scope` / `scope` across both CLI `bsk debug` and MCP `bsk_debug` (preserving offline `capabilities` discovery when neither `session` nor `scope` is passed); fixed drifted MCP error recovery hints (`bsk_session(action='wait')`, `bsk_inspect(action='html')`, `bsk_session(action='browsers')`, `session`/`observation`, nested `params: {"mode": "drop", "files": [...]}`, and required action arguments such as `dialog_id`/`operation_id`/`prompt`) with dispatch-aligned schema-validated hint tests; replaced hardcoded 35s `TOOL_IPC_TIMEOUT` across `bsk step` (including slow `navigate` up to `120000ms`), `bsk plan`, MCP `bsk_interact(sync_after=true)`, and `bsk_plan` with dynamic `tool_ipc_timeout` (`timeout_ms + grace`), pinned the action-resolved implicit session across readiness waits and `post_sync` in `step`/`bsk_interact(sync_after=true)`, and hydrated `post.observation.text` from daemon `ScopeResultMeta` on `unchanged` and text-`delta` replies; fixed Recipe runner `delta -> unchanged` stale VOM handling (`absorb`/`read_text`/`await_until`) to invalidate stale text (including `unchanged` with `history_complete: false` or non-empty `changes`), patch exact text-deltas, match predecessor IDs across rotating `unchanged` `observation_id`s, refresh via `ToolSnapshot`, and re-verify origin after fallback snapshots, plus added `step.key` template substitution (and `Commit` classification for parameterized keys) in `Recipe::bind()`; and fixed both CLI `bsk record` and MCP `bsk_record(action="start"|"stop")` cancel/EOF/recovery teardown to dispatch `SessionStop` with a fresh uncancelled control context, close live recording windows before clearing stale `NotFound` state, preserve `record-session.json` when teardown fails, and isolate MCP recording scope (`<conn_scope>:record`) for stdio EOF reaping without clobbering active browsing sessions.
+- Hardened extension CDP driver, MV3 Service Worker, transport auth backoff, dialog, tab scope, and session lifecycle reliability: reconciled orphaned `chrome.debugger` tab attachments on Service Worker startup via `ChromiumCdp.reconcileOrphanedAttachments` (`chrome.debugger.getTargets()`, fenced against concurrent attach and non-destructive to DevTools/other debuggers) while persisting `borrowedTabs` in `OrphanAgentWindowLedger` so orphaned Agent Windows safely return borrowed user tabs (excluding all orphan windows from fallback placement) before reaping without closing user tabs; upgraded WebSocket disconnect cleanup (`cleanupAfterDisconnect` / `createDisconnectCleanup`) to cancel and drain in-flight RPCs (`ToolDispatcher.cancelAll`/`cancelSession`/`awaitSessionCancelled`), dismiss pending and chained JS dialogs through shared `withSessionDialogCleanup`, clear `hoverLatches`/`hoverBypassTabs` (`OVERLAY_AUTOMATION_BYPASS: false`), and release `video`, `debug`, `cooperation`, screenshot export, and `sessionRunners` state; reset `WSTransport` `local_auth_backoff` on endpoint/mode changes (`setUrl`, `disconnect`, `ConnectionController.reconfigureTransport`/`applyPendingConfiguration`, `watchRemoteAuthorization`, and `watchDaemonConnection`) and prevented normal socket closes during unpaired async IndexedDB reads from triggering exponential auth backoff; fixed `ChromiumCdp.probeFrameDocumentElementBackendNodeId` for same-origin iframes nested inside cross-origin OOPIFs by checking `frameDiscovery.frameIds.get(route.sessionId) === frameId` instead of treating every OOPIF-session child as the target root; moved `resolveStarted = true` in `tool.dialog_accept` into `cdp.resolveDialog`'s `onDispatch` callback so pre-dispatch races, cancellations, and permission failures report `effect_state: "none"` (`phase: "precondition"`) instead of locking sessions with `effect_state: "unknown"`; enforced `isAgentControlledTab` in `authoriseAgentTab` for local sessions so `tool.tab_close` and `tool.tab_select` cannot act on unmanaged user-opened tabs inside an Agent Window; fixed `ChromiumCdp.tabs` dead eviction (replacing the unreachable `version === 0` guard with monotonic `nextTabVersion` tracking) and `sessionRunners` retention leaks (`WeakRef` session lookups + `evictSessionCdpRunner` on session stop/release/disconnect); wired `chrome.tabs.onReplaced` across `SessionManager`, `AgentWindowRouting`, `ChromiumCdp`, `BackgroundExecution`, `CooperationController`, `event-handler`, and `background.ts` so Memory Saver / prerender tab replacements stay controllable and returnable; adopted iframe-originated (`sourceFrameId >= 0`) Agent Window popups into non-destructive `observedTabs` in `task-popups.ts` to eliminate the uncontrollable-yet-unborrowable popup deadlock; added `beforeunload` dismissal (`code: "cancelled"`, `reason: "user_cancelled"`) handling parity to `navigate_back`, `navigate_forward`, and `reload`; released `VideoManager`'s `backgroundExecution` lease when recording finishes or fails startup (preserving pre-existing session leases); and dropped late `console`/`network` CDP events arriving for already-detached tabs.
+- Fixed extension `read`, `RefStore`, file upload/download, keyboard/pointer/select/wait, and element screenshot bugs across mainstream websites and OOPIFs: excluded void `<input>` controls (such as CSRF `<input type="hidden">`, password, and file inputs whose `.value` cannot appear in `textContent`) from redacting container `read: "text"` fields in `bsk read` while stripping excluded descendant subtrees (`<script>`, `<style>`, `<template>`, `<noscript>`, `[data-bsk-overlay]`) across both `read` and `expect(field: "text")` and keeping direct/non-void redaction intact; preserved existing `name` and `rowAnchor` metadata when `RefStore.set()` updates a DOM ref and deferred `handleRead` `RefStore` mutation behind `previewRefs()` until `max_bytes` and cooperation checks pass; fenced `file-input-transaction` chooser interception and capture-phase click probe arming with `onDispatch`, pre-dispatch-only `AbortSignal` cancellation, and a self-expiring probe TTL so timeout/abort never leaves native file pickers swallowed; bounded `handlePress` `keyDown`/`char`/`keyUp` waits with per-step pre-dispatch abort fencing and `finally` `keyUp` release, guarded `handleFill` `keyUp` cleanup behind actual `rawKeyDown` dispatch (`onDispatch`) without masking the original error, and clipped OOPIF `targetActionPoint` against parent/ancestor viewports in `frame-geometry.ts` while upgrading `upload --mode drop` to `pointReachesTarget` occlusion verification, per-step pre-dispatch abort and `onDispatch`-fenced drop commit tracking, and `withInputReady` (`preserveWindowFocus: true`); accepted post-dispatch downloads originating from child/descendant frames (including dynamically created hidden `<iframe src>`, `<form target>` iframes, and cross-origin CDN OOPIFs) in `download-capture.ts` while holding matching filename candidates across in-flight hierarchy checks, immediately releasing unrelated concurrent download candidates upon claiming a winner, and rejecting pre-dispatch or unrelated-tab/sibling downloads; prevented `screenshot --ref` from scrolling unborrowed user tabs (`passive_read` invariant) and rejected visual/DOM refs replaced concurrently during `ensureAttachedToUrl`; added ARIA `aria-checked` support to `expect` (`action-checks.ts`) and `read` (`collector.ts`), refused `<option disabled>` and `<optgroup disabled>` in `handleSelect`, aligned `handleHover` with `withInputReady` + `verifyPointerTarget`, added `preserveWindowFocus: true` and `StaleFrameHandleError` -> `ref_not_found` mapping across sibling interaction handlers (`hover`, `press`, `select`, `scroll-to`, `wheel`), verified ancestor iframe visibility for `visible`/`hidden` states in `handleWaitForElement` (short-circuiting root-frame refs via `getMainFrameHandle`, skipping for `attached`, and retrying incomplete/vanishing ancestry), bounded `ensureCdpReady` in `handleWaitForNavigation`, and prevented unhandled `Promise.race` rejections in `waits.ts` and `transfer-transaction.ts`.
+- Fixed extension content-script, overlay, `request_help`, debug network, `FrameRepairs`, and `LongScreenshot` lifecycle bugs and page hot-path jank:
+  - **Cooperation frame listener & `FrameRepairs` lifecycle**: `cooperation-capture.ts` now records `message.lease` on `COOPERATION_ARM_FRAME`, rejects retired leases, and tears down all 21 capture-phase DOM/window listeners (including `window` `wheel` so legacy `mousewheel` events resume) and the `MutationObserver` on `COOPERATION_DISABLE` even when armed without a prior `COOPERATION_READ`; `browser-bridge.ts` and `runtime-content-scripts.ts` forward the active tab lease across `COOPERATION_ARM_FRAME` and `injectCooperationAllFrames`, disarm in-flight arms racing `releaseTab`, and evict rejected `executeScript` Promises from `FrameRepairs` so transient injection errors no longer permanently brick a document with `frame_unobservable`.
+  - **Recording & Borrow overlays**: `entrypoints/content.ts` now sets `activeRecordRequestId` when recovering an active recording via `RECORD_QUERY`, ignores late `RECORD_QUERY`/`RECORD_START` messages for already-stopped request IDs, and reconciles `{ active: false }` on BFCache `pageshow` for both `RecordOverlay` and `HelpRequestOverlay` (including detached `HELP_QUERY` listeners) without clobbering concurrent starts or blacklisting transient `rearmRecording` failures; `tools/record.ts` checks `rearmRecording` and finishing state in `attachRecordQueryListener` before replying `{ active: true }` and retires/cancels tabs recovered during aborted provisional `record_start`; inactive-tab `BorrowConfirmationOverlay` toast progress-bar timeouts now pass `timedOut: true` to `handleDeny(true)` matching the active-tab modal and timer fallback.
+  - **`request_help` multi-tab cleanup & UX**: `tools/human-loop.ts` now listens to `chrome.tabs.onRemoved` (including during setup before active registration) to cancel promptly and clear sibling compact banners when `primaryTabId` closes, detaches global runtime/tab/navigation listeners when no help requests remain active, stops re-scrolling `ref` targets when the user switches tabs back, and flags `hasDynamicRects` on both `HELP_REQUEST` and `HELP_QUERY` for ref-backed requests so offscreen iframe targets still recover their highlight when scrolled back into view; `help-request.ts` and `HelpRequestOverlay.tsx` skip 500ms CDP polling and scroll queries when no dynamic/cross-frame rects exist and throttle viewport refresh bursts when they do.
+  - **Debug network annotations & non-JSON redaction**: `DebugNetworkStore.annotate` merges pending annotations instead of overwriting earlier `{ effective }` / `{ mock }` entries when `Fetch.requestPaused` settles before `Network.requestWillBeSent`; `redactBody` in `debug/redact.ts` still JSON-redacts valid JSON served under form/HTML/JS MIME types, redacts NDJSON per record (failing closed on truncated/malformed trailing records), omits oversized structured JSON/NDJSON prefixes (including `text/plain` JSON), and stops misclassifying plain-text logs, JavaScript, and HTML starting with `[` or `{` as fatal `unparsed_json`.
+  - **`LongScreenshot` pause/resume race**: `long-screenshot/background.ts` captures the active job before `await job.page(...)` and re-verifies job identity and non-terminal phase afterward so completing, cancelling, or restarting a capture mid-pause/resume never throws `TypeError` or overwrites terminal phases back to `"paused"`/`"capturing"`.
+  - **Content-script hot-path perf & main-world hygiene**: eliminated O(DOM) `querySelectorAll("*")` + `getComputedStyle` full-page scans on `mouseover`/`startRecordCapture` in `record-capture.ts` (replaced with scoped popup/ancestor/mutation surface tracking that preserves hover menu ownership across neighboring toolbar buttons), collapsed double DOM mutation scans in `frame-agent.ts` into a single-pass `TreeWalker` via `dom-primitives.ts`, and moved `document-settle.ts` root-document quiet probing into an isolated world with automatic `MutationObserver` cleanup instead of leaking `window.__bskRecordQuiet` in the page main world.
+- Fixed VOM cross-frame scene annotation scoping, `textDelta` role-overlap syntax corruption, hero-headline stealth-filter false positives, form state accuracy, and tooltip cache invalidation:
+  - Scoped `attachCapturedSceneAnnotations`, `findSurfaceTriggerNode`, `findSurfaceNodeByPoint`, `buildActiveScopeBlocks`, and `probeHoverSurfaces` by `(frameId, backendNodeId)` and `(frameId, treeScope, domId)` across all captured frame documents and Shadow DOM trees (decoding Chrome `DOMSnapshot` `shadowRootType` in `snapshot.ts` so repeated shadow hosts do not collide while keeping light-DOM slotted nodes in document scope, preventing OOPIF nodes with colliding low `backendNodeId`s from hijacking main-document hover panels, enabling iframe `aria-controls` active scope blocks without cross-frame ID leakage, skipping `display: none` / `visibility: hidden` / `opacity: 0` descendants and `<textarea>`/`<select>` form values in `collectScopeLines`, and propagating trigger `frameId` onto rendered `[§ active: ...]` rows in `@browser-skill/vom`).
+  - Updated `@browser-skill/vom` `inspectVomLine` to emit exact quoted-name character bounds (`nameStart`/`nameEnd`) and `contentStart`, and updated `textDelta` to search post-prefix content (including unescaped text and silently 160-char-clipped `[§ active: ...]` body lines) and replace strictly inside the quoted name segment so UI text overlapping VOM role names (such as `status "status"` -> `status "Saved"` or `timer "time"` -> `timer "00:01"`) never corrupts role prefixes or leaves active-scope blocks stale.
+  - Pruned ~1,120 lines of handwritten CSS Color 4/5, gradient-stop, and ancestor-inherited contrast heuristics from `tools/vom/facts.ts` (eliminating false-positive deletion of white hero headlines over `<svg>`, `::before`/`::after`, composited `<img>`, and sibling overlays) while passing real `Page.getLayoutMetrics` `layoutScale` via `normalize.ts`/`capture-coordinator.ts` and retaining zero-false-positive exclusions for invisible `opacity < 0.05`, `font-size <= 1.5px`, transparent foregrounds (with `background-clip: text` gradient exemption), same-element opaque zero-contrast, 1px microboxes, and offscreen text.
+  - Extended `tools/vom/form-capture.ts` to traverse Open Shadow DOM controls (including nested shadow roots and shadow-hosted iframes), classified untouched `<select>` controls as `"default"` (in both live capture and snapshot-only `resolve.ts` fallback) instead of `"filled"`, and stopped marking unchecked `<input type="checkbox">` controls without an explicit `value` attribute as `"filled"` / `[unchecked] ="on"` across `form-capture.ts`, `snapshot.ts`, and `@browser-skill/vom` `render.ts`.
+  - Keyed `tools/vom/name-enrichment.ts` tooltip cache entries by document `loaderId` (preventing recycled `backendNodeId`s after reload from inheriting stale icon labels) and added automatic eviction on main-frame navigation, tab close, and tab replacement with leak-free listener detachment when the cache empties.
+- Fixed a P0 recording privacy leak where plaintext passwords from inputs toggled via "show password" (`type="password"` → `type="text"`, without sensitive `autocomplete`) could leak into trailing recorded `TraceStateV3.body` VOM snapshots or from Shadow DOM login components: decoupled content capture stop (`RecordCaptureController.stop()`, committing any final unblurred dirty fill and detaching step listeners) from DOM marker teardown (`RecordCaptureController.dispose()` via `RecordFrameCoordinator.cleanup()` / `cancel()` / port disconnect, including deferred disconnect of proven-hidden child frames) so `data-bsk-record-password` and `type` mutation observers remain intact across `drainRecordingToStability` and `settleTrailing` and are cleanly removed across all tabs and frames once trailing VOM completes (or on cancel/disconnect); extended `record-capture.ts` password `type` mutation tracking and closed-ShadowRoot edit-target resolution across pre-existing, dynamically inserted, lazily attached, and closed `ShadowRoot`s via `dom-primitives.ts` (`visitShadowRoots` / `openOrClosedShadowRoot` / isolated-world `rememberFormerPassword` shared with `cooperation-capture.ts`); and prevented `semantic-graph/resolve.ts` from deriving sensitive input names from inner AX/DOM `StaticText` values or exposing AX-only textbox values lacking DOM attribute evidence during recording.
+- Fixed VOM `applyActiveRegionPolicy` falsely hiding clickable cards, links, buttons, and their descendants whenever a non-full-viewport `position: fixed/absolute/sticky` element partially overlapped even a single corner or edge (such as product/video card corner badges, sticky headers grazing a control's top edge, or floating support buttons grazing a card corner): region occlusion now requires all 9 inset interaction sample points to be covered by eligible higher-paint-order foreground regions (including multi-region joint coverage while still hiding controls behind sidebars, drawers, and overlapping positioned panes), preserves geometrically uncovered interactive/visual descendants inside covered clickable containers (keeping rescued Canvas visuals attached under their surviving ancestor while still pruning passive descendants of truly blocked controls), and ignores root document shells and negative `z-index` / `paintOrder` decorative backgrounds including positioned descendants inside negative-`z-index` stacking contexts (propagating parsed CSS `z-index` from `DOMSnapshot` so Chromium's `PaintLayer` ordering never treats `z-index: -1` backdrops as foreground blockers).
+- Fixed a permanent session deadlock when `tool.evaluate` runs a slow or never-resolving Promise (such as `new Promise(() => {})`) and is cancelled by a user or daemon deadline: `ChromiumCdp.send()` and `getFrameGraph()` now forward their `AbortSignal` into `command()` / `CdpReadGate.run()` and wait abortably on shared `ensureAttached()` setup (so cancelling during a slow initial `Page.enable` also unblocks immediately with `effect_state: "none"`), `waitForAbort()` (and `runCdpCommand()`) attach `.catch(() => {})` to abandoned native CDP promises so late tab-close/detach rejections never emit unhandled rejections, `CdpReadGate` skips tripping its renderer read blocker when an `awaitPromise: true` `Runtime.evaluate`/`Runtime.callFunctionOn` call is aborted (so subsequent `observe`/`click`/`evaluate` calls recover immediately instead of failing with `renderer_read_timeout`), `handleEvaluate` dispatches `Runtime.evaluate` through `sendToFrame` with `signal` and an `onDispatch` fence to classify aborts accurately as `code: "cancelled"` with `effect_state: "none"` (`dispatched: false`) before dispatch and `effect_state: "unknown"` after dispatch, `withRemoteObject`/`withObjectGroup` bound `Runtime.releaseObject*` cleanup waits to 1s so hung cleanup cannot lock the session, `CooperationController` skips redundant post-action frame refreshes on already-aborted `evaluate`/`upload` calls, and `ToolDispatcher` awaits pending (including synchronously chained) JS dialog dismissal within daemon's 2s cancel budget (`1.5s`) before releasing `activeDialogOperations` without disturbing the `DialogPending` accept/dismiss workflow.
+- `bsk daemon start` now explains a failed bind on the default daemon port: on Windows, WinNAT / Hyper-V / WSL2 can reserve port 52800 inside the TCP dynamic port range after a reboot, so the error names that cause, shows `netsh int ipv4 show excludedportrange protocol=tcp` to confirm it, and points to `bsk daemon start --foreground --port <port>` with the extension pointed at that port. Failures on an explicit `--port` keep the plain OS error (#767).
+- Fixed false `"the user has control of this tab"` (`human_intervention` / `"User activity revoked this action"`) interruptions when scripted JavaScript (such as `bsk evaluate` calling `document.execCommand('insertHTML' | 'delete' | 'insertText', ...)` on rich-text `contenteditable` / form editors, or `.click()` on `<input type="checkbox">` / `<input type="radio">` / `<label>` controls) triggers Chromium's trusted default-activation `input`/`change` events without any real user gesture: `cooperation-capture.ts` now tracks untrusted programmatic clicks in the current task (so synchronous default checkbox/radio activations are not misclassified as human input) and ignores bare `InputEvent("input")` (plus its same-task blur `change`) dispatched on editable fields with no originating `beforeinput`, keyboard, pointer, wheel, drop, or IME composition event while still updating `fields`/`revision` and preserving detection of all genuine user interactions; capped `CooperationController`'s pre-execution readiness poll (`target_hidden` / `target_disabled` / `target_readonly`) at 5s (and below explicit short `timeout_ms` with a reply margin) so clicking permanently hidden controls (such as visually hidden WeUI checkbox `<input>`s) returns structured `target_hidden` (`effect_state: "none"`) instead of hanging for 30s/2m and losing the race to the daemon's RPC timeout; and allowed `tab_create`, `tab_select`, `tab_borrow`, `tab_return`, and `tab_close` to proceed when an owned non-borrowed agent tab (including human-preserved `observedTabs`) is stuck on a settled `page_load_failed` error page instead of deadlocking with `"shared page control or observation changed"`.
+- Eliminated `"A page frame is not responding"` (`cooperation_sync_required`) failures and session traps on heavy Canvas/CSS-in-JS web applications such as Lark Base / Feishu Bitable: short-circuited `cooperation-capture.ts` `styleFacts()` immediately when any stylesheet is cross-origin unreadable instead of serializing all inline CSSOM `rule.cssText` strings, skipped `@font-face` / `@keyframes` rules, deferred `invisibleAttribute` style checks until after structural `childList` filtering, and extracted `data-*` attribute names directly (`/^data-[-\w]+$/`) without full-sheet string concatenation while replacing quadratic `querySelectorAll("*")` / `closest()` / unconditional `chrome.dom.openOrClosedShadowRoot` sweeps across `dom-primitives.ts` and `cooperation-capture.ts` with `TreeWalker` subtree pruning and shadow-host tag filtering; forwarded caller `timeout_ms` (up to `25000ms`, including default `15000ms` `cooperate wait` and post-action `evaluate`/`upload` refreshes, with matching daemon transport and CLI/MCP IPC snapshot headroom) and `AbortSignal` across `bsk open`, `bsk sync`, `bsk cooperate sync|enable|wait`, and MCP `bsk_session(open|sync)` into `collectCooperationFrames` using a single non-duplicated `COOPERATION_READ` sweep per frame while still retiring silent hidden child frames after `3000ms`, retrying transient mid-observation document replacements in `--settle`, and bounding `settle` retries to the caller's remaining wall-clock `timeout_ms` budget; broadened `hidden-frames.ts` `ownedByHiddenElement` to recognize unfocused `pointer-events: none` and offscreen `position: fixed` frames, tolerate non-document `<object>`/`<embed>` or un-navigated `<iframe>` placeholders (`owners.length >= siblings.length`), and safely disambiguate silent hidden cross-origin iframes (such as session-refresh or third-party extension iframes) via exact-before-origin owner `declaredSrc` matching alongside visible cross-origin widgets; allowed `navigate`, `reload`, `navigate_back`, and `navigate_forward` to escape tabs stuck on `FrameUnresponsiveError` (including uncommitted `pendingUrl` states and `CdpReadGate`-tripped tabs) or `frame_unobservable` (including when `ImplicitScopeRegistry` auto-injects a prior `target` `context_id` after a cross-document transition, while proportioning short `timeout_ms` entry refreshes and bounding preflight CDP probes plus `Page.getFrameTree` / `networkidle` post-commit recovery handoffs in `navigation.ts` to remaining `timeout_ms` without corrupting reported timeout diagnostics); and bounded `executeScript` (`ensureOverlayInjected`, `injectCooperationAllFrames`, `injectRecordFrameAllFrames`, and `armCommittedFrame`), `pushOverlayStateForTab`, hover/record `bypassOverlay`, `RECORD_FRAME_START` / recording `sendToTab` / `waitForDocumentSettled` (plus proven-hidden child frame tolerance in `RecordFrameCoordinator.stop`), `CAPTURE_SUPPRESS` / `VIDEO_OVERLAY` / fallback screenshot bounds, `resetAgentOverlays`, and `COOPERATION_ARM_FRAME` to `3000ms` alongside alarm-tick keepalive heartbeats so wedged renderers never hang `session stop`, `navigate`, `screenshot`, `record`, or `video` or trigger MV3 Service Worker `kRequestTimeout` evictions (#766).
+- `bsk window resize` on fractional display scaling (Windows 10 at 125%): a committed
+  resize is now accepted when the browser reports bounds within 2 px of the request on
+  either axis (`1100x700` landing at `1101x701`), instead of failing with
+  `protocol_error` / `window_resize_constrained` / exit code `2` after burning the
+  settling retries, while a genuinely constrained window still reports the same reason
+  and the `window_resize_viewport_unchanged` guard stays unchanged (#771).
+- `upload` and CSS `--selector` targeting across `iframe`s and hidden `<input type="file">`
+  widgets (such as Layui's `display: none` file inputs) (#725): action and `wait-for-element`
+  selectors now search accessible same-origin `iframe`s and cross-origin OOPIFs in parallel
+  via `FrameDocumentHandle`s (bounded per child frame with unresponsive OOPIF `processKey`
+  isolation in `CdpReadGate`, ownerless `getFrameDocuments` queries without poisoning geometry
+  caches, deterministic frame-graph order, and mid-poll child-frame navigation resilience in
+  `wait-for-element`) after checking the main document (enforcing cross-frame uniqueness under
+  strict/target policy and tracking child-frame `frameEpoch` invalidation in cooperative
+  control, while keeping `expect` preconditions main-document-scoped); when `upload` (`--mode
+  input`) resolves directly to an `<input type="file">`, it validates connectedness, enabled
+  state, and `multiple` before calling `DOM.setFileInputFiles` without requiring visual
+  geometry or renderer-frame click readiness; OOPIF and same-origin cross-frame chooser
+  triggers ensure the child `Page` domain is enabled and accept intercepted
+  `Page.fileChooserOpened` events (including dynamically created detached file inputs); and
+  CLI, MCP, and bundled skill descriptions now guide callers to prefer visible upload trigger
+  `@eN` refs or target `<input type="file">` selectors directly.
+- Fixed native input commands (`click`, `fill`, `press`, `wheel`, `drag`, `step`, `plan`) failing with `"Native input clock calibration failed: Cannot attach to this target."` (`cdp_failed` / `input_clock_unavailable`) on Chrome 157+ Web Store and policy-installed builds where Chromium restricts `chrome.debugger` discovery/attachment or offscreen helper creation on `video-offscreen.html`: `sampleNativeInputClock` and `NativeInputClock` now automatically fall back to uncalibrated wall-clock dispatch (`offset: 0`, caching non-transient probe restrictions across `NativeInputClock.invalidate()` so the offscreen document is not respawned on subsequent sessions while retaining `sameClock` monotonic drift fencing before native dispatch), and aligned real-browser wheel zoom assertions and documentation with Chromium 158+ preserving CSS-pixel `Input.dispatchMouseEvent` wheel deltas across browser zoom (#742).
+- Eliminated frequent false `"Page interaction coverage changed; wait and synchronize"` (`control_context_invalid` with `effect_state: "unknown"` and `IntentWal` tab freezes) across SPA sites and pages with dynamic subframes: separated same-document root URL updates (`Page.navigatedWithinDocument` and `FrameState.url`) from cross-document root destruction via `ChromiumCdp.onRouteChanged` / `CooperationController.invalidateRoute` (restoring `rootFrameId`, reconciling child frames across `soft_detached` reattach and post-dialog checks on same-document route updates, and stopping same-process child-iframe `DOM.documentUpdated` events from firing root `onDocumentChanged`) so live collectors stay available, multi-step inputs (`fill`, `scroll-to`, `wheel`, `press`, `select`, `click`, `drag`) and `bsk plan` batches survive same-pathname query/anchor updates (while consuming strict baselines for untargeted actions) and pathname/hash-router transitions revoke stale contexts cleanly after action settlement (`effect_state: "none"`), completed `fill` Step 3 across both `onBeforeNavigate` and instant-commit auto-submitting forms (`finalValueAlreadyNotified`) as well as post-input `Runtime.callFunctionOn` / `DOM.getBoxModel` visibility measurement across main and child frames, sequenced background `observeTab` behind `armCommittedFrame` while initializing collection leases on `COOPERATION_ARM` and `COOPERATION_RESUME` for newly mounted child frames, allowing `collectCooperationFrames` replacement passes past proven-hidden unobservable subframes, and isolating in-flight `state.working` operations and `target` contexts from non-owner `refresh` failures, and preserved explicit handler errors (`navigate`/`reload` errors and structured `result.data.reason` errors such as `download_capture_failed` and `fill_target_changed`) while revoking stale implicit `target` context auto-injection in `ImplicitScopeRegistry` (without dropping cached `last_vom` / alias hydration for `unchanged` and `delta` syncs) and allowing `navigate`/`reload`/`navigate_back`/`navigate_forward` recovery off `page_load_failed` error pages (#762).
+- Fixed `tool.wheel` skipping compositor paint readiness (`waitForInputPaint`) under `ToolDispatcher` persistent background leases on unfocused or minimized windows by decoupling `ReadyInput.hidden` (`lacksForegroundPresentation`) from temporary `restoreFocus` and wiring `windowsApi` in `ToolDispatcher`; stopped `target`-policy `--selector` actions in `CooperationController` from polluting `session.refStore`, emitting `used_ref` (while preserving `used_selector` on `--selector` action receipts without polluting `tool.drag`'s `DragResult` or `tool.press`'s `PressResult`), or leaking hallucinated `@eN` references in `handleSelect` custom-dropdown error messages (`withPinnedSelectorTargets`); refreshed live frame activity inside `CooperationController.beginDomMutation()` under `target` policy before scripted DOM writes while preserving `state.baseline` (`observation_id`) when pre-write validation fails with `effect_state: "none"`; fixed `clearRecordingForSession` to use the caller/dispatcher's `deps` (`RECORD_CANCEL` + `bypassOverlay(tabId, false)`), required explicit `isAgentWindowId` in `returnBorrowedTab` so returning a borrowed user tab never routes into another session's Agent Window, replaced module-global download locking with instance-scoped `DownloadConcurrencyGate` (`session_busy`, `effect_state: "none"`, `dispatched: false`), and cleaned up `observeIdentityStreaks`, `hoverLatches`, and `hoverBypassTabs` on session teardown and `tabs.onRemoved`; enabled Canvas `[visual:screenshot]` `@eN` parity on `cooperate sync`, budgeted the `renderDoubleLayer` `L2 page … occluded by L1` footer line within `maxTokens`, and moved popup `[expanded]` / `[has-submenu]` tags out of `vom.name` to post-quote VOM tags so custom dropdowns no longer emit duplicate `[expanded]` suffixes.
+- Eliminated redundant back-to-back frame collection sweeps in `guardedRunner.runBrowserMutation` (`action-guard.ts`), skipped mutation fencing on passive `inspect` probes in `handleFullPageScreenshot`, and raised the per-frame cooperation IPC reply deadline (`FRAME_REPLY_TIMEOUT_MS` / `OWNER_REPLY_MS`) from `1200ms` to `3000ms` so cold high-DPR / software-rasterized full-page captures and Tier-A overlay mounts do not spuriously fail with `FrameUnresponsiveError` (#761).
+- Added `--max-tokens` (`max_tokens` in MCP) to `bsk step`, `bsk plan`, `bsk_interact` (with `sync_after` or `until_visible`), and `bsk_plan`, forwarding it to the post-action `tool.cooperate` sync instead of hardcoding `None` so `--max-tokens` baselines stay reusable across `delta` and `unchanged` syncs without forcing an unbounded page re-capture (#755).
+- Ignored internal `data-bsk-*` attributes and `<browser-skill-overlay>` (`[data-bsk-overlay]`) ShadowHost mutations in `cooperation-capture.ts` so active recording and sensitive-field markers no longer advance `FrameState.structure`, excluded extension ShadowRoot UI controls (`HelpRequestOverlay`, `RecordOverlay`, `BorrowConfirmationOverlay`) across `record-capture.ts`, `record-hover-surface.ts`, and `cooperation-capture.ts` so overlay interactions and hover surfaces are never mis-recorded as webpage steps, and re-evaluated tab control ownership after awaiting `ensureOverlayInjected` so mid-injection tab detachments never flash stale `control` state.
+- VOM token estimation now handles unpaired UTF-16 surrogates without combining them with the following symbol or throwing a `RangeError`; valid emoji pairs retain their existing estimates.
+
+- Fixed non-`start` `tool.video` (`status`/`stop`/`list`/`get`/`delete`), `tool.operation_await`, and scope-bound `tool.wait_ms` bypassing `ToolInflightRegistry` cancellation (and scope-bound `tool.wait_ms` omitting `SessionActivityGuard` idle leases or `ToolDialogAccept`/`ToolDialogDismiss` `decision_lock` waits masking `UserAborted`/`SessionEnded` reasons) on `session.user_interrupt` and `DaemonState::teardown_session` (`session.window_closed` / idle reap / disconnect), fixed `IntentWal` `flush_pending_async` returning before concurrently drained `DISPATCHED` records hit disk and `on_session_ended` leaving un-reconciled `dispatched`/`unknown` records on disk across daemon restarts, fixed `queue.rs` misattributing deadline cancel-cleanup timeouts on non-transfer tools (`navigate`, `screenshot_full_page`, `window_resize`, etc.) as `"file transfer timed out"` (`transfer_outcome_unknown`) and stripping extension `effect_state` / `cancelled_before_dispatch` metadata on cancelled file transfers (including when terminal session teardown reasons are present), fixed Canvas screenshot point-click and zero-timeout validation drift across `bsk` CLI and MCP (`bsk_interact`, `bsk_page`, `bsk_inspect`, `bsk_tabs`, `bsk_assist`, `bsk sync --wait-for/--wait-not --timeout-ms` up to `120000`ms, and structured `scope_browser_conflict` errors on MCP `bsk_session(open)`), and fixed MCP `notifications/cancelled` dropping in-flight IPC futures at `0`ms without awaiting `CANCEL_RESPONSE_GRACE` (recovering real `effect_state` receipts and releasing staged upload files on `cancelled_before_dispatch`).
+- Fixed `dump-schema --method <name> --output` emitting input schemas instead of `output_schema`, fixed `scripts/protocol.mjs` omitting input-only nested `$ref` types (such as `ActionExpectation`, `CookieFilter`, and `UserAgentBrandVersion`) from `transport/generated/input.ts`, fixed MCP `strip_schema` deleting argument and nested property `description` fields from `tools/list` `inputSchema` (stripping only the root struct doc comment at `depth == 0` and preserving inner `oneOf` `null` branches when collapsing `Option<T>`), typed `LoggedStep::Action.modifiers` as `Option<Vec<KeyModifier>>` while closing the `RunLogs` `character_key` input-privacy filter bypass on `modifiers: []` / `null` / `["shift"]`, typed `CooperationController.command` against `CooperateResult` while failing `cooperate wait` immediately on concurrent tab close/release instead of spinning until timeout with `state: undefined`, accepted explicit `"payload": null` on empty-payload `EventFrame` variants, and aligned `bsk sync` activity fixtures with genuine `CooperateActivity` wire contracts.
+- Fixed mid-call idle-timeout session reaping during `Unlocked` tool RPCs, `operation await`, `debug(activity|wait)`, `video`, `ledger`, and `session.run_log` via RAII `SessionActivityGuard` leases, promoted `ToolDialogAccept` to `cancel_at_deadline: true` + `EffectAwareAction` serialized behind a per-session `dialog_operations` decision lock before `IntentWal` reconciliation, gated `ImplicitScopeRegistry` binding on explicit `bind_scope || reuse_or_start_scope` so ephemeral `record` and `recipe` sessions never clobber or tombstone the caller's bound session, eliminated prose-substring `IntentWal` classification in favor of structured `dispatched: false` / `effect_state` error data across `CooperationController` (`bootstrap` / `strict` / `target`), `Dispatcher`, `dialog-control`, and `queue`, added `ErrorCode::UserAborted` to `IntentWal` `Unknown` reconciliation with authoritative multi-tab `tab_id` attribution, and pinned open tabs' active `cN`/`oN` short aliases across >32 ring evictions.
+- Closed the post-#737 VOM cache last-mile gaps across CLI, MCP, and daemon: hydrated `observation` and `observation_origin` in `bsk sync --json` (and normalized `{ "vom": ... }` receipts in `bsk view`) so saved `bsk sync --json` files work directly with `bsk view` and `--baseline`, reused `scope_meta.cached_vom` on slim `unchanged` and text-patched `delta` frames in `authoritative_full_vom` (`--wait-for`/`--wait-not` without redundant `tool.snapshot` fallbacks) and MCP `bsk_session(open|sync)`, hydrated slim `delta` VOM into `RunLogs` while isolating `known`/`masked` ref tables per tab across multi-tab sessions, pinned Step 0's resolved `session_id`/`tab_id`/`context_id` across Steps `1..N` in `bsk plan` and `bsk_plan`, wired `endpoint_pipe_name` across Windows named-pipe server/client IPC, and expanded cross-platform Windows daemon CI unit and integration test coverage alongside updated `2.0` protocol and skill references.
+- Fixed session idle-timeout reaping missing `dialog_operations.remove_session` and losing the `session_idle_timeout` tombstone reason on subsequent browser disconnect, fixed unclaimed `session_requests` cleanup missing `dialog_operations`, `scopes`, and `intent_wal` teardown, and unified `DialogOperation` post-settlement reconciliation (`scopes`, `intent_wal`, and `run_logs`) so operations suspended with `DialogPending` and completed via `dialog accept/dismiss` + `operation await` update `run_logs` to their real completion outcome instead of leaving `Uncertain`.
+- Fixed `--max-tokens` truncated baselines short-circuiting subsequent unbounded or differently budgeted `bsk sync` calls (`baseline_reason: "token_budget_changed"` across both `strict` and `target` policies plus daemon budget/predecessor checks), patched cached `last_vom` in-place on `target`-policy text `delta` updates (including equal-budget `--max-tokens` truncated observations and whitespace-collapsed empty line patches) while clearing `last_vom` on unpatched form `field` deltas so `bsk sync --match-text` never matches stale input values, preserved `truncated`, `capture_truncated`, `next_cursor`, and `presentation` across `bsk sync` cached hydration and receipt formatting, and added symmetric unbounded `tool.snapshot` fallback (with automatic cooperation re-sync) for `--wait-for` when `--max-tokens` truncates the observation.
+- Fixed cross-origin OOPIF `visual-region` `@eN` references and `--capture-id` coordinate clicks failing with `visual_target_changed` after 75s idle Soft-Detach reconnects (when Chrome assigns a new internal child `sessionId` while `frameId + loaderId` remain unchanged), deterministically rejected stale `FrameNodeHandle` / `FrameDocumentHandle` targets across child-frame `loaderId` navigations and same-`loaderId` `document.open()` replacements, and restored 75s idle Soft-Detach after one-shot `console` / `network` reads and `debug start -> stop` lease release.
+- Fixed native-dialog gate bypass when `tool.debug` (`replay`) triggers browser dialogs, missing `intent_wal` tracking on `download`/`dialog_accept`/`debug(replay)`/`navigate`/`reload`, and missing `EffectAwareAction` policies on `window_resize`/`emulate`/`tab_close`.
+- Fixed MCP error hints emitting CLI-only commands (such as `bsk ledger resolve`), missing `discard`/`exported` video cooperation actions, missing `navigate_back`/`forward`/`dialog_*` debug evidence classification, missing audit labels, and `recipe` `session_gone` detection of `session_stopped`/`no_active_session`.
+- Preserved user window focus on macOS and Linux/X11 Chromium when creating or
+  initializing background Agent Windows and tabs (`chromeAgentWindowApi.create`
+  seeding an inactive tab via `tabId` on Linux while excluding active or
+  starting Agent Windows from donor selection, and `tool.tab_create` /
+  `ensureActiveTab` creating inactive tabs before activating via
+  `chrome.tabs.update`, closing orphan tabs or claiming cleanup failures into
+  `agentCreatedTabs`), enabled the Aura screencast compositor keepalive (and
+  full-page stale-frame guard) on headed Linux and Windows across `screenshot`
+  and `screenshot --full-page` on unselected tabs and unfocused/occluded or
+  minimized Agent Windows (skipping `HeadlessChrome/`), and made
+  `parsePngDimensions` charset-independent when bundled (#731, #732).
+- Preserved foreground window focus during native pointer interactions (`click`,
+  `drag`, `download`, and `upload`) in background Linux Agent Windows, ordered
+  CDP focus emulation, temporary `about:blank` tab unselection, and background
+  lease visibility checks so shared tabs do not emit spurious `blur` events,
+  claimed temporary tabs to prevent leaked `about:blank` fallback routing, and
+  rechecked focus after transient X11 events when restoring task popup focus or
+  routing an external link (#731, #732).
+- Accepted hyphen-prefixed base64url local `device_id` values (`Bytes<16>`) in
+  `bsk daemon revoke`, `bsk daemon rotate`, and `bsk daemon pair --replace`
+  without requiring `--`, while still rejecting malformed hyphenated flags at
+  CLI parse time (#732).
+- Failed closed with `invalid_params` when cooperation action metadata
+  (`context_id`, `depends_on`, `observation_id`, `expect`) is supplied to
+  unguarded CLI or MCP commands while stripping auxiliary follow-up RPCs inside
+  multi-phase commands (`open`, `step`, `upload`, `download`, and
+  `screenshot --full-page`), and re-verified `--expect` business conditions in
+  `CooperationController` (`prepare` — including `primaryEffect` hover/focus
+  steps — and `beginDomMutation` before marking `nativeInputStarted`) under
+  `target` policy so last-moment DOM mutations fail closed before the committing
+  press or scripted mutation (#731, #732).
+- VOM tree folding (`shouldSkipRedundantRefChildren` and `renderTreeRows`) preserves
+  independent interactive descendants under named interactive controls (such as Vue 3 +
+  Element Plus nested `<el-sub-menu>` popups inside a parent `menuitem` or custom ARIA
+  combobox popups) so each expanded, actionable child item renders on its own row with a
+  distinct `@eN` reference across `bsk sync`, `observe`, and `snapshot`, while keeping
+  passive inner wrappers, inherited `cursor: pointer` / click-skin descendants, and native
+  `<input>` / `<textarea>` / `<select>` controls folded without duplicate refs; added
+  required pre-release audit scenario `EDGE-NESTED-MENU-REFS`.
+- Structured list extraction (`extract list`) collects slot-assigned items and default
+  item links (`url`) across open Shadow DOM `<slot>` projections while preserving rendered
+  slot order, closed-`<details>` hidden row positions, nested-list item and link ownership,
+  visibility checks, and collection limits ([#588](https://github.com/Tencent/BrowserSkill/issues/588),
+  [#612](https://github.com/Tencent/BrowserSkill/pull/612)); added required pre-release
+  audit scenario `EDGE-SLOTTED-LIST-EXTRACT`.
+- Structured extraction (`extract table`, `extract list`, and `extract discover`) applies
+  computed CSS `text-transform` (`uppercase` and `lowercase`) and rendered locale casing
+  rules to visible non-sensitive `<input>` and `<textarea>` values while preserving browser
+  UA `text-transform: none` defaults and byte-budget accounting (follow-up to
+  [#613](https://github.com/Tencent/BrowserSkill/pull/613)).
+- Recording a contenteditable editor keeps the line breaks the person typed, so a
+  multi-line edit replays with its lines instead of collapsing into one
+  ([#594](https://github.com/Tencent/BrowserSkill/issues/594)).
+
+### Removed
+
+- Removed upper-layer imports of `browser-driver/frame-graph` (`CdpTarget`, `CdpFrame`, `CdpFrameGraph`, `sendToTarget`, `sendGuarded`, `sendAttached`, and `getFrameGraph`), optional `?` mock-accommodating methods on `CdpRunner`, module-global `downloadActive` state, the `isAgentWindowId: () => false` fallback default in `returnBorrowedTab`, hardcoded Chinese benchmark heading filters from `@browser-skill/vom`, and regex line re-parsing / duplicated `DERIVED_NAME_CAP` in `cooperation/text-delta.ts`.
+- Removed dead write-only `apps/extension/src/lib/sessions-live-flag.ts` (`bh.sessions_live` / `SESSIONS_LIVE_FLAG_KEY`) and ineffective Isolated World `history.pushState` / `history.replaceState` monkey-patching in `apps/extension/src/content/record-capture.ts`.
+- Removed `reattachIfSoftDetached`, `reconcileSoftDetachedFrames`, and `resolveTarget` compensation hooks from `CdpRunner`, `RefStore.remapChildFrameSessions`, partial hand-written `CdpRunner` wrapper object literals (replaced with full `delegateCdpRunner` delegation), and isolated default `new ChromiumCdp()` fallback instances outside `background.ts`.
+- Removed deprecated `TraceV2` recording types/converters (retaining `TraceV3` only), all 9 legacy `1.x` `Feature::*` compatibility gates, extension/daemon `"1.6"`/`LEGACY_MIN_COMPATIBLE_PEER` shims, duplicate `DragParams.observation_id` / legacy drag modes, and duplicate `wire_*` runtime validators from generated TypeScript artifacts.
+- Removed the legacy bespoke `bsk_*` tool wrapper, duplicated session start journal,
+  forked DSH-only skill markdown, and Web UI thumbnail-polling React overlay from
+  `packages/dsh-plugin-browserskill` (along with `@deepseek-ai/dsh-*` host `rc` peer
+  locks and DSH-specific test shims); DeepSeek Harness now uses the standard `bsk` CLI
+  and `bsk mcp` server, with in-flight MCP cancellation, cooperation settlement, CLI
+  video export, and dynamic-reading browser regressions migrated to `bsk` CLI and
+  `bsk mcp` (#731, #732).
+
+## [0.5.0] - 2026-11-12
+
+### Added
+
+- Daemon-local `<3ms` Intent Write-Ahead Ledger (`$BSK_HOME/intent_ledger.jsonl`, `0600`)
+  and `bsk ledger status | resolve`: intercepts all mutating tools (`click`, `fill`,
+  `press`, `select`, `upload`, `drag`, `evaluate`) regardless of `--ref`, raw CSS
+  `--selector`, or visual `(image_x, image_y)` targeting while persisting only redacted
+  target summaries (never plaintext `fill` values or `evaluate` scripts). Transitions
+  timed-out, cancelled, disconnected, or `effect_state: "unknown"` actions (plus leftover
+  `DISPATCHED` entries across daemon restarts) to `UNKNOWN`, blocking blind mutating
+  replays on that tab in `<1ms` (`uncertain_prior_effect`) while allowing 100% of
+  read-only/diagnostic commands and auto-reconciling on `bsk sync`.
+- Zero-ceremony lifecycle commands (`bsk open`, `bsk sync`, `bsk close`) and a
+  daemon-memory `ImplicitScopeRegistry` with deterministic `caller_scope` isolation
+  (`--session` > `--scope` / `BSK_SESSION` / `BSK_SCOPE` > per-process MCP stdio
+  `conn_scope` > host subagent IDs > anti-silent-hijack `"default"`), monotonic short
+  evidence aliases (`c1..cN`, `o1..oN`), omitted `--session` / target-policy
+  `--context` resolution, and `unchanged` VOM hydration without altering extension-side
+  cooperative safety verification.
+- Affordance-typed VOM rendering and `<select>` label selection: bare input controls bind
+  preceding static captions as `[field: "..."]` without duplicating consumed labels; CJK
+  parent-child text deduplication requires exact equality; non-sensitive native `<select>`
+  elements inline up to 10 options (`[options: val="Label"* | ...]`), while `select`
+  accepts unique visible option labels, rejects ambiguous duplicate labels
+  (`option_ambiguous`), lists up to 12 available candidates on `option_not_found`, and
+  guides callers to click custom ARIA comboboxes (`[custom-dropdown: ...]`); runs of 3 or
+  more consecutive pure read-only table rows fold into compact pipe-delimited rows.
+- Computed-style stealth prompt-injection stripping and zero-extra-RPC virtual-scroll row
+  business-key guards: observation and hover probes strip non-interactive subtrees hidden
+  via `opacity < 0.05`, `font-size <= 1.5px`, zero foreground/background contrast,
+  far-offscreen layout bounds, or `< 2px` clipped boxes (preserving interactive controls,
+  `.sr-only` accessible button labels, `<label for>` and `aria-labelledby`/`aria-describedby`
+  targets); `@eN` refs inside table, list, or virtual rows record a normalized `rowAnchor`
+  and verify it atomically in `checkActionTarget`'s single `SAMPLE_TARGET` probe, blocking
+  in-place recycled DOM slots before dispatch (`virtual_row_recycled`, `effect_state: none`).
+- Qoder and Qoder CN are available as skill-only install targets through
+  `bsk install-skill --harness qoder` and `--harness qoder-cn`.
+- Local pairing with mutual proofs, durable key rotation and interruption recovery.
+  Paired connections verify the daemon before sending business traffic; activation
+  invalidates the original link. Device revocation and browser registration are
+  serialized, and successful revocation completes live connection cleanup.
+- `bsk daemon pair --replace`, local device listing/revocation, `daemon rotate`
+  and `daemon trust-local on|off`; status and doctor expose pairing guidance.
+- Extension pairing settings, staged verification, ten-language guidance,
+  explicit bypass confirmation and retained remote grants when using local mode.
+  Pairing is optional for new installs and upgrades; unpaired connections remain
+  usable with an identity warning and a link to the official security overview.
+  Paired connections and saved recovery candidates never automatically downgrade.
+- `bsk daemon pair` reuses or starts the daemon before returning a usable link.
+  Explicit Required mode remains available; unverified connections cannot claim
+  an existing paired identity under the default policy.
+
+- The in-page control panel can minimize to a right-edge expand arrow. Its display
+  state is retained for the current task across status updates and navigation.
+- `bsk plan` and the MCP tool `bsk_plan` run several already-decided actions in one
+  call, then return the synchronized state, so a form or a set of filters takes one
+  model turn instead of one per action. Each step keeps the checks of its own command,
+  and the first step that does not complete stops the plan without any retry.
+- The DSH plugin runs decided actions together with `bsk_interact(action=plan)`, with the
+  same checks, stopping rule and receipt as `bsk plan`.
+- The DSH plugin offers `bsk_recipe` when its `recipes` option or `BSK_RECIPES=1` is set.
+  A run uses an owned session, keeps the receipt of a run that did not complete, and has
+  no approve action.
+- `bsk recipe` saves a verified flow as a local file and replays it, returning its
+  outputs without a model turn per step; MCP lists `bsk_recipe` with `BSK_RECIPES=1`.
+  Targets match exactly by role, name and context, and a run stops at the first deviation
+  and hands the page back. This version replays only read and reversible steps: a lowered
+  risk runs only after a person approves it with `bsk recipe approve`, and an uncertain run
+  holds its recipe until the caller checks it. See `docs/recipes.md`.
+- `bsk read`, MCP and DSH `bsk_inspect(action=read)` sample bounded DOM fields
+  through fixed synchronous isolated-world queries. Agents can read current title,
+  URLs, text, attributes and control state across unrelated animation, then act
+  with explicit business conditions. No caller JavaScript, callbacks or delayed
+  effects are accepted; sensitive fields are masked.
+- DOM reads negotiate protocol 1.9 and reject older peers explicitly, without
+  script fallback. Visual/untargeted input retains strict guards.
+- `bsk evaluate --unverified` (MCP `params.unverified`, DSH `unverified`) runs a script
+  without comparing the page with any observation, for pages that never hold still and
+  scripts whose dependencies cannot be stated. Control authority, main-document identity
+  and tab ownership are still enforced; it cannot be combined with `--expect`,
+  `--observation` or `--depends-on`, and its result carries `verified: false`. It needs
+  protocol 1.9 on the daemon and extension; peers below 1.9 are rejected before dispatch.
+  Earlier 1.9 development builds require updating the CLI, daemon and extension together.
+
+### Changed
+
+- Accelerated single-step interaction hot paths by ~85%: under `target` cooperation
+  policy, internal non-input CDP steps (`Runtime.callFunctionOn`, `DOM.focus`,
+  `DOM.scrollIntoViewIfNeeded`, `Emulation.*`, `DOM.getBoxModel`) run against a zero-RPC
+  in-memory push-interruption fence after a single entry `verifyDecision()` (preserving
+  real-time `isTrusted` human takeover cancellation and strict-policy semantics), merged
+  duplicate `beforeinput` cross-frame refreshes, and made `finishInput` cleanup
+  non-blocking on untouched Agent Window tabs; compressed `handleFill` to a 3–4 step CDP
+  fast path that retires hard `fill_value_mismatch` errors on auto-formatted inputs and
+  returns `actual_value` / `formatted` on non-sensitive fields; switched business CLI
+  commands to optimistic single-UDS direct connection via `daemon.json` with zero-replay
+  connect-failure auto-spawn fallback.
+- Rewrote the CLI `SKILL.md` into a zero-preread workflow (`<= 2,000` UTF-8 bytes)
+  preserving all four cooperative safety invariants, removed repeated static `guidance`
+  prose from `cooperate sync` replies, and added 75-second four-guard idle
+  `chrome.debugger` soft-detach (preserving `tabOwners`, console/network `since`
+  cursors, unchanged `@vN` and cross-origin OOPIF `@eN` refs, pending JavaScript
+  dialogs, and active download/upload/navigation/screencast attachment leases across
+  transparent reattach) alongside immediate 0ms detach on `bsk close` and
+  `bsk tab return`.
+- Cooperative synchronization and strict pre-action verification reuse a sliding
+  10-second `Accessibility` domain lease per tab, skip unused VOM text rendering on
+  scene-only evidence and delta captures, stream unrelaxed whole-page evidence
+  comparison without per-node serialization, and reduce semantic-graph and VOM
+  allocations on large pages.
+- The extension popup always shows Connection settings instead of hiding them behind
+  a disclosure. The optional-pairing advice collapses to a warning-triangle icon beside
+  the heading and expands on click; skipped verification and states that block the
+  connection stay visible. The current address sits under the selected mode, the
+  pairing steps move behind an info icon, "Use a new pairing link" is a button, and the
+  save notice appears only once there is a valid change to save.
+- `bsk plan` and `bsk recipe` are documented standard CLI workflows, with packaged
+  guidance for batching and replay; recipe schemas remain opt-in in MCP and DSH.
+- Recipe execution and edits share an exclusive lock. Replay refuses unreadable
+  safety state or an unwritable run marker, and retains interrupted-run holds even
+  when the host process remains alive. DSH drains cancelled plan and recipe receipts.
+
+- The extension removes obsolete migration flags and version gates while keeping
+  pairing optional. There is no automatic enforcement deadline.
+- `bsk-protocol` is the single source of truth for method metadata, JSON schemas,
+  TypeScript request/result codecs, exhaustive daemon/extension execution policies,
+  and protocol 1.2–1.9 peer feature compatibility checks (`pnpm protocol:check`).
+
+### Fixed
+
+- Stopping a recording coordinates cleanup of the recording session and preserves
+  the captured steps if cleanup needs to be retried ([#720](https://github.com/Tencent/BrowserSkill/pull/720)).
+- The DSH skill and plugin documentation explain how to call BrowserSkill tools
+  through `run_code` in PTC mode ([#721](https://github.com/Tencent/BrowserSkill/pull/721)).
+- Idle debugger detach preserves element references across reattach and waits for
+  open dialogs and active downloads to finish ([#711](https://github.com/Tencent/BrowserSkill/pull/711)).
+- A target-policy `cooperate sync` no longer re-sends the whole VOM when the only page
+  activity since the last observation replaced visible text in place. The content script
+  logs text-only mutation batches separately from structural ones, and the extension
+  answers `kind: "delta"` with `observation_patch.lines`, `kind: "text"` entries in
+  `changes` (previous value, value, touched VOM lines) and `previous_observation_id`.
+  With `--baseline` on the exact predecessor the CLI applies the patch, saves the merged
+  observation through `--save-full` and keeps the page text out of stdout; `view` reads
+  the merged version with zero browser calls. On the 6,857-node `ARENA-MEGA-VOM-DELTA`
+  fixture the third sync went from about 2.2 s and 574 KB to about 0.2 s and 2 KB, and
+  the merged text equals a fresh capture. Structural changes, replaced documents or
+  refs, human activity, field changes, focus moves under focus-dependent styles, log
+  gaps, text outside or ambiguous in the held observation, child frames and token-budget
+  shifts still return a fresh `baseline`, now with a `baseline_reason`. Strict-policy
+  behaviour and the target and observation guards are unchanged
+  ([#722](https://github.com/Tencent/BrowserSkill/pull/722)).
+- Hardened VOM stealth prompt-injection stripping against CSS Color 4/5, gradient-clip
+  text, HiDPI microboxes, inner scroll containers, and mixed textstyle containers:
+  resolves `oklch`/`oklab`/`lab`/`lch`/`hsl`/`hwb`/`color()`/`color-mix()` to sRGB for
+  accurate cross-space zero-contrast and zero-alpha detection (including Tailwind v4
+  `oklch()` backdrops and `currentColor 0%` mixes); preserves genuine
+  `background-clip: text` / `-webkit-background-clip: text` gradient headings while
+  stripping transparent, zero-span, or background-matching gradient stops; scales `1px`
+  microbox and offscreen bounds on HiDPI/Retina displays; verifies inner
+  `overflow: auto | scroll` scroll offsets (`scrollRects`) and `#text` glyph bounds so
+  legitimate scrolled rows remain intact while unscrolled `left: -99999px` / `-2000px` /
+  `text-indent: -9999px` injections are stripped; and clears direct stealth text and
+  tainted AX `name`s on retained containers ([#709](https://github.com/Tencent/BrowserSkill/pull/709)).
+- `wait-for-navigation` no longer returns on the old page when the navigation it waits
+  for is scheduled or still in flight. A settled page counts as reached only after a
+  short grace period without a main-frame navigation start; once a navigation starts
+  or Chrome reports one as pending, only the successor document can satisfy the wait.
+  Same-document and back/forward-cache restores still complete immediately
+  ([#700](https://github.com/Tencent/BrowserSkill/issues/700)).
+- VOM snapshot decoding and semantic DOM text resolution exclude `<style>`, `<script>`,
+  `<noscript>`, and `<template>` subtrees (alongside HTML comment nodes) when collecting
+  fallback element text, preventing controls without an accessible name from leaking raw
+  CSS, script, or template markup as their label
+  ([#694](https://github.com/Tencent/BrowserSkill/issues/694)).
+- Native clicks, key presses and wheel input calibrate Chromium's input clock so
+  long-running browsers do not misclassify their own input as human intervention
+  after sleep or clock changes. Calibration uses the extension's hidden document,
+  preserves the existing input checks, and reports clock failures before dispatch
+  ([#665](https://github.com/Tencent/BrowserSkill/issues/665)).
+- `tool.record_start` enforces shared-tab cooperation ownership, stop, and human-control
+  guards and invalidates stale control contexts when starting recording; `tool.tab_return`
+  clears active recordings for local sessions as well as remote ones.
+- `navigate back` and `navigate forward` no longer time out when Chrome restores
+  the history entry from the back/forward cache. A restored document is already
+  loaded and emits no new load lifecycle event, so the restore commit now
+  satisfies `domcontentloaded` and `load`, and re-enables lifecycle replay on the
+  restored document so `networkidle` also completes on previously idle pages
+  ([#701](https://github.com/Tencent/BrowserSkill/issues/701)).
+- Daemon shutdown retains its WebSocket stop notification when the accept loop is
+  between waits, avoiding a lost notification that can leave `daemon stop` waiting.
+- Website debugging attributes agent uploads and downloads to their transfer
+  operations instead of recording the resulting file changes and clicks as human input.
+- The Intent WAL no longer freezes a tab after actions that provably never took
+  effect. A click refused after only scrolling (`effect_state: "unknown"` with
+  `press_sent: false`) and any failure reporting `dispatched: false` now settle.
+  `select` checks the requested options before scrolling or focusing the element,
+  and `fill` validates the value before clearing; rejections found there
+  (`option_not_found`, `option_ambiguous`, disabled `<select>`, `fill_value_invalid`,
+  `target_not_fillable`) report `effect_state: "none"` with `phase: "precondition"`,
+  so a corrected retry neither needs `bsk ledger resolve` nor loses the
+  shared-control context. The same reasons reported later, after `select` moved
+  focus or after `fill` cleared the field, keep an unknown effect. A `<select>` that is already disabled is now
+  reported as `invalid_params` instead of a `cdp_failed` focus error
+  ([#702](https://github.com/Tencent/BrowserSkill/issues/702)).
+- Local validation failures in upload, download, plan and step return stable
+  parameter/file error codes and relevant recovery hints. Upload sources are checked
+  before contacting the daemon or staging any files.
+- `bsk get-html --json --out <file>` no longer prints the HTML to stdout. With
+  `--out`, JSON output reports `tab_id`, `path`, `written_bytes`, `byte_size`,
+  `truncated` and any dialogs, so large pages stay out of the caller's context;
+  without `--out`, the JSON result still includes `html`
+  ([#715](https://github.com/Tencent/BrowserSkill/issues/715)).
+- `fill` on a page without focus (a background tab, or the agent window while
+  another window is focused) delivers focus before validating and clearing the
+  field, so focus listeners that set a default value no longer leave it in front of
+  the typed text or restore it when the tab is activated. A visible page receives
+  focus from a pointer move outside the viewport, which reaches no element; a hidden
+  or hovered page keeps the previous no-op key press, which pages can observe as an
+  empty key. Truncated or reformatted password, card and one-time-code fills report
+  `formatted: true` (also in the human CLI output) without `actual_value`, and text
+  inputs named like passwords, as left by a "show password" toggle, are treated as
+  sensitive ([#713](https://github.com/Tencent/BrowserSkill/issues/713)).
+- `fill` notifies each final value once. Native insertion and clearing already
+  dispatch `input`; the completion step no longer repeats it
+  ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
+- Borrowing a user tab that still shows `about:blank` or the browser's empty New
+  Tab page (`chrome://newtab/`, `edge://newtab/`, `about:newtab`, including
+  query/fragment variants) no longer deadlocks tab management or initial
+  navigation in the session. Empty initial/new-tab root pages without a
+  collector are skipped during tab-management preparation and may perform an
+  initial bootstrap navigation, and `tab return` can also hand back a borrowed
+  tab stuck on a browser-restricted page or failed root load without tearing
+  down the session. Observable `about:blank` popups, other unobservable web
+  pages, and subframes are still refused without synchronization
+  ([#703](https://github.com/Tencent/BrowserSkill/issues/703)).
+- Window blur releases completed text-editing holds, and new task synchronizations
+  after an idle gap automatically resume paused or editing tabs when no gesture or
+  recent input is active, avoiding unnecessary manual hand-back prompts between tasks.
+- `bsk sync` and `bsk open` evaluate `--wait-for` and `--wait-not` against the full
+  page. A strict-policy `delta` frame or an `unchanged` frame without a cached page
+  is read once with `tool.snapshot` instead of matching only its `[change ...]` lines
+  or empty text, and a page cut by `--max-tokens` is read in full before `--wait-not`
+  accepts that text is gone. A wait that returns after several polls also reports
+  the field changes, activity and `history_complete=false` of the frames it did not
+  return. A failed page read keeps the wait polling instead of ending it
+  ([#714](https://github.com/Tencent/BrowserSkill/issues/714)).
+- Recording keeps clicks on buttons and links whose name is longer than 48 characters,
+  such as GOV.UK step-by-step sections and long news headlines.
+- Recording keeps clicks on links, filter disclosures, checkboxes and other controls
+  that share a form with a search field, such as GOV.UK search results and filters.
+- Recorded steps keep their element ref after the page scrolls or the target changes size:
+  when no position matches, the only same-tag ref with the same role and name is used.
+  A click on text inside a `<summary>`, tab or option is measured on that control.
+- Recipe save refuses oversized input and formatted documents before publishing a
+  revision that its own reader could not open.
+- `press` maps US-layout punctuation to its physical `code` and virtual key code,
+  so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
+- Main-document SPA route changes, including away-and-back and hash routes,
+  invalidate old control contexts and refs. Supplementary reads never renew them.
+  This also covers passive reads of already loaded tabs and fresh debugger attachments.
+- Context-bound reads preserve frame-collection diagnostics and report failures before
+  dispatch with `effect_state: none`. Missing root or child document elements report
+  `read_target_stale` instead of a generic CDP failure.
+- CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
+  instead of repeated sync/evaluate refusals.
+- A script that states what it relies on is checked against that instead of the whole
+  page, so unrelated clocks, feeds and media no longer refuse it in a loop. Under target
+  policy, `evaluate` with `--expect` and no `--observation` reuses its context and is not
+  refused when a child frame navigates; passing `--observation` as well still checks the
+  whole page. Under strict policy, `evaluate` with
+  `--depends-on` checks those regions, form values and modal layers only; it previously
+  also required the whole page to match. A script that states nothing is checked as before.
+- A refusal caused by a changed observation also reports `observed_changes`: the number
+  of changed, added and removed nodes with up to five examples. For scripts, the recovery
+  text and the bundled skills give the order to try: state the facts, and use
+  `--unverified` only when they cannot be stated.
+- Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
+- A frame that does not answer collection in time is named in the error message and
+  `data.frames` (frame ID with the sanitized origin and path; tab operations add the tab).
+  The refusal remains `cooperation_sync_required`, so `--settle`, recipes and DSH still
+  retry it, and its recovery explains how to leave a frame that keeps failing
+  ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
+- A child frame that cannot be collected while its element is not displayed, has no area
+  or is invisible, and does not hold focus, is listed in `frame_gaps` as `hidden_frame`
+  instead of blocking the tab, as with micro-frontend sandbox iframes. Later collections
+  recheck the element instead of waiting for the frame again, and a displayed frame still
+  blocks input ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
+- Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
+- Recording captures option changes on native `<select>` controls inside open shadow roots,
+  whose `change` events do not reach the document.
+- Strict DOM-targeted actions tolerate added or removed noninteractive tooltips after their
+  own hover, and character counters tied to a focused text field by `maxlength` or
+  `aria-describedby` after their own focus. Target meaning, links, ordinary text, form state,
+  modal contents and explicit dependencies stay exact. Scripts, untargeted keys and visual
+  clicks retain the full observation check, including during preparation
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
+- A targeted strict action without `--depends-on` tolerates a positively identified media
+  timeline elsewhere on the page, as it already did with dependencies. Unnamed, submitted and
+  in-form sliders, and untargeted actions, stay exact.
+- Evidence refusals report `observed_change` (the first differing node, field and check, and
+  whether it happened before or during preparation) without values or sensitive text. Strict
+  click refusals after preparation also report `press_sent: false`.
+- A request refused because an earlier command on the session is still settling (for
+  example a cancelled observation screenshot) now carries `reason: operation_settling`,
+  `retryable` and `retry_after_ms`. `cooperate sync --settle` pauses and syncs again
+  (up to 5 s, also for older extensions), and the CLI no longer suggests a reload that needs
+  the same sync ([#527](https://github.com/Tencent/BrowserSkill/issues/527)).
+- `upload` preserves its concrete handler failure receipts (`set_file_input_failed` and
+  `file_drop_failed`, such as `-32000 Not allowed` when Chrome's "Allow access to file URLs"
+  extension toggle is off) when transaction cleanup detaches the debugger or post-action
+  frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
+  `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
+  `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
+- Recording preserves clicks on submit, reset and image input buttons, including
+  actions beside search fields, and uses reset buttons' visible values as names.
+
+- Cooperative status updates preserve an active click-passthrough lease, so the
+  control panel and its minimized arrow do not swallow automated page clicks.
+- Recording keeps clicks on buttons and links inside an editor's `contenteditable="false"`
+  regions, such as attachment actions, instead of treating them as editor input.
+
+- `extract` applies CSS `uppercase` and `lowercase` to text in table cells,
+  headers, list fields and discovery previews, respecting nested style overrides
+  and language-specific casing. Transformed text remains subject to the byte
+  budget ([#597](https://github.com/Tencent/BrowserSkill/issues/597)).
+- Closing a retained Agent Window or stopping the last session detaches remaining
+  CDP debugger attachments and cancels active session operations, so the browser's
+  debugging infobar does not linger after the task window is closed.
+
+## [0.4.2] - 2026-11-05
+
+### Added
+
+- Session controller labels show an agent name, project, session ID and color in
+  browser overlays. CLI and DSH session startup accept the display metadata.
+- Fill supports date, time, datetime-local, month and week inputs, validates
+  formats and min/max limits, and preserves background input state.
 - `bsk mcp` lets MCP clients control BrowserSkill over stdio using the existing
   daemon and browser extension. `bsk install-skill --mcp` can configure Codex,
   Claude Code, and Cursor.
 
 ### Changed
 
+- Borrowed tabs return relative to their original neighbors, with improved pinned
+  tab and group restoration. Eligible requests support automatic borrowing when
+  borrow confirmation is disabled.
+- The extension restores the `tabGroups` permission to read and restore borrowed
+  tabs' original groups.
+- Shared control waits for two seconds of quiet after the person's last completed
+  action before returning control to the Agent, up from 650 ms.
 - CLI and daemon updates prefer the official website's domestic download source,
   falling back to GitHub for failed manifest or archive requests and verification.
   Archive fallback stays on the selected version with SHA256 verification; if both
@@ -24,9 +550,25 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
-- On Windows, `daemon stop`, daemon status checks, the post-update wait and
-  leftover cleanup no longer treat a running process the CLI cannot open, such as
-  one started from an elevated terminal, as exited.
+- Element waits requery selectors when matched nodes are replaced, avoiding false
+  hidden/detached success while a replacement remains visible.
+- Console capture is enabled only when requested, avoiding repeated reloads on
+  affected anti-debugging pages while preserving capture diagnostics.
+- Debug evidence redacts exact vendor credential headers.
+- DSH fill/select values beginning with `-` are passed as option values rather
+  than being parsed as CLI flags.
+- The shared-control toolbar yields pointer hits during automated clicks,
+  including page actions beneath its lower-right corner. Its controls become
+  interactive again when the click finishes or its passthrough lease expires.
+- Enter dispatches keydown and text together, preserving a completed link or
+  form navigation receipt without sending a separate character to a new page.
+  The next action still requires a fresh control context after navigation.
+- Timed-out page actions cancel and await bounded cleanup. Error responses retain
+  execution phase, effect state and operation identity; missing receipts remain
+  explicitly uncertain. CLI and MCP timeout guidance asks callers to inspect the
+  application result before choosing another action instead of blindly retrying.
+- Repeated action labels use their own DOM container's text for context, including
+  labels after the button, so adjacent records no longer misidentify their target.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting

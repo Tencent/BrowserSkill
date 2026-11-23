@@ -1,9 +1,9 @@
 // @vitest-environment node
-// Opt in with BSK_SELECT_CHROME; the fixture owns a headless browser and profile.
+// Opt in with BSK_TEST_CHROME; the fixture owns a headless browser and profile.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSelect } from "../interaction";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -15,7 +15,7 @@ let send: Send;
 let close: (() => void) | undefined;
 let browserRun: Promise<void> | undefined;
 
-if (process.env.BSK_SELECT_CHROME) {
+if (process.env.BSK_TEST_CHROME) {
   beforeAll(async () => {
     const { withChrome } = await import(
       new URL(
@@ -27,7 +27,7 @@ if (process.env.BSK_SELECT_CHROME) {
     const closed = Promise.withResolvers<void>();
     close = () => closed.resolve();
     browserRun = withChrome(
-      { executable: process.env.BSK_SELECT_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (command: Send) => {
         ready.resolve(command);
         await closed.promise;
@@ -42,7 +42,7 @@ if (process.env.BSK_SELECT_CHROME) {
   }, 30_000);
 }
 
-describe.skipIf(!process.env.BSK_SELECT_CHROME)("select disabled state in Chrome", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("select disabled state in Chrome", () => {
   it.each([
     { name: "directly disabled", markup: "<select disabled></select>", disabled: true },
     {
@@ -105,9 +105,9 @@ describe.skipIf(!process.env.BSK_SELECT_CHROME)("select disabled state in Chrome
         },
       });
       await manager.start("aa11");
-      const cdp: CdpRunner = {
+      const cdp: CdpRunner = createStubCdpRunner({
         send: async (_tabId, method, params) => send(method, params, sessionId) as never,
-      };
+      });
       const result = await handleSelect(
         manager,
         {
@@ -125,16 +125,90 @@ describe.skipIf(!process.env.BSK_SELECT_CHROME)("select disabled state in Chrome
       );
       expect(result).toMatchObject(
         disabled
-          ? focusDisables
-            ? { code: "invalid_params", message: "select requires an enabled <select>" }
-            : { code: "cdp_failed" }
+          ? { code: "invalid_params", message: "select requires an enabled <select>" }
           : { selected_values: ["ca"] },
       );
+      if (disabled) {
+        // Only a select rejected before scrolling or focusing is free of page
+        // effects; one disabled by its own focus handler keeps an unknown effect.
+        expect((result as { data?: { effect_state?: string } }).data?.effect_state).toBe(
+          focusDisables ? undefined : "none",
+        );
+      }
       expect(
         await evaluate(
           "({ value: document.querySelector('select').value, events: window.events })",
         ),
       ).toEqual({ value: disabled ? "us" : "ca", events: disabled ? [] : ["input", "change"] });
+    } finally {
+      await send("Target.closeTarget", { targetId });
+    }
+  });
+
+  it.each([
+    {
+      name: "disabled option",
+      options:
+        '<option value="us">United States</option><option value="ca" disabled>Canada</option>',
+    },
+    {
+      name: "option inside disabled optgroup",
+      options:
+        '<option value="us">United States</option><optgroup label="North" disabled><option value="ca">Canada</option></optgroup>',
+    },
+  ])("refuses $name without mutating selection", async ({ options }) => {
+    const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+      url: "about:blank",
+    });
+    try {
+      const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId,
+        flatten: true,
+      });
+      const evaluate = async (expression: string) => {
+        const reply = await send<{ result: { value: unknown }; exceptionDetails?: unknown }>(
+          "Runtime.evaluate",
+          { expression, returnByValue: true },
+          sessionId,
+        );
+        expect(reply.exceptionDetails).toBeUndefined();
+        return reply.result.value;
+      };
+      await evaluate(`document.body.innerHTML = '<select>${options}</select>';
+        const select = document.querySelector('select');
+        window.events = [];
+        for (const type of ['input', 'change']) select.addEventListener(type, () => window.events.push(type));`);
+      const manager = new SessionManager({
+        agentWindow: {
+          create: async () => ({ windowId: 100, initialTabIds: [] }),
+          remove: async () => {},
+          ensureActiveTab: async () => 4,
+        },
+      });
+      await manager.start("aa11");
+      const cdp: CdpRunner = createStubCdpRunner({
+        send: async (_tabId, method, params) => send(method, params, sessionId) as never,
+      });
+      const result = await handleSelect(
+        manager,
+        { session_id: "aa11", selector: "select", values: ["ca"] },
+        {
+          cdp,
+          tabsApi: {
+            get: async (id) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab,
+            query: async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab],
+          },
+        },
+      );
+      expect(result).toMatchObject({
+        code: "invalid_params",
+        data: { reason: "target_disabled", effect_state: "none", disabled: "ca" },
+      });
+      expect(
+        await evaluate(
+          "({ value: document.querySelector('select').value, events: window.events })",
+        ),
+      ).toEqual({ value: "us", events: [] });
     } finally {
       await send("Target.closeTarget", { targetId });
     }

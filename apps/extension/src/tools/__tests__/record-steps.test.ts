@@ -1,16 +1,26 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { RECORD_FINISH, RECORD_START, RECORD_STEP, RECORD_STOP } from "@/lib/record-bridge";
-import type { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { rootEventSource, type TabEventSource } from "@/browser-driver/frame-handles";
+import {
+  RECORD_CANCEL,
+  RECORD_FINISH,
+  RECORD_QUERY,
+  RECORD_START,
+  RECORD_STEP,
+  RECORD_STOP,
+} from "@/lib/record-bridge";
+import { SessionManager } from "@/session-manager/manager";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { EXTENSION_VERSION } from "@/transport/handshake";
-import type { RecordedTrace, RecordStopResult, TraceV3 } from "@/transport/types";
+import type { RecordStopResult, TraceV3 } from "@/transport/types";
 import {
   attachRecordFinishListener,
+  attachRecordQueryListener,
   attachRecordStepListener,
-  handleRecordStart,
-  handleRecordStop,
+  handleRecordStart as rawHandleRecordStart,
+  handleRecordStop as rawHandleRecordStop,
   resetBrowserObservationForTests,
 } from "../record";
+import { handleSessionStop } from "../session";
 
 const AGENT_WINDOW_ID = 100;
 const TAB_ID = 4;
@@ -18,12 +28,10 @@ const START_URL = "https://example.com/";
 const RECORD_START_V3 = {
   session_id: "abcd",
   url: START_URL,
-  trace_version: 3 as const,
-  supports_tab_switch_steps: true,
 };
 const stepSequenceByProducer = new Map<string, number>();
 
-function asTraceV3(trace: RecordedTrace): TraceV3 {
+function asTraceV3(trace: TraceV3): TraceV3 {
   if (!("version" in trace)) {
     throw new Error("expected v3 trace");
   }
@@ -128,7 +136,7 @@ function makeFakeCdp(
   trees?: unknown[],
   options?: { failCaptures?: boolean; treesByTab?: Record<number, unknown> },
 ): FakeCdp {
-  type EventListener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => void;
+  type EventListener = (source: TabEventSource, method: string, params: unknown) => void;
   const events: EventListener[] = [];
   const script = [...(trees ?? [])];
   let failing = options?.failCaptures ?? false;
@@ -140,9 +148,10 @@ function makeFakeCdp(
     "Page.getFrameTree": () => ({
       frameTree: { frame: { id: "frame-1", loaderId: "loader-before" } },
     }),
+    "Page.createIsolatedWorld": () => ({ executionContextId: 1 }),
     "Page.navigate": () => {
       for (const listener of [...events]) {
-        listener({ tabId: TAB_ID }, "Page.lifecycleEvent", {
+        listener(rootEventSource(TAB_ID), "Page.lifecycleEvent", {
           name: "load",
           frameId: "frame-1",
           loaderId: "loader-after",
@@ -155,7 +164,8 @@ function makeFakeCdp(
     }),
     "Runtime.evaluate": (params: unknown) => {
       const expression = String((params as { expression?: string })?.expression ?? "");
-      if (!expression.includes("__bskRecordQuiet")) return { result: { value: "complete" } };
+      if (expression.includes("tokens.delete")) return { result: { value: true } };
+      if (!expression.includes("bsk.record.quiet")) return { result: { value: "complete" } };
       const idleMs = Date.now() >= busyUntil ? LONG_IDLE_MS : 0;
       return { result: { value: { idleMs, readyState: "complete" } } };
     },
@@ -169,7 +179,7 @@ function makeFakeCdp(
     },
   };
 
-  return {
+  return createStubCdpRunner({
     send: (async (_tabId: number, method: string, params: unknown) => {
       const handler = handlers[method];
       if (!handler) throw new Error(`unsupported CDP call ${method}`);
@@ -182,7 +192,7 @@ function makeFakeCdp(
       busyUntil = Date.now() + ms;
     },
     trackSessionTab: () => {},
-    onEvent: (handler: EventListener) => {
+    onEvent: (_tabId: number, handler: EventListener) => {
       events.push(handler);
       return {
         dispose: () => {
@@ -191,7 +201,7 @@ function makeFakeCdp(
         },
       };
     },
-  };
+  });
 }
 
 function makeTabsApi() {
@@ -238,9 +248,38 @@ function makeMultiTabsApi(tabs: chrome.tabs.Tab[]) {
   };
 }
 
+async function drainWithTimers<T>(promise: Promise<T>): Promise<T> {
+  let settled = false;
+  promise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  while (!settled && vi.getTimerCount() > 0) {
+    await vi.advanceTimersToNextTimerAsync();
+  }
+  return promise;
+}
+
+function handleRecordStart(
+  ...args: Parameters<typeof rawHandleRecordStart>
+): ReturnType<typeof rawHandleRecordStart> {
+  return drainWithTimers(rawHandleRecordStart(...args));
+}
+
+function handleRecordStop(
+  ...args: Parameters<typeof rawHandleRecordStop>
+): ReturnType<typeof rawHandleRecordStop> {
+  return drainWithTimers(rawHandleRecordStop(...args));
+}
+
 /** Outlast a settle on a quiet page plus the per-tab observation cooldown. */
 function settleWait(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 800));
+  return vi.advanceTimersByTimeAsync(800).then(() => {});
 }
 
 function runtimeOnMessageEmit(
@@ -264,7 +303,12 @@ function runtimeOnMessageEmit(
 }
 
 describe("recorded user steps reach the exported trace", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
   afterEach(() => {
+    vi.useRealTimers();
     stepSequenceByProducer.clear();
     resetBrowserObservationForTests();
     vi.unstubAllGlobals();
@@ -404,7 +448,7 @@ describe("recorded user steps reach the exported trace", () => {
       transitionQualifiers: [],
     } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
     // Let findRecordingForTab's tab lookup and the settle capture resolve.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     const trace = (stopped as RecordStopResult).trace as TraceV3;
@@ -437,7 +481,7 @@ describe("recorded user steps reach the exported trace", () => {
       details as unknown as chrome.webNavigation.WebNavigationFramedCallbackDetails,
     );
     // Let findRecordingForTab's tab lookup and the settle capture resolve.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     const trace = (stopped as RecordStopResult).trace as TraceV3;
@@ -783,7 +827,7 @@ describe("recorded user steps reach the exported trace", () => {
       expects_navigation: true,
     });
     // The SPA swaps the URL while the settle for that click is still waiting.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.advanceTimersByTimeAsync(50);
     tabsApi.goTo("https://example.com/list?group=deepsearch", "分组");
     chromeApi.webNavigationOnCommitted.emit({
       tabId: TAB_ID,
@@ -893,7 +937,7 @@ describe("recorded user steps reach the exported trace", () => {
     });
     cdp.setBusyFor(900);
     setTimeout(() => tabsApi.goTo("https://example.com/detail", "详情"), 800);
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await vi.advanceTimersByTimeAsync(2_000);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     const trace = (stopped as RecordStopResult).trace as TraceV3;
@@ -931,13 +975,13 @@ describe("recorded user steps reach the exported trace", () => {
       value: "标题",
       commit: "blur",
     });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await vi.advanceTimersByTimeAsync(100);
     runtimeOnMessageEmit(chromeApi, requestId, {
       op: "click",
       page_url: START_URL,
       target: { role: "button", name: "确定", tag: "button" },
     });
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await vi.advanceTimersByTimeAsync(1_500);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     const trace = (stopped as RecordStopResult).trace as TraceV3;
@@ -1130,11 +1174,11 @@ describe("recorded user steps reach the exported trace", () => {
       { tab: { id: TAB_ID } } as chrome.runtime.MessageSender,
       () => {},
     );
-    await stopStarted;
+    await drainWithTimers(stopStarted);
 
-    const cliStop = handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
+    const cliStop = rawHandleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
     releaseStop();
-    const stopped = await cliStop;
+    const stopped = await drainWithTimers(cliStop);
 
     expect(asTraceV3((stopped as RecordStopResult).trace).stopped_by).toBe("user_finish");
   });
@@ -1166,6 +1210,7 @@ describe("recorded user steps reach the exported trace", () => {
         await stopReleased;
         return false;
       }),
+      cleanup: vi.fn(async () => {}),
       cancel: vi.fn(),
     };
     const deps = { tabsApi, sendToTab, cdp: makeFakeCdp(), frameCoordinator };
@@ -1177,20 +1222,16 @@ describe("recorded user steps reach the exported trace", () => {
       { tab: { id: TAB_ID } } as chrome.runtime.MessageSender,
       () => {},
     );
-    await stopStarted;
+    await drainWithTimers(stopStarted);
 
-    const cliStop = handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const cliStop = rawHandleRecordStop(manager, { session_id: "abcd" }, deps);
     releaseStop();
-    const result = await Promise.race([
-      cliStop,
-      new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 500)),
-    ]);
+    const result = await drainWithTimers(cliStop);
 
-    expect(result).not.toBe("timed_out");
     expect(result).toMatchObject({ code: "protocol_error" });
   });
 
-  it("defaults to legacy trace v2 without starting observation capture", async () => {
+  it("starts trace v3 observation capture without explicit trace_version fields", async () => {
     const { runtimeOnMessage } = installChrome();
     const manager = fakeManager();
     const tabsApi = makeTabsApi();
@@ -1236,21 +1277,10 @@ describe("recorded user steps reach the exported trace", () => {
     );
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
-    const trace = (stopped as RecordStopResult).trace;
-    expect("version" in trace).toBe(false);
-    expect("pages" in trace && trace.pages.length).toBeGreaterThan(0);
-    // `hover` has no v2 counterpart on peers that negotiate v2.
-    expect("steps" in trace && trace.steps.map((step) => step.op)).toEqual(["click"]);
-  });
-
-  it("rejects unsupported trace_version values", async () => {
-    const manager = fakeManager();
-    const result = await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL, trace_version: 99 },
-      { tabsApi: makeTabsApi(), sendToTab: vi.fn(), cdp: makeFakeCdp() },
-    );
-    expect(result).toMatchObject({ code: "invalid_params" });
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(trace.version).toBe(3);
+    expect(trace.states.length).toBeGreaterThan(0);
+    expect(trace.steps.map((step) => step.op)).toEqual(["hover", "click"]);
   });
 
   it("does not record an unclaimed user tab inside a remote Agent Window", async () => {
@@ -1394,7 +1424,7 @@ describe("recorded user steps reach the exported trace", () => {
     expect(stateUrl(clicks[1]!.state)).toBe(START_URL);
   });
 
-  it("keeps switch_tab internal when the v3 caller did not advertise support", async () => {
+  it("emits switch_tab steps unconditionally in trace v3", async () => {
     const chromeApi = installChrome();
     const manager = fakeManager();
     const tabsApi = makeMultiTabsApi([
@@ -1415,18 +1445,14 @@ describe("recorded user steps reach the exported trace", () => {
     ]);
     const deps = { tabsApi, sendToTab: vi.fn(async () => ({ ok: true })), cdp: makeFakeCdp() };
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL, trace_version: 3 },
-      deps,
-    );
+    await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
     tabsApi.activate(5);
     chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
     await settleWait();
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
     const trace = asTraceV3((stopped as RecordStopResult).trace);
-    expect(trace.steps.some((step) => step.op === "switch_tab")).toBe(false);
+    expect(trace.steps.some((step) => step.op === "switch_tab")).toBe(true);
   });
 
   it("keeps the latest rapid tab activation when an earlier rearm acknowledges late", async () => {
@@ -1464,12 +1490,12 @@ describe("recorded user steps reach the exported trace", () => {
     await handleRecordStart(manager, RECORD_START_V3, deps);
     tabsApi.activate(5);
     chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
-    await secondStarted;
+    await drainWithTimers(secondStarted);
     tabsApi.activate(6);
     chromeApi.tabsOnActivated.emit({ tabId: 6, windowId: AGENT_WINDOW_ID });
     await settleWait();
     releaseSecond();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.advanceTimersByTimeAsync(50);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
     const trace = asTraceV3((stopped as RecordStopResult).trace);
@@ -1520,6 +1546,7 @@ describe("recorded user steps reach the exported trace", () => {
         }),
       ),
       stop: vi.fn(async () => true),
+      cleanup: vi.fn(async () => {}),
       cancel: vi.fn(),
     };
     const deps = { tabsApi, sendToTab, cdp: makeFakeCdp(), frameCoordinator };
@@ -1561,6 +1588,7 @@ describe("recorded user steps reach the exported trace", () => {
       armTab: vi.fn(async () => true),
       sourceFor: vi.fn(() => null),
       stop: vi.fn(async () => false),
+      cleanup: vi.fn(async () => {}),
       cancel: vi.fn(),
     };
     const deps = {
@@ -1618,15 +1646,15 @@ describe("recorded user steps reach the exported trace", () => {
     await handleRecordStart(manager, RECORD_START_V3, deps);
     tabsApi.activate(5);
     chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
-    await rearmStarted;
+    await drainWithTimers(rearmStarted);
 
-    const stoppedPromise = handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const stoppedPromise = rawHandleRecordStop(manager, { session_id: "abcd" }, deps);
     await vi.waitFor(() => {
       expect(sendToTab).toHaveBeenCalledWith(5, expect.objectContaining({ type: RECORD_STOP }));
     });
     failRearm();
-    const stopped = await stoppedPromise;
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    const stopped = await drainWithTimers(stoppedPromise);
+    await vi.advanceTimersByTimeAsync(600);
 
     const startsForSecondTab = sendToTab.mock.calls.filter(
       ([tabId, message]) => tabId === 5 && (message as { type?: string }).type === RECORD_START,
@@ -1796,10 +1824,217 @@ describe("recorded user steps reach the exported trace", () => {
       transitionType: "link",
       transitionQualifiers: [],
     } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.advanceTimersByTimeAsync(50);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
     const trace = asTraceV3((stopped as RecordStopResult).trace);
     expect(trace.steps.map((step) => step.op)).toEqual(["switch_tab"]);
+  });
+
+  it("cancels active recording and resets automation-bypass refcounts on borrowed tabs during handleSessionStop using injected deps", async () => {
+    installChrome();
+    const realManager = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: AGENT_WINDOW_ID, initialTabIds: [] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 99,
+      },
+    });
+    const ctx = await realManager.start("borrowed-rec");
+    ctx.borrowedTabs.set(99, { tabId: 99, originalWindowId: 200, originalIndex: 0 });
+
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: 99,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+      } as chrome.tabs.Tab,
+    ]);
+    const sentMessages: Array<{ tabId: number; message: unknown }> = [];
+    const sendToTab = vi.fn(async (tabId: number, message: unknown) => {
+      sentMessages.push({ tabId, message });
+      return { ok: true };
+    });
+    const bypassOverlay = vi.fn(async () => {});
+    const cdp = makeFakeCdp();
+
+    await handleRecordStart(
+      realManager,
+      { session_id: "borrowed-rec", tab_id: 99 },
+      { tabsApi, sendToTab, bypassOverlay, cdp },
+    );
+    expect(bypassOverlay).toHaveBeenCalledWith(99, true);
+
+    sentMessages.length = 0;
+    bypassOverlay.mockClear();
+
+    const stopRes = await handleSessionStop(
+      realManager,
+      { session_id: "borrowed-rec" },
+      {
+        cdp: {
+          detachSession: vi.fn(async () => {}),
+          releaseSessionTab: vi.fn(async () => {}),
+        },
+        tabsQuery: tabsApi,
+        tabManagement: {
+          tabs: {
+            get: tabsApi.get,
+            create: vi.fn(async () => ({ id: 1 }) as chrome.tabs.Tab),
+            remove: vi.fn(async () => {}),
+            update: vi.fn(async (id) => tabsApi.get(id)),
+            move: vi.fn(async (id, props) => {
+              const tab = await tabsApi.get(id);
+              tab.windowId = props.windowId ?? tab.windowId;
+              return tab;
+            }),
+            query: tabsApi.query,
+            group: vi.fn(async () => 1),
+          },
+          windows: {
+            get: vi.fn(async (id) => ({ id, type: "normal" }) as chrome.windows.Window),
+            getLastFocused: vi.fn(
+              async () => ({ id: 200, type: "normal" }) as chrome.windows.Window,
+            ),
+            create: vi.fn(async () => ({ id: 300, type: "normal" }) as chrome.windows.Window),
+            remove: vi.fn(async () => {}),
+          },
+          agentOverlayReset: { resetAgentOverlays: vi.fn(async () => {}) },
+        },
+        recording: { tabsApi, sendToTab, bypassOverlay, cdp },
+      },
+    );
+    expect(stopRes).toEqual({ returned_tab_ids: [99] });
+    expect(
+      sentMessages.some(
+        (entry) =>
+          entry.tabId === 99 && (entry.message as { type?: string })?.type === RECORD_CANCEL,
+      ),
+    ).toBe(true);
+    expect(bypassOverlay).toHaveBeenCalledWith(99, false);
+  });
+
+  it("replies { active: false } to RECORD_QUERY when recording is winding down or rearm fails", async () => {
+    const { runtimeOnMessage } = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeTabsApi();
+    let releaseStop!: () => void;
+    const sendToTab = vi.fn(async (_tabId: number, message: { type?: string }) => {
+      if (message.type === RECORD_STOP) {
+        await new Promise<void>((resolve) => {
+          releaseStop = resolve;
+        });
+      }
+      return { ok: true };
+    });
+    const cdp = makeFakeCdp();
+    const detachQuery = attachRecordQueryListener({ tabsApi, sendToTab, cdp });
+
+    try {
+      const started = await handleRecordStart(manager, RECORD_START_V3, {
+        tabsApi,
+        sendToTab,
+        cdp,
+      });
+      expect("code" in started).toBe(false);
+
+      // Begin stopping so `recording.finishAttempt` is in progress (winding down).
+      const stopping = handleRecordStop(
+        manager,
+        { session_id: "abcd" },
+        {
+          tabsApi,
+          sendToTab,
+          cdp,
+        },
+      );
+      await vi.waitFor(() => expect(releaseStop).toBeTypeOf("function"));
+
+      const queryReply = vi.fn();
+      runtimeOnMessage.emit(
+        { type: RECORD_QUERY },
+        { tab: { id: TAB_ID, active: true } as chrome.tabs.Tab } as chrome.runtime.MessageSender,
+        queryReply,
+      );
+      await vi.waitFor(() => expect(queryReply).toHaveBeenCalledWith({ active: false }));
+
+      releaseStop();
+      const stopped = await stopping;
+      expect("code" in stopped).toBe(false);
+    } finally {
+      detachQuery();
+    }
+  });
+
+  it("retires provisional recording and cancels tabs recovered via RECORD_QUERY when startup aborts", async () => {
+    const { runtimeOnMessage } = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeTabsApi();
+    const abort = new AbortController();
+    let releaseNav!: () => void;
+    const sendToTab = vi.fn(async () => ({ ok: true }));
+    const baseCdp = makeFakeCdp();
+    const cdp = {
+      ...baseCdp,
+      send: vi.fn(async (tabId: number, method: string, params?: Record<string, unknown>) => {
+        if (method === "Page.navigate") {
+          await new Promise<void>((resolve) => {
+            releaseNav = resolve;
+          });
+          return { frameId: "f1" };
+        }
+        return baseCdp.send(tabId, method, params);
+      }) as typeof baseCdp.send,
+    };
+    const detachQuery = attachRecordQueryListener({ tabsApi, sendToTab, cdp });
+
+    try {
+      const starting = handleRecordStart(manager, RECORD_START_V3, {
+        tabsApi,
+        sendToTab,
+        cdp,
+        signal: abort.signal,
+      });
+      await vi.waitFor(() => expect(releaseNav).toBeTypeOf("function"));
+
+      // Destination page queries while startup navigation is still pending and mounts the overlay.
+      const queryReply = vi.fn();
+      runtimeOnMessage.emit(
+        { type: RECORD_QUERY },
+        { tab: { id: TAB_ID, active: true } as chrome.tabs.Tab } as chrome.runtime.MessageSender,
+        queryReply,
+      );
+      await vi.waitFor(() =>
+        expect(queryReply).toHaveBeenCalledWith(
+          expect.objectContaining({ active: true, requestId: expect.any(String) }),
+        ),
+      );
+      const recoveredRequestId = queryReply.mock.calls[0]?.[0]?.requestId as string;
+
+      // Startup is cancelled before navigation finishes.
+      abort.abort();
+      releaseNav();
+      const result = await starting;
+      expect(result).toMatchObject({ code: "cancelled" });
+
+      // The provisional recording must send RECORD_CANCEL to the tab that mounted via RECORD_QUERY.
+      expect(sendToTab).toHaveBeenCalledWith(TAB_ID, {
+        type: RECORD_CANCEL,
+        requestId: recoveredRequestId,
+      });
+
+      // Subsequent RECORD_QUERY sees no active recording.
+      const afterReply = vi.fn();
+      runtimeOnMessage.emit(
+        { type: RECORD_QUERY },
+        { tab: { id: TAB_ID, active: true } as chrome.tabs.Tab } as chrome.runtime.MessageSender,
+        afterReply,
+      );
+      await vi.waitFor(() => expect(afterReply).toHaveBeenCalledWith({ active: false }));
+    } finally {
+      detachQuery();
+    }
   });
 });

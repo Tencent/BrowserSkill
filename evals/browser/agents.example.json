@@ -1,16 +1,16 @@
 {
   "agents": {
-    "dsh-local": {
-      "variant": "granular-28",
-      "command": "dsh",
-      "args": ["--profile", "headless", "{prompt}"],
+    "codex-local": {
+      "variant": "mcp-domain",
+      "command": "codex",
+      "args": ["exec", "{prompt}"],
       "cwd": "../..",
       "timeoutMs": 300000,
       "metadata": {
-        "toolCount": 28
+        "toolCount": 7
       },
       "metrics": {
-        "toolCallPattern": "browser[_-][a-z_-]+"
+        "toolCallPattern": "bsk_[a-z_]+"
       }
     }
   }

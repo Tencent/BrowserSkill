@@ -1,9 +1,9 @@
 //! One explicit action, optional positive readiness condition, then read-only sync.
 use super::{
-    TOOL_IPC_TIMEOUT, business_rpc, cooperate,
-    ensure_daemon::ensure_daemon,
+    business_rpc, cooperate,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
-    observation_view,
+    observation_view, orchestration,
 };
 use anyhow::{Context, ensure};
 use bsk_protocol::{Method, tools::*};
@@ -11,7 +11,7 @@ use clap::{Args, ValueEnum};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -31,7 +31,9 @@ pub enum Action {
 #[derive(Debug, Clone, Args)]
 pub struct StepArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     /// Post-action sync policy. Auto preserves an existing choice or starts target control.
     /// Use cooperate sync first when choosing a policy before the action.
     #[arg(long, value_enum, default_value = "auto")]
@@ -45,13 +47,16 @@ pub struct StepArgs {
     /// Session, tab, context and dependencies come from CLI flags, not this object.
     #[arg(long)]
     pub params: String,
-    /// Known main-document CSS selector that should become visible after the action.
+    /// Known CSS selector (main document and accessible iframes) that should become visible after the action.
     /// Use a positive readiness signal; visibility alone does not prove business success.
     #[arg(long)]
     pub until_visible: Option<String>,
     /// Readiness budget in milliseconds, independent of the action timeout.
     #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u32).range(1..=25000))]
     pub wait_timeout_ms: u32,
+    /// Token budget for the post-action VOM observation. Keep the same budget across syncs, steps, and plans to preserve cache reuse.
+    #[arg(long = "max-tokens")]
+    pub max_tokens: Option<u32>,
     /// Save the unfiltered combined result, atomically, without overwriting.
     #[arg(long)]
     pub save_full: Option<PathBuf>,
@@ -106,23 +111,25 @@ pub(crate) fn target(value: &Value, required: bool) -> anyhow::Result<()> {
     }
     Ok(())
 }
-pub(crate) fn prepare(args: &StepArgs) -> anyhow::Result<(Method, Value)> {
+/// Arguments of the optional wait and of the presentation that follow actions.
+pub(crate) fn check_follow_args(
+    until_visible: Option<&str>,
+    match_text: &[String],
+) -> anyhow::Result<()> {
     ensure!(
-        args.match_text
+        match_text
             .iter()
             .all(|s| !s.trim().is_empty() && !s.contains(['\n', '\r'])),
         "match text must be a nonempty single-line literal"
     );
     ensure!(
-        args.until_visible
-            .as_ref()
-            .is_none_or(|s| !s.trim().is_empty()),
+        until_visible.is_none_or(|s| !s.trim().is_empty()),
         "empty readiness selector"
     );
-    let mut v: Value = serde_json::from_str(&args.params).context("parse --params JSON")?;
-    let object = v
-        .as_object_mut()
-        .context("--params must be a JSON object")?;
+    Ok(())
+}
+/// Identity and evidence are the caller's, never fields of an action.
+pub(crate) fn reject_reserved(fields: &serde_json::Map<String, Value>) -> anyhow::Result<()> {
     for key in [
         "session_id",
         "tab_id",
@@ -132,22 +139,60 @@ pub(crate) fn prepare(args: &StepArgs) -> anyhow::Result<(Method, Value)> {
         "observation_id",
     ] {
         ensure!(
-            !object.contains_key(key),
+            !fields.contains_key(key),
             "{key} must be supplied with CLI flags"
         );
     }
-    object.insert("session_id".into(), args.session.clone().into());
-    if let Some(tab) = args.tab_id {
+    Ok(())
+}
+pub(crate) fn prepare(args: &StepArgs) -> anyhow::Result<(Method, Value)> {
+    check_follow_args(args.until_visible.as_deref(), &args.match_text)?;
+    let params: Value = serde_json::from_str(&args.params).context("parse --params JSON")?;
+    action_params(
+        args.session.as_deref().unwrap_or_default(),
+        args.tab_id,
+        args.action,
+        params,
+    )
+}
+/// Validate one action's protocol fields against its protocol type.
+pub(crate) fn action_params(
+    session: &str,
+    tab_id: Option<i64>,
+    action: Action,
+    mut v: Value,
+) -> anyhow::Result<(Method, Value)> {
+    let object = v
+        .as_object_mut()
+        .context("--params must be a JSON object")?;
+    reject_reserved(object)?;
+    object.insert("session_id".into(), session.into());
+    if let Some(tab) = tab_id {
         object.insert("tab_id".into(), tab.into());
     }
     if let Some(ms) = v.get("timeout_ms") {
-        ensure!(
-            ms.as_u64().is_some_and(|ms| (1..=30000).contains(&ms)),
-            "action timeout_ms must be 1..=30000"
-        );
+        let raw = ms.as_u64().ok_or_else(|| {
+            if matches!(action, Action::Navigate) {
+                anyhow::anyhow!("timeout_ms must be 1..=120000")
+            } else {
+                anyhow::anyhow!("action timeout_ms must be 1..=30000")
+            }
+        })?;
+        if matches!(action, Action::Navigate) {
+            orchestration::validate_open_timeout_ms(raw).map_err(anyhow::Error::msg)?;
+        } else {
+            orchestration::validate_action_timeout_ms(raw).map_err(anyhow::Error::msg)?;
+        }
     }
-    let result = match args.action {
-        Action::Click => (Method::ToolClick, typed::<ClickParams>(&v)?),
+    let result = match action {
+        Action::Click => {
+            let parsed: ClickParams =
+                serde_json::from_value(v.clone()).context("invalid action parameters")?;
+            let normalized = serde_json::to_value(&parsed)?;
+            known_keys(&v, &normalized)?;
+            super::orchestration::validate_click_params(&parsed).map_err(anyhow::Error::msg)?;
+            (Method::ToolClick, normalized)
+        }
         Action::Press => (Method::ToolPress, typed::<PressParams>(&v)?),
         Action::Fill => (Method::ToolFill, typed::<FillParams>(&v)?),
         Action::Hover => (Method::ToolHover, typed::<HoverParams>(&v)?),
@@ -157,8 +202,8 @@ pub(crate) fn prepare(args: &StepArgs) -> anyhow::Result<(Method, Value)> {
         Action::Wheel => (Method::ToolWheel, typed::<WheelParams>(&v)?),
         Action::Navigate => (Method::ToolNavigate, typed::<NavigateParams>(&v)?),
     };
-    match args.action {
-        Action::Navigate => {}
+    match action {
+        Action::Navigate | Action::Click => {}
         Action::Drag => {
             target(&result.1["source"], true)?;
             ensure!(
@@ -174,35 +219,165 @@ pub(crate) fn prepare(args: &StepArgs) -> anyhow::Result<(Method, Value)> {
     }
     Ok(result)
 }
-fn failure(error: &CliError) -> Value {
+pub(crate) fn failure(error: &CliError) -> Value {
     json!({"message":error.to_string(),"code":error.code(),"data":error.data(),"exit_code":error.exit_code()})
 }
-fn interrupted(error: &CliError) -> bool {
+pub(crate) fn interrupted(error: &CliError) -> bool {
     matches!(
         error.code(),
         Some(bsk_protocol::ErrorCode::Cancelled | bsk_protocol::ErrorCode::UserAborted)
     )
 }
 
+/// Wait for a known selector on the action's tab. Returns whether the wait was
+/// interrupted, which ends the operation without a follow-up sync.
+pub(crate) fn await_ready(
+    session: &str,
+    tab: Option<i64>,
+    selector: &str,
+    wait_timeout_ms: u32,
+    result: &mut Value,
+    exit: &mut u8,
+    call: &mut impl FnMut(Method, Value, Duration) -> Result<Value, CliError>,
+) -> bool {
+    let wait = call(
+        Method::ToolWaitForElement,
+        json!({"session_id":session,"tab_id":tab,
+        "selector":selector,"state":"visible","timeout_ms":wait_timeout_ms,"poll_ms":100}),
+        business_rpc::ipc_timeout(wait_timeout_ms),
+    );
+    match wait {
+        Ok(wait) => {
+            if wait["satisfied"] != true {
+                *exit = (*exit).max(1);
+            }
+            result["readiness"] = wait;
+            false
+        }
+        Err(error) => {
+            result["readiness"] = json!({"error":failure(&error)});
+            *exit = (*exit).max(error.exit_code());
+            interrupted(&error)
+        }
+    }
+}
+
+pub(crate) struct PostSyncOptions<'a> {
+    pub(crate) session: &'a str,
+    pub(crate) policy: cooperate::Policy,
+    pub(crate) tab: Option<i64>,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) hydrate_cache: bool,
+}
+
+/// The read-only sync that ends an operation, stored as `post` or `post_error`.
+/// Requests daemon `ScopeResultMeta` on sync so `unchanged` and text-`delta`
+/// replies hydrate `post.observation.text` when `hydrate_cache` is true.
+pub(crate) fn post_sync_with_meta(
+    opts: PostSyncOptions<'_>,
+    result: &mut Value,
+    exit: &mut u8,
+    call: &mut impl FnMut(
+        Method,
+        Value,
+        Duration,
+        bool,
+    ) -> Result<(Value, Option<crate::ipc_client::ScopeResultMeta>), CliError>,
+) {
+    let mut latest_meta = None;
+    let sync = cooperate::settle::run(|mode| {
+        let is_sync = matches!(mode, CooperateAction::Sync | CooperateAction::Enable);
+        let params = CooperateParams {
+            control_policy: is_sync.then_some(opts.policy.into()),
+            session_id: opts.session.to_owned(),
+            action: mode,
+            tab_id: opts.tab,
+            timeout_ms: Some(1000),
+            max_tokens: is_sync.then_some(opts.max_tokens).flatten(),
+        };
+        let ipc_timeout = cooperate::cooperate_ipc_timeout(params.timeout_ms);
+        let (val, scope_meta) = call(
+            Method::ToolCooperate,
+            serde_json::to_value(params).expect("serializable sync"),
+            ipc_timeout,
+            is_sync,
+        )?;
+        if is_sync {
+            latest_meta = scope_meta;
+        }
+        Ok(val)
+    })
+    .and_then(|reply| {
+        cooperate::verify_policy(&reply, Some(opts.policy.into()))?;
+        Ok(reply)
+    });
+    match sync {
+        Ok(mut value) => {
+            if value["context_id"].as_str().is_none() {
+                *exit = (*exit).max(1);
+            }
+            if opts.hydrate_cache {
+                orchestration::hydrate_cached_observation(&mut value, latest_meta.as_ref());
+            }
+            result["post"] = value;
+        }
+        Err(error) => {
+            *exit = (*exit).max(error.exit_code());
+            result["post_error"] = failure(&error);
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn run(
     args: &StepArgs,
     method: Method,
     params: Value,
     mut call: impl FnMut(Method, Value, Duration) -> Result<Value, CliError>,
 ) -> (Value, u8) {
+    run_with_meta(args, method, params, true, |method, params, timeout, _| {
+        call(method, params, timeout).map(|val| (val, None))
+    })
+}
+
+pub(crate) fn run_with_meta(
+    args: &StepArgs,
+    method: Method,
+    params: Value,
+    hydrate_cache: bool,
+    mut call: impl FnMut(
+        Method,
+        Value,
+        Duration,
+        bool,
+    ) -> Result<(Value, Option<crate::ipc_client::ScopeResultMeta>), CliError>,
+) -> (Value, u8) {
     let start = Instant::now();
-    let action = match call(method, params, TOOL_IPC_TIMEOUT) {
-        Ok(value) => value,
+    let mut pinned_session = args
+        .session
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let action_timeout = orchestration::tool_ipc_timeout(&method, &params);
+    let (action, action_meta) = match call(method, params, action_timeout, pinned_session.is_none())
+    {
+        Ok((value, meta)) => (value, meta),
         Err(error) => {
             return (
                 json!({"ok":false,"phase":"action","action":{"error":failure(&error)},
-            "action_replayed":false,"rpc_calls":1,"elapsed_ms":start.elapsed().as_millis()}),
+                "action_replayed":false,"rpc_calls":1,"elapsed_ms":start.elapsed().as_millis()}),
                 error.exit_code(),
             );
         }
     };
+    if pinned_session.is_none()
+        && let Some(sm) = action_meta.filter(|m| !m.session_id.trim().is_empty())
+    {
+        pinned_session = Some(sm.session_id);
+    }
     let action_ms = start.elapsed().as_millis();
-    // Pin all reads to the action's actual tab; never follow a human's active tab.
+    // Pin all reads to the action's actual session and tab; never follow a concurrent scope rebind or human's active tab.
     let tab = action["tab_id"].as_i64().or(args.tab_id);
     // Navigation timeout is an RPC result, but the navigate command exits 4.
     let mut exit = if matches!(args.action, Action::Navigate) && action["reached"] == "timeout" {
@@ -212,69 +387,45 @@ pub(crate) fn run(
     };
     let mut result = json!({"ok":false,"action":{"result":action},"action_replayed":false});
     let mut rpc_calls = 1;
-    if let Some(selector) = &args.until_visible {
+    let mut counted_call = |method, params, timeout, want_meta| {
         rpc_calls += 1;
-        let wait = call(
-            Method::ToolWaitForElement,
-            json!({"session_id":args.session,"tab_id":tab,
-            "selector":selector,"state":"visible","timeout_ms":args.wait_timeout_ms,"poll_ms":100}),
-            Duration::from_millis(args.wait_timeout_ms as u64 + 5000),
-        );
-        match wait {
-            Ok(wait) => {
-                if wait["satisfied"] != true {
-                    exit = exit.max(1);
-                }
-                result["readiness"] = wait;
-            }
-            Err(error) => {
-                result["readiness"] = json!({"error":failure(&error)});
-                exit = exit.max(error.exit_code());
-                if interrupted(&error) {
-                    result["phase"] = "readiness".into();
-                    result["rpc_calls"] = rpc_calls.into();
-                    result["elapsed_ms"] = json!(start.elapsed().as_millis());
-                    return (result, exit);
-                }
-            }
+        call(method, params, timeout, want_meta)
+    };
+    let session = pinned_session.as_deref().unwrap_or_default();
+    if let Some(selector) = &args.until_visible {
+        let mut plain_call = |method, params, timeout| {
+            counted_call(method, params, timeout, false).map(|(val, _)| val)
+        };
+        if await_ready(
+            session,
+            tab,
+            selector,
+            args.wait_timeout_ms,
+            &mut result,
+            &mut exit,
+            &mut plain_call,
+        ) {
+            result["phase"] = "readiness".into();
+            result["rpc_calls"] = rpc_calls.into();
+            result["elapsed_ms"] = json!(start.elapsed().as_millis());
+            return (result, exit);
         }
     } else {
         result["readiness"] = json!({"requested":false});
     }
     let ready_ms = start.elapsed().as_millis() - action_ms;
-    let sync = cooperate::settle::run(|mode| {
-        rpc_calls += 1;
-        call(
-            Method::ToolCooperate,
-            serde_json::to_value(CooperateParams {
-                control_policy: matches!(mode, CooperateAction::Sync | CooperateAction::Enable)
-                    .then_some(args.policy.into()),
-                session_id: args.session.clone(),
-                action: mode,
-                tab_id: tab,
-                timeout_ms: Some(1000),
-                max_tokens: None,
-            })
-            .expect("serializable sync"),
-            TOOL_IPC_TIMEOUT,
-        )
-    })
-    .and_then(|reply| {
-        cooperate::verify_policy(&reply, Some(args.policy.into()))?;
-        Ok(reply)
-    });
-    match sync {
-        Ok(value) => {
-            if value["context_id"].as_str().is_none() {
-                exit = exit.max(1);
-            }
-            result["post"] = value;
-        }
-        Err(error) => {
-            exit = exit.max(error.exit_code());
-            result["post_error"] = failure(&error);
-        }
-    }
+    post_sync_with_meta(
+        PostSyncOptions {
+            session,
+            policy: args.policy,
+            tab,
+            max_tokens: args.max_tokens,
+            hydrate_cache,
+        },
+        &mut result,
+        &mut exit,
+        &mut counted_call,
+    );
     result["phase"] = if exit == 0 {
         "observed"
     } else {
@@ -288,68 +439,163 @@ pub(crate) fn run(
     (result, exit)
 }
 
-pub fn dispatch(args: StepArgs, _format: Format) -> Result<(), CliError> {
-    let (method, params) = prepare(&args)?;
-    let baseline = args
-        .baseline
-        .as_deref()
-        .map(observation_view::read)
-        .transpose()?;
-    // Preflight output before the action. A post-action I/O failure must retain its result.
-    let saved = args
-        .save_full
-        .as_deref()
-        .map(cooperate::saved_reply::SavedReply::prepare)
-        .transpose()?;
-    if matches!(args.policy, cooperate::Policy::Target) {
-        business_rpc::set_target_policy_requested();
+/// Saving and folding shared by the commands that end in a synchronized reply.
+pub(crate) struct Output<'a> {
+    session: &'a str,
+    baseline: Option<Value>,
+    saved: Option<cooperate::saved_reply::SavedReply>,
+    save_full: Option<&'a Path>,
+    match_text: &'a [String],
+    context_lines: u32,
+}
+
+impl<'a> Output<'a> {
+    /// Preflight output before the action. A post-action I/O failure must retain its result.
+    pub(crate) fn prepare(
+        session: &'a str,
+        baseline: Option<&Path>,
+        save_full: Option<&'a Path>,
+        match_text: &'a [String],
+        context_lines: u32,
+    ) -> Result<Self, CliError> {
+        Ok(Self {
+            session,
+            baseline: baseline
+                .map(observation_view::read)
+                .transpose()
+                .map_err(|error| {
+                    CliError::file_validation(
+                        error,
+                        "check --baseline: provide a readable, valid saved reply",
+                    )
+                })?,
+            saved: save_full
+                .map(cooperate::saved_reply::SavedReply::prepare)
+                .transpose()
+                .map_err(|error| {
+                    CliError::file_validation(
+                        error,
+                        "check --save-full: use a new path in a writable directory",
+                    )
+                })?,
+            save_full,
+            match_text,
+            context_lines,
+        })
     }
-    let daemon = ensure_daemon().context("ensure daemon is running")?;
-    if matches!(args.action, Action::Drag) && params["mode"] == "click-move-click" {
-        super::drag::require_click_move_click_daemon(daemon.sock_path.clone())?;
+
+    pub(crate) fn with_resolved_session(mut self, resolved: Option<&'a str>) -> Self {
+        if self.session.trim().is_empty()
+            && let Some(sid) = resolved.filter(|s| !s.trim().is_empty())
+        {
+            self.session = sid;
+        }
+        self
     }
-    let (mut reply, mut exit) = run(&args, method, params, |method, params, timeout| {
-        business_rpc::call(
-            daemon.sock_path.clone(),
-            "step",
-            method,
-            Some(params),
-            timeout,
-        )
-    });
-    if business_rpc::cancel_requested() {
-        reply["ok"] = false.into();
-        reply["cancelled"] = true.into();
-        reply["phase"] = "cancelled".into();
-        exit = super::error::exit_code_for(bsk_protocol::ErrorCode::Cancelled);
-    }
-    if let Some(post) = reply.get_mut("post") {
-        observation_view::attach(post, &args.session, baseline.as_ref());
-    }
-    if let Some(saved) = saved {
-        match saved.finish(&reply) {
-            Ok(()) => reply["full_output_path"] = json!(args.save_full),
-            Err(e) => {
-                reply["storage_error"] = e.to_string().into();
-                reply["ok"] = false.into();
-                exit = exit.max(2);
+
+    pub(crate) fn finish(self, mut reply: Value, mut exit: u8) -> Result<(), CliError> {
+        if business_rpc::cancel_requested() {
+            reply["ok"] = false.into();
+            reply["cancelled"] = true.into();
+            reply["phase"] = "cancelled".into();
+            exit = super::error::exit_code_for(bsk_protocol::ErrorCode::Cancelled);
+        }
+        if let Some(post) = reply.get_mut("post") {
+            observation_view::attach(post, self.session, self.baseline.as_ref());
+            if self.baseline.is_none() && post.get("observation").is_some() {
+                if post["kind"] == "unchanged" {
+                    post["observation_origin"]["kind"] = "reused".into();
+                } else if post["kind"] == "delta" && post.get("observation_patch").is_some() {
+                    post["observation_origin"]["kind"] = "merged".into();
+                }
             }
         }
-    }
-    if let Some(post) = reply.get_mut("post") {
-        if !args.match_text.is_empty() {
-            cooperate::presentation::filter(post, &args.match_text, args.context_lines as usize);
+        if let Some(saved) = self.saved {
+            match saved.finish(&reply) {
+                Ok(()) => {
+                    reply["full_output_path"] = json!(self.save_full);
+                    if let Some(post) = reply.get_mut("post") {
+                        observation_view::omit_saved_merge(post);
+                    }
+                }
+                Err(e) => {
+                    reply["storage_error"] = e.to_string().into();
+                    reply["ok"] = false.into();
+                    exit = exit.max(2);
+                }
+            }
+        }
+        if let Some(post) = reply.get_mut("post")
+            && !self.match_text.is_empty()
+        {
+            cooperate::presentation::filter(post, self.match_text, self.context_lines as usize);
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&reply).context("render step result")?
+        );
+        if exit == 0 {
+            Ok(())
+        } else {
+            Err(CliError::RenderedExit { exit_code: exit })
         }
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&reply).context("render step result")?
+}
+
+pub fn dispatch(
+    args: StepArgs,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
+    let (method, params) = prepare(&args).map_err(CliError::invalid_params)?;
+    let session = args.session.as_deref().unwrap_or_default();
+    let output = Output::prepare(
+        session,
+        args.baseline.as_deref(),
+        args.save_full.as_deref(),
+        &args.match_text,
+        args.context_lines,
+    )?;
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
+    let aux_ctx = op_ctx.without_action_metadata();
+    let mut first_rpc = true;
+    let daemon = ensure_daemon().context("ensure daemon is running")?;
+    let hydrate_cache = args.baseline.is_none();
+    let mut resolved_session: Option<String> = None;
+    let (reply, exit) = run_with_meta(
+        &args,
+        method,
+        params,
+        hydrate_cache,
+        |method, params, timeout, want_meta| {
+            let rpc_ctx = if std::mem::take(&mut first_rpc) {
+                &op_ctx
+            } else {
+                &aux_ctx
+            };
+            let meta = crate::ipc_client::IpcRequestMeta {
+                return_scope_meta: want_meta,
+                ..Default::default()
+            };
+            let (val, resp_meta) = rpc_ctx.call_envelope(
+                daemon.sock_path.clone(),
+                "step",
+                method,
+                Some(params),
+                meta,
+                timeout,
+            )?;
+            if let Some(ref sm) = resp_meta.scope_meta
+                && !sm.session_id.is_empty()
+            {
+                resolved_session = Some(sm.session_id.clone());
+            }
+            Ok((val, resp_meta.scope_meta))
+        },
     );
-    if exit == 0 {
-        Ok(())
-    } else {
-        Err(CliError::RenderedExit { exit_code: exit })
-    }
+    output
+        .with_resolved_session(resolved_session.as_deref())
+        .finish(reply, exit)
 }
 
 #[cfg(test)]
@@ -588,7 +834,7 @@ mod tests {
         std::fs::write(&p, "keep").unwrap();
         let mut a = args();
         a.save_full = Some(p.clone());
-        assert!(dispatch(a, Format::Json).is_err());
+        assert!(dispatch(a, &business_rpc::ClientContext::default(), Format::Json).is_err());
         assert_eq!(std::fs::read_to_string(p).unwrap(), "keep");
     }
     #[test]
@@ -673,5 +919,56 @@ mod tests {
         assert_eq!(exit, 0);
         assert_eq!(reply["post"]["context_id"], "legacy");
         assert_eq!(reply["action_replayed"], false);
+    }
+
+    #[test]
+    fn implicit_session_resolved_by_action_is_pinned_for_readiness_and_post_sync() {
+        let mut args = args();
+        args.session = None;
+        args.until_visible = Some("#done".into());
+        let mut seen = Vec::new();
+        let (reply, exit) = run_with_meta(
+            &args,
+            Method::ToolClick,
+            json!({"session_id": "", "ref": "@e1"}),
+            true,
+            |method, params, _, want_meta| {
+                seen.push((
+                    method.clone(),
+                    params["session_id"].as_str().unwrap_or("").to_owned(),
+                    want_meta,
+                ));
+                match method {
+                    Method::ToolClick => Ok((
+                        json!({"tab_id": 7}),
+                        Some(crate::ipc_client::ScopeResultMeta {
+                            session_id: "sess-a".into(),
+                            ..Default::default()
+                        }),
+                    )),
+                    Method::ToolWaitForElement => Ok((json!({"satisfied": true}), None)),
+                    Method::ToolCooperate => Ok((
+                        json!({
+                            "tab_id": 7,
+                            "context_id": "ctx-a",
+                            "control_policy": "target",
+                            "kind": "baseline",
+                            "observation": {"text": "@vom 1\nL1 page"}
+                        }),
+                        None,
+                    )),
+                    other => panic!("unexpected method {other:?}"),
+                }
+            },
+        );
+        assert_eq!(exit, 0, "{reply}");
+        assert_eq!(
+            seen,
+            vec![
+                (Method::ToolClick, "".into(), true),
+                (Method::ToolWaitForElement, "sess-a".into(), false),
+                (Method::ToolCooperate, "sess-a".into(), true),
+            ]
+        );
     }
 }

@@ -5,6 +5,7 @@
 // even when the Agent Window has stolen focus.
 // ---------------------------------------------------------------------------
 
+import { ensureOverlayInjected } from "@/lib/runtime-content-scripts";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 
@@ -613,8 +614,11 @@ export async function requestBorrowConfirmation(
         timeoutMs,
       };
       activeMessageTabId = candidate.tabId;
-      tabsApi
-        .sendMessage(candidate.tabId, message)
+      void ensureOverlayInjected(candidate.tabId)
+        .then(() => {
+          if (settled) return undefined;
+          return tabsApi.sendMessage(candidate.tabId, message);
+        })
         .then((response) => {
           if (settled) return;
           const candidateResponse = response as BorrowResponseMessage | undefined;

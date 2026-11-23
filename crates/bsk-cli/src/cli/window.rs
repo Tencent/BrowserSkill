@@ -8,7 +8,7 @@ use bsk_protocol::tools::{WindowResizeParams, WindowResizeResult};
 use clap::{Args, Subcommand};
 
 use crate::cli::TOOL_IPC_TIMEOUT;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Args)]
@@ -25,9 +25,13 @@ pub enum WindowSub {
 
 #[derive(Debug, Clone, Args)]
 pub struct WindowResizeArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// New Agent Window outer width in CSS pixels (100..=7680).
     #[arg(long, value_parser = window_size)]
@@ -52,21 +56,41 @@ fn window_size(s: &str) -> Result<u32, String> {
     }
 }
 
-pub fn dispatch(cmd: WindowCmd, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    cmd: WindowCmd,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     match cmd.sub {
-        WindowSub::Resize(args) => run_resize(info.sock_path, args, format),
+        WindowSub::Resize(args) => run_resize(info.sock_path, ctx, args, format),
     }
 }
 
-fn run_resize(sock: PathBuf, args: WindowResizeArgs, format: Format) -> Result<(), CliError> {
+fn run_resize(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: WindowResizeArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let params = WindowResizeParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
+        tab_id: None,
         width: args.width,
         height: args.height,
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
-    let reply: WindowResizeResult =
-        ipc_call("window-resize-1", Method::ToolWindowResize, sock, params)?;
+    let reply: WindowResizeResult = ipc_call(
+        "window-resize-1",
+        &op_ctx,
+        Method::ToolWindowResize,
+        sock,
+        params,
+    )?;
     match format {
         Format::Json => {
             let json = serde_json::to_string_pretty(&reply)
@@ -85,6 +109,7 @@ fn run_resize(sock: PathBuf, args: WindowResizeArgs, format: Format) -> Result<(
 
 fn ipc_call<P, R>(
     rpc_id_prefix: &'static str,
+    ctx: &crate::cli::business_rpc::ClientContext,
     method: Method,
     sock: PathBuf,
     params: P,
@@ -93,11 +118,5 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(
-        sock,
-        rpc_id_prefix,
-        method,
-        Some(params),
-        TOOL_IPC_TIMEOUT,
-    )
+    ctx.call::<P, R>(sock, rpc_id_prefix, method, Some(params), TOOL_IPC_TIMEOUT)
 }

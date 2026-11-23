@@ -38,7 +38,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use bsk_protocol::RpcId;
+use bsk_protocol::{ErrorCode, RpcError, RpcId};
 
 use super::abort::AbortToken;
 use super::browsers::BrowserId;
@@ -88,6 +88,9 @@ pub enum CancelReason {
     UserAborted,
     /// Terminal user intervention; the session cannot resume.
     UserMovedTab,
+    /// Session ended mid-call (`session_window_closed`, `session_idle_timeout`,
+    /// `browser_disconnected`, or `session_stopped`).
+    SessionEnded(&'static str),
 }
 
 /// Mutable state inside [`ToolInflightEntry`]. Behind a `Mutex` so
@@ -103,7 +106,7 @@ pub enum CancelReason {
 #[derive(Debug, Clone)]
 struct InflightInner {
     /// Owning browser, set by the worker before forwarding the WS
-    /// request. `None` while still queued.
+    /// request. `None` while still queued or for daemon-local waiters.
     browser_id: Option<BrowserId>,
     /// WS-side correlation id allocated by the worker. `None` until
     /// the worker is about to forward the request frame.
@@ -119,20 +122,24 @@ struct InflightInner {
     /// (e.g. by `tool.wait_ms`'s own cancel path) does not get
     /// retroactively relabelled when the user clicks stop.
     cancel_reason: Option<CancelReason>,
-    /// Session that owns this RPC. Set at registration time and
-    /// never mutated. Used by `cancel_session` to drain every
-    /// inflight entry for one session in a single sweep.
-    session_id: SessionId,
+    /// Session that owns this RPC (`None` for sessionless `tool.wait_ms`).
+    /// Set at registration time and never mutated. Used by `cancel_session`
+    /// to drain every inflight entry for one session in a single sweep.
+    session_id: Option<SessionId>,
+    /// Whether this entry has been handed off to a background suspended
+    /// [`super::dialog_operations::DialogOperation`] waiter.
+    dialog_retained: bool,
 }
 
 impl InflightInner {
-    fn new(session_id: SessionId) -> Self {
+    fn new(session_id: Option<SessionId>) -> Self {
         Self {
             browser_id: None,
             ws_rpc_id: None,
             cancelled: false,
             cancel_reason: None,
             session_id,
+            dialog_retained: false,
         }
     }
 }
@@ -180,7 +187,7 @@ pub struct ToolInflightEntry {
 }
 
 impl ToolInflightEntry {
-    fn new(session_id: SessionId, cli_rpc_id: RpcId) -> Arc<Self> {
+    fn new(session_id: Option<SessionId>, cli_rpc_id: RpcId) -> Arc<Self> {
         Arc::new(Self {
             cli_rpc_id,
             dialog_pending: tokio::sync::watch::channel(false).0,
@@ -191,6 +198,43 @@ impl ToolInflightEntry {
 
     pub fn cancel_token(&self) -> AbortToken {
         self.cancel.clone()
+    }
+
+    pub fn mark_dialog_retained(&self) {
+        self.inner
+            .lock()
+            .expect("ToolInflightEntry poisoned")
+            .dialog_retained = true;
+    }
+
+    /// Map this entry's recorded [`CancelReason`] to the structured IPC [`RpcError`].
+    pub fn cancel_error(&self, default_msg: &str) -> RpcError {
+        match self.cancel_reason() {
+            Some(CancelReason::UserAborted) => RpcError {
+                code: ErrorCode::UserAborted,
+                message: "tool dispatch interrupted by user".to_string(),
+                data: None,
+            },
+            Some(CancelReason::UserMovedTab) => RpcError {
+                code: ErrorCode::UserAborted,
+                message:
+                    "session ended because the user moved a controlled tab out of its Agent Window"
+                        .into(),
+                data: Some(serde_json::json!({
+                    "reason": bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
+                })),
+            },
+            Some(CancelReason::SessionEnded(reason)) => RpcError {
+                code: ErrorCode::NotFound,
+                message: "session not registered or already stopped".into(),
+                data: Some(serde_json::json!({ "reason": reason })),
+            },
+            Some(CancelReason::Cancelled) | None => RpcError {
+                code: ErrorCode::Cancelled,
+                message: default_msg.to_string(),
+                data: None,
+            },
+        }
     }
 
     /// Cheap, lock-free hint that the entry has been cancelled. Useful
@@ -361,6 +405,16 @@ impl ToolInflightRegistry {
         cli_rpc_id: RpcId,
         session_id: SessionId,
     ) -> Result<InflightGuard, InflightRegisterError> {
+        self.register_optional(cli_rpc_id, Some(session_id))
+    }
+
+    /// Register an inflight entry whose owning `session_id` may be `None`
+    /// (such as sessionless `tool.wait_ms`).
+    pub fn register_optional(
+        self: &Arc<Self>,
+        cli_rpc_id: RpcId,
+        session_id: Option<SessionId>,
+    ) -> Result<InflightGuard, InflightRegisterError> {
         let entry = ToolInflightEntry::new(session_id, cli_rpc_id.clone());
         {
             let mut guard = self.inner.lock().expect("tool inflight poisoned");
@@ -429,6 +483,15 @@ impl ToolInflightRegistry {
         sid: &SessionId,
         reason: CancelReason,
     ) -> Vec<InflightSnapshot> {
+        self.cancel_session_filtered(sid, reason, true)
+    }
+
+    pub(super) fn cancel_session_filtered(
+        &self,
+        sid: &SessionId,
+        reason: CancelReason,
+        include_dialog_retained: bool,
+    ) -> Vec<InflightSnapshot> {
         // Snapshot the entries we want to cancel under the registry
         // lock, then trip each one outside the registry lock so a
         // concurrent unregister (driven by Drop on InflightGuard) can
@@ -441,7 +504,8 @@ impl ToolInflightRegistry {
                 .values()
                 .filter(|entry| {
                     let inner = entry.inner.lock().expect("ToolInflightEntry poisoned");
-                    &inner.session_id == sid
+                    inner.session_id.as_ref() == Some(sid)
+                        && (include_dialog_retained || !inner.dialog_retained)
                 })
                 .cloned()
                 .collect()

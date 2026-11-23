@@ -30,9 +30,7 @@ impl DaemonLock {
 impl Drop for DaemonLock {
     fn drop(&mut self) {
         // Best-effort: unlock then close. Kernel would do this anyway.
-        // Use fs2::FileExt explicitly so we don't accidentally pull in
-        // the std::fs::FileExt method stabilised in 1.89 (our MSRV is
-        // 1.85).
+        // Use the same fs2 locking API as acquire_at.
         let _ = <std::fs::File as fs2::FileExt>::unlock(&self.file);
     }
 }
@@ -46,8 +44,12 @@ pub struct AlreadyLocked {
 
 /// Acquire the lock exclusively, returning a guard.
 pub fn acquire() -> Result<DaemonLock> {
-    paths::ensure_bsk_home()?;
-    let path = paths::lock_path()?;
+    acquire_at(&paths::ensure_bsk_home()?)
+}
+
+/// Acquire the lifecycle lock in an already-created daemon home.
+pub fn acquire_at(home: &std::path::Path) -> Result<DaemonLock> {
+    let path = home.join("daemon.lock");
     let file = OpenOptions::new()
         .read(true)
         .write(true)

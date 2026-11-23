@@ -415,7 +415,7 @@ fn install_candidate_with_client(
     let lock = UpdateLock::try_acquire(&target)?;
     let mut record = UpdateRecord::start(UpdateSource::Command, &candidate.latest, &target);
     record.save();
-    let installed = install_verified(candidate, &target, client, &mut record, lock, &|| false)?;
+    let installed = install_verified(candidate, &target, client, &mut record, lock, &|| None)?;
 
     let running = restart_daemon.then(running_daemon).flatten();
     if let Some(daemon) = running.as_ref().filter(|daemon| daemon.host_managed) {
@@ -425,16 +425,16 @@ fn install_candidate_with_client(
     }
     // Stopping a daemon this process could not start again (inside a host
     // Job that forbids breakaway) would leave none: check before stopping.
-    if let Some(daemon) = running.as_ref() {
-        if let Err(err) = crate::daemon::start::check_independent_start(&target) {
-            tracing::warn!(error = %format_args!("{err:#}"), "leaving the running daemon alone");
-            record.succeed(None);
-            installed.discard();
-            return Ok(DaemonRestart::LeftRunning {
-                pid: daemon.pid,
-                reason: format!("{err:#}"),
-            });
-        }
+    if let Some(daemon) = running.as_ref()
+        && let Err(err) = crate::daemon::start::check_independent_start(&target)
+    {
+        tracing::warn!(error = %format_args!("{err:#}"), "leaving the running daemon alone");
+        record.succeed(None);
+        installed.discard();
+        return Ok(DaemonRestart::LeftRunning {
+            pid: daemon.pid,
+            reason: format!("{err:#}"),
+        });
     }
     let daemon_was_running = match restart_daemon
         .then(crate::daemon::start::stop_if_running)
@@ -508,11 +508,28 @@ fn running_daemon() -> Option<crate::daemon::info::DaemonInfo> {
     }
 }
 
+/// Why an in-progress update should abort after download before touching the
+/// installed executable on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstallAbort {
+    /// The daemon started shutting down.
+    Stopping,
+    /// Agent sessions became active during download; defer cleanly without
+    /// replacing the executable or arming the failure cooldown.
+    SessionsActive,
+}
+
+/// Sentinel error returned when a daemon auto-update defers cleanly because an
+/// agent session started during download.
+#[derive(Debug, thiserror::Error)]
+#[error("auto-update deferred: agent session(s) became active during download")]
+pub(crate) struct DeferredForActiveSessions;
+
 /// Download, install and run the new executable once, under `lock`, which
 /// the returned [`Installed`] keeps until the update is confirmed or rolled
 /// back. On failure the previous executable is back in place (or `record`
 /// says how to put it back), and `record` holds the reason. Nothing is
-/// installed once `cancelled` returns true after the download.
+/// installed once `abort` returns `Some(...)` after the download.
 ///
 /// `target` must be captured *before* any replacement happens: on Linux
 /// `std::env::current_exe` starts returning a ` (deleted)`-suffixed path once
@@ -523,7 +540,7 @@ pub(crate) fn install_verified(
     client: &reqwest::blocking::Client,
     record: &mut UpdateRecord,
     lock: UpdateLock,
-    cancelled: &dyn Fn() -> bool,
+    abort: &dyn Fn() -> Option<InstallAbort>,
 ) -> Result<Installed> {
     let binary = match download_candidate_binary(candidate, client) {
         Ok(binary) => binary,
@@ -532,10 +549,17 @@ pub(crate) fn install_verified(
             return Err(err);
         }
     };
-    if cancelled() {
-        let err = anyhow::anyhow!("the daemon stopped before the update was installed");
-        record.fail(&err, Recovery::Unchanged);
-        return Err(err);
+    match abort() {
+        Some(InstallAbort::Stopping) => {
+            let err = anyhow::anyhow!("the daemon stopped before the update was installed");
+            record.fail(&err, Recovery::Unchanged);
+            return Err(err);
+        }
+        Some(InstallAbort::SessionsActive) => {
+            UpdateRecord::clear();
+            return Err(anyhow::Error::new(DeferredForActiveSessions));
+        }
+        None => {}
     }
     record.enter(UpdateStage::Install);
     let installed = match install_binary(target, &binary, lock) {
@@ -567,10 +591,10 @@ pub(crate) fn self_install_candidate(
     target: &Path,
     record: &mut UpdateRecord,
     lock: UpdateLock,
-    cancelled: &dyn Fn() -> bool,
+    abort: &dyn Fn() -> Option<InstallAbort>,
 ) -> Result<Installed> {
     let client = update_http_client(ARCHIVE_FETCH_TIMEOUT)?;
-    install_verified(candidate, target, &client, record, lock, cancelled)
+    install_verified(candidate, target, &client, record, lock, abort)
 }
 
 /// Where to turn when bsk cannot write next to its own executable.
@@ -1059,18 +1083,38 @@ impl PreviousNotRestored {
     }
 }
 
+/// Resolve a symlink executable path on Unix so self-update replaces the real
+/// target binary instead of clobbering a Homebrew or custom symlink (macOS
+/// `std::env::current_exe()` can return an unresolved symlink path). Regular
+/// files are returned unchanged so macOS temp directories (`/var/folders/...`)
+/// preserve their exact caller path.
+fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        if std::fs::symlink_metadata(path)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return std::fs::canonicalize(path)
+                .with_context(|| format!("resolve symlink executable {}", path.display()));
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
 /// Put `binary` at `target`, even while `target` is running: running
 /// processes keep their image and every later launch uses the new binary.
 /// The swap is not safe against a concurrent one, hence the lock it takes.
 fn install_binary(target: &Path, binary: &[u8], lock: UpdateLock) -> Result<Installed> {
+    let resolved = resolve_symlink_target(target)?;
     #[cfg(windows)]
-    let previous = windows::replace(target, binary)?;
+    let previous = windows::replace(&resolved, binary)?;
 
     #[cfg(not(windows))]
-    let previous = replace_binary_atomically(target, binary)?;
+    let previous = replace_binary_atomically(&resolved, binary)?;
 
     Ok(Installed {
-        target: target.to_path_buf(),
+        target: resolved,
         previous,
         _lock: lock,
     })
@@ -1114,10 +1158,11 @@ fn replace_binary_atomically(target: &Path, binary: &[u8]) -> Result<PathBuf> {
 /// Whether bsk can put a new executable next to `target`. An installation it
 /// cannot write belongs to the installer or package manager that made it.
 pub(crate) fn ensure_replaceable(target: &Path) -> Result<()> {
-    let dir = target
+    let resolved = resolve_symlink_target(target)?;
+    let dir = resolved
         .parent()
-        .with_context(|| format!("target path has no parent: {}", target.display()))?;
-    let probe = sibling(target, &format!("new-{}", unique_suffix()))?;
+        .with_context(|| format!("target path has no parent: {}", resolved.display()))?;
+    let probe = sibling(&resolved, &format!("new-{}", unique_suffix()))?;
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1181,9 +1226,13 @@ fn verify_executable(exe: &Path, version: &Version) -> Result<()> {
 /// at startup and uses it for its whole life.
 pub(crate) fn installed_executable() -> Result<&'static Path> {
     static EXE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    EXE.get_or_init(|| std::env::current_exe().ok())
-        .as_deref()
-        .context("locate current bsk executable")
+    EXE.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .map(|exe| resolve_symlink_target(&exe).unwrap_or(exe))
+    })
+    .as_deref()
+    .context("locate current bsk executable")
 }
 
 /// Best-effort removal of what earlier updates left next to `exe`: previous
@@ -1217,8 +1266,11 @@ pub(crate) struct Leftover {
 
 /// Files earlier updates left next to `exe`.
 pub(crate) fn update_leftovers(exe: &Path) -> Vec<Leftover> {
-    let (Some(dir), Some(name)) = (exe.parent(), exe.file_name().and_then(|name| name.to_str()))
-    else {
+    let resolved = resolve_symlink_target(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let (Some(dir), Some(name)) = (
+        resolved.parent(),
+        resolved.file_name().and_then(|name| name.to_str()),
+    ) else {
         return Vec::new();
     };
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -2200,6 +2252,48 @@ mod tests {
             |_| -> Result<()> { bail!("boom") },
         );
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_self_update_preserves_symlink_and_replaces_real_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let cellar_dir = dir.path().join("cellar");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&cellar_dir).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let real_target = cellar_dir.join("bsk");
+        std::fs::write(&real_target, b"old-binary").unwrap();
+        let symlink_path = bin_dir.join("bsk");
+        std::os::unix::fs::symlink(&real_target, &symlink_path).unwrap();
+
+        ensure_replaceable(&symlink_path).unwrap();
+        let lock = UpdateLock::try_acquire(&real_target).unwrap();
+        let installed = install_binary(&symlink_path, b"new-binary", lock).unwrap();
+
+        // The symlink itself must survive intact, while its real target was replaced.
+        assert!(
+            std::fs::symlink_metadata(&symlink_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "self-update must not clobber symlink at {}",
+            symlink_path.display()
+        );
+        assert_eq!(std::fs::read(&real_target).unwrap(), b"new-binary");
+        assert_eq!(std::fs::read(&symlink_path).unwrap(), b"new-binary");
+
+        // Rollback must also restore the real target without clobbering the symlink.
+        installed.restore().unwrap();
+        assert!(
+            std::fs::symlink_metadata(&symlink_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "rollback must preserve symlink"
+        );
+        assert_eq!(std::fs::read(&real_target).unwrap(), b"old-binary");
     }
 
     fn tar_gz_with_bsk(binary: &[u8]) -> Vec<u8> {

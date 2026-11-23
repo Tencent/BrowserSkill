@@ -1,13 +1,13 @@
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
-import type { RequestFrame } from "@/transport/types";
+import type { AuditContextEvent, RequestFrame } from "@/transport/types";
 
 /** Read cached element labels and tab metadata only; never stimulate the page. */
 export async function auditContext(
   req: RequestFrame,
   sessions: SessionManager,
-): Promise<Record<string, unknown> | null> {
+): Promise<AuditContextEvent | null> {
   const params = req.params as Record<string, unknown> | undefined;
-  if (typeof params?._audit_id !== "string" || typeof params.session_id !== "string") return null;
+  if (typeof req.audit_id !== "string" || typeof params?.session_id !== "string") return null;
   const context = sessions.get(params.session_id);
   if (!context) return null;
   const ref = typeof params.ref === "string" ? context.refStore.resolveEntry(params.ref) : null;
@@ -25,7 +25,7 @@ export async function auditContext(
     /* Restricted or empty URL. */
   }
   return {
-    operation_id: params._audit_id,
+    operation_id: req.audit_id,
     tab_id: tab.id,
     ...(url ? { url } : {}),
     ...(ref?.kind === "dom" && ref.tabId === tab.id && ref.name

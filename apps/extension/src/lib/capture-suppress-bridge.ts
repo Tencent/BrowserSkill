@@ -37,8 +37,37 @@ export type CaptureSuppressSendToTab = (
   message: CaptureSuppressMessage,
 ) => Promise<unknown>;
 
-const defaultSendToTab: CaptureSuppressSendToTab = (tabId, message) =>
-  chrome.tabs.sendMessage(tabId, message);
+const DEFAULT_CAPTURE_SUPPRESS_TIMEOUT_MS = 3_000;
+const CAPTURE_SUPPRESS_TIMED_OUT = Symbol("capture_suppress_timed_out");
+
+const defaultSendToTab: CaptureSuppressSendToTab = async (tabId, message) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const pending = chrome.tabs.sendMessage(tabId, message);
+    void pending?.catch?.(() => {});
+    const outcome = await Promise.race([
+      pending,
+      new Promise<typeof CAPTURE_SUPPRESS_TIMED_OUT>((resolve) => {
+        timer = setTimeout(
+          () => resolve(CAPTURE_SUPPRESS_TIMED_OUT),
+          DEFAULT_CAPTURE_SUPPRESS_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    if (outcome === CAPTURE_SUPPRESS_TIMED_OUT) {
+      if (message.phase === "begin") {
+        // Balance the content-script counter if a busy renderer processes `begin` later.
+        void chrome.tabs
+          .sendMessage(tabId, { type: CAPTURE_SUPPRESS, phase: "end" })
+          .catch(() => {});
+      }
+      throw new Error("overlay capture-suppress timed out");
+    }
+    return outcome;
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 /**
  * Run `fn` with the target tab's overlay hidden. `end` is sent from a

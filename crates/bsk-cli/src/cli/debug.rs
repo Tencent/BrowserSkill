@@ -12,12 +12,14 @@ use clap::Args;
 #[derive(Debug, Clone, Args)]
 pub struct DebugArgs {
     /// Capture/inspect evidence, manage request rules, or replay a recorded request.
-    #[arg(value_parser = ["performance", "aggregate", "duplicates", "start", "stop", "status", "requests", "request", "operations", "operation", "console", "pages", "export", "rules", "rule_add", "rule_enable", "rule_disable", "rule_remove", "replay", "capabilities", "activity", "wait", "pin", "unpin"])]
+    #[arg(value_parser = clap::builder::PossibleValuesParser::new(DebugAction::ALL.iter().map(DebugAction::wire_name)))]
     pub action: String,
     /// Request, operation or rule ID returned by an earlier debug action.
     pub id: Option<String>,
     #[arg(long)]
     pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
     #[arg(long)]
@@ -95,12 +97,6 @@ impl DebugArgs {
     fn params(self) -> Result<DebugParams, CliError> {
         let action: DebugAction = serde_json::from_value(serde_json::Value::String(self.action))
             .context("invalid debug action")?;
-        if action != DebugAction::Capabilities && self.session.as_deref().is_none_or(str::is_empty)
-        {
-            return Err(
-                anyhow::anyhow!("--session is required except for offline capabilities").into(),
-            );
-        }
         if matches!(
             action,
             DebugAction::Request
@@ -197,6 +193,10 @@ impl DebugArgs {
             fields: self.fields,
             wait_ms: self.wait_ms,
             command_id: self.command_id,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         })
     }
 }
@@ -228,35 +228,74 @@ fn read_options<T: serde::de::DeserializeOwned>(
     .transpose()
 }
 
-pub fn dispatch(args: DebugArgs, _format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: DebugArgs,
+    ctx: &super::business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     let output = args.output.clone();
+    let scope = args.scope.clone();
+    let op_ctx = ctx.with_scope(scope.as_deref());
     let params = args.params()?;
-    if params.action == DebugAction::Capabilities && params.session_id.is_empty() {
+    if !params.action.cooperation_guarded() && op_ctx.has_any_action_metadata() {
+        return Err(CliError::invalid_params(anyhow::anyhow!(
+            "context, depends_on, observation, and expect on debug apply only to guarded debug actions (rule_add, rule_enable, rule_disable, rule_remove, replay)"
+        )));
+    }
+    if params.action == DebugAction::Capabilities
+        && params.session_id.is_empty()
+        && op_ctx.scope.is_none()
+    {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "cli": cli_identity(), "extension": null, "discovery": "cli_schema_only",
-                "hint": "Pass --session to discover the connected extension's actual capabilities and limits",
-                "parameters": bsk_protocol::tools::debug_parameter_schema(),
-            })).context("render capabilities")?
+            serde_json::to_string_pretty(&offline_capabilities_value())
+                .context("render capabilities")?
         );
         return Ok(());
     }
-    let timeout = if params.action == DebugAction::Wait {
-        std::time::Duration::from_millis(u64::from(params.wait_ms.unwrap_or(10000)) + 5000)
-    } else {
-        TOOL_IPC_TIMEOUT
-    };
+    let timeout = debug_timeout(&params);
     let export = params.action == DebugAction::Export;
     let budget = params.budget.unwrap_or(65536) as usize;
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let mut result: DebugResult = super::business_rpc::call(
+    let mut result: DebugResult = op_ctx.call(
         info.sock_path,
         "debug",
         Method::ToolDebug,
         Some(params),
         timeout,
     )?;
+    let rendered_val = postprocess_result(&mut result, export, output.as_deref(), budget)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&rendered_val).context("render debug evidence")?
+    );
+    Ok(())
+}
+
+pub(crate) fn debug_timeout(params: &DebugParams) -> std::time::Duration {
+    if params.action == DebugAction::Wait {
+        std::time::Duration::from_millis(u64::from(params.wait_ms.unwrap_or(10000)) + 5000)
+    } else {
+        TOOL_IPC_TIMEOUT
+    }
+}
+
+pub(crate) fn offline_capabilities_value() -> serde_json::Value {
+    serde_json::json!({
+        "cli": cli_identity(),
+        "extension": null,
+        "discovery": "cli_schema_only",
+        "hint": "Pass session or scope to discover the connected extension's actual capabilities and limits",
+        "parameters": bsk_protocol::tools::debug_parameter_schema(),
+    })
+}
+
+pub(crate) fn postprocess_result(
+    result: &mut DebugResult,
+    export: bool,
+    output: Option<&std::path::Path>,
+    budget: usize,
+) -> Result<serde_json::Value, CliError> {
     if let Some(capabilities) = result
         .capabilities
         .as_mut()
@@ -269,6 +308,7 @@ pub fn dispatch(args: DebugArgs, _format: Format) -> Result<(), CliError> {
     if export {
         let recording = result
             .recording
+            .take()
             .context("extension returned no debug recording")?;
         if let Some(path) = output {
             use std::io::Write;
@@ -285,29 +325,27 @@ pub fn dispatch(args: DebugArgs, _format: Format) -> Result<(), CliError> {
                 .metadata()
                 .context("stat debug export")?
                 .len();
-            file.persist_noclobber(&path)
+            file.persist_noclobber(path)
                 .context("save debug export (destination must not exist)")?;
-            println!(
-                "{}",
-                serde_json::json!({"path": path.canonicalize().unwrap_or(path), "bytes": bytes, "run_id": recording.run.id})
-            );
-        } else {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&recording).context("render debug recording")?
-            );
+            return Ok(serde_json::json!({
+                "path": path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+                "bytes": bytes,
+                "run_id": recording.run.id
+            }));
         }
-    } else {
-        let rendered = serde_json::to_string_pretty(&result).context("render debug evidence")?;
-        if rendered.len() > budget {
-            return Err(anyhow::anyhow!(
-                "output exceeds budget after CLI metadata; increase --budget"
-            )
-            .into());
-        }
-        println!("{rendered}");
+        return serde_json::to_value(&recording)
+            .context("render debug recording")
+            .map_err(Into::into);
     }
-    Ok(())
+    let rendered = serde_json::to_string_pretty(&result).context("render debug evidence")?;
+    if rendered.len() > budget {
+        return Err(
+            anyhow::anyhow!("output exceeds budget after CLI metadata; increase --budget").into(),
+        );
+    }
+    serde_json::to_value(result)
+        .context("encode debug evidence")
+        .map_err(Into::into)
 }
 
 fn cli_identity() -> serde_json::Value {
@@ -392,7 +430,9 @@ mod tests {
     #[test]
     fn reliability_options_are_discoverable_and_bounded() {
         assert!(parse(&["bsk", "debug", "capabilities"]).is_ok());
-        assert!(parse(&["bsk", "debug", "activity"]).is_err());
+        let activity = parse(&["bsk", "debug", "activity"]).unwrap();
+        assert_eq!(activity.action, DebugAction::Activity);
+        assert!(activity.session_id.is_empty());
         let p = parse(&[
             "bsk",
             "debug",

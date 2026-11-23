@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { RequestFrame } from "@/transport/types";
 import { prepareBackgroundExecution } from "../background-execution";
+import { createStubCdpRunner } from "../shared";
 
 async function fixture() {
   const manager = new SessionManager({
@@ -22,11 +23,17 @@ async function fixture() {
         [{ id: 1, windowId: 100, url: "https://fixture.test", active: true }] as chrome.tabs.Tab[],
     ),
   };
-  const cdp = {
-    send: vi.fn(),
-    acquireBackgroundExecution: vi.fn(async () => {}),
-    releaseSessionTab: vi.fn(async () => {}),
-  };
+  const acquireBackgroundExecution = vi.fn(async () => {});
+  const releaseSessionTab = vi.fn(async () => {});
+  const cdp = Object.assign(
+    createStubCdpRunner({
+      send: vi.fn(),
+    }),
+    {
+      acquireBackgroundExecution,
+      releaseSessionTab,
+    },
+  );
   return { manager, ctx, tabs, cdp };
 }
 

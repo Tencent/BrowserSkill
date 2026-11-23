@@ -101,6 +101,21 @@ pub struct AuthorizedDevice {
     pub browser_id: String,
 }
 
+/// Lightweight filesystem metadata snapshot used to detect edits/atomic
+/// replacements of `remote-authorization.json` without reading or parsing the
+/// file on every tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoreFileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(not(unix))]
+    created: Option<std::time::SystemTime>,
+}
+
 fn now() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
 }
@@ -130,6 +145,10 @@ impl AuthorizationStore {
         Self {
             path: home.join("remote-authorization.json"),
         }
+    }
+
+    pub fn is_configured(&self) -> Result<bool> {
+        Ok(!self.read_state()?.public_url.is_empty())
     }
 
     fn transaction<T>(&self, write: bool, work: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
@@ -402,6 +421,36 @@ impl AuthorizationStore {
         .unwrap_or_else(|error| {
             tracing::warn!(%error, "could not check persisted browser authorization");
             false
+        })
+    }
+
+    pub(crate) fn file_stamp(&self) -> std::io::Result<StoreFileStamp> {
+        let meta = fs::metadata(&self.path)?;
+        Ok(StoreFileStamp {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            #[cfg(unix)]
+            dev: {
+                use std::os::unix::fs::MetadataExt;
+                meta.dev()
+            },
+            #[cfg(unix)]
+            ino: {
+                use std::os::unix::fs::MetadataExt;
+                meta.ino()
+            },
+            #[cfg(not(unix))]
+            created: meta.created().ok(),
+        })
+    }
+
+    pub(crate) fn device_expiries(&self) -> Result<std::collections::HashMap<String, i64>> {
+        self.transaction(false, |state| {
+            Ok(state
+                .devices
+                .iter()
+                .map(|(id, device)| (id.clone(), device.expires_at))
+                .collect())
         })
     }
 }

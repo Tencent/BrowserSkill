@@ -3,97 +3,151 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DebugAction {
-    Performance,
-    Aggregate,
-    Duplicates,
-    Capabilities,
-    Activity,
-    Wait,
-    Pin,
-    Unpin,
-    Start,
-    Stop,
-    Status,
-    Requests,
-    Request,
-    Operations,
-    Operation,
-    Console,
-    Pages,
-    Export,
-    Rules,
-    RuleAdd,
-    RuleEnable,
-    RuleDisable,
-    RuleRemove,
-    Replay,
+macro_rules! debug_actions {
+    ($($action:ident => ($wire:literal, $effect:ident, $owner:ident, $cooperation_guarded:literal, $wal_tracked:literal, $dialog_gated:literal)),* $(,)?) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        pub enum DebugAction { $(#[serde(rename = $wire)] $action,)* }
+        impl DebugAction {
+            pub const ALL: &'static [Self] = &[$(Self::$action,)*];
+            pub const fn wire_name(&self) -> &'static str {
+                match self { $(Self::$action => $wire,)* }
+            }
+            pub const fn effect(&self) -> crate::method::MethodEffect {
+                match self { $(Self::$action => crate::method::MethodEffect::$effect,)* }
+            }
+            pub const fn owner(&self) -> crate::catalog::MethodOwner {
+                match self { $(Self::$action => crate::catalog::MethodOwner::$owner,)* }
+            }
+            /// Whether shared-tab cooperation gates this debug sub-action as an active
+            /// intervention or rule mutation (`rule_disable`/`rule_remove` also modify
+            /// active rule state on the controlled tab).
+            pub const fn cooperation_guarded(&self) -> bool {
+                match self { $(Self::$action => $cooperation_guarded,)* }
+            }
+            /// Whether an uncertain outcome on this sub-action must be recorded in the IntentWal.
+            pub const fn wal_tracked(&self) -> bool {
+                match self { $(Self::$action => $wal_tracked,)* }
+            }
+            /// Whether this sub-action can execute page requests that trigger a native JS dialog.
+            pub const fn dialog_gated(&self) -> bool {
+                match self { $(Self::$action => $dialog_gated,)* }
+            }
+        }
+    };
+}
+
+debug_actions! {
+    Performance => ("performance", ControlPlane, Extension, false, false, false),
+    Aggregate => ("aggregate", ControlPlane, Extension, false, false, false),
+    Duplicates => ("duplicates", ControlPlane, Extension, false, false, false),
+    Capabilities => ("capabilities", ControlPlane, Extension, false, false, false),
+    Activity => ("activity", ControlPlane, Daemon, false, false, false),
+    Wait => ("wait", ControlPlane, Daemon, false, false, false),
+    Pin => ("pin", ControlPlane, Extension, false, false, false),
+    Unpin => ("unpin", ControlPlane, Extension, false, false, false),
+    Start => ("start", ControlPlane, Extension, false, false, false),
+    Stop => ("stop", ControlPlane, Extension, false, false, false),
+    Status => ("status", ControlPlane, Extension, false, false, false),
+    Requests => ("requests", ControlPlane, Extension, false, false, false),
+    Request => ("request", ControlPlane, Extension, false, false, false),
+    Operations => ("operations", ControlPlane, Extension, false, false, false),
+    Operation => ("operation", ControlPlane, Extension, false, false, false),
+    Console => ("console", ControlPlane, Extension, false, false, false),
+    Pages => ("pages", ControlPlane, Extension, false, false, false),
+    Export => ("export", ControlPlane, Extension, false, false, false),
+    Rules => ("rules", ControlPlane, Extension, false, false, false),
+    RuleAdd => ("rule_add", BrowserMutation, Extension, true, true, false),
+    RuleEnable => ("rule_enable", BrowserMutation, Extension, true, true, false),
+    RuleDisable => ("rule_disable", ControlPlane, Extension, true, false, false),
+    RuleRemove => ("rule_remove", ControlPlane, Extension, true, false, false),
+    Replay => ("replay", BrowserMutation, Extension, true, true, true),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DebugParams {
     pub session_id: String,
     pub action: DebugAction,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 65536))]
     pub offset: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 16384))]
     pub max_chars: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<DebugRuleSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<DebugReplaySpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 4096, max = 262144))]
     pub budget: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 60000))]
     pub slow_ms: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 100, max = 10000))]
     pub window_ms: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_controlled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 100, max = 599))]
     pub status: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 60000))]
     pub wait_ms: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_id: Option<String>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<super::ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<super::ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -243,7 +297,7 @@ pub struct DebugOperation {
     pub finished_at: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_end: Option<f64>,
-    pub state: String,
+    pub state: DebugOperationState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,6 +314,13 @@ pub struct DebugOperation {
     pub console_ids: Vec<String>,
     pub truncated: bool,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugRunState {
+    Capturing,
+    Stopped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugRun {
     pub id: String,
@@ -270,7 +331,7 @@ pub struct DebugRun {
     pub started_at: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped_at: Option<f64>,
-    pub state: String,
+    pub state: DebugRunState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     pub requests: u64,
@@ -288,7 +349,7 @@ pub struct DebugRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub storage: Option<serde_json::Value>,
+    pub storage: Option<DebugStorage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<BTreeMap<String, String>>,
 }
@@ -403,9 +464,19 @@ pub struct DebugResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<serde_json::Value>,
+    pub output: Option<DebugOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<DebugActivity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugRuleState {
+    Enabled,
+    Disabled,
+    Exhausted,
+    Removed,
+    Stopped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -467,7 +538,7 @@ pub struct DebugRule {
     #[serde(flatten)]
     pub spec: DebugRuleSpec,
     pub id: String,
-    pub state: String,
+    pub state: DebugRuleState,
     pub hits: u32,
     pub failures: u32,
     pub created_at: f64,
@@ -498,11 +569,19 @@ pub struct DebugReplay {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugInterventionKind {
+    Block,
+    Modify,
+    Mock,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugIntervention {
     pub rule_id: String,
     #[serde(rename = "type")]
-    pub kind: String,
+    pub kind: DebugInterventionKind,
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -529,7 +608,8 @@ pub struct DebugActivity {
 }
 
 pub fn debug_parameter_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(DebugParams)).expect("debug schema serializes")
+    serde_json::to_value(crate::catalog::schema_for::<DebugParams>())
+        .expect("debug schema serializes")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -675,4 +755,30 @@ mod fidelity_tests {
         assert!(legacy.request_body.replay_safe.is_none());
         assert_eq!(to_value(legacy).unwrap(), value);
     }
+}
+
+/// Bounded local retention statistics included in debug run metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugStorage {
+    pub requests: u64,
+    pub bytes: u64,
+    pub dropped: u64,
+    pub pins: u64,
+}
+
+/// Reports how the requested output budget affected a debug response.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugOutput {
+    pub budget: u64,
+    pub truncated: bool,
+    pub omitted: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugOperationState {
+    Running,
+    Completed,
+    Error,
+    Interrupted,
 }

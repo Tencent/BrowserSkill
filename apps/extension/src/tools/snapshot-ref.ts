@@ -2,6 +2,7 @@
 // compound CDP node identity via the session RefStore, and build stable
 // `ref_not_found` errors for hard-failure tool paths.
 
+import type { FrameNodeHandle } from "@/browser-driver/frame-handles";
 import type { SessionContext } from "@/session-manager/manager";
 import { normaliseRef, type RefEntry } from "@/session-manager/ref-store";
 import type { RpcError } from "@/transport/types";
@@ -11,7 +12,10 @@ export interface SnapshotRefLookup {
   backendNodeId: number;
   refKey: string;
   frameId?: string;
-  cdpSessionId?: string;
+  loaderId?: string;
+  documentElementBackendNodeId?: number;
+  handle: FrameNodeHandle;
+  rowAnchor?: string;
 }
 
 /** Typed lookup never turns a visual anchor into a DOM operation target. */
@@ -22,8 +26,7 @@ export function lookupRefTarget(
 ): RefEntry | null {
   const entry = ctx.refStore.resolveEntry(refKey);
   if (!entry) return null;
-  const ownerTabId =
-    entry.kind === "visual-region" ? entry.candidate.document.target.tabId : entry.tabId;
+  const ownerTabId = entry.kind === "visual-region" ? entry.candidate.document.tabId : entry.tabId;
   return ownerTabId === tabId ? entry : null;
 }
 
@@ -40,11 +43,25 @@ export function lookupSnapshotRef(
   const refKey = normaliseRef(ref);
   const entry = lookupRefTarget(ctx, refKey, tabId);
   if (!entry || entry.kind !== "dom") return null;
+  const handle: FrameNodeHandle = entry.handle ?? {
+    tabId,
+    frameId: entry.frameId ?? "",
+    loaderId: entry.loaderId ?? "",
+    backendNodeId: entry.backendNodeId,
+    ...(entry.documentElementBackendNodeId !== undefined
+      ? { documentElementBackendNodeId: entry.documentElementBackendNodeId }
+      : {}),
+  };
   return {
     backendNodeId: entry.backendNodeId,
     refKey,
     ...(entry.frameId ? { frameId: entry.frameId } : {}),
-    ...(entry.cdpSessionId ? { cdpSessionId: entry.cdpSessionId } : {}),
+    ...(entry.loaderId ? { loaderId: entry.loaderId } : {}),
+    ...(entry.documentElementBackendNodeId !== undefined
+      ? { documentElementBackendNodeId: entry.documentElementBackendNodeId }
+      : {}),
+    handle,
+    ...(entry.rowAnchor ? { rowAnchor: entry.rowAnchor } : {}),
   };
 }
 

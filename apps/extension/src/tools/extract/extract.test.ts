@@ -23,9 +23,18 @@ const searchResults = `<div id="search-results">
   <article class="result"><h3><a href="/docs/provenance">数据来源说明</a></h3></article>
 </div>`;
 
-function extract(selector: string, patch: Partial<ExtractParams> = {}) {
-  const options = validateExtract({ session_id: "test", action: "table", selector, ...patch });
-  const raw = collectExtractDom.call(document.documentElement, options);
+function extract(
+  selector: string | undefined,
+  patch: Partial<ExtractParams> = {},
+  context: Element = document.documentElement,
+) {
+  const options = validateExtract({
+    session_id: "test",
+    action: "table",
+    ...(selector ? { selector } : {}),
+    ...patch,
+  });
+  const raw = collectExtractDom.call(context, options);
   if (raw.error) throw new Error(`${raw.error.reason}: ${raw.error.message}`);
   return fitExtractBudget(
     normalizeExtract(raw, options, 7, {
@@ -34,7 +43,7 @@ function extract(selector: string, patch: Partial<ExtractParams> = {}) {
       title: raw.title,
       frame_id: "root",
       captured_at: raw.captured_at,
-      selector,
+      ...(selector ? { selector } : {}),
     }),
     options.max_bytes,
   );
@@ -42,8 +51,148 @@ function extract(selector: string, patch: Partial<ExtractParams> = {}) {
 beforeEach(() => {
   document.head.innerHTML = "";
   document.body.innerHTML = "";
+  // happy-dom ships no UA stylesheet, so `[hidden]` would not hide anything and
+  // form controls would inherit ancestor `text-transform` instead of defaulting
+  // to `none`. Emulate the UA rules that matter, first in document order so
+  // author rules still win exactly as they do in a browser.
+  const ua = document.createElement("style");
+  ua.textContent =
+    "[hidden] { display: none; } input, textarea, select, button { text-transform: none; }";
+  document.head.appendChild(ua);
 });
 describe("structured extraction facts", () => {
+  it.each([
+    { transform: "uppercase", value: "paid", expected: "PAID" },
+    { transform: "lowercase", value: "PAID", expected: "paid" },
+    { transform: "none", value: "PaId", expected: "PaId" },
+  ])("applies text-transform: $transform to text nodes", ({ transform, value, expected }) => {
+    document.body.innerHTML = `<table id="t"><tr><td style="text-transform:${transform}">${value}</td></tr></table>`;
+    expect(extract("#t").rows).toEqual([{ c1: expected }]);
+  });
+
+  it("inherits CSS case transforms and respects nested overrides and line breaks", () => {
+    document.head.innerHTML = `<style>
+      #t { text-transform: uppercase; }
+      #t em { text-transform: lowercase; }
+      #t .literal { text-transform: none; }
+    </style>`;
+    document.body.innerHTML = `<table id="t"><thead><tr><th>status</th></tr></thead>
+      <tbody><tr><td>pa<span>id</span><em>DONE</em><span class="literal">MiXeD</span><br>new  line</td></tr></tbody></table>`;
+    const result = extract("#t");
+    expect(result.columns[0].name).toBe("STATUS");
+    expect(result.rows).toEqual([{ c1: "PAIDdoneMiXeD\nNEW LINE" }]);
+  });
+
+  it("transforms list text without changing attribute reads", () => {
+    document.body.innerHTML = `<ul id="l" style="text-transform:uppercase"><li><span data-status="paid">paid</span></li></ul>`;
+    const result = extract("#l", {
+      action: "list",
+      fields: [
+        { key: "text", selector: "span", read: "text" },
+        { key: "raw", selector: "span", read: "attribute", attribute: "data-status" },
+      ],
+    });
+    expect(result.rows).toEqual([{ text: "PAID", raw: "paid" }]);
+  });
+
+  it("applies explicit CSS case transforms to input and textarea values with UA defaults, locale rules, and shadow host language", () => {
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      `<style>
+        #t { text-transform: uppercase; }
+        #t input.upper { text-transform: uppercase; }
+        #t input.literal { text-transform: none; }
+        #t textarea.lower { text-transform: lowercase; }
+      </style>`,
+    );
+    document.body.innerHTML = `<table id="t" lang="tr"><tbody><tr>
+        <td><input value="iı"></td>
+        <td><input class="upper" value="iı"></td>
+        <td><input class="upper literal" value="PaId"></td>
+        <td><input class="upper" lang="de" value="straße"></td>
+        <td><textarea class="lower">Iİ\n  SECOND</textarea></td>
+        <td><input type="password" style="text-transform:uppercase" value="secret">ok</td>
+      </tr></tbody></table>
+      <ul id="l"><li><input class="code" style="text-transform:uppercase" data-raw="abc-12" value="abc-12"></li></ul>`;
+
+    expect(extract("#t").rows).toEqual([
+      {
+        c1: "iı",
+        c2: "İI",
+        c3: "PaId",
+        c4: "STRASSE",
+        c5: "ıi\n  second",
+        c6: "OK",
+      },
+    ]);
+
+    const listResult = extract("#l", {
+      action: "list",
+      fields: [
+        { key: "text", selector: "input", read: "text" },
+        { key: "raw", selector: "input", read: "attribute", attribute: "data-raw" },
+      ],
+    });
+    expect(listResult.rows).toEqual([{ text: "ABC-12", raw: "abc-12" }]);
+
+    // Controls inside an open shadow root inherit locale casing from the shadow host ancestry.
+    document.body.innerHTML = `<table id="shadow-table" lang="en"><tbody><tr>
+      <td lang="tr"><div id="host"></div></td>
+    </tr></tbody></table>`;
+    document.getElementById("host")!.attachShadow({
+      mode: "open",
+    }).innerHTML = `<input style="text-transform:uppercase" value="iı">`;
+    expect(extract("#shadow-table").rows).toEqual([{ c1: "İI" }]);
+  });
+
+  it("charges the byte budget for transformed input and textarea values", () => {
+    const options = validateExtract({
+      session_id: "test",
+      action: "table",
+      selector: "#t",
+      max_bytes: 1024,
+    });
+    for (const transform of ["none", "uppercase"]) {
+      document.body.innerHTML = `<table id="t"><tr><td><input style="text-transform:${transform}" value="${"ŉ".repeat(400)}"></td></tr></table>`;
+      const raw = collectExtractDom.call(document.documentElement, options);
+      if (transform === "none") expect(raw.error).toBeUndefined();
+      else
+        expect(raw.error).toMatchObject({
+          reason: "extract_limit",
+          message: "Text byte budget exceeded",
+        });
+    }
+  });
+
+  it.each([
+    { language: "tr", transform: "uppercase", value: "iı", expected: "İI" },
+    { language: "tr", transform: "lowercase", value: "Iİ", expected: "ıi" },
+    { language: "de", transform: "uppercase", value: "straße", expected: "STRASSE" },
+    { language: "invalid_tag", transform: "uppercase", value: "paid", expected: "PAID" },
+  ])("uses $language case mappings for $transform", ({ language, transform, value, expected }) => {
+    document.body.innerHTML = `<table id="t" lang="${language}"><tr><td style="text-transform:${transform}">${value}</td></tr></table>`;
+    expect(extract("#t").rows).toEqual([{ c1: expected }]);
+  });
+
+  it("charges the byte budget for transformed Unicode text", () => {
+    const options = validateExtract({
+      session_id: "test",
+      action: "table",
+      selector: "#t",
+      max_bytes: 1024,
+    });
+    for (const transform of ["none", "uppercase"]) {
+      document.body.innerHTML = `<table id="t"><tr><td style="text-transform:${transform}">${"ŉ".repeat(400)}</td></tr></table>`;
+      const raw = collectExtractDom.call(document.documentElement, options);
+      if (transform === "none") expect(raw.error).toBeUndefined();
+      else
+        expect(raw.error).toMatchObject({
+          reason: "extract_limit",
+          message: "Text byte budget exceeded",
+        });
+    }
+  });
+
   it.each(["hidden", "auto", "visible"])("respects content-visibility: %s", (visibility) => {
     document.body.innerHTML = `<table id="t"><tr><td>Visible<div style="content-visibility: ${visibility}"><span style="content-visibility: visible; visibility: visible">Extra</span></div></td></tr></table>`;
     expect(extract("#t").rows).toEqual([
@@ -352,5 +501,55 @@ describe("structured extraction facts", () => {
         captured_at: "now",
       }).coverage.dataset_complete,
     ).toBe("unknown");
+  });
+
+  it("extracts a target that author CSS made visible despite hidden", () => {
+    document.body.innerHTML =
+      '<table id="t" hidden style="display:table"><tr><td>Inline</td></tr></table>';
+    expect(extract("#t").rows).toEqual([{ c1: "Inline" }]);
+
+    document.body.innerHTML =
+      '<style>#t { display: table; }</style><table id="t" hidden><tr><td>Sheet</td></tr></table>';
+    expect(extract("#t").rows).toEqual([{ c1: "Sheet" }]);
+
+    document.body.innerHTML = '<table id="t" hidden><tr><td>Secret</td></tr></table>';
+    expect(() => extract("#t")).toThrow("extract_target_hidden");
+  });
+
+  it("extracts content under a hidden ancestor that author CSS made visible", () => {
+    document.body.innerHTML =
+      '<style>#host { display: block; }</style><div id="host" hidden><table id="t"><tr><td>Visible</td></tr></table></div>';
+    expect(extract("#t").rows).toEqual([{ c1: "Visible" }]);
+
+    document.body.innerHTML =
+      '<div id="host" hidden><table id="t"><tr><td>Secret</td></tr></table></div>';
+    expect(() => extract("#t")).toThrow("extract_target_hidden");
+  });
+
+  it("extracts slotted list items, slotted links and closed details positions without leaking nested lists", () => {
+    document.body.innerHTML = `<div id="host">
+      <li slot="second"><a href="/second">Second</a><ul id="inner"><li><a href="/inner">Inner</a></li></ul></li>
+      <li slot="first"><a href="/first">First</a></li>
+      <li slot="unused"><a href="/unused">Unused</a></li>
+      <a slot="slotted-link" href="/fourth">Fourth</a>
+    </div>`;
+    const shadow = document.querySelector("#host")!.attachShadow({ mode: "open" });
+    shadow.innerHTML = `<ul id="l">
+      <slot name="first"></slot>
+      <details><summary>More</summary><li>Hidden details</li></details>
+      <slot name="second"></slot>
+      <li><slot name="slotted-link"></slot></li>
+    </ul>`;
+    const outer = extract(undefined, { action: "list", ref: "list" }, shadow.querySelector("#l")!);
+    expect(outer.rows).toEqual([
+      { text: "First", url: new URL("/first", document.baseURI).href },
+      { text: "Second\nInner", url: new URL("/second", document.baseURI).href },
+      { text: "Fourth", url: new URL("/fourth", document.baseURI).href },
+    ]);
+    expect(outer.row_sources.map((row) => row.source_row)).toEqual([1, 3, 4]);
+    expect(outer.warnings).toEqual(["hidden_rows_omitted"]);
+
+    const inner = extract("#inner", { action: "list" });
+    expect(inner.rows).toEqual([{ text: "Inner", url: new URL("/inner", document.baseURI).href }]);
   });
 });

@@ -201,6 +201,7 @@ describe("released task CDP attachments", () => {
       expect(f.cdp.isAttached(7)).toBe(false);
       f.finishAttach.resolve();
       expect(await result).toHaveProperty("code");
+      await vi.advanceTimersByTimeAsync(0);
       expect(f.cdp.isAttached(7)).toBe(false);
       expect(f.api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 7 });
       expect(f.api.sendCommand).not.toHaveBeenCalled();

@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>Canvas visual baseline</title>
+<style>body{font:16px system-ui;padding:25px}canvas{border:1px solid;display:block;margin:10px}</style>
+<h1>Canvas controls</h1><p>Click the green area on the interactive canvas.</p>
+<canvas id="plain" width="420" height="140"></canvas>
+<canvas id="labelled" aria-label="Labelled interactive canvas" width="420" height="140"></canvas><output id="result"></output>
+<script>
+for(let c of document.querySelectorAll('canvas')){let ctx=c.getContext('2d');ctx.fillStyle='#163d60';ctx.fillRect(0,0,420,140);ctx.fillStyle='#44deba';ctx.fillRect(250,35,130,65);ctx.fillStyle='white';ctx.font='22px sans-serif';ctx.fillText('Canvas Test',20,78);ctx.fillStyle='#123';ctx.fillText('Click me',265,75)}
+document.querySelector('#labelled').onclick=e=>{let value=e.offsetX>=250&&e.offsetX<=380&&e.offsetY>=35&&e.offsetY<=100?'target hit':'miss';document.querySelector('output').textContent=value;fetch('/event',{method:'POST',body:JSON.stringify({type:'canvas-test',value,x:e.offsetX,y:e.offsetY})})};
+</script>

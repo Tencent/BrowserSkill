@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Arena Inner Federated Frame</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 12px;
+    font: 13px/1.45 system-ui, -apple-system, sans-serif;
+    background: #f8fafc;
+    color: #0f172a;
+  }
+  .frame-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: #e2e8f0;
+    border-radius: 6px;
+    margin-bottom: 10px;
+    font-size: 12px;
+  }
+  .controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+    align-items: end;
+    margin-bottom: 10px;
+  }
+  label { display: block; font-weight: 600; font-size: 12px; margin-bottom: 3px; }
+  input, select, button {
+    padding: 6px 9px;
+    border: 1px solid #94a3b8;
+    border-radius: 5px;
+    font: inherit;
+  }
+  button {
+    background: #0f766e;
+    border-color: #0f766e;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    background: #fff;
+  }
+  th, td {
+    border: 1px solid #cbd5e1;
+    padding: 5px 7px;
+    text-align: left;
+  }
+  thead th { background: #f1f5f9; }
+  output {
+    display: block;
+    margin-top: 8px;
+    padding: 6px 8px;
+    background: #ecfeff;
+    border: 1px solid #a5f3fc;
+    border-radius: 5px;
+    font-family: ui-monospace, monospace;
+    font-size: 11.5px;
+  }
+</style>
+</head>
+<body>
+<div class="frame-bar">
+  <strong id="inner-role-title">Inner Federated Sub-Application</strong>
+  <span id="inner-host-badge">host: pending</span>
+</div>
+
+<form id="inner-frame-form" onsubmit="return false">
+  <div class="controls">
+    <div>
+      <label for="inner-operator">子域审计签名人</label>
+      <input id="inner-operator" type="text" placeholder="输入子域复核人">
+    </div>
+    <div>
+      <label for="inner-tier">核算隔离等级</label>
+      <select id="inner-tier">
+        <option value="L1-STANDARD">标准隔离 (L1-STANDARD)</option>
+        <option value="L2-STRICT" selected>强隔离审计 (L2-STRICT)</option>
+        <option value="L3-ZERO-TRUST">零信任封箱 (L3-ZERO-TRUST)</option>
+      </select>
+    </div>
+    <button type="button" id="inner-approve-btn">签发子域凭据</button>
+  </div>
+</form>
+
+<table id="inner-ledger-table">
+  <caption id="inner-table-caption">子域结算与审计凭证表</caption>
+  <thead>
+    <tr>
+      <th rowspan="2">凭证编号</th>
+      <th rowspan="2">归属子域</th>
+      <th colspan="2">配额与结算指标</th>
+      <th rowspan="2">校验状态</th>
+    </tr>
+    <tr>
+      <th>核定调用量</th>
+      <th>结算金额</th>
+    </tr>
+  </thead>
+  <tbody id="inner-ledger-tbody"></tbody>
+</table>
+
+<output id="inner-status-output">ready</output>
+
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const role = params.get('role') || 'billing';
+  const refreshEpoch = params.get('refresh') || '0';
+  document.getElementById('inner-role-title').textContent =
+    role === 'nested-audit' ? 'L2 跨源嵌套安全审计子帧 (Nested L2)' : 'L1 同源账单清分中心子帧 (Same-Origin L1)';
+  document.getElementById('inner-host-badge').textContent =
+    `host=${location.host} · role=${role} · epoch=${refreshEpoch}`;
+  document.getElementById('inner-table-caption').textContent =
+    role === 'nested-audit' ? '跨源嵌套 L2 审计流水表' : '同源清分子帧结算表';
+
+  const prefix = role === 'nested-audit' ? 'AUD-L2' : 'BIL-L1';
+  const rows = Array.from({ length: 6 }, (_, i) => {
+    const id = `${prefix}-${101 + i}`;
+    const quota = (1200 + i * 350).toLocaleString('en-US');
+    const amt = (88.5 + i * 24.25).toFixed(2);
+    const st = i % 2 === 0 ? 'VERIFIED' : 'PENDING';
+    return `<tr><td>${id}</td><td>${role}</td><td>${quota}</td><td>¥${amt}</td><td>${st}</td></tr>`;
+  });
+  document.getElementById('inner-ledger-tbody').innerHTML = rows.join('');
+
+  document.getElementById('inner-approve-btn').addEventListener('click', () => {
+    const operator = document.getElementById('inner-operator').value.trim() || 'anonymous';
+    const tier = document.getElementById('inner-tier').value;
+    const payload = {
+      source: 'arena-frame-inner',
+      role,
+      host: location.host,
+      refreshEpoch,
+      operator,
+      tier
+    };
+    document.getElementById('inner-status-output').textContent = JSON.stringify(payload);
+    window.parent.postMessage(payload, '*');
+    fetch('/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'arena-inner-frame-saved', ...payload })
+    }).catch(() => {});
+  });
+})();
+</script>
+</body>
+</html>

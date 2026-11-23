@@ -1,4 +1,4 @@
-import { type ControllerInfo, isControllerInfo } from "@/lib/controller-info";
+import { isControllerInfo } from "@/lib/controller-info";
 import {
   DEFAULT_INTERACTION_PREFERENCES,
   type InteractionPreferenceStore,
@@ -7,12 +7,23 @@ import {
 import { withTaskPreviewStop } from "@/lib/task-preview";
 import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
 import { detectBrowserMeta } from "@/transport/handshake";
-import type { InteractionPolicy, RpcError } from "@/transport/types";
+import type {
+  SessionStartParams as ProtocolSessionStartParams,
+  RpcError,
+  SessionStartResult,
+  SessionStopParams,
+  SessionStopResult,
+} from "@/transport/types";
+import type { DialogCleanupCdp } from "./dialogs";
 import { rpcError } from "./errors";
-import { clearRecordingForSession } from "./record";
+import { clearHelpForSession } from "./human-loop";
+import { clearObserveIdentityStreaksForSession } from "./observation";
+import { clearRecordingForSession, type RecordDeps } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
-import { isRpcError } from "./shared";
+import { evictSessionCdpRunner, isRpcError } from "./shared";
 import { chromeAgentOverlayResetApi, returnBorrowedTab, type TabManagementDeps } from "./tabs";
+
+export type { SessionStartResult, SessionStopParams, SessionStopResult } from "@/transport/types";
 
 /** Valid range for Agent Window dimensions in CSS pixels. */
 export const WINDOW_SIZE_MIN = 100;
@@ -52,26 +63,10 @@ export function validateWindowSize(
   }
   return { width: width as number, height: height as number };
 }
-
-export interface SessionStartParams {
-  session_id: string;
-  controller?: ControllerInfo | null;
-  /** Opt in to Chrome's shared incognito browsing session. */
-  incognito?: boolean;
-  browser_instance_id?: string;
-  /** Optional Agent Window outer width in CSS pixels (100..=7680). */
-  width?: number;
-  /** Optional Agent Window outer height in CSS pixels (100..=7680). */
-  height?: number;
-  /** Background by default; true explicitly opens the window in front. */
-  focused?: boolean;
-  /** Legacy input accepted for compatibility; browser settings always decide. */
+/** Legacy input remains accepted at the handler boundary. */
+export interface SessionStartParams extends Omit<ProtocolSessionStartParams, "controller"> {
+  controller?: { name: string; project?: string | null; color?: string | null } | null;
   unattended?: boolean;
-}
-
-export interface SessionStartResult {
-  interaction?: InteractionPolicy;
-  agent_window_id?: number;
 }
 
 export interface SessionStartDeps {
@@ -79,29 +74,12 @@ export interface SessionStartDeps {
   signal?: AbortSignal;
 }
 
-export interface SessionStopParams {
-  session_id: string;
-}
-
-export interface SessionStopResult {
-  /** Tab ids that were returned to their original (or fallback) window. */
-  returned_tab_ids?: number[];
-  /** Tab ids whose return path failed; those entries remain borrowed so
-   *  shutdown can be retried without closing the Agent Window. */
-  return_failures?: Array<{ tab_id: number; code: string; message: string }>;
-  /**
-   * True when the Agent Window was *released* to the user (instead of being
-   * closed) because it still contained user-created tabs after the agent's own
-   * tabs were closed. Single-session scope.
-   */
-  window_released?: boolean;
-}
-
 export interface SessionStopDeps {
   signal?: AbortSignal;
-  cdp?: Pick<CdpRunner, "releaseSessionTab"> & {
-    detachSession(sessionId: string): Promise<void>;
-  };
+  cdp?: Partial<Pick<CdpRunner, "releaseSessionTab">> &
+    DialogCleanupCdp & {
+      detachSession(sessionId: string): Promise<void>;
+    };
   /**
    * Tab management deps forwarded to `returnBorrowedTab`. Defaults to
    * the production `chrome.tabs` / `chrome.windows` wrappers, but
@@ -116,6 +94,8 @@ export interface SessionStopDeps {
    * pure. Tests can inject a fake `ChromeTabsApi` too.
    */
   tabsQuery?: ChromeTabsApi;
+  /** Optional recording runtime deps forwarded to `clearRecordingForSession`. */
+  recording?: Partial<RecordDeps>;
 }
 
 /**
@@ -151,16 +131,19 @@ export async function handleSessionStart(
   }
   try {
     await deps.preferences?.readyOrFallback();
+    const prefs = deps.preferences?.get() ?? DEFAULT_INTERACTION_PREFERENCES;
+    const minimized = !params.focused && prefs.openAgentWindowMinimized;
     const ctx = await manager.start(params.session_id, {
       controller: params.controller ?? undefined,
       incognito: params.incognito,
       size: sizeOrErr,
       focused: params.focused,
+      ...(minimized ? { minimized: true } : {}),
       signal: deps.signal,
     });
     return {
       agent_window_id: ctx.agentWindowId,
-      interaction: interactionPolicy(deps.preferences?.get() ?? DEFAULT_INTERACTION_PREFERENCES),
+      interaction: interactionPolicy(prefs),
     };
   } catch (err) {
     if (err instanceof SessionStartCleanupError) {
@@ -241,16 +224,30 @@ async function stopSession(
   }
 
   // Remote access must end before returning a tab. Preserve the local recording
-  // when a failed return keeps its session alive for a retry.
-  if (ctx.remote) clearRecordingForSession(params.session_id);
+  // and help request when a failed return keeps its session alive for a retry.
+  if (ctx.remote) {
+    if (deps.recording) clearRecordingForSession(params.session_id, deps.recording);
+    else clearRecordingForSession(params.session_id);
+    clearHelpForSession(params.session_id);
+    clearObserveIdentityStreaksForSession(params.session_id);
+  }
 
-  // Step 1: auto-return borrowed tabs. Iterate over a snapshot of the
-  // ids so deletions during iteration do not break the Map iterator.
+  // Step 1: auto-return borrowed tabs. Dynamically pull unattempted keys so tabs
+  // replaced mid-stop via `chrome.tabs.onReplaced` are still returned instead of stranded.
   const returnedTabIds: number[] = [];
   const returnFailures: SessionStopResult["return_failures"] = [];
-  const borrowedIds = Array.from(ctx.borrowedTabs.keys());
-  for (const tabId of borrowedIds) {
+  const attempted = new Set<number>();
+  while (true) {
     if (manager.get(ctx.sessionId) !== ctx) return {};
+    let tabId: number | undefined;
+    for (const candidate of ctx.borrowedTabs.keys()) {
+      if (!attempted.has(candidate)) {
+        tabId = candidate;
+        break;
+      }
+    }
+    if (tabId === undefined) break;
+    attempted.add(tabId);
     // A close event may have removed this borrow while another tab returned.
     if (!ctx.borrowedTabs.has(tabId)) continue;
     try {
@@ -321,7 +318,12 @@ async function stopSession(
   // Step 2: clear the per-session RefStore (review M6/M7 parity).
   ctx.refStore.clear();
 
-  if (!ctx.remote) clearRecordingForSession(params.session_id);
+  if (!ctx.remote) {
+    if (deps.recording) clearRecordingForSession(params.session_id, deps.recording);
+    else clearRecordingForSession(params.session_id);
+    clearHelpForSession(params.session_id);
+    clearObserveIdentityStreaksForSession(params.session_id);
+  }
 
   // Step 3: detach CDP sessions this session opened (no-op if none).
   await deps.cdp?.detachSession(params.session_id);
@@ -453,6 +455,7 @@ async function stopSession(
       // Keep the window + its user tabs; only drop the session binding.
       const observedTabIds = Array.from(ctx.observedTabs ?? []);
       await manager.stop(params.session_id, { dropOnly: true });
+      evictSessionCdpRunner(deps.cdp, params.session_id);
       // Closing an agent tab may have reactivated an observed tab. Reset only
       // after dropping the session so subsequent overlay refreshes stay hidden.
       const overlayReset = deps.tabManagement?.agentOverlayReset ?? chromeAgentOverlayResetApi;
@@ -466,6 +469,7 @@ async function stopSession(
     } else {
       // Close the window and any remaining agent-owned tabs.
       await manager.stop(params.session_id);
+      evictSessionCdpRunner(deps.cdp, params.session_id);
     }
 
     return result;

@@ -7,17 +7,34 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import {
+  attachPairingBackground,
+  copyPairingExtension,
+  pairLocalBrowser,
+} from "../../../local-pairing.mjs";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { dragMarkup, dragScript } from "./drag-interactions.fixture.mjs";
 
 const exec = promisify(execFile);
-const chrome = process.env.BSK_DRAG_CHROME;
-assert(chrome, "Set BSK_DRAG_CHROME to a Chrome executable with extension debugging support");
-const bsk = resolve(process.env.BSK_DRAG_BSK ?? "target/debug/bsk");
+const chrome = process.env.BSK_TEST_CHROME;
+assert(chrome, "Set BSK_TEST_CHROME to a Chrome executable with extension debugging support");
+const defaultCli = process.platform === "win32" ? "target/debug/bsk.exe" : "target/debug/bsk";
+const bsk = resolve(process.env.BSK_TEST_CLI ?? defaultCli);
 const extension = resolve(process.env.BSK_DRAG_EXTENSION ?? "apps/extension/dist/chrome-mv3");
 const port = Number(process.env.BSK_DRAG_PORT ?? 52839);
 const home = await mkdtemp(join(tmpdir(), "bsk-drag-home-"));
 const env = { ...process.env, BSK_HOME: home, BSK_AUTO_UPDATE: "off", BSK_AUTO_START: "0" };
+for (const key of [
+  "BSK_SESSION",
+  "BSK_SCOPE",
+  "CLAUDE_CODE_AGENT_ID",
+  "CODEX_THREAD_ID",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "CURSOR_TRACE_ID",
+  "DSH_SESSION_ID",
+]) {
+  delete env[key];
+}
 const output = resolve(process.env.BSK_DRAG_OUTPUT ?? "evals/browser/results/drag-interactions");
 const transcript = [];
 const browserLog = [];
@@ -134,7 +151,7 @@ try {
       executable: chrome,
       deviceScale: 1,
       zoom: 1,
-      extensionPath: extension,
+      extensionPath: await copyPairingExtension(extension, join(home, "extension"), port),
       headless: true,
       disableGpu: false,
       extensionViaCdp: true,
@@ -147,22 +164,9 @@ try {
       },
     },
     async (send) => {
-      const worker = await eventually(async () => {
-        const targets = (await send("Target.getTargets")).targetInfos;
-        const t = targets.find(
-          (t) =>
-            t.type === "service_worker" &&
-            t.url.startsWith("chrome-extension://") &&
-            t.url.endsWith("/background.js"),
-        );
-        assert(t);
-        return t;
-      });
-      const { sessionId: workerSession } = await send("Target.attachToTarget", {
-        targetId: worker.targetId,
-        flatten: true,
-      });
-      await send("Runtime.enable", {}, workerSession);
+      const worker = await attachPairingBackground(send, extension);
+      await send("Runtime.enable", {}, worker.sessionId);
+      await pairLocalBrowser(send, { executable: bsk, env, worker });
       transcript.push({ browser: await send("Browser.getVersion") });
       await eventually(async () => {
         const r = await cli(["browsers"]);

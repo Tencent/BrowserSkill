@@ -5,7 +5,7 @@ import {
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
-import type { RpcError } from "@/transport/types";
+import type { RpcError, WindowResizeParams, WindowResizeResult } from "@/transport/types";
 import type { LayoutMetrics } from "./geometry/frame-context";
 import { validateWindowSize } from "./session";
 import {
@@ -16,19 +16,7 @@ import {
   resolveTargetTab,
 } from "./shared";
 
-/** The cooperation controller binds the current observation's tab to the request. */
-export interface WindowResizeParams {
-  session_id: string;
-  tab_id?: number;
-  width: number;
-  height: number;
-}
-
-export interface WindowResizeResult {
-  window_id: number;
-  width: number;
-  height: number;
-}
+export type { WindowResizeParams, WindowResizeResult } from "@/transport/types";
 
 type Size = { width: number; height: number };
 type WindowBounds = { width?: number; height?: number };
@@ -38,8 +26,24 @@ type Viewport = { size: Size; zoom: number };
 // caught up. Remember that failure until the viewport or window actually changes.
 const unconfirmed = new WeakMap<SessionContext, Map<number, { window: Size; viewport: Size }>>();
 
+// An outer window is addressed in DIP, but the OS stores device pixels, so a
+// fractional display scale can make the browser report the resize as one pixel
+// bigger or smaller per axis than requested (Windows 10 at 125%: asking for
+// 1100x700 lands 1101x701). Two DIP covers that double rounding at every scale
+// and is the same floor `viewportFollowed` already applies to window bounds,
+// while a real window-manager constraint is off by tens of pixels.
+const WINDOW_ROUNDING_TOLERANCE_DIP = 2;
+
 function sameSize(a: Size, b: Size): boolean {
   return a.width === b.width && a.height === b.height;
+}
+
+/** Whether a committed resize landed on the request, up to DIP rounding. */
+function withinRounding(actual: Size, requested: Size): boolean {
+  return (
+    Math.abs(actual.width - requested.width) <= WINDOW_ROUNDING_TOLERANCE_DIP &&
+    Math.abs(actual.height - requested.height) <= WINDOW_ROUNDING_TOLERANCE_DIP
+  );
 }
 
 function clearUnconfirmed(ctx: SessionContext, tabId: number): void {
@@ -98,7 +102,7 @@ function viewportFollowed(
   newWindow: Size,
 ): boolean {
   // Window bounds use DIP; integer layout dimensions use zoomed CSS pixels.
-  const roundingTolerance = Math.max(2, before.zoom, after.zoom);
+  const roundingTolerance = Math.max(WINDOW_ROUNDING_TOLERANCE_DIP, before.zoom, after.zoom);
   return (
     (Math.abs(newWindow.width - oldWindow.width) <= roundingTolerance ||
       before.size.width !== after.size.width) &&
@@ -172,8 +176,8 @@ export async function handleWindowResize(
   const previousFailure = unconfirmed.get(ctx)?.get(target.tabId);
   if (
     previousFailure &&
-    sameSize(beforeWindow, requested) &&
-    sameSize(previousFailure.window, beforeWindow) &&
+    withinRounding(beforeWindow, requested) &&
+    withinRounding(previousFailure.window, beforeWindow) &&
     sameSize(previousFailure.viewport, beforeViewport.size)
   )
     return {
@@ -253,8 +257,7 @@ export async function handleWindowResize(
       if (!actualWindow) throw new Error("the browser did not return usable window bounds");
       actualViewport = await viewport(deps.cdp, target.tabId);
       if (
-        actualWindow.width === requested.width &&
-        actualWindow.height === requested.height &&
+        withinRounding(actualWindow, requested) &&
         viewportFollowed(beforeViewport, actualViewport, beforeWindow, actualWindow)
       ) {
         clearUnconfirmed(ctx, target.tabId);
@@ -290,7 +293,7 @@ export async function handleWindowResize(
     tabs.set(target.tabId, { window: actualWindow, viewport: actualViewport.size });
     unconfirmed.set(ctx, tabs);
   }
-  if (actualWindow?.width !== requested.width || actualWindow?.height !== requested.height)
+  if (!actualWindow || !withinRounding(actualWindow, requested))
     return {
       code: "protocol_error",
       message: `Window resize requested ${requested.width}x${requested.height}, but the browser reports ${actualWindow?.width ?? "?"}x${actualWindow?.height ?? "?"}.`,

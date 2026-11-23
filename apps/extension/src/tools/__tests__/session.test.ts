@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentWindowCreateOptions } from "@/session-manager/agent-window";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { SessionManager } from "@/session-manager/manager";
+import * as humanLoop from "../human-loop";
 import * as recording from "../record";
 import { handleSessionStart, handleSessionStop } from "../session";
 import type { ChromeTabsApi } from "../shared";
@@ -179,6 +180,7 @@ describe("handleSessionStop with auto-return", () => {
     const failures = new Set([7]);
     const { tabs, windows } = makeApis(state, { moveThrowsFor: failures });
     const clear = vi.spyOn(recording, "clearRecordingForSession").mockImplementation(() => {});
+    const clearHelp = vi.spyOn(humanLoop, "clearHelpForSession").mockImplementation(() => {});
     try {
       const result = await handleSessionStop(
         sm,
@@ -188,18 +190,23 @@ describe("handleSessionStop with auto-return", () => {
       expect(result).toHaveProperty("return_failures");
       expect(sm.has("aa11")).toBe(true);
       expect(clear).toHaveBeenCalledTimes(remote ? 1 : 0);
+      expect(clearHelp).toHaveBeenCalledTimes(remote ? 1 : 0);
       failures.clear();
       clear.mockClear();
+      clearHelp.mockClear();
       const move = tabs.move;
       tabs.move = vi.fn(async (id, options) => {
         expect(clear).toHaveBeenCalledTimes(remote ? 1 : 0);
+        expect(clearHelp).toHaveBeenCalledTimes(remote ? 1 : 0);
         return move(id, options);
       });
       await handleSessionStop(sm, { session_id: "aa11" }, { tabManagement: { tabs, windows } });
       expect(clear).toHaveBeenCalledTimes(1);
+      expect(clearHelp).toHaveBeenCalledTimes(1);
       expect(sm.has("aa11")).toBe(false);
     } finally {
       clear.mockRestore();
+      clearHelp.mockRestore();
     }
   });
   it("leaves the session untouched when cancellation arrived before teardown", async () => {
@@ -863,6 +870,50 @@ describe("handleSessionStop window release (issue #57)", () => {
     // The leaked agent tab must NOT keep the window open.
     expect(res.window_released).toBeFalsy();
     expect(aw.remove).toHaveBeenCalledWith(agentWindowId);
+    expect(sm.has("aa11")).toBe(false);
+  });
+
+  it("still returns a borrowed tab that was replaced via onReplaced while an earlier tab was returning", async () => {
+    const aw = fakeAgentWindow([agentWindowId]);
+    aw.ensureActiveTab = vi.fn(async () => 10);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(301, { tabId: 301, originalWindowId: 1, originalIndex: 0 });
+    ctx.borrowedTabs.set(302, { tabId: 302, originalWindowId: 1, originalIndex: 1 });
+
+    const state: FakeState = {
+      tabs: new Map([
+        [10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab],
+        [301, { id: 301, windowId: agentWindowId } as chrome.tabs.Tab],
+        [302, { id: 302, windowId: agentWindowId } as chrome.tabs.Tab],
+      ]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+    const origMove = tabs.move;
+    tabs.move = vi.fn(async (tabId: number, moveProps: chrome.tabs.MoveProperties) => {
+      const moved = await origMove(tabId, moveProps);
+      if (tabId === 301) {
+        // While 301 is being returned, Chrome replaces borrowed tab 302 -> 399.
+        state.tabs.delete(302);
+        state.tabs.set(399, { id: 399, windowId: agentWindowId } as chrome.tabs.Tab);
+        sm.replaceTab(399, 302);
+      }
+      return moved;
+    }) as typeof tabs.move;
+    const query = makeQuery(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.returned_tab_ids).toEqual([301, 399]);
+    expect(res.return_failures).toBeUndefined();
+    expect(state.tabs.get(301)?.windowId).toBe(1);
+    expect(state.tabs.get(399)?.windowId).toBe(1);
     expect(sm.has("aa11")).toBe(false);
   });
 });

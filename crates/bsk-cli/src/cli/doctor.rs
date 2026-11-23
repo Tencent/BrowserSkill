@@ -173,7 +173,7 @@ enum DaemonState {
     NoListener(DaemonInfo),
     ProbeError(anyhow::Error),
     Verified {
-        status: StatusResult,
+        status: Box<StatusResult>,
         local_identity_error: Option<String>,
         /// Owned by a terminal or supervisor, which must restart it.
         host_managed: bool,
@@ -208,6 +208,7 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
         check_version_compatible(state.status()),
         check_auto_update(state.status(), state.host_managed()),
         check_extension_connected(state.status()),
+        check_local_auth(state.status()),
         check_browsers_protocol_compatible(state.status()),
     ]
 }
@@ -407,7 +408,7 @@ fn current_state(browser_wait: Duration) -> DaemonState {
                 .err()
                 .map(|err| format!("{err:#}")),
             host_managed: daemon.info.host_managed,
-            status: daemon.status,
+            status: Box::new(daemon.status),
         },
         Ok(Probe::Absent(Some(info))) => DaemonState::NoListener(info),
         Ok(Probe::Absent(None)) => DaemonState::Missing,
@@ -484,6 +485,9 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
     }
     if !details.is_empty() {
         details.insert(0, format!("bundled bsk v{}", env!("CARGO_PKG_VERSION")));
+    }
+    if !report.updated.is_empty() {
+        details.push("reload the updated BrowserSkill skill in the agent, or start a new agent conversation; an existing conversation may retain old instructions".into());
     }
     let detail = details.join("; ");
 
@@ -569,24 +573,35 @@ fn check_version_compatible(status: Option<&StatusResult>) -> CheckResult {
     let Some(status) = status else {
         return CheckResult::fail(name, "daemon status unavailable", "start the daemon first");
     };
-    let ok = status.protocol_version == PROTOCOL_VERSION;
-    if ok {
-        CheckResult::ok(
+    match bsk_protocol::evaluate_handshake_compat(
+        &status.protocol_version,
+        None,
+        PROTOCOL_VERSION,
+        bsk_protocol::catalog::MIN_COMPATIBLE_PROTOCOL,
+    ) {
+        bsk_protocol::HandshakeCompat::Ok => CheckResult::ok(
             name,
             format!(
                 "daemon protocol {} (app {})",
                 status.protocol_version, status.daemon_version
             ),
-        )
-    } else {
-        CheckResult::fail(
+        ),
+        bsk_protocol::HandshakeCompat::Skew => CheckResult::warn(
+            name,
+            format!(
+                "daemon protocol {} and CLI protocol {} differ within compatible minor range",
+                status.protocol_version, PROTOCOL_VERSION
+            ),
+            "upgrade and restart the older component if any newer option is unavailable",
+        ),
+        bsk_protocol::HandshakeCompat::Reject { reason } => CheckResult::fail(
             name,
             format!(
                 "daemon protocol {} (expected {}), app {}",
                 status.protocol_version, PROTOCOL_VERSION, status.daemon_version
             ),
-            "upgrade or restart bsk so CLI and daemon speak the same protocol version",
-        )
+            format!("{reason}; update bsk and restart its daemon (`bsk daemon stop`)"),
+        ),
     }
 }
 
@@ -648,6 +663,31 @@ fn display_protocol(value: &str) -> &str {
     if value.is_empty() { "unknown" } else { value }
 }
 
+fn check_local_auth(status: Option<&StatusResult>) -> CheckResult {
+    let mode = status
+        .and_then(|s| s.local_auth.as_ref())
+        .map(|s| s.mode.clone())
+        .or_else(|| {
+            paths::bsk_home()
+                .ok()
+                .and_then(|home| crate::daemon::local_auth::read_mode(&home).ok())
+                .and_then(|mode| serde_json::to_value(mode).ok())
+                .and_then(|value| value.as_str().map(str::to_owned))
+        });
+    if mode.as_deref() == Some("trust_local") {
+        CheckResult::warn(
+            "local connection verification",
+            "unverified local connections are allowed",
+            "run `bsk daemon trust-local off` and turn off skipping in the extension to restore verification",
+        )
+    } else {
+        CheckResult::ok(
+            "local connection verification",
+            "local pairing verification is available",
+        )
+    }
+}
+
 fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
     let name = "extension connected";
     let Some(status) = status else {
@@ -657,6 +697,18 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
             "start the daemon and load the extension first",
         );
     };
+    if status.browsers.is_empty()
+        && status
+            .local_auth
+            .as_ref()
+            .is_some_and(|auth| auth.last_unpaired_attempt.is_some())
+    {
+        return CheckResult::fail(
+            name,
+            "extension is waiting for local pairing",
+            "run `bsk daemon pair`, then paste the link into the extension's connection settings",
+        );
+    }
     let browsers = status.browsers.len();
     let unresponsive = status
         .browsers
@@ -784,8 +836,9 @@ mod m2_tests {
 
     fn fake_status(browsers: Vec<BrowserStatusEntry>, skew: Vec<VersionSkewEntry>) -> StatusResult {
         StatusResult {
+            local_auth: None,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
-            protocol_version: "1.0".into(),
+            protocol_version: "2.0".into(),
             pid: 1,
             uptime_secs: 0,
             ws_port: 0,
@@ -793,6 +846,7 @@ mod m2_tests {
             browsers,
             sessions: Vec::new(),
             version_skew_browsers: skew,
+            ipc_envelope: true,
         }
     }
 
@@ -955,7 +1009,7 @@ mod m2_tests {
     #[test]
     fn unverified_local_identity_warns_without_failing_usable_ipc() {
         let state = DaemonState::Verified {
-            status: fake_status(Vec::new(), Vec::new()),
+            status: Box::new(fake_status(Vec::new(), Vec::new())),
             local_identity_error: Some("peer identity is unavailable".into()),
             host_managed: false,
         };
@@ -1212,7 +1266,7 @@ mod m2_tests {
             session_count: 1,
             connected_at_ms: 1,
             version_skew: false,
-            extension_protocol_version: "1.0".into(),
+            extension_protocol_version: "2.0".into(),
             unresponsive: true,
         };
         let status = fake_status(vec![entry.clone()], Vec::new());
@@ -1250,7 +1304,7 @@ mod m2_tests {
                 session_count: 0,
                 connected_at_ms: 1,
                 version_skew: false,
-                extension_protocol_version: "1.0".into(),
+                extension_protocol_version: "2.0".into(),
                 unresponsive: false,
             }],
             Vec::new(),
@@ -1272,7 +1326,7 @@ mod m2_tests {
                 session_count: 0,
                 connected_at_ms: 1,
                 version_skew: true,
-                extension_protocol_version: "1.1".into(),
+                extension_protocol_version: "2.1".into(),
                 unresponsive: false,
             }],
             vec![VersionSkewEntry {
@@ -1281,8 +1335,8 @@ mod m2_tests {
                 label: "Personal".into(),
                 server_version: env!("CARGO_PKG_VERSION").into(),
                 client_version: "0.0.9".into(),
-                server_protocol_version: "1.0".into(),
-                client_protocol_version: "1.1".into(),
+                server_protocol_version: "2.0".into(),
+                client_protocol_version: "2.1".into(),
             }],
         );
         let check = check_browsers_protocol_compatible(Some(&status));

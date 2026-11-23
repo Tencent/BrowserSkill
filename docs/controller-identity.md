@@ -23,8 +23,8 @@ hex colors in shells where `#` starts a comment. Labels are rendered as text.
 They are caller-supplied display information, not authenticated identities or
 permissions. Avoid putting secrets or private filesystem paths in these labels.
 
-The DSH `bsk_session` tool's `start` action accepts `agentName`, `project`, and
-`controllerColor` with the same meaning. Other clients can send an optional
+The MCP `bsk_session` tool's `start` action accepts `agent_name`, `project`, and
+`controller_color` with the same meaning. Other clients can send an optional
 `controller: { name, project?, color? }` in `session.start` / `tool.session_start`.
 The daemon includes it in each session entry returned by `session.list`,
 `system.status`, and recoverable request status. Retrying a tracked start with
@@ -45,8 +45,8 @@ The feature does not rewrite page/window titles or introduce control preemption.
 ## Run the isolated browser regression
 
 Build the CLI (`cargo build -p bsk --locked`) and extension with
-`BSK_DAEMON_WS_URL=ws://127.0.0.1:52836 pnpm ext:build`. Set `BSK_IDENTITY_CLI` to
-the built CLI executable and `BSK_IDENTITY_CHROME` to a Chromium executable that
+`BSK_DAEMON_WS_URL=ws://127.0.0.1:52836 pnpm ext:build`. Set `BSK_TEST_CLI`
+(defaults to `target/debug/bsk`) and `BSK_TEST_CHROME` to a Chromium executable that
 supports unpacked extension loading through CDP, then run:
 
 ```sh

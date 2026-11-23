@@ -35,18 +35,27 @@ describe("RefStore", () => {
     expect(s.size()).toBe(2);
   });
 
-  it("preserves the child CDP session as part of ref identity", () => {
+  it("preserves FrameNodeHandle as part of ref identity", () => {
     const s = new RefStore();
     s.set("e1", 42, {
       tabId: 7,
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
+      documentElementBackendNodeId: 11,
     });
     expect(s.resolveEntry("e1")).toMatchObject({
       backendNodeId: 42,
       tabId: 7,
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
+      documentElementBackendNodeId: 11,
+      handle: {
+        tabId: 7,
+        frameId: "child-frame",
+        loaderId: "child-loader",
+        backendNodeId: 42,
+        documentElementBackendNodeId: 11,
+      },
     });
   });
 });
@@ -98,18 +107,43 @@ describe("stable DOM references", () => {
     expect(store.resolve(second)).toBe(43);
   });
 
-  it("separates tabs, frames and CDP sessions even when backend node IDs overlap", () => {
+  it("separates tabs, frames and frame loaders even when backend node IDs overlap, while keeping OOPIF refs naturally stable across CDP session rotation", () => {
     const store = new RefStore();
     store.enableStableRefs();
-    const inputs = [
-      button,
-      { ...button, tabId: 8 },
-      { ...button, frameId: "child" },
-      { ...button, frameId: "child", cdpSessionId: "oopif" },
+    const inputs: DomRefInput[] = [
+      { ...button, loaderId: "root-loader" },
+      { ...button, tabId: 8, loaderId: "root-loader" },
+      { ...button, frameId: "same-origin-child", loaderId: "same-loader" },
+      { ...button, frameId: "child", loaderId: "oopif-loader-1" },
     ];
     const refs = publish(store, inputs);
     expect(new Set(refs).size).toBe(inputs.length);
     expect(publish(store, [...inputs].reverse())).toEqual([...refs].reverse());
+
+    // Live cross-origin OOPIF navigation produces a new loaderId on the same frameId (`child`)
+    // and MUST allocate a distinct `@eN` even if backendNodeId 42 is reused in the new process!
+    const [liveNavRef] = publish(store, [
+      { ...button, frameId: "child", loaderId: "oopif-loader-2" },
+    ]);
+    expect(liveNavRef).not.toBe(refs[3]);
+
+    // After soft-detach + reattach with an unchanged OOPIF, `frameId + loaderId` is unchanged,
+    // so `@eN` stays 100% stable without any session-remapping patch!
+    expect(publish(store, inputs)).toEqual(refs);
+    expect(store.resolveEntry(refs[3])).toMatchObject({
+      kind: "dom",
+      frameId: "child",
+      loaderId: "oopif-loader-1",
+    });
+
+    // Once `invalidateChildFrames` invalidates `child`, both DOM and visual refs in `child`
+    // are dropped and the next observation allocates a brand-new `@eN`.
+    store.invalidateChildFrames(7, new Set(["child"]));
+    expect(store.resolve(refs[3])).toBeNull();
+    const [freshOopif] = publish(store, [
+      { ...button, frameId: "child", loaderId: "oopif-loader-3" },
+    ]);
+    expect(freshOopif).not.toBe(refs[3]);
   });
 
   it("never reuses a name after document replacement, including reserved unpublished rows", () => {
@@ -141,18 +175,25 @@ describe("stable DOM references", () => {
   it("expires visual refs at every publication without invalidating stable DOM refs", () => {
     const store = new RefStore();
     store.enableStableRefs();
-    const visual = {
+    const visual: VisualRefInput = {
       kind: "visual-region",
       candidate: {
         backendNodeId: 90,
+        parentBackendNodeId: 1,
         document: {
-          target: { tabId: 7 },
+          tabId: 7,
           attachmentId: "attached",
           frameId: "top",
+          loaderId: "root-loader",
           documentElementBackendNodeId: 1,
         },
+        region: {
+          status: "available",
+          borderBox: { x: 0, y: 0, width: 10, height: 10 },
+          crop: { x: 0, y: 0, width: 10, height: 10 },
+        },
       },
-    } as VisualRefInput;
+    };
     const [dom] = publish(store, [button]);
     const first = store.allocateRef(visual);
     store.replace([[first, visual]]);
@@ -163,5 +204,46 @@ describe("stable DOM references", () => {
     expect(second).not.toBe(first);
     expect(store.resolveEntry(first)).toBeNull();
     expect(store.resolve(dom)).toBe(42);
+  });
+
+  it("preserves name and rowAnchor on same-node set() updates and keeps previewRefs read-only", () => {
+    const store = new RefStore();
+    store.enableStableRefs();
+    const rowButton: DomRefInput = {
+      backendNodeId: 42,
+      tabId: 7,
+      frameId: "top",
+      loaderId: "l1",
+      name: "Delete",
+      rowAnchor: "INV-001",
+    };
+    const [ref] = publish(store, [rowButton]);
+    store.set(ref, 42, {
+      tabId: 7,
+      frameId: "top",
+      loaderId: "l1",
+      documentElementBackendNodeId: 1,
+    });
+    expect(store.resolveEntry(ref)).toMatchObject({
+      backendNodeId: 42,
+      name: "Delete",
+      rowAnchor: "INV-001",
+      documentElementBackendNodeId: 1,
+    });
+    // Updating the same ref with a different DOM node must NOT inherit old rowAnchor/name.
+    store.set(ref, 99, { tabId: 7, frameId: "top", loaderId: "l1" });
+    expect(store.resolveEntry(ref)).toMatchObject({ backendNodeId: 99 });
+    expect(store.resolveEntry(ref)).not.toHaveProperty("rowAnchor");
+    expect(store.resolveEntry(ref)).not.toHaveProperty("name");
+
+    const previewed = store.previewRefs([
+      rowButton,
+      { backendNodeId: 50, tabId: 7, frameId: "top", loaderId: "l1" },
+    ]);
+    expect(previewed).toEqual([ref, "e2"]);
+    // previewRefs must not reserve e2 in nextRef or identities.
+    expect(store.allocateRef({ backendNodeId: 51, tabId: 7, frameId: "top", loaderId: "l1" })).toBe(
+      "e2",
+    );
   });
 });

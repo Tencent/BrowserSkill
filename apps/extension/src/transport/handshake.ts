@@ -1,3 +1,9 @@
+import {
+  EXTENSION_CLIENT_ID,
+  MIN_COMPATIBLE_PROTOCOL,
+  PROTOCOL_VERSION,
+} from "./generated/methods";
+import { decodeHandshakeResult } from "./protocol";
 import type { Transport } from "./transport";
 import type {
   HandshakeParams,
@@ -7,8 +13,9 @@ import type {
   ResponseFrame,
   RpcError,
 } from "./types";
+import { isResponseFrame } from "./types";
 
-export const PROTOCOL_VERSION = "1.8";
+export { MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION } from "./generated/methods";
 /**
  * Extension semver, injected at build time from `package.json` via
  * Vite's `define` (see `wxt.config.ts` and `vitest.config.ts`).
@@ -16,18 +23,11 @@ export const PROTOCOL_VERSION = "1.8";
 export const EXTENSION_VERSION: string =
   typeof __BSK_EXT_VERSION__ === "string" ? __BSK_EXT_VERSION__ : "0.0.0-unset";
 /**
- * Lowest **protocol** version this extension accepts (e.g. `"1.0"`).
- * This is the daemon floor; the daemon can independently accept older extensions.
- */
-// Moving a controlled tab ends the session. Older daemons cannot consume the
-// terminal event and would leave the session active, so require this protocol.
-export const MIN_COMPATIBLE_PROTOCOL = "1.6";
-/**
  * **Deprecated** — legacy app-semver floor for wire compat with old
  * daemons. New code sends `"0.0.0"`; compat decisions ignore this.
  */
 export const MIN_COMPATIBLE_PEER = "0.0.0";
-export const CLIENT_ID = "browser-skill-extension";
+export const CLIENT_ID = EXTENSION_CLIENT_ID;
 
 export interface BrowserMeta {
   name: string;
@@ -119,8 +119,11 @@ export function performHandshake(
         options.onRejected?.(error);
         return;
       }
-      const result = r.result as HandshakeResult;
-      resolve({ params, result });
+      try {
+        resolve({ params, result: decodeHandshakeResult(r.result) });
+      } catch (error) {
+        reject(error);
+      }
     });
 
     function cleanup() {
@@ -145,11 +148,7 @@ export function performHandshake(
 }
 
 function isResponseFor(msg: ProtocolFrame, id: string): boolean {
-  return (
-    typeof (msg as ResponseFrame).id === "string" &&
-    (msg as ResponseFrame).id === id &&
-    ("result" in (msg as object) || "error" in (msg as object))
-  );
+  return isResponseFrame(msg) && msg.id === id;
 }
 
 /**

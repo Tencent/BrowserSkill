@@ -35,6 +35,8 @@ export interface HelpRequestMessage {
   selectors: string[];
   /** Top-viewport rectangles for targets that cannot be represented by a root selector. */
   rects?: HelpHighlightRect[];
+  /** True when the request tracks ref-backed rects that may scroll back into view even if `rects` is currently empty. */
+  hasDynamicRects?: boolean;
   timeoutMs: number;
 }
 
@@ -93,6 +95,7 @@ export function isHelpRequestMessage(msg: unknown): msg is HelpRequestMessage {
               Number.isFinite((rect as Record<string, unknown>)[key]),
             ),
         ))) &&
+    (m.hasDynamicRects === undefined || typeof m.hasDynamicRects === "boolean") &&
     typeof m.timeoutMs === "number"
   );
 }

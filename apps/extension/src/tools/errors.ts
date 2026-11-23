@@ -2,6 +2,7 @@
 // rendering. Extension handlers attach reasons here; human-facing copy
 // lives in bsk-cli `render_error.rs`.
 
+import { isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type {
   ErrorCode,
   RpcError,
@@ -35,6 +36,9 @@ export function classifyCdpError(error: RpcError): RpcError {
 }
 
 export function cdpError(error: unknown): RpcError {
+  if (isStaleFrameHandleError(error)) {
+    return rpcError("not_found", "ref_not_found", error.message);
+  }
   return classifyCdpError({
     code: "cdp_failed",
     message: error instanceof Error ? error.message : String(error),
@@ -68,4 +72,19 @@ export function transferError(
     phase: options.phase,
     ...(options.cleanupState ? { cleanup_state: options.cleanupState } : {}),
   });
+}
+
+/** Recognize only CDP's explicit missing-node errors. A stale selector lookup
+ * must still be retried. Chrome's debugger API may encode the error as JSON. */
+export function isMissingNode(error: unknown): boolean {
+  let message = error instanceof Error ? error.message : String(error);
+  try {
+    const parsed = JSON.parse(message);
+    if (typeof parsed?.message === "string") message = parsed.message;
+  } catch {
+    // Plain debugger error message.
+  }
+  return (
+    message === "No node with given id found" || message === "Could not find node with given id"
+  );
 }

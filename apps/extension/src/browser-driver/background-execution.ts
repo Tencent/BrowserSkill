@@ -20,6 +20,10 @@ export class BackgroundExecution {
     return this.owners.get(tabId)?.has(sessionId) ?? false;
   }
 
+  hasAny(tabId: number): boolean {
+    return (this.owners.get(tabId)?.size ?? 0) > 0;
+  }
+
   release(sessionId: string, tabId: number): void {
     const owners = this.owners.get(tabId);
     owners?.delete(sessionId);
@@ -29,6 +33,18 @@ export class BackgroundExecution {
   forget(tabId: number): void {
     this.owners.delete(tabId);
     this.applied.delete(tabId);
+  }
+
+  replaceTab(addedTabId: number, removedTabId: number): void {
+    if (addedTabId === removedTabId) return;
+    const removedOwners = this.owners.get(removedTabId);
+    if (removedOwners?.size) {
+      const targetOwners = this.owners.get(addedTabId) ?? new Set<string>();
+      for (const sessionId of removedOwners) targetOwners.add(sessionId);
+      this.owners.set(addedTabId, targetOwners);
+    }
+    this.owners.delete(removedTabId);
+    this.applied.delete(removedTabId);
   }
 
   invalidate(tabId: number): void {

@@ -1,3 +1,4 @@
+import { methods } from "@/transport/generated/methods";
 import { type JsonSource, parseJsonSource } from "./json-source";
 import type {
   DebugConsole,
@@ -9,6 +10,13 @@ import type {
   DebugRequest,
   DebugValue,
 } from "./types";
+
+const FORM_INPUT_METHODS = new Set<string>(
+  methods.filter((entry) => entry.debug_evidence === "form_input").map((entry) => entry.method),
+);
+const NAVIGATION_METHODS = new Set<string>(
+  methods.filter((entry) => entry.debug_evidence === "navigation").map((entry) => entry.method),
+);
 
 export function requestKind(request: DebugRequest): "business" | "resource" | "extension" {
   if (
@@ -201,11 +209,9 @@ export function operationEvidence(
       record.operations.findIndex((item) => item.id === operation.id),
     ),
   );
-  const boundary = prior.findLastIndex(
-    (item) => !["tool.fill", "tool.select"].includes(item.method),
-  );
+  const boundary = prior.findLastIndex((item) => !FORM_INPUT_METHODS.has(item.method));
   const inputs = prior.slice(boundary + 1);
-  if (["tool.fill", "tool.select"].includes(operation.method)) inputs.push(operation);
+  if (FORM_INPUT_METHODS.has(operation.method)) inputs.push(operation);
   const inputPage =
     [operation.before, ...inputs.flatMap((item) => [item.before, item.after])]
       .filter((page): page is DebugPage => !!page)
@@ -223,7 +229,7 @@ export function operationEvidence(
       (item) =>
         item.started_at > operation.started_at &&
         item.started_at < nextLoad.at &&
-        !["tool.navigate", "tool.reload"].includes(item.method),
+        !NAVIGATION_METHODS.has(item.method),
     )
   )
     gaps.add("intervening_operations");
@@ -240,7 +246,7 @@ export function operationEvidence(
         (item) =>
           item.started_at > operation.started_at &&
           item.started_at <= nextLoad.at &&
-          ["tool.navigate", "tool.reload"].includes(item.method),
+          NAVIGATION_METHODS.has(item.method),
       )
     : undefined;
   const loadedPage =

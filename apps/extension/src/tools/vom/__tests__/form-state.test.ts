@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { type CdpRunner, cdpRunnerForTarget } from "../../shared";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
+import { type CdpRunner, cdpRunnerForFrame, createStubCdpRunner } from "../../shared";
+import type { CapturedNode } from "../capture-types";
 import { enrichFormControlStates } from "../form-capture";
 import { decodeDocument } from "../snapshot";
 
@@ -92,7 +94,7 @@ async function fakeCdp(
     return {};
   });
   const nodes = await decodeControls(snap);
-  return { send, cdp: { send: send as CdpRunner["send"] }, nodes };
+  return { send, cdp: createStubCdpRunner({ send: send as CdpRunner["send"] }), nodes };
 }
 
 async function decodeControls(snap: ReturnType<typeof snapshot>) {
@@ -104,7 +106,7 @@ async function decodeControls(snap: ReturnType<typeof snapshot>) {
 }
 
 describe("form state identity", () => {
-  it("keeps native checked state separate from values before and after form enrichment", async () => {
+  it("keeps native checked state separate from explicit values and omits synthetic 'on' on unchecked checkboxes", async () => {
     const { cdp, nodes } = await fakeCdp(
       [
         [
@@ -116,19 +118,28 @@ describe("form state identity", () => {
       ],
       () =>
         reply([
-          [10, state("on")],
-          [11, state("subscribe")],
-          [12, state("choice")],
+          [
+            10,
+            {
+              defaultValue: "",
+              checked: false,
+              placeholder: "",
+              state: "empty",
+              sensitive: false,
+            },
+          ],
+          [11, { ...state("subscribe"), checked: true }],
+          [12, { ...state("choice"), checked: true }],
           [13, state("on")],
         ]),
     );
     const read = () =>
-      nodes[0].filter((n) => n.tag === "input").map((n) => [n.formValue, n.checked]);
+      nodes[0].filter((n) => n.tag === "input").map((n) => [n.formValue, n.checked, n.formState]);
     const expected = [
-      ["on", false],
-      ["subscribe", true],
-      ["choice", true],
-      ["on", undefined],
+      [undefined, false, "empty"],
+      ["subscribe", true, "filled"],
+      ["choice", true, "filled"],
+      ["on", undefined, "filled"],
     ];
     expect(read()).toEqual(expected);
     await enrichFormControlStates(cdp, 7, nodes);
@@ -188,22 +199,27 @@ describe("form state identity", () => {
   });
 
   it("keeps identical backend ids in different OOPIF targets separate", async () => {
-    const sendToTarget = vi.fn(async (target, method) => {
-      if (method === "Runtime.evaluate") return reply([[11, state(target.sessionId)]]);
+    const sendToFrame = vi.fn(async (handle, method) => {
+      if (method === "Runtime.evaluate") return reply([[11, state(handle.frameId)]]);
       return {};
     });
     const send = vi.fn(async () => {
       throw new Error("unexpected top-level target");
     });
-    const cdp = { send, sendToTarget } as unknown as CdpRunner;
-    for (const sessionId of ["left-frame", "right-frame"]) {
+    const cdp = createStubCdpRunner({
+      send: send as unknown as CdpRunner["send"],
+      sendToFrame: sendToFrame as unknown as CdpRunner["sendToFrame"],
+    });
+    for (const frameId of ["left-frame", "right-frame"]) {
+      const handle = toFrameDocumentHandle(7, { frameId });
       const nodes = await decodeControls(snapshot([[{ id: 11, value: "old" }]]));
-      await enrichFormControlStates(cdpRunnerForTarget(cdp, { tabId: 7, sessionId }), 7, nodes);
-      expect(nodes[0].find((n) => n.backendNodeId === 11)?.formValue).toBe(sessionId);
-      expect(sendToTarget).toHaveBeenCalledWith(
-        { tabId: 7, sessionId },
+      await enrichFormControlStates(cdpRunnerForFrame(cdp, handle), 7, nodes);
+      expect(nodes[0].find((n) => n.backendNodeId === 11)?.formValue).toBe(frameId);
+      expect(sendToFrame).toHaveBeenCalledWith(
+        handle,
         "Runtime.releaseObjectGroup",
         expect.anything(),
+        { allowReattach: false },
       );
     }
     expect(send).not.toHaveBeenCalled();
@@ -245,16 +261,47 @@ describe("form state identity", () => {
     expect(send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", expect.anything());
   });
 
+  it("releases OOPIF remote objects through cdpRunnerForFrame even after guard.signal aborts", async () => {
+    const controller = new AbortController();
+    const handle = toFrameDocumentHandle(7, { frameId: "oopif-frame", loaderId: "loader-1" });
+    const nodes = await decodeControls(snapshot([[{ id: 11, value: "old" }]]));
+    const sendToFrame = vi.fn(async (_h, method, _params, guard) => {
+      guard?.signal?.throwIfAborted();
+      if (method === "Runtime.evaluate") {
+        controller.abort();
+        return reply([[11, state("new")]]);
+      }
+      return {};
+    });
+    const cdp = createStubCdpRunner({
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      sendToFrame: sendToFrame as CdpRunner["sendToFrame"],
+    });
+    const scoped = cdpRunnerForFrame(cdp, handle, {
+      ignoreFrameNavigation: true,
+      signal: controller.signal,
+    });
+    await expect(
+      enrichFormControlStates(scoped, 7, nodes, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(sendToFrame).toHaveBeenLastCalledWith(
+      handle,
+      "Runtime.releaseObjectGroup",
+      expect.objectContaining({ objectGroup: expect.any(String) }),
+      { ignoreFrameNavigation: true, allowReattach: false },
+    );
+  });
+
   it("does not report success when cancelled during object cleanup", async () => {
     const controller = new AbortController();
     const nodes = await decodeControls(snapshot([[{ id: 11, value: "old" }]]));
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async (_tabId, method) => {
         if (method === "Runtime.evaluate") return reply([[11, state("new")]]);
         if (method === "Runtime.releaseObjectGroup") controller.abort();
         return {};
       }) as CdpRunner["send"],
-    };
+    });
     await expect(enrichFormControlStates(cdp, 7, nodes, controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     });
@@ -386,7 +433,7 @@ it.each([
     if (method === "Runtime.callFunctionOn") return { result: { value: inForm } };
     return {};
   });
-  await enrichFormControlStates({ send: send as CdpRunner["send"] }, 7, nodes);
+  await enrichFormControlStates(createStubCdpRunner({ send: send as CdpRunner["send"] }), 7, nodes);
   expect(send).toHaveBeenCalledWith(
     7,
     "DOM.resolveNode",
@@ -406,7 +453,7 @@ it("bounds missing range-owner reads and keeps the uninspected remainder unknown
     if (method === "Runtime.callFunctionOn") return { result: { value: false } };
     return {};
   });
-  await enrichFormControlStates({ send: send as CdpRunner["send"] }, 7, nodes);
+  await enrichFormControlStates(createStubCdpRunner({ send: send as CdpRunner["send"] }), 7, nodes);
   expect(send.mock.calls.filter(([, method]) => method === "DOM.resolveNode")).toHaveLength(64);
   expect(nodes[0].find((n) => n.backendNodeId === 64)?.inForm).toBe(false);
   expect(nodes[0].find((n) => n.backendNodeId === 65)?.inForm).toBeUndefined();
@@ -433,12 +480,14 @@ it("drains in-flight range reads before releasing objects after a terminal error
     return {};
   });
   let settled = false;
-  const result = enrichFormControlStates({ send: send as CdpRunner["send"] }, 7, nodes).catch(
-    (error) => {
-      settled = true;
-      return error;
-    },
-  );
+  const result = enrichFormControlStates(
+    createStubCdpRunner({ send: send as CdpRunner["send"] }),
+    7,
+    nodes,
+  ).catch((error) => {
+    settled = true;
+    return error;
+  });
   await vi.waitFor(() => expect(resolveSecond).toBeTypeOf("function"));
   const error = Object.assign(new Error("renderer timed out"), { name: "CdpReadTimeoutError" });
   rejectFirst(error);
@@ -452,26 +501,185 @@ it("drains in-flight range reads before releasing objects after a terminal error
 });
 
 it("keeps fallback owner reads with identical backend ids scoped to their OOPIF target", async () => {
-  const sendToTarget = vi.fn(async (target, method) => {
+  const sendToFrame = vi.fn(async (handle, method) => {
     if (method === "Runtime.evaluate") return reply([]);
     if (method === "DOM.resolveNode") return { object: { objectId: "range" } };
     if (method === "Runtime.callFunctionOn")
-      return { result: { value: target.sessionId === "owned-frame" } };
+      return { result: { value: handle.frameId === "owned-frame" } };
     return {};
   });
   const send = vi.fn(async () => {
     throw new Error("unexpected root target");
   });
-  const cdp = { send, sendToTarget } as unknown as CdpRunner;
-  for (const sessionId of ["owned-frame", "free-frame"]) {
+  const cdp = createStubCdpRunner({
+    send: send as unknown as CdpRunner["send"],
+    sendToFrame: sendToFrame as unknown as CdpRunner["sendToFrame"],
+  });
+  for (const frameId of ["owned-frame", "free-frame"]) {
+    const handle = toFrameDocumentHandle(7, { frameId });
     const nodes = await decodeControls(snapshot([[{ id: 11, type: "range", value: "0" }]]));
-    await enrichFormControlStates(cdpRunnerForTarget(cdp, { tabId: 7, sessionId }), 7, nodes);
-    expect(nodes[0].find((n) => n.backendNodeId === 11)?.inForm).toBe(sessionId === "owned-frame");
-    expect(sendToTarget).toHaveBeenCalledWith(
-      { tabId: 7, sessionId },
+    await enrichFormControlStates(cdpRunnerForFrame(cdp, handle), 7, nodes);
+    expect(nodes[0].find((n) => n.backendNodeId === 11)?.inForm).toBe(frameId === "owned-frame");
+    expect(sendToFrame).toHaveBeenCalledWith(
+      handle,
       "Runtime.callFunctionOn",
       expect.objectContaining({ objectId: "range" }),
     );
   }
   expect(send).not.toHaveBeenCalled();
+});
+
+it("inspects Open Shadow DOM form controls, marks untouched <select> as default, and keeps unchecked checkboxes empty without synthetic 'on'", async () => {
+  const doc = document.implementation.createHTMLDocument("shadow-select-checkbox");
+  doc.body.innerHTML = `
+    <form id="f">
+      <select id="101"><option value="us">United States</option><option value="uk">United Kingdom</option></select>
+      <select id="102"><option value="a">A</option><option value="b" selected>B</option></select>
+      <select id="103"><option value="">Choose...</option><option value="x">X</option></select>
+      <input id="104" type="checkbox" />
+      <input id="105" type="checkbox" checked />
+      <input id="106" type="checkbox" value="newsletter" />
+      <div id="host"></div>
+    </form>
+  `;
+  const selectChanged = doc.getElementById("102") as HTMLSelectElement;
+  selectChanged.value = "a";
+  const host = doc.getElementById("host") as HTMLDivElement;
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML = `<input id="107" type="text" value="" /><div id="nested"></div>`;
+  const shadowInput = shadow.getElementById("107") as HTMLInputElement;
+  shadowInput.value = "shadow-typed";
+  const nestedHost = shadow.getElementById("nested") as HTMLDivElement;
+  const nestedShadow = nestedHost.attachShadow({ mode: "open" });
+  nestedShadow.innerHTML = `<select id="108"><option value="en">English</option><option value="zh">Chinese</option></select>`;
+
+  const capturedNodes: CapturedNode[] = [
+    {
+      backendNodeId: 101,
+      parentBackendNodeId: 1,
+      tag: "select",
+      attrs: {},
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+    {
+      backendNodeId: 102,
+      parentBackendNodeId: 1,
+      tag: "select",
+      attrs: {},
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+    {
+      backendNodeId: 103,
+      parentBackendNodeId: 1,
+      tag: "select",
+      attrs: {},
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+    {
+      backendNodeId: 104,
+      parentBackendNodeId: 1,
+      tag: "input",
+      attrs: { type: "checkbox" },
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+      formValue: "on",
+      checked: false,
+    },
+    {
+      backendNodeId: 105,
+      parentBackendNodeId: 1,
+      tag: "input",
+      attrs: { type: "checkbox", checked: "" },
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+      checked: true,
+    },
+    {
+      backendNodeId: 106,
+      parentBackendNodeId: 1,
+      tag: "input",
+      attrs: { type: "checkbox", value: "newsletter" },
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+      checked: false,
+    },
+    {
+      backendNodeId: 107,
+      parentBackendNodeId: 1,
+      tag: "input",
+      attrs: { type: "text" },
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+    {
+      backendNodeId: 108,
+      parentBackendNodeId: 1,
+      tag: "select",
+      attrs: {},
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    },
+  ];
+
+  const cdp = createStubCdpRunner({
+    send: vi.fn(async (_tabId, method, params) => {
+      if (method === "Runtime.evaluate") {
+        const entries = new Function(
+          "document",
+          `return ${(params as { expression: string }).expression}`,
+        )(doc) as Array<[HTMLElement, string]>;
+        return reply(entries.map(([el, json]) => [Number(el.id), JSON.parse(json)]));
+      }
+      return {};
+    }) as CdpRunner["send"],
+  });
+
+  await enrichFormControlStates(cdp, 7, [capturedNodes]);
+
+  const byId = new Map(capturedNodes.map((n) => [n.backendNodeId, n]));
+  expect(byId.get(101)).toMatchObject({
+    formState: "default",
+    formValue: "us",
+    formDefaultValue: "us",
+  });
+  expect(byId.get(102)).toMatchObject({
+    formState: "filled",
+    formValue: "a",
+    formDefaultValue: "b",
+  });
+  expect(byId.get(103)).toMatchObject({ formState: "empty", formValue: "" });
+  expect(byId.get(104)).toMatchObject({ formState: "empty", checked: false });
+  expect(byId.get(104)?.formValue).toBeUndefined();
+  expect(byId.get(105)).toMatchObject({ formState: "default", checked: true });
+  expect(byId.get(105)?.formValue).toBeUndefined();
+  expect(byId.get(106)).toMatchObject({
+    formState: "empty",
+    checked: false,
+    formValue: "newsletter",
+  });
+  expect(byId.get(107)).toMatchObject({ formState: "filled", formValue: "shadow-typed" });
+  expect(byId.get(108)).toMatchObject({
+    formState: "default",
+    formValue: "en",
+    formDefaultValue: "en",
+  });
 });

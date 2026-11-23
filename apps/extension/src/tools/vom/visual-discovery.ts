@@ -1,4 +1,3 @@
-import { type CdpTarget } from "@/browser-driver/frame-graph";
 import type { ViewportRect } from "../geometry";
 import { createCaptureCheckpoint } from "./capture-abort";
 import type {
@@ -40,12 +39,14 @@ export interface VisualCandidate {
 export type VisualDiscoveryIssue =
   | {
       readonly reason: "visual-facts-not-collected";
-      readonly target?: never;
+      readonly tabId?: never;
+      readonly processKey?: never;
       readonly frameId?: never;
       readonly backendNodeId?: never;
     }
   | {
-      readonly target: CdpTarget;
+      readonly tabId: number;
+      readonly processKey: string;
       readonly frameId: string;
       readonly backendNodeId?: number;
       readonly reason: VisualIssueReason;
@@ -322,7 +323,8 @@ export async function discoverVisualCandidates(
       });
       if (region.status === "unavailable") {
         issues.push({
-          target: document.frame.target,
+          tabId: document.frame.handle.tabId,
+          processKey: document.frame.processKey,
           frameId: document.frame.frameId,
           backendNodeId: node.backendNodeId,
           reason: region.reason,
@@ -349,7 +351,12 @@ export async function discoverVisualCandidates(
       !reportedFrames.has(document.frame.frameId) &&
       (!document.identity || !document.index.nodes.size)
     )
-      issues.push({ target: document.frame.target, frameId: document.frame.frameId, reason });
+      issues.push({
+        tabId: document.frame.handle.tabId,
+        processKey: document.frame.processKey,
+        frameId: document.frame.frameId,
+        reason,
+      });
   }
   const pending = checkpoint();
   if (pending) await pending;

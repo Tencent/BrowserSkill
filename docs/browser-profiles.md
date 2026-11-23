@@ -80,22 +80,22 @@ tabs and protected popups. Such tabs may keep the incognito window and its brows
 session alive. Downloads and BrowserSkill's own operation history follow their
 existing retention rules.
 
-## DeepSeek Harness
+## MCP clients
 
-Use the verified popup instance ID in the plugin's session tool:
+Use the verified popup instance ID in `bsk_session`:
 
 ```text
 bsk_session({ action: "start", browser: "<verified-instance-id>" })
 ```
 
 For an incognito Agent Window, add `incognito: true` to that call. The extension
-must have **Allow in incognito** enabled, and the plugin, CLI, daemon and extension
+must have **Allow in incognito** enabled, and the CLI, daemon and extension
 must support protocol 1.4 or later; a missing permission or an older peer returns an
 error instead of retrying as a normal window.
 
 **Copy instructions** includes this tool call alongside the CLI command.
-Use the DeepSeek Harness call instead of running a separate CLI session. The plugin
-manages its own sessions. Supply the same selector on every new session for the task, even if
+When using MCP, call `bsk_session` instead of running a separate CLI session.
+Supply the same selector on every new session for the task, even if
 only one browser is connected. If the mapping is unknown or the target is offline,
 ask the user to confirm or reconnect it; do not retry without `browser`.
 
@@ -103,7 +103,7 @@ ask the user to confirm or reconnect it; do not retry without `browser`.
 
 This is a manual profile-to-instance workflow, not automatic profile discovery or
 a persisted task/workspace requirement. Explicit selectors reject unavailable or
-ambiguous targets. Neither the CLI nor the DSH plugin can infer a profile requirement
+ambiguous targets. Neither the CLI nor `bsk mcp` can infer a profile requirement
 from the user's conversation if the agent omits the selector: with only one browser
 connected, an unqualified start can still select the wrong profile. The skill and
 copied instructions guide the agent; they do not enforce a binding on future calls.

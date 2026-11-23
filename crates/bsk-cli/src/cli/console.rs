@@ -8,14 +8,18 @@ use bsk_protocol::tools::{ConsoleEntry, ConsoleParams, ConsoleResult};
 use clap::Args;
 
 use crate::cli::TOOL_IPC_TIMEOUT;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Args)]
 pub struct ConsoleArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -38,26 +42,41 @@ pub struct ConsoleArgs {
     pub include_stack: bool,
 }
 
-pub fn dispatch(args: ConsoleArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: ConsoleArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
-    run(info.sock_path, args, format)
+    run(info.sock_path, &op_ctx, args, format)
 }
 
-fn run(sock: PathBuf, args: ConsoleArgs, format: Format) -> Result<(), CliError> {
+fn run(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: ConsoleArgs,
+    format: Format,
+) -> Result<(), CliError> {
     let params = ConsoleParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         since: args.since,
         limit: args.limit,
         max_text_chars: args.max_text_chars,
         include_stack: args.include_stack.then_some(true),
+        context_id: None,
     };
-    let reply: ConsoleResult = call(sock, params)?;
+    let reply: ConsoleResult = call(sock, ctx, params)?;
     render(&reply, format)
 }
 
-fn call(sock: PathBuf, params: ConsoleParams) -> Result<ConsoleResult, CliError> {
-    crate::cli::business_rpc::call::<ConsoleParams, ConsoleResult>(
+fn call(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    params: ConsoleParams,
+) -> Result<ConsoleResult, CliError> {
+    ctx.call::<ConsoleParams, ConsoleResult>(
         sock,
         "console",
         Method::ToolConsole,

@@ -1,59 +1,26 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "VideoGrant",
-  "type": "object",
-  "required": [
-    "capability",
-    "recording"
-  ],
-  "properties": {
-    "capability": {
-      "type": "string"
-    },
-    "recording": {
-      "$ref": "#/definitions/VideoRecording"
-    }
-  },
   "definitions": {
     "VideoCompleteness": {
-      "type": "string",
       "enum": [
         "complete",
         "partial"
-      ]
+      ],
+      "type": "string"
     },
     "VideoQuality": {
-      "type": "string",
       "enum": [
         "standard",
         "clear"
-      ]
+      ],
+      "type": "string"
     },
     "VideoRecording": {
-      "type": "object",
-      "required": [
-        "byte_size",
-        "created_at",
-        "dropped_frames",
-        "duration_ms",
-        "expires_at",
-        "exported",
-        "frames",
-        "height",
-        "max_duration_ms",
-        "quality",
-        "recording_id",
-        "session_id",
-        "state",
-        "tab_id",
-        "title",
-        "width"
-      ],
       "properties": {
         "byte_size": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "completeness": {
           "anyOf": [
@@ -66,19 +33,19 @@
           ]
         },
         "created_at": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "dropped_frames": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "duration_ms": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "error": {
           "type": [
@@ -87,27 +54,27 @@
           ]
         },
         "expires_at": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "exported": {
           "type": "boolean"
         },
         "frames": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "height": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "max_duration_ms": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "quality": {
           "$ref": "#/definitions/VideoQuality"
@@ -119,12 +86,12 @@
           "type": "string"
         },
         "started_at": {
+          "format": "uint64",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint64",
-          "minimum": 0.0
+          ]
         },
         "state": {
           "$ref": "#/definitions/VideoState"
@@ -136,28 +103,61 @@
           ]
         },
         "tab_id": {
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         },
         "title": {
           "type": "string"
         },
         "width": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         }
-      }
+      },
+      "required": [
+        "recording_id",
+        "session_id",
+        "tab_id",
+        "title",
+        "state",
+        "quality",
+        "created_at",
+        "expires_at",
+        "max_duration_ms",
+        "duration_ms",
+        "byte_size",
+        "width",
+        "height",
+        "frames",
+        "dropped_frames",
+        "exported"
+      ],
+      "type": "object"
     },
     "VideoState": {
-      "type": "string",
       "enum": [
         "starting",
         "recording",
         "finalizing",
         "ready",
         "failed"
-      ]
+      ],
+      "type": "string"
     }
-  }
+  },
+  "properties": {
+    "capability": {
+      "type": "string"
+    },
+    "recording": {
+      "$ref": "#/definitions/VideoRecording"
+    }
+  },
+  "required": [
+    "recording",
+    "capability"
+  ],
+  "title": "VideoGrant",
+  "type": "object"
 }

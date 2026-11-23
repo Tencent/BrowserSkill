@@ -325,7 +325,10 @@ mod judge_tests {
             judge(7, "0.3.1", 52719, &expected).is_err(),
             "wrong version"
         );
-        assert!(judge(7, "999.0.0", 52800, &expected).is_err(), "wrong port");
+        assert!(
+            judge(7, "999.0.0", crate::daemon::DEFAULT_WS_PORT, &expected).is_err(),
+            "wrong port"
+        );
 
         let any_port = Expected {
             port: None,

@@ -1,3 +1,5 @@
+import { REMOTE_AUTH_SUBPROTOCOL_PREFIX } from "./generated/methods";
+
 /** A gateway issues a pairing URL; the fragment never becomes part of the request URL. */
 export interface RemoteEndpoint {
   url: string;
@@ -11,7 +13,7 @@ export interface RemoteEndpoint {
 }
 
 export const REMOTE_ENDPOINT_KEY = "bsk_remote_endpoint";
-export const REMOTE_AUTH_PROTOCOL_PREFIX = "bsk-auth.";
+export const REMOTE_AUTH_PROTOCOL_PREFIX = REMOTE_AUTH_SUBPROTOCOL_PREFIX;
 
 export function parseRemoteEndpoint(input: string): RemoteEndpoint {
   const url = new URL(input.trim());

@@ -1,0 +1,1449 @@
+#!/usr/bin/env python3
+"""Behavioral tests of the audit helper, not BrowserSkill product tests."""
+
+import contextlib, csv, importlib.util, io, json, sys, tempfile, time, unittest
+from pathlib import Path
+from types import SimpleNamespace as NS
+from unittest.mock import patch
+import threading, urllib.request
+
+spec = importlib.util.spec_from_file_location(
+    "audit", Path(__file__).with_name("release_audit.py")
+)
+audit = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(audit)
+spec2 = importlib.util.spec_from_file_location(
+    "serve", Path(__file__).with_name("serve.py")
+)
+serve = importlib.util.module_from_spec(spec2)
+spec2.loader.exec_module(serve)
+FAKE = """#!/usr/bin/env python3
+import json,sys
+args=sys.argv[1:]
+if '--help' in args:
+ print('Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n  status  Show status\\n\\nOptions:\\n  --help  Help' if args==['--help'] else 'Usage: bsk status [OPTIONS]')
+elif '--fail' in args:
+ print(json.dumps({'code':'synthetic_rejection','data':{'effect_state':'none'}}));sys.exit(3)
+elif '--unsatisfied' in args:print(json.dumps({'satisfied':False}))
+else:print(json.dumps({'ok':True,'value':'synthetic'}))
+"""
+
+
+class AuditTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.skill = self.base / "skill"
+        (self.skill / "references").mkdir(parents=True)
+        (self.skill / "assets/fixtures").mkdir(parents=True)
+        (self.skill / "assets/fixtures/minimal.html").write_text(
+            "<title>synthetic</title>", encoding="utf-8"
+        )
+        self.binary = self.base / "bsk"
+        self.binary.write_text(FAKE, encoding="utf-8")
+        self.binary.chmod(0o755)
+        self.patch = patch.object(audit, "SKILL", self.skill)
+        self.patch.start()
+        self.root = self.base / "run"
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def init(self, extra=None):
+        cases = [
+            {"id": "FLOW", "kind": "workflow", "required_commands": ["status"]}
+        ] + (extra or [])
+        audit.write(self.skill / "references/scenarios.json", cases)
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.init(
+                NS(
+                    out=str(self.root),
+                    bsk=str(self.binary),
+                    binary=str(self.binary),
+                    browser="synthetic-browser",
+                    candidate="synthetic-build",
+                    port=4567,
+                )
+            )
+
+    def execute(self, argv=None, case="FLOW"):
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.execute(
+                NS(
+                    run=str(self.root),
+                    case=case,
+                    argv=argv or ["status"],
+                    timeout=5,
+                    lane="browser",
+                    stdin_file=None,
+                    interactive=False,
+                )
+            )
+        return max(
+            (self.root / "commands").glob("*/meta.json"),
+            key=lambda p: p.stat().st_mtime_ns,
+        ).parent.name
+
+    def passed(self, rid, case="FLOW", checks=None):
+        return {
+            "id": case,
+            "status": "passed",
+            "records": [rid],
+            "oracle_summary": "Synthetic helper contract verified",
+            "checks": checks
+            or [{"record": rid, "pointer": "/json/ok", "op": "eq", "value": True}],
+        }
+
+    def fill(self, rid, extra=None):
+        help_id = self.execute(["help"], "CMD-help")
+        audit.write(
+            self.root / "results.json",
+            {
+                "cases": [
+                    self.passed(rid),
+                    self.passed(rid, "CMD-status"),
+                    self.passed(help_id, "CMD-help"),
+                ]
+                + (extra or [])
+            },
+        )
+
+    def gate(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = audit.gate(self.root)
+        return code, audit.load(self.root / "gate.json")
+
+    def test_full_helper_contract_can_pass(self):
+        self.init()
+        rid = self.execute()
+        self.fill(rid)
+        code, r = self.gate()
+        self.assertEqual(code, 0)
+        self.assertTrue(r["release_ready"])
+        self.assertEqual(r["command_coverage"], 1)
+
+    def test_missing_result_blocks(self):
+        self.init()
+        self.execute()
+        self.assertEqual(self.gate()[0], 1)
+
+    def test_retry_does_not_erase_failure(self):
+        self.init()
+        self.execute(["status", "--fail"])
+        rid = self.execute()
+        self.fill(rid)
+        self.assertFalse(self.gate()[1]["release_ready"])
+
+    def test_raw_output_tampering_blocks(self):
+        self.init()
+        rid = self.execute()
+        self.fill(rid)
+        (self.root / "commands" / rid / "stdout.txt").write_text(
+            '{"ok":false}', encoding="utf-8"
+        )
+        self.assertEqual(self.gate()[0], 1)
+
+    def test_candidate_change_blocks(self):
+        self.init()
+        rid = self.execute()
+        self.fill(rid)
+        self.binary.write_text(FAKE + "\n# changed\n", encoding="utf-8")
+        self.assertEqual(self.gate()[0], 1)
+
+    def test_deleted_scenario_blocks(self):
+        self.init()
+        rid = self.execute()
+        self.fill(rid)
+        plan = audit.load(self.root / "plan.json")
+        plan["cases"] = plan["cases"][1:]
+        audit.write(self.root / "plan.json", plan)
+        self.assertEqual(self.gate()[0], 1)
+
+    def test_unfinished_command_blocks(self):
+        self.init()
+        rid = self.execute()
+        self.fill(rid)
+        d = self.root / "commands" / ("a" * 32)
+        audit.write(d / "started.json", {})
+        self.assertEqual(self.gate()[0], 1)
+
+    def test_declared_negative_exact_error_passes(self):
+        self.init([{"id": "NEG", "negative": True, "required_commands": ["status"]}])
+        good = self.execute()
+        bad = self.execute(["status", "--fail"], "NEG")
+        checks = [
+            {
+                "record": bad,
+                "pointer": "/json/code",
+                "op": "eq",
+                "value": "synthetic_rejection",
+            },
+            {
+                "record": bad,
+                "pointer": "/json/data/effect_state",
+                "op": "eq",
+                "value": "none",
+            },
+        ]
+        self.fill(good, [self.passed(bad, "NEG", checks)])
+        self.assertEqual(self.gate()[0], 0)
+
+    def test_wrong_negative_reason_blocks(self):
+        self.init([{"id": "NEG", "negative": True, "required_commands": ["status"]}])
+        good = self.execute()
+        bad = self.execute(["status", "--fail"], "NEG")
+        checks = [
+            {
+                "record": bad,
+                "pointer": "/json/code",
+                "op": "eq",
+                "value": "wrong_reason",
+            },
+            {
+                "record": bad,
+                "pointer": "/json/data/effect_state",
+                "op": "eq",
+                "value": "none",
+            },
+        ]
+        self.fill(good, [self.passed(bad, "NEG", checks)])
+        self.assertEqual(self.gate()[0], 1)
+
+    def test_zero_exit_unsatisfied_wait_is_explicit_negative(self):
+        self.init(
+            [
+                {
+                    "id": "NEG",
+                    "negative": True,
+                    "allow_zero_rejection": True,
+                    "check_effect": False,
+                    "required_commands": ["status"],
+                }
+            ]
+        )
+        good = self.execute()
+        bad = self.execute(["status", "--unsatisfied"], "NEG")
+        checks = [
+            {"record": bad, "pointer": "/json/satisfied", "op": "eq", "value": False}
+        ]
+        self.fill(good, [self.passed(bad, "NEG", checks)])
+        self.assertEqual(self.gate()[0], 0)
+
+    def test_exit_code_only_is_not_business_verification(self):
+        self.init()
+        rid = self.execute()
+        r = self.passed(
+            rid,
+            checks=[{"record": rid, "pointer": "/exit_code", "op": "eq", "value": 0}],
+        )
+        audit.write(
+            self.root / "results.json", {"cases": [r, self.passed(rid, "CMD-status")]}
+        )
+        self.assertEqual(self.gate()[0], 1)
+
+    def test_zero_exit_script_failure_cannot_be_hidden(self):
+        body = FAKE.replace(
+            "  status  Show status", "  status  Show status\\n  evaluate  Script"
+        )
+        body = body.replace(
+            "elif '--unsatisfied'",
+            "elif '--eval-false' in args:print(json.dumps({'ok':False,'marker':'present'}))\nelif '--unsatisfied'",
+        )
+        self.binary.write_text(body, encoding="utf-8")
+        self.init()
+        good = self.execute()
+        bad = self.execute(["evaluate", "--eval-false"], "CMD-evaluate")
+        self.fill(
+            good,
+            [
+                self.passed(
+                    bad,
+                    "CMD-evaluate",
+                    [
+                        {
+                            "record": bad,
+                            "pointer": "/json/marker",
+                            "op": "eq",
+                            "value": "present",
+                        }
+                    ],
+                )
+            ],
+        )
+        r = self.gate()[1]
+        self.assertFalse(r["release_ready"])
+        self.assertTrue(any("ok:true" in e for e in r["errors"]))
+
+    def test_required_call_count_needs_distinct_actual_invocations(self):
+        self.init(
+            [
+                {
+                    "id": "COUNT",
+                    "kind": "workflow",
+                    "required_commands": ["status"],
+                    "required_command_counts": {"status": 2},
+                }
+            ]
+        )
+        first = self.execute()
+        r = self.passed(first, "COUNT")
+        self.fill(first, [r])
+        report = self.gate()[1]
+        self.assertFalse(report["release_ready"])
+        self.assertTrue(any("Insufficient actual calls" in e for e in report["errors"]))
+        second = self.execute(case="COUNT")
+        results = audit.load(self.root / "results.json")
+        next(v for v in results["cases"] if v["id"] == "COUNT")["records"].append(
+            second
+        )
+        audit.write(self.root / "results.json", results)
+        self.assertEqual(self.gate()[0], 0)
+
+    def test_duplicate_record_cannot_satisfy_call_count(self):
+        self.init(
+            [
+                {
+                    "id": "COUNT",
+                    "kind": "workflow",
+                    "required_commands": ["status"],
+                    "required_command_counts": {"status": 2},
+                }
+            ]
+        )
+        first = self.execute()
+        r = self.passed(first, "COUNT")
+        r["records"] = [first, first]
+        self.fill(first, [r])
+        report = self.gate()[1]
+        self.assertFalse(report["release_ready"])
+        self.assertTrue(any("Duplicate command record" in e for e in report["errors"]))
+
+    def test_strict_types_and_path_boundary(self):
+        self.init()
+        rid = self.execute()
+        self.assertFalse(
+            audit.assertion(
+                self.root,
+                {"record": rid, "pointer": "/json/ok", "op": "eq", "value": 1},
+            )
+        )
+        with self.assertRaises(ValueError):
+            audit.within(self.root, "../outside")
+
+    def test_discovery_keeps_navigate_and_distinct_alias_help(self):
+        body = """#!/usr/bin/env python3
+import sys
+p=sys.argv[1:-1]
+if not p:print('Usage: bsk <COMMAND>\\n\\nCommands:\\n  navigate  Go\\n  navigate-back  Alias\\n\\nOptions:\\n  --help Help')
+elif p==['navigate']:print('Usage: bsk navigate [URL]\\n\\nCommands:\\n  back  Back\\n\\nArguments:\\n  [URL] Destination\\n\\nOptions:\\n  --help Help')
+else:print('Usage: bsk '+' '.join(p))
+"""
+        self.binary.write_text(body, encoding="utf-8")
+        inv = audit.discover(str(self.binary), self.base / "help")
+        self.assertEqual(
+            set(inv["commands"]), {"help", "navigate", "navigate back", "navigate-back"}
+        )
+        self.assertEqual(
+            len({x["path"] for x in inv["help_documents"]}), len(inv["help_documents"])
+        )
+        self.init()
+        plan = audit.load(self.root / "plan.json")["cases"]
+        self.assertEqual(len({c["id"] for c in plan}), len(plan))
+        command_ids = {
+            c["command"]: c["id"] for c in plan if c.get("kind") == "command"
+        }
+        self.assertNotEqual(command_ids["navigate back"], command_ids["navigate-back"])
+
+    def test_server_routes_and_event_oracle(self):
+        root = self.skill / "assets/fixtures"
+        (root / "plan-recipe-lab.html").write_text(
+            "<title>plan-recipe-lab</title>", encoding="utf-8"
+        )
+        server = serve.make_server(root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = "http://127.0.0.1:" + str(server.server_port)
+        try:
+            with urllib.request.urlopen(url + "/minimal") as r:
+                self.assertIn(b"synthetic", r.read())
+            with urllib.request.urlopen(url + "/recipe/report?drift=none") as r:
+                self.assertIn(b"plan-recipe-lab", r.read())
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/event", data=b'{"type":"test"}', method="POST"
+                )
+            ) as r:
+                self.assertEqual(json.load(r)["received"]["type"], "test")
+            with urllib.request.urlopen(url + "/events") as r:
+                self.assertEqual(json.load(r)[0]["data"]["type"], "test")
+            with self.assertRaises(urllib.error.HTTPError):
+                urllib.request.urlopen(url + "/../test_release_audit.py")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_hidden_recipe_discovery_and_plan_recipe_benchmark(self):
+        body = """#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if '--help' in args:
+    p = args[:-1]
+    if not p:
+        print('Usage: bsk <COMMAND>\\n\\nCommands:\\n  status  Status\\n  plan    Batch plan\\n\\nOptions:\\n  --help Help')
+    elif p == ['recipe']:
+        print('Usage: bsk recipe <COMMAND>\\n\\nCommands:\\n  run   Replay\\n  save  Save\\n\\nOptions:\\n  --help Help')
+    else:
+        print('Usage: bsk ' + ' '.join(p))
+elif args[:1] == ['plan']:
+    if '--fail-plan' in args:
+        print(json.dumps({'ok': False, 'completed': 1, 'total': 3, 'stopped': {'index': 1, 'action': 'click', 'effect_state': 'none', 'reason': 'wait_unsatisfied'}}))
+        sys.exit(1)
+    print(json.dumps({'ok': True, 'completed': 5, 'total': 5, 'elapsed_ms': 42, 'post': {'context_id': 'c2', 'kind': 'baseline', 'observation': {'text': '@vom 1\\nL1 page'}}}))
+elif args[:2] == ['recipe', 'run']:
+    if '--handoff' in args:
+        print(json.dumps({'status': 'handoff', 'reason': 'target_not_found', 'effects': {'steps_done': 0, 'last_effect_state': 'none'}}))
+        sys.exit(1)
+    print(json.dumps({'status': 'completed', 'outputs': {'total': '1300'}, 'effects': {'steps_done': 4, 'last_effect_state': 'committed'}, 'elapsed_ms': 85}))
+elif args[:2] == ['recipe', 'save']:
+    print(json.dumps({'saved': True, 'revision': 1, 'status': 'draft'}))
+else:
+    print(json.dumps({'ok': True, 'value': 'synthetic'}))
+"""
+        self.binary.write_text(body, encoding="utf-8")
+        inv = audit.discover(str(self.binary), self.base / "help")
+        self.assertEqual(
+            set(inv["commands"]),
+            {"help", "status", "plan", "recipe run", "recipe save"},
+        )
+        self.init(
+            [
+                {
+                    "id": "PLAN-FLOW",
+                    "kind": "workflow",
+                    "page_type": "batch-plan",
+                    "required_commands": ["plan"],
+                },
+                {
+                    "id": "NEG-PLAN",
+                    "kind": "workflow",
+                    "page_type": "batch-plan",
+                    "required_commands": ["plan"],
+                    "negative": True,
+                    "allow_plan_stopped": True,
+                },
+                {
+                    "id": "RECIPE-FLOW",
+                    "kind": "workflow",
+                    "page_type": "recipe",
+                    "required_commands": ["recipe save", "recipe run"],
+                },
+                {
+                    "id": "NEG-RECIPE",
+                    "kind": "workflow",
+                    "page_type": "recipe",
+                    "required_commands": ["recipe run"],
+                    "negative": True,
+                    "check_effect": False,
+                    "allow_recipe_handoff": True,
+                },
+            ]
+        )
+        r_status = self.execute(["status"], "FLOW")
+        r_help = self.execute(["help"], "CMD-help")
+        r_plan_ok = self.execute(["plan", "--steps", "[]"], "PLAN-FLOW")
+        r_plan_neg = self.execute(["plan", "--fail-plan"], "NEG-PLAN")
+        r_rec_save = self.execute(["recipe", "save"], "RECIPE-FLOW")
+        r_rec_run = self.execute(["recipe", "run", "sales"], "RECIPE-FLOW")
+        r_rec_neg = self.execute(["recipe", "run", "sales", "--handoff"], "NEG-RECIPE")
+
+        cases = [
+            self.passed(r_status, "FLOW"),
+            self.passed(r_status, "CMD-status"),
+            self.passed(r_help, "CMD-help"),
+            self.passed(r_plan_ok, "PLAN-FLOW"),
+            self.passed(r_plan_ok, "CMD-plan"),
+            self.passed(
+                r_plan_neg,
+                "NEG-PLAN",
+                [
+                    {
+                        "record": r_plan_neg,
+                        "pointer": "/json/stopped/reason",
+                        "op": "eq",
+                        "value": "wait_unsatisfied",
+                    },
+                    {
+                        "record": r_plan_neg,
+                        "pointer": "/json/stopped/effect_state",
+                        "op": "eq",
+                        "value": "none",
+                    },
+                ],
+            ),
+            {
+                "id": "RECIPE-FLOW",
+                "status": "passed",
+                "records": [r_rec_save, r_rec_run],
+                "oracle_summary": "Recipe saved and replayed",
+                "checks": [
+                    {
+                        "record": r_rec_save,
+                        "pointer": "/json/saved",
+                        "op": "eq",
+                        "value": True,
+                    },
+                    {
+                        "record": r_rec_run,
+                        "pointer": "/json/status",
+                        "op": "eq",
+                        "value": "completed",
+                    },
+                ],
+            },
+            self.passed(
+                r_rec_save,
+                "CMD-recipe__save",
+                [
+                    {
+                        "record": r_rec_save,
+                        "pointer": "/json/saved",
+                        "op": "eq",
+                        "value": True,
+                    }
+                ],
+            ),
+            self.passed(
+                r_rec_run,
+                "CMD-recipe__run",
+                [
+                    {
+                        "record": r_rec_run,
+                        "pointer": "/json/status",
+                        "op": "eq",
+                        "value": "completed",
+                    }
+                ],
+            ),
+            self.passed(
+                r_rec_neg,
+                "NEG-RECIPE",
+                [
+                    {
+                        "record": r_rec_neg,
+                        "pointer": "/json/status",
+                        "op": "eq",
+                        "value": "handoff",
+                    },
+                    {
+                        "record": r_rec_neg,
+                        "pointer": "/json/reason",
+                        "op": "eq",
+                        "value": "target_not_found",
+                    },
+                ],
+            ),
+        ]
+        audit.write(self.root / "results.json", {"cases": cases})
+        code, report = self.gate()
+        self.assertEqual(code, 0, report.get("errors"))
+        self.assertTrue(report["release_ready"])
+        self.assertIn("benchmark_summary", report)
+        self.assertEqual(report["execution_modes"]["plan"]["actions_executed"], 5)
+        self.assertEqual(report["execution_modes"]["plan"]["avg_actions_per_turn"], 5.0)
+        self.assertEqual(report["execution_modes"]["plan"]["success_rate"], 1.0)
+        self.assertEqual(
+            report["execution_modes"]["plan"]["negative_guard_invocations"], 1
+        )
+        self.assertEqual(report["execution_modes"]["recipe"]["actions_executed"], 4)
+        self.assertEqual(
+            report["execution_modes"]["recipe"]["avg_actions_per_turn"], 4.0
+        )
+        self.assertEqual(report["execution_modes"]["recipe"]["success_rate"], 1.0)
+        self.assertEqual(
+            report["execution_modes"]["recipe"]["negative_guard_invocations"], 1
+        )
+        self.assertEqual(
+            report["execution_modes"]["recipe_mgmt"]["actions_executed"], 0
+        )
+        self.assertTrue((self.root / "benchmark.json").exists())
+        self.assertTrue((self.root / "benchmark.md").exists())
+
+        # Verify step error vs result action counting and semantic checks
+        m_step_err = audit.extract_metrics(
+            "step", 1, {"ok": False, "action": {"error": {"code": "refused"}}}, 12.0
+        )
+        self.assertEqual(m_step_err["actions_executed"], 0)
+        m_step_ok = audit.extract_metrics(
+            "step", 0, {"ok": True, "action": {"result": {"tab_id": 1}}}, 15.0
+        )
+        self.assertEqual(m_step_ok["actions_executed"], 1)
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "recipe draft"}, {"json": {"errors": ["ambiguous"]}}
+            )
+        )
+        self.assertIsNone(
+            audit.semantic_failure(
+                {"command": "recipe approve"},
+                {"json": {"name": "sales", "approval_required": False}},
+            )
+        )
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "read"}, {"json": {"ok": True}}
+            )
+        )
+        self.assertIsNone(
+            audit.semantic_failure(
+                {"command": "read"}, {"json": {"items": [{"text": "hello"}]}}
+            )
+        )
+
+        # Multi-run aggregation
+        agg = audit.aggregate_multi_run_benchmarks([self.root, self.root])
+        self.assertEqual(agg["runs_count"], 2)
+        self.assertEqual(agg["summary"]["full_pass_runs"], 2)
+        self.assertEqual(agg["summary"]["mean_success_rate"], 1.0)
+        md = audit.render_multi_run_markdown(agg)
+        self.assertIn("PLAN-FLOW", md)
+        self.assertIn("RECIPE-FLOW", md)
+
+    def test_adversarial_server_routes_bfcache_cors_and_media_mimes(self):
+        root = self.skill / "assets/fixtures"
+        (root / "arena-bfcache-detail.html").write_text(
+            "<title>bfcache</title>", encoding="utf-8"
+        )
+        (root / "captions-zh.vtt").write_text(
+            "WEBVTT\n\n00:00.000 --> 00:01.000\n你好\n", encoding="utf-8"
+        )
+        (root / "arena-audio.wav").write_bytes(b"RIFF\x24\x00\x00\x00WAVE")
+        server = serve.make_server(root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_port
+        url = f"http://127.0.0.1:{port}"
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            with urllib.request.urlopen(url + "/minimal") as r:
+                self.assertEqual(r.headers.get("Cache-Control"), "no-store")
+                self.assertEqual(r.headers.get("Access-Control-Allow-Origin"), "*")
+            with urllib.request.urlopen(url + "/arena-bfcache-detail") as r:
+                self.assertEqual(r.headers.get("Cache-Control"), "no-cache")
+            with urllib.request.urlopen(url + "/minimal?bfcache=1") as r:
+                self.assertEqual(r.headers.get("Cache-Control"), "no-cache")
+            with urllib.request.urlopen(url + "/captions-zh.vtt") as r:
+                self.assertEqual(r.headers.get("Content-Type"), "text/vtt; charset=utf-8")
+            with urllib.request.urlopen(url + "/arena-audio.wav") as r:
+                self.assertEqual(r.headers.get("Content-Type"), "audio/wav")
+                self.assertEqual(r.headers.get("Accept-Ranges"), "bytes")
+                self.assertEqual(r.read(), b"RIFF\x24\x00\x00\x00WAVE")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=0-3"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 0-3/12")
+                self.assertEqual(r.read(), b"RIFF")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=8-"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 8-11/12")
+                self.assertEqual(r.read(), b"WAVE")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=-4"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 8-11/12")
+                self.assertEqual(r.read(), b"WAVE")
+            for invalid_range in ("bytes=999-", "bytes=8-2", "bytes=-0", "bytes=bad"):
+                with self.assertRaises(urllib.error.HTTPError) as r_err:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            url + "/arena-audio.wav", headers={"Range": invalid_range}
+                        )
+                    )
+                self.assertEqual(r_err.exception.code, 416)
+                self.assertEqual(
+                    r_err.exception.headers.get("Content-Range"), "bytes */12"
+                )
+            with urllib.request.urlopen(
+                urllib.request.Request(url + "/arena-audio.wav", method="HEAD")
+            ) as r:
+                self.assertEqual(r.status, 200)
+                self.assertEqual(r.headers.get("Accept-Ranges"), "bytes")
+                self.assertEqual(r.headers.get("Content-Length"), "12")
+                self.assertEqual(r.read(), b"")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                opener.open(url + "/redirect-cross-origin")
+            self.assertEqual(ctx.exception.code, 302)
+            self.assertEqual(
+                ctx.exception.headers.get("Location"),
+                f"http://localhost:{port}/arena-bfcache-detail?from=cross_origin_302&bfcache=1",
+            )
+            with urllib.request.urlopen(url + "/slow-doc?delay_ms=15") as r:
+                self.assertIn(b"slow-doc-ready", r.read())
+            with urllib.request.urlopen(url + "/download") as r:
+                self.assertEqual(r.read(), "编号,名称\n42,中文文件 ✅\n".encode("utf-8"))
+            # The joint statement is gated on the submission receipt.
+            with self.assertRaises(urllib.error.HTTPError) as gate:
+                urllib.request.urlopen(
+                    url + "/download?scene=joint-filing&org=TestOrg&gross=1272.00"
+                )
+            self.assertEqual(gate.exception.code, 403)
+            joint = (
+                url
+                + "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901"
+                + "&org=%E7%94%B2%2C%E4%B9%99&gross=1272.00"
+            )
+            with urllib.request.urlopen(joint) as r:
+                joint_csv = r.read().decode("utf-8")
+            rows = list(csv.reader(io.StringIO(joint_csv)))
+            self.assertEqual(
+                rows[1], ["JNT-COMMIT-2026-9901", "甲,乙", "1272.00", "已联合核定 ✅"]
+            )
+            with urllib.request.urlopen(
+                url
+                + "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901"
+                + "&org=%3DHYPERLINK(1)&gross=1"
+            ) as r:
+                rows = list(csv.reader(io.StringIO(r.read().decode("utf-8"))))
+            self.assertEqual(rows[1][1], "'=HYPERLINK(1)")
+            with urllib.request.urlopen(url + "/download-stream?chunks=2&chunk_ms=5") as r:
+                self.assertIsNone(r.headers.get("Content-Length"))
+                stream_csv = r.read().decode("utf-8")
+                self.assertIn("流式对账分片-2", stream_csv)
+            with urllib.request.urlopen(
+                url + "/download-stream?chunks=2&chunk_ms=0&known_length=1"
+            ) as r:
+                body = r.read()
+                self.assertEqual(r.headers.get("Content-Length"), str(len(body)))
+            with urllib.request.urlopen(url + "/events") as r:
+                before_head = json.load(r)
+            # HEAD probes return headers only and never create business evidence.
+            for head_path in (
+                "/download",
+                "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901&org=A&gross=1",
+                "/download-stream?chunks=3&chunk_ms=200",
+                "/slow-doc?delay_ms=3000",
+            ):
+                started = time.monotonic()
+                with urllib.request.urlopen(
+                    urllib.request.Request(url + head_path, method="HEAD")
+                ) as r:
+                    self.assertEqual(r.status, 200)
+                    self.assertEqual(r.read(), b"")
+                self.assertLess(time.monotonic() - started, 1.0, head_path)
+            with urllib.request.urlopen(url + "/events") as r:
+                events_after = json.load(r)
+            self.assertEqual(len(events_after), len(before_head))
+            ev_types = [e.get("type") for e in events_after]
+            self.assertIn("redirect-cross-origin", ev_types)
+            self.assertIn("slow-doc", ev_types)
+            self.assertIn("download-stream", ev_types)
+            self.assertIn("download-rejected", ev_types)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_wave_commands_range_assertions_and_long_admin_home(self):
+        (self.skill / "assets/fixtures/arena-frame-outer.html").write_text(
+            '<iframe src="http://localhost:4187/a"></iframe><iframe src="http://127.0.0.1:4187/b"></iframe>',
+            encoding="utf-8",
+        )
+        self.init()
+        rewritten = (self.root / "fixtures/arena-frame-outer.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("http://localhost:4567/a", rewritten)
+        self.assertIn("http://127.0.0.1:4567/b", rewritten)
+        rid = self.execute()
+        d = self.root / "commands" / rid
+        (d / "stdout.txt").write_text(
+            '{"ok": true, "size": 42, "label": "9"}', encoding="utf-8"
+        )
+        m = audit.load(d / "meta.json")
+        m["stdout_sha256"] = audit.digest(d / "stdout.txt")
+        audit.write(d / "meta.json", m)
+        self.assertTrue(
+            audit.assertion(
+                self.root, {"record": rid, "pointer": "/json/size", "op": "lt", "value": 50}
+            )
+        )
+        self.assertTrue(
+            audit.assertion(
+                self.root, {"record": rid, "pointer": "/json/size", "op": "lte", "value": 42}
+            )
+        )
+        self.assertTrue(
+            audit.assertion(
+                self.root, {"record": rid, "pointer": "/json/size", "op": "gte", "value": 42}
+            )
+        )
+        for op, ptr, val in [
+            ("gte", "/json/ok", 1),
+            ("lte", "/json/ok", 1),
+            ("gt", "/json/ok", 0),
+            ("gte", "/json/size", True),
+            ("gt", "/json/label", "10"),
+        ]:
+            self.assertFalse(
+                audit.assertion(
+                    self.root, {"record": rid, "pointer": ptr, "op": op, "value": val}
+                ),
+                f"Expected strict numeric rejection for {op} on {ptr} vs {val!r}",
+            )
+        m_open = audit.extract_metrics(
+            "open", 0, {"vom": "@vom 2\npage", "elapsed_ms": 20}, 25.0
+        )
+        self.assertEqual(m_open["execution_mode"], "single_action")
+        self.assertEqual(m_open["actions_executed"], 1)
+        self.assertEqual(m_open["observation_kind"], "full")
+        self.assertGreater(m_open["vom_chars"], 0)
+        m_sync = audit.extract_metrics("sync", 0, {"unchanged": True}, 8.0)
+        self.assertEqual(m_sync["execution_mode"], "read")
+        self.assertTrue(m_sync["observation_reused"])
+        self.assertEqual(m_sync["observation_kind"], "unchanged")
+        m_ledger = audit.extract_metrics("ledger status", 0, {"pending": []}, 5.0)
+        self.assertEqual(m_ledger["browser_calls"], 0)
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "navigate back"}, {"json": {"reached": "timeout"}, "argv": ["navigate", "back"]}
+            )
+        )
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "sync"}, {"json": None, "argv": ["sync", "--json"]}
+            )
+        )
+        deep_run = (
+            self.base
+            / ("very_deep_nested_segment_" * 4)
+            / "candidate_run_directory"
+        )
+        deep_run.mkdir(parents=True)
+        with patch.object(audit.sys, "platform", "win32"):
+            win_home = audit.resolve_admin_home(deep_run)
+            self.assertEqual(Path(win_home), (deep_run / "admin-runtime").resolve())
+        if sys.platform == "win32":
+            # Windows daemons use named pipes, so the AF_UNIX 96-byte cap and its
+            # symlink workaround do not apply there.
+            return
+        resolved = Path(audit.resolve_admin_home(deep_run))
+        try:
+            self.assertLessEqual(len(str(resolved / "run" / "daemon.sock")), 96)
+            self.assertEqual(resolved.resolve(), (deep_run / "admin-runtime").resolve())
+        finally:
+            if resolved.is_symlink():
+                resolved.unlink()
+
+    def test_timeout_records_metadata_instead_of_crashing(self):
+        self.binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "if '--help' in sys.argv:\n"
+            "    print('Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n  status  Show status\\n\\nOptions:\\n  --help  Help' if sys.argv[1:] == ['--help'] else 'Usage: bsk status [OPTIONS]')\n"
+            "else:\n"
+            "    time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        self.init()
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.execute(
+                NS(
+                    run=str(self.root),
+                    case="FLOW",
+                    argv=["status"],
+                    timeout=1,
+                    lane="browser",
+                    stdin_file=None,
+                    interactive=False,
+                )
+            )
+        meta = audit.load(next((self.root / "commands").glob("*/meta.json")))
+        self.assertTrue(meta["timed_out"])
+        self.assertNotEqual(meta.get("exit_code"), 0)
+
+    def test_launcher_runs_python_wrappers_through_the_interpreter(self):
+        wrapper = self.base / "bsk-wrapper"
+        wrapper.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
+        self.assertEqual(
+            audit.launcher(wrapper, "nt"), [sys.executable or "python", str(wrapper)]
+        )
+        self.assertEqual(audit.launcher(wrapper, "posix"), [wrapper])
+        for suffix in (".exe", ".cmd", ".bat"):
+            native = self.base / ("bsk" + suffix)
+            native.write_bytes(b"MZ")
+            self.assertEqual(audit.launcher(native, "nt"), [native])
+        for suffix in (".py", ".pyw"):
+            script = self.base / ("bsk" + suffix)
+            script.write_text("print('ok')\n", encoding="utf-8")
+            self.assertEqual(
+                audit.launcher(script, "nt"), [sys.executable or "python", str(script)]
+            )
+            self.assertEqual(audit.launcher(script, "posix"), [script])
+        plain = self.base / "bsk-script"
+        plain.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+        self.assertEqual(audit.launcher(plain, "nt"), [plain])
+
+    def test_events_endpoint_serves_utf8_payloads(self):
+        root = self.skill / "assets/fixtures"
+        server = serve.make_server(root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}"
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/event",
+                    data=json.dumps(
+                        {"type": "note", "value": "中文事件"}, ensure_ascii=False
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+            ) as response:
+                response.read()
+            with urllib.request.urlopen(url + "/events") as response:
+                body = response.read().decode("utf-8")
+            self.assertIn("中文事件", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_shipped_scenarios_and_fixture_manifest_integrity(self):
+        import re as _re
+
+        real_skill = Path(__file__).resolve().parents[1]
+        scenarios = audit.load(real_skill / "references/scenarios.json")
+        self.assertEqual(len(scenarios), 113)
+        ids = [s["id"] for s in scenarios]
+        self.assertEqual(len(ids), len(set(ids)))
+        for required_id in [
+            "PLAN-BATCH-FORM",
+            "NEG-PLAN-MIDSTEP-EXPECT",
+            "RECIPE-LIFECYCLE",
+            "RECIPE-DRIFT-RESILIENCE",
+            "NEG-RECIPE-HANDOFF",
+            "READ-DYNAMIC-BOUNDED",
+            "EDGE-VIRTUAL-LIST-RECYCLE",
+            "EDGE-STACKED-MODALS",
+            "EDGE-NESTED-MENU-REFS",
+            "EDGE-SLOTTED-LIST-EXTRACT",
+            "LOCAL-VIDEO-PORTAL",
+            "LOCAL-FORUM-HUB",
+            "PUBLIC-BILIBILI-FEED",
+            "PUBLIC-BILIBILI-PLAYER",
+            "PUBLIC-FORUM-TOPICS",
+            "PUBLIC-FORUM-THREAD",
+        ]:
+            self.assertIn(required_id, ids)
+        arena_ids = [i for i in ids if i.startswith("ARENA-")]
+        self.assertEqual(
+            arena_ids,
+            [
+                "ARENA-JOINT-LEAD-FORM",
+                "ARENA-JOINT-PARTNERS-BUDGET",
+                "ARENA-JOINT-SUBMIT-DOWNLOAD",
+                "ARENA-NEG-FORM-READONLY-DISABLED",
+                "ARENA-NEG-SELECT-DISABLED-OPTION",
+                "ARENA-NEG-DOWNLOAD-GATE",
+                "ARENA-SHADOW-NESTED-OPEN",
+                "ARENA-SHADOW-CLOSED-VISUAL",
+                "ARENA-IFRAME-FEDERATION",
+                "ARENA-IFRAME-RELOAD-ISOLATION",
+                "ARENA-MEDIA-VIDEO-TRANSPORT",
+                "ARENA-MEDIA-CAPTIONS-FRAME",
+                "ARENA-MEDIA-AUDIO-PLAYLIST",
+                "ARENA-SPA-HYDRATION-ROUTES",
+                "ARENA-BFCACHE-HISTORY",
+                "ARENA-ASYNC-NAV-DOWNLOAD",
+                "ARENA-CSS-STEGANO",
+                "ARENA-SENSITIVE-VAULT",
+                "ARENA-VIRTUAL-GRID-KEYED",
+                "ARENA-MEGA-VOM-DELTA",
+                "ARENA-NEG-VIRTUAL-RECYCLE",
+            ],
+        )
+        # Every required_argv flag must be declared on that exact CLI command
+        # (guards against e.g. requiring `observe --redact-values`, a `record` flag).
+        cli_dir = real_skill.parents[3] / "crates/bsk-cli/src/cli"
+        for sc in scenarios:
+            for variant in sc.get("required_argv", []):
+                src = (cli_dir / (variant["command"].split()[0] + ".rs")).read_text(
+                    encoding="utf-8"
+                )
+                for flag in variant["args"]:
+                    if not flag.startswith("--"):
+                        continue
+                    name = flag[2:]
+                    declared = f'long = "{name}"' in src or _re.search(
+                        r"#\[arg\(long\b[^\]]*\]\s*(?:///[^\n]*\n\s*)*pub "
+                        + name.replace("-", "_")
+                        + r"\b",
+                        src,
+                    )
+                    self.assertTrue(
+                        declared,
+                        f"Scenario {sc['id']} requires {variant['command']} {flag}, "
+                        "which that command does not declare",
+                    )
+        corpus = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in [
+                *(real_skill / "assets/fixtures").glob("arena-*.html"),
+                real_skill / "scripts/serve.py",
+            ]
+        )
+        known_dom_ids = set(_re.findall(r'id=["\']([A-Za-z0-9_-]+)["\']', corpus))
+        for sc in scenarios:
+            if not sc["id"].startswith("ARENA-"):
+                continue
+            for sel_id in _re.findall(r"#([A-Za-z][A-Za-z0-9_-]*)", sc.get("goal", "")):
+                if sel_id.endswith("..3"):
+                    sel_id = sel_id[:-3]
+                self.assertIn(
+                    sel_id,
+                    known_dom_ids,
+                    f"Scenario {sc['id']} references #{sel_id} missing from arena fixtures",
+                )
+        manifest = audit.load(real_skill / "references/fixture-manifest.json")
+        actual_files = {
+            f.relative_to(real_skill / "assets").as_posix()
+            for f in (real_skill / "assets/fixtures").iterdir()
+            if f.is_file()
+        }
+        self.assertEqual(set(manifest.keys()), actual_files)
+        for rel, expected_sha in manifest.items():
+            full = real_skill / "assets" / rel
+            self.assertTrue(full.is_file(), f"Missing fixture {rel}")
+            self.assertEqual(audit.digest(full), expected_sha, f"Hash mismatch for {rel}")
+
+    def test_nested_menu_vom_assertions_and_gate_contract(self):
+        nested_cli = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+cmds = ["navigate", "sync", "hover", "wait-for-element", "observe", "snapshot", "click", "read"]
+if "--help" in args:
+    if args == ["--help"]:
+        body = "\\n".join(f"  {c:<18} run {c}" for c in cmds)
+        print(f"Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n{body}\\n\\nOptions:\\n  --help  Help")
+    else:
+        print(f"Usage: bsk {args[0]} [OPTIONS]")
+    sys.exit(0)
+mode = os.environ.get("FAKE_MENU_MODE", "fixed")
+cmd = args[0]
+if cmd == "navigate":
+    print(json.dumps({"ok": True, "url": args[1]}))
+elif cmd == "wait-for-element":
+    print(json.dumps({"satisfied": True}))
+elif cmd == "hover":
+    print(json.dumps({"ok": True}))
+elif cmd == "click":
+    print(json.dumps({"ok": True}))
+elif cmd == "read":
+    print(json.dumps({"items": [{"ref": "@e9", "values": {"text": "Selected audit"}, "redacted": []}]}))
+elif cmd in ("sync", "observe", "snapshot"):
+    phase = "post" if "--post" in args else "pre"
+    if phase == "pre":
+        if mode == "v050":
+            vom = (
+                "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+                "  @e1 menuitem \\"Overview\\"\\n"
+                "  @e2 menuitem \\"Workspace [has-submenu]\\""
+            )
+        else:
+            vom = (
+                "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+                "  @e1 menuitem \\"Overview\\"\\n"
+                "  @e2 menuitem \\"Workspace\\" [has-submenu]"
+                + ("\\n  @e9 menuitem \\"Audit export\\"" if mode == "leaked_pre" else "")
+            )
+    elif mode == "v050":
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace [expanded]\\"\\n"
+            "menu\\n"
+            "  @e3 menuitem \\"Members\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\""
+        )
+    elif mode == "dup_ref":
+        vom = (
+            "@vom 1\\nmenu\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history\\" [expanded]\\n"
+            "    @e5 menuitem \\"Audit export\\"\\n"
+            "    @e5 menuitem \\"Report history\\""
+        )
+    else:
+        audit_ref = "@e7" if cmd == "sync" else "@e5"
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace\\" [expanded]\\n"
+            "menu\\n"
+            "  @e3 menuitem \\"Members\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history\\" [expanded]\\n"
+            f"    {audit_ref} menuitem \\"Audit export\\"\\n"
+            "    @e8 menuitem \\"Report history\\""
+        )
+    key = "vom" if cmd == "sync" else "text"
+    print(json.dumps({key: vom}))
+"""
+        self.binary.write_text(nested_cli, encoding="utf-8")
+        self.binary.chmod(0o755)
+        real_skill = Path(__file__).resolve().parents[1]
+        nested_scenario = next(
+            s
+            for s in audit.load(real_skill / "references/scenarios.json")
+            if s["id"] == "EDGE-NESTED-MENU-REFS"
+        )
+        items = nested_scenario["nested_menu_contract"]["items"]
+
+        def run_round(run_name, mode, click_ref="@e7"):
+            out_dir = self.base / run_name
+            audit.write(self.skill / "references/scenarios.json", [nested_scenario])
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.init(
+                    NS(
+                        out=str(out_dir),
+                        bsk=str(self.binary),
+                        binary=str(self.binary),
+                        browser="chrome",
+                        candidate=run_name,
+                        port=4567,
+                    )
+                )
+
+            def ex(argv, case="EDGE-NESTED-MENU-REFS"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audit.execute(
+                        NS(
+                            run=str(out_dir),
+                            case=case,
+                            argv=argv,
+                            timeout=5,
+                            lane="browser",
+                            stdin_file=None,
+                            interactive=False,
+                            env=[f"FAKE_MENU_MODE={mode}"],
+                        )
+                    )
+                return max(
+                    (out_dir / "commands").glob("*/meta.json"),
+                    key=lambda p: p.stat().st_mtime_ns,
+                ).parent.name
+
+            r_nav = ex(["navigate", "http://127.0.0.1:4567/nested-menu"])
+            r_pre = ex(["sync", "--json"])
+            r_h1 = ex(["hover", "--ref", "@e2"])
+            r_w1 = ex(["wait-for-element", "#workspace-popper"])
+            r_h2 = ex(["hover", "--ref", "@e4"])
+            r_w2 = ex(["wait-for-element", "#advanced-popper"])
+            r_obs = ex(["observe", "--post", "--json"])
+            r_snap = ex(["snapshot", "--post", "--json"])
+            r_sync = ex(["sync", "--post", "--json"])
+            r_click = ex(["click", "--ref", click_ref])
+            r_read = ex(["read", "--selector", "#menu-selection-receipt"])
+            records = [r_nav, r_pre, r_h1, r_w1, r_h2, r_w2, r_obs, r_snap, r_sync, r_click, r_read]
+            checks = [
+                {"record": r_pre, "pointer": "/json/vom", "op": "vom_no_ref", "value": items},
+                {"record": r_obs, "pointer": "/json/text", "op": "vom_distinct_refs", "value": items},
+                {"record": r_snap, "pointer": "/json/text", "op": "vom_distinct_refs", "value": items},
+                {"record": r_sync, "pointer": "/json/vom", "op": "vom_distinct_refs", "value": items},
+                {"record": r_read, "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"},
+            ]
+            return out_dir, records, checks
+
+        # 1) 0.5.0 parent-concatenated menuitem fails vom_distinct_refs and gate()
+        d_050, recs_050, checks_050 = run_round("r050", "v050")
+        self.assertTrue(audit.assertion(d_050, checks_050[0]))
+        for c in checks_050[1:4]:
+            self.assertFalse(audit.assertion(d_050, c))
+        audit.write(
+            d_050 / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_050,
+                        "oracle_summary": "0.5.0 check",
+                        "checks": [{"record": recs_050[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            code_050 = audit.gate(d_050)
+        gate_050 = audit.load(d_050 / "gate.json")
+        self.assertEqual(code_050, 1)
+        self.assertTrue(
+            any("EDGE-NESTED-MENU-REFS" in e and "independent distinct menuitem" in e for e in gate_050["errors"]),
+            gate_050["errors"],
+        )
+
+        # 2) Duplicate @eN fails vom_distinct_refs
+        d_dup, _, checks_dup = run_round("rdup", "dup_ref")
+        self.assertFalse(audit.assertion(d_dup, checks_dup[1]))
+
+        # 3) Pre-expansion leaked ref fails vom_no_ref and gate()
+        d_leak, recs_leak, checks_leak = run_round("rleak", "leaked_pre")
+        self.assertFalse(audit.assertion(d_leak, checks_leak[0]))
+        audit.write(
+            d_leak / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_leak,
+                        "oracle_summary": "leaked pre check",
+                        "checks": [{"record": recs_leak[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_leak)
+        gate_leak = audit.load(d_leak / "gate.json")
+        self.assertTrue(
+            any("Pre-expansion sync exposed actionable child ref" in e for e in gate_leak["errors"]),
+            gate_leak["errors"],
+        )
+
+        # 4) Clicking ref NOT taken from latest sync fails gate()
+        d_wrong_ref, recs_wrong, _ = run_round("rwrong", "fixed", click_ref="@e5")
+        audit.write(
+            d_wrong_ref / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_wrong,
+                        "oracle_summary": "wrong ref check",
+                        "checks": [{"record": recs_wrong[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_wrong_ref)
+        gate_wrong = audit.load(d_wrong_ref / "gate.json")
+        self.assertTrue(
+            any("Click ref @e5 does not match latest sync ref @e7" in e for e in gate_wrong["errors"]),
+            gate_wrong["errors"],
+        )
+
+        # 5) Fixed candidate passes every assertion and EDGE-NESTED-MENU-REFS in gate()
+        d_ok, recs_ok, checks_ok = run_round("rok", "fixed", click_ref="@e7")
+        for c in checks_ok:
+            self.assertTrue(audit.assertion(d_ok, c), c)
+        audit.write(
+            d_ok / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_ok,
+                        "oracle_summary": "Verified nested menu refs and receipt",
+                        "checks": checks_ok,
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_ok)
+        gate_ok = audit.load(d_ok / "gate.json")
+        self.assertIn("EDGE-NESTED-MENU-REFS", gate_ok["passed_ids"])
+
+    def test_slotted_list_extract_gate_contract(self):
+        slotted_cli = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if "--help" in args:
+    if args == ["--help"]:
+        print("Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n  navigate  Go\\n  extract   Extract\\n\\nOptions:\\n  --help  Help")
+    elif args == ["extract", "--help"]:
+        print("Usage: bsk extract <COMMAND>\\n\\nCommands:\\n  discover  Discover\\n  list      List\\n\\nOptions:\\n  --help  Help")
+    else:
+        print("Usage: bsk " + " ".join(args[:-1]) + " [OPTIONS]")
+    sys.exit(0)
+mode = os.environ.get("FAKE_SLOTTED_MODE", "fixed")
+if args[0] == "navigate":
+    print(json.dumps({"ok": True, "url": args[1]}))
+elif args[:2] == ["extract", "discover"]:
+    print(json.dumps({
+        "targets": [
+            {"target_id": "xt_slotted", "kind": "list", "name": "Shadow Slotted Runbook List", "columns": ["text", "url"]},
+            {"target_id": "xt_nested", "kind": "list", "name": "Nested mTLS Sub-checks", "columns": ["text", "url"]}
+        ]
+    }))
+elif args[:2] == ["extract", "list"]:
+    if "--selector" in args:
+        print(json.dumps({
+            "rows": [{"text": "Sub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/mtls"}],
+            "row_sources": [{"source_row": 1}],
+            "warnings": [],
+            "coverage": {"truncated": False, "dataset_complete": "complete"}
+        }))
+    elif mode == "v050":
+        print(json.dumps({
+            "rows": [{"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}],
+            "row_sources": [{"source_row": 1}],
+            "warnings": [],
+            "coverage": {"truncated": False, "dataset_complete": "complete"}
+        }))
+    elif mode == "bad_details_pos":
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/canary"},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 2}, {"source_row": 4}],
+            "warnings": ["hidden_rows_omitted"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+    elif mode == "ambiguous_nested_url":
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": None},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 3}, {"source_row": 5}],
+            "warnings": ["hidden_rows_omitted", "ambiguous_default_url"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+    else:
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/canary"},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 3}, {"source_row": 5}],
+            "warnings": ["hidden_rows_omitted"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+"""
+        self.binary.write_text(slotted_cli, encoding="utf-8")
+        self.binary.chmod(0o755)
+        real_skill = Path(__file__).resolve().parents[1]
+        slotted_scenario = next(
+            s
+            for s in audit.load(real_skill / "references/scenarios.json")
+            if s["id"] == "EDGE-SLOTTED-LIST-EXTRACT"
+        )
+
+        def run_slotted(run_name, mode, target_id="xt_slotted"):
+            out_dir = self.base / run_name
+            audit.write(self.skill / "references/scenarios.json", [slotted_scenario])
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.init(
+                    NS(
+                        out=str(out_dir),
+                        bsk=str(self.binary),
+                        binary=str(self.binary),
+                        browser="chrome",
+                        candidate=run_name,
+                        port=4567,
+                    )
+                )
+
+            def ex(argv):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audit.execute(
+                        NS(
+                            run=str(out_dir),
+                            case="EDGE-SLOTTED-LIST-EXTRACT",
+                            argv=argv,
+                            timeout=5,
+                            lane="browser",
+                            stdin_file=None,
+                            interactive=False,
+                            env=[f"FAKE_SLOTTED_MODE={mode}"],
+                        )
+                    )
+                return max(
+                    (out_dir / "commands").glob("*/meta.json"),
+                    key=lambda p: p.stat().st_mtime_ns,
+                ).parent.name
+
+            r_nav = ex(["navigate", "http://127.0.0.1:4567/arena-shadow-iframe"])
+            r_disc = ex(["extract", "discover", "--json"])
+            r_outer = ex(["extract", "list", "--target-id", target_id, "--json"])
+            r_inner = ex(["extract", "list", "--selector", "#shadow-nested-sublist", "--json"])
+            recs = [r_nav, r_disc, r_outer, r_inner]
+            audit.write(
+                out_dir / "results.json",
+                {
+                    "cases": [
+                        {
+                            "id": "EDGE-SLOTTED-LIST-EXTRACT",
+                            "status": "passed",
+                            "records": recs,
+                            "oracle_summary": "slotted list check",
+                            "checks": [
+                                {
+                                    "record": r_inner,
+                                    "pointer": "/json/rows/0/text",
+                                    "op": "eq",
+                                    "value": "Sub-check: mTLS cert pinned",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.gate(out_dir)
+            return audit.load(out_dir / "gate.json")
+
+        g_v050 = run_slotted("slotted_v050", "v050")
+        self.assertTrue(
+            any("Slotted outer list row count 1 != 3" in e for e in g_v050["errors"]),
+            g_v050["errors"],
+        )
+
+        g_pos = run_slotted("slotted_pos", "bad_details_pos")
+        self.assertTrue(
+            any("source_row [1, 2, 4] != [1, 3, 5]" in e for e in g_pos["errors"]),
+            g_pos["errors"],
+        )
+
+        g_url = run_slotted("slotted_url", "ambiguous_nested_url")
+        self.assertTrue(
+            any("does not end with '/runbook/canary'" in e for e in g_url["errors"]),
+            g_url["errors"],
+        )
+
+        g_tid = run_slotted("slotted_tid", "fixed", target_id="xt_wrong")
+        self.assertTrue(
+            any("Missing extract list --target-id xt_slotted" in e for e in g_tid["errors"]),
+            g_tid["errors"],
+        )
+
+        g_ok = run_slotted("slotted_ok", "fixed")
+        self.assertIn("EDGE-SLOTTED-LIST-EXTRACT", g_ok["passed_ids"])
+
+
+if __name__ == "__main__":
+    unittest.main()

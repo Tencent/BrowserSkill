@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { mergeRequest } from "../journal";
 import { DebugNetworkStore, MAX_INFLIGHT, MAX_REQUESTS } from "../network-store";
 import type { DebugRequest } from "../types";
@@ -8,13 +9,13 @@ function fixture(send = vi.fn(async () => ({ body: '{"saved":false}' }))) {
   let sequence = 0;
   const store = new DebugNetworkStore(
     "d1",
-    { send: send as never },
+    { sendToEventSource: send as never },
     () => ++sequence,
     Date.now,
     (entry) => saved.set(entry.id, structuredClone(mergeRequest(saved.get(entry.id), entry))),
   );
   const event = (method: string, data: object) =>
-    store.onEvent({ tabId: 7 }, `Network.${method}`, data);
+    store.onEvent(rootEventSource(7), `Network.${method}`, data);
   const start = (id: string) =>
     event("requestWillBeSent", {
       requestId: id,
@@ -52,7 +53,9 @@ describe("in-flight evidence retention", () => {
       duration_ms: 19000,
       response_body: { state: "available", text: '{"saved":false}' },
     });
-    expect(f.send).toHaveBeenCalledWith(7, "Network.getResponseBody", { requestId: "slow" });
+    expect(f.send).toHaveBeenCalledWith(rootEventSource(7), "Network.getResponseBody", {
+      requestId: "slow",
+    });
   });
 
   it("preserves an already running body job when its request leaves the recent cache", async () => {

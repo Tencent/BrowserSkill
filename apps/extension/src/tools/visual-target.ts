@@ -1,4 +1,9 @@
-import type { CdpFrame } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  isStaleFrameHandleError,
+  rootProcessBoundary,
+} from "@/browser-driver/frame-handles";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import {
@@ -9,7 +14,7 @@ import {
 } from "./geometry";
 import { type CssViewport } from "./geometry/coordinate-types";
 import { cssViewport, GeometryContext } from "./geometry/frame-context";
-import { type CdpRunner, sendToCdpTarget } from "./shared";
+import { type CdpRunner, sendToFrameHandle } from "./shared";
 import { isCaptureTerminalError, throwIfAborted } from "./vom/capture-abort";
 import { resolveVerifiedNode } from "./vom/document-identity";
 import type { DocumentIdentity } from "./vom/facts";
@@ -104,9 +109,9 @@ function stale(message: string): RpcError {
 export function sameIdentity(a: DocumentIdentity, b: DocumentIdentity): boolean {
   return (
     a.attachmentId === b.attachmentId &&
+    a.tabId === b.tabId &&
     a.frameId === b.frameId &&
-    a.target.tabId === b.target.tabId &&
-    a.target.sessionId === b.target.sessionId &&
+    a.loaderId === b.loaderId &&
     a.documentElementBackendNodeId === b.documentElementBackendNodeId
   );
 }
@@ -146,27 +151,34 @@ async function readFrame(
 ): Promise<LiveFrame | RpcError> {
   const verified = await resolveVerifiedNode(cdp, document, anchor, signal);
   if (verified.status !== "current") return stale(`visual DOM identity ${verified.status}`);
+  const guard = { attachmentId: document.attachmentId, signal };
   try {
     const slots = new Map<number, string>();
     while (true) {
       throwIfAborted(signal);
-      const reply = await sendToCdpTarget<{
+      const reply = await sendToFrameHandle<{
         result?: { deepSerializedValue?: DeepValue };
         exceptionDetails?: unknown;
-      }>(cdp, document.target, "Runtime.callFunctionOn", {
-        objectId: verified.objectId,
-        objectGroup: verified.objectGroup,
-        functionDeclaration: READ_ANCESTRY,
-        arguments: [
-          { value: VISUAL_STYLES },
-          ...Array.from(slots.values(), (objectId) => ({ objectId })),
-        ],
-        serializationOptions: {
-          serialization: "deep",
-          // At depth zero only shadow-root metadata is included, never its descendants.
-          additionalParameters: { maxNodeDepth: 0, includeShadowTree: "all" },
+      }>(
+        cdp,
+        document,
+        "Runtime.callFunctionOn",
+        {
+          objectId: verified.objectId,
+          objectGroup: verified.objectGroup,
+          functionDeclaration: READ_ANCESTRY,
+          arguments: [
+            { value: VISUAL_STYLES },
+            ...Array.from(slots.values(), (objectId) => ({ objectId })),
+          ],
+          serializationOptions: {
+            serialization: "deep",
+            // At depth zero only shadow-root metadata is included, never its descendants.
+            additionalParameters: { maxNodeDepth: 0, includeShadowTree: "all" },
+          },
         },
-      });
+        guard,
+      );
       throwIfAborted(signal);
       if (reply.exceptionDetails || !reply.result?.deepSerializedValue)
         return stale("visual ancestry unavailable");
@@ -179,7 +191,7 @@ async function readFrame(
         !result.rows.every((row) => Number.isSafeInteger(row.node) && row.node > 0)
       )
         return stale("visual ancestry incomplete");
-      if (cdp.getAttachmentId?.(document.target.tabId) !== document.attachmentId)
+      if (cdp.getAttachmentId?.(document.tabId) !== document.attachmentId)
         return stale("visual attachment changed");
       // assignedSlot is null for light children of a closed shadow host. Query only
       // these missing edges, then reread geometry and validate the assignment together.
@@ -190,30 +202,41 @@ async function readFrame(
       for (const row of missing) {
         if (slots.has(row.node)) return stale("visual slot assignment changed");
         throwIfAborted(signal);
-        const described = await sendToCdpTarget<{
+        const described = await sendToFrameHandle<{
           node?: { assignedSlot?: { backendNodeId?: number } };
-        }>(cdp, document.target, "DOM.describeNode", { backendNodeId: row.node, depth: 0 });
+        }>(cdp, document, "DOM.describeNode", { backendNodeId: row.node, depth: 0 }, guard);
         const backendNodeId = described.node?.assignedSlot?.backendNodeId;
         if (!backendNodeId) return stale("visual slot assignment unavailable");
         throwIfAborted(signal);
-        const resolved = await sendToCdpTarget<{ object?: { objectId?: string } }>(
+        const resolved = await sendToFrameHandle<{ object?: { objectId?: string } }>(
           cdp,
-          document.target,
+          document,
           "DOM.resolveNode",
           {
             backendNodeId,
             executionContextId: verified.executionContextId,
             objectGroup: verified.objectGroup,
           },
+          guard,
         );
         if (!resolved.object?.objectId) return stale("visual slot unavailable");
         slots.set(row.node, resolved.object.objectId);
       }
     }
+  } catch (error) {
+    throwIfAborted(signal);
+    if (isStaleFrameHandleError(error)) return stale("visual frame changed");
+    throw error;
   } finally {
-    await sendToCdpTarget(cdp, document.target, "Runtime.releaseObjectGroup", {
-      objectGroup: verified.objectGroup,
-    }).catch(() => {});
+    if (cdp.getAttachmentId?.(document.tabId) === document.attachmentId) {
+      await sendToFrameHandle(
+        cdp.resourceCleanup ?? cdp,
+        document,
+        "Runtime.releaseObjectGroup",
+        { objectGroup: verified.objectGroup },
+        { attachmentId: document.attachmentId, allowReattach: false },
+      ).catch(() => {});
+    }
     throwIfAborted(signal);
   }
 }
@@ -236,8 +259,8 @@ export async function resolveVisualRegionNow(
   while (frame) {
     if (
       seen.has(frame.document.frameId) ||
-      frame.document.target.tabId !== candidate.document.target.tabId ||
-      cdp.getAttachmentId?.(frame.document.target.tabId) !== frame.document.attachmentId
+      frame.document.tabId !== candidate.document.tabId ||
+      frame.document.attachmentId !== candidate.document.attachmentId
     )
       return stale("invalid visual frame path");
     seen.add(frame.document.frameId);
@@ -246,34 +269,51 @@ export async function resolveVisualRegionNow(
     frame = frame.parent?.frame;
   }
   path.reverse();
-  const frames: CdpFrame[] = path.map(({ frame }) => ({
-    frameId: frame.document.frameId,
-    target: frame.document.target,
-    ...(frame.parent
+  const tabId = candidate.document.tabId;
+  const frameHandles = new Map<string, FrameDocumentHandle>(
+    path.map(({ frame: item }) => [item.document.frameId, item.document]),
+  );
+  const frames: FrameDocumentInfo[] = path.map(({ frame: item }) => ({
+    handle: item.document,
+    frameId: item.document.frameId,
+    loaderId: item.document.loaderId,
+    processKey: "root",
+    isOutOfProcess: false,
+    ...(item.parent
       ? {
-          parentFrameId: frame.parent.frame.document.frameId,
-          ownerBackendNodeId: frame.parent.ownerBackendNodeId,
+          parentFrameId: item.parent.frame.document.frameId,
+          ownerBackendNodeId: item.parent.ownerBackendNodeId,
         }
       : {}),
   }));
   // Validate each recorded edge instead of asking the driver to fill all page owners.
-  for (const { frame } of path) {
-    if (!frame.parent) continue;
+  for (const { frame: item } of path) {
+    if (!item.parent) continue;
     throwIfAborted(signal);
-    const owner = await sendToCdpTarget<{ backendNodeId?: number }>(
-      cdp,
-      frame.parent.frame.document.target,
-      "DOM.getFrameOwner",
-      { frameId: frame.document.frameId },
-    );
-    if (owner.backendNodeId !== frame.parent.ownerBackendNodeId)
+    const parentDoc = item.parent.frame.document;
+    let owner: { backendNodeId?: number };
+    try {
+      owner = await sendToFrameHandle<{ backendNodeId?: number }>(
+        cdp,
+        parentDoc,
+        "DOM.getFrameOwner",
+        { frameId: item.document.frameId },
+        { attachmentId: parentDoc.attachmentId, signal },
+      );
+    } catch (error) {
+      throwIfAborted(signal);
+      if (isCaptureTerminalError(error)) throw error;
+      return stale("visual frame owner unavailable");
+    }
+    if (owner.backendNodeId !== item.parent.ownerBackendNodeId)
       return stale("visual frame owner changed");
   }
   const geometry = new GeometryContext(
     cdp,
-    candidate.document.target.tabId,
+    tabId,
     { rootFrameId: frames[0].frameId, frames },
     signal,
+    frameHandles,
   );
   let context: VisualContext = EMPTY_VISUAL_CONTEXT;
   let parentRead: LiveFrame | undefined;
@@ -285,34 +325,37 @@ export async function resolveVisualRegionNow(
   // out, without issuing another identity read behind the stuck command.
   const liveFrames: LiveFrame[] = [];
   for (let i = 0; i < path.length; i++) {
-    const { frame, anchor } = path[i];
-    const live = await readFrame(cdp, frame.document, anchor, signal);
+    const { frame: item, anchor: itemAnchor } = path[i];
+    const live = await readFrame(cdp, item.document, itemAnchor, signal);
     if ("code" in live) return live;
     if (live.top !== (i === 0)) return stale("visual root frame changed");
     liveFrames.push(live);
   }
+  if (cdp.getAttachmentId?.(tabId) !== candidate.document.attachmentId)
+    return stale("visual attachment changed");
   throwIfAborted(signal);
   onIdentityVerified?.();
   for (let i = 0; i < path.length; i++) {
-    const { frame, anchor } = path[i];
+    const { frame: item, anchor: itemAnchor } = path[i];
     const live = liveFrames[i];
     if (i === 0) topDpr = live.dpr;
-    const metrics = await geometry.layoutMetrics(frame.document.target);
+    const metrics = await geometry.layoutMetrics(item.document);
     const viewport = cssViewport(metrics);
     const projections: GeometryProjection[] = [];
-    if (frame.parent) {
-      const parent = frame.parent.frame.document;
+    if (item.parent) {
+      const parent = item.parent.frame.document;
       const size = parentRead!.rows[0].contentSize;
       if (![size.width, size.height].every((n) => Number.isFinite(n) && n > 0))
         return stale("iframe content size unavailable");
-      const parentViewport = await geometry.viewport(parent.target);
+      const parentViewport = await geometry.viewport(parent);
       if (!parentViewport) return stale("parent viewport unavailable");
       const local = await geometry.snapshotProjection(
-        { target: parent.target, frameId: frame.document.frameId },
-        frame.parent.ownerBackendNodeId,
+        { process: rootProcessBoundary(tabId), frameId: item.document.frameId },
+        item.parent.ownerBackendNodeId,
         [],
         parentViewport,
         size,
+        parent,
       );
       const outer = await geometry.targetProjection(parent.frameId);
       if (local.status !== "available" || !outer)
@@ -328,8 +371,8 @@ export async function resolveVisualRegionNow(
     const unit = projectVisualBox({ x: 0, y: 0, width: 1, height: 1 }, projections);
     if (!unit || !(unit.width > 0 && unit.height > 0)) return stale("visual mapping unavailable");
     mappings.push({
-      document: frame.document,
-      anchor,
+      document: item.document,
+      anchor: itemAnchor,
       unit,
       viewport: {
         ...viewport,
@@ -353,7 +396,7 @@ export async function resolveVisualRegionNow(
       const row = live.rows[j];
       const isAnchor = j === 0;
       const node = {
-        document: frame.document,
+        document: item.document,
         backendNodeId: row.node,
         styles: row.styles,
         clientBox: projectVisualBox(row.client, projections),
@@ -409,7 +452,7 @@ export async function resolveVisualRegionNow(
         !sameClips(candidate.region.clips, finalRegion.clips)))
   )
     return stale("visual region changed");
-  const viewport = cssViewport(await geometry.layoutMetrics(frames[0].target));
+  const viewport = cssViewport(await geometry.layoutMetrics(path[0].frame.document));
   return { crop: finalRegion.crop, region: finalRegion, viewport, dpr: topDpr, mappings };
 }
 
@@ -426,16 +469,22 @@ export async function verifyCapturedTarget(
     while (frame) {
       const verified = await resolveVerifiedNode(cdp, frame.document, anchor, signal);
       if (verified.status !== "current") return stale(`visual DOM identity ${verified.status}`);
-      await sendToCdpTarget(cdp, frame.document.target, "Runtime.releaseObjectGroup", {
-        objectGroup: verified.objectGroup,
-      }).catch(() => {});
+      await sendToFrameHandle(
+        cdp.resourceCleanup ?? cdp,
+        frame.document,
+        "Runtime.releaseObjectGroup",
+        { objectGroup: verified.objectGroup },
+        { attachmentId: frame.document.attachmentId, allowReattach: false },
+      ).catch(() => {});
       throwIfAborted(signal);
       if (frame.parent) {
-        const owner = await sendToCdpTarget<{ backendNodeId?: number }>(
+        const parentDoc = frame.parent.frame.document;
+        const owner = await sendToFrameHandle<{ backendNodeId?: number }>(
           cdp,
-          frame.parent.frame.document.target,
+          parentDoc,
           "DOM.getFrameOwner",
           { frameId: frame.document.frameId },
+          { attachmentId: parentDoc.attachmentId, signal },
         );
         throwIfAborted(signal);
         if (owner.backendNodeId !== frame.parent.ownerBackendNodeId)
@@ -445,8 +494,7 @@ export async function verifyCapturedTarget(
       frame = frame.parent?.frame;
     }
     throwIfAborted(signal);
-    return cdp.getAttachmentId?.(candidate.document.target.tabId) ===
-      candidate.document.attachmentId
+    return cdp.getAttachmentId?.(candidate.document.tabId) === candidate.document.attachmentId
       ? null
       : stale("visual attachment changed");
   } catch (error) {
@@ -512,13 +560,17 @@ export async function verifyVisualHit(
     const verified = await resolveVerifiedNode(cdp, document, anchor, signal);
     if (verified.status !== "current") return false;
     try {
-      const result = await sendToCdpTarget<{
+      const result = await sendToFrameHandle<{
         result?: { value?: boolean };
         exceptionDetails?: unknown;
-      }>(cdp, document.target, "Runtime.callFunctionOn", {
-        objectId: verified.objectId,
-        objectGroup: verified.objectGroup,
-        functionDeclaration: `function(x,y) {
+      }>(
+        cdp,
+        document,
+        "Runtime.callFunctionOn",
+        {
+          objectId: verified.objectId,
+          objectGroup: verified.objectGroup,
+          functionDeclaration: `function(x,y) {
           if (!this.isConnected || this.ownerDocument !== document) return false;
           for(let n=this;n;n=n.parentElement || n.getRootNode().host) if(n.inert) return false;
           // Resolve roots from the verified target; closed hosts expose no shadowRoot.
@@ -533,17 +585,27 @@ export async function verifyVisualHit(
           // Check every outer scope as well, so internal hits cannot bypass an overlay.
           return path.reverse().every(({root,node}) => root.elementFromPoint(x,y)===node);
         }`,
-        arguments: [
-          { value: (point.x - unit.x) / unit.width },
-          { value: (point.y - unit.y) / unit.height },
-        ],
-        returnByValue: true,
-      });
+          arguments: [
+            { value: (point.x - unit.x) / unit.width },
+            { value: (point.y - unit.y) / unit.height },
+          ],
+          returnByValue: true,
+        },
+        { attachmentId: document.attachmentId, signal },
+      );
       if (result.exceptionDetails || result.result?.value !== true) return false;
+    } catch {
+      return false;
     } finally {
-      await sendToCdpTarget(cdp, document.target, "Runtime.releaseObjectGroup", {
-        objectGroup: verified.objectGroup,
-      }).catch(() => {});
+      if (cdp.getAttachmentId?.(document.tabId) === document.attachmentId) {
+        await sendToFrameHandle(
+          cdp.resourceCleanup ?? cdp,
+          document,
+          "Runtime.releaseObjectGroup",
+          { objectGroup: verified.objectGroup },
+          { attachmentId: document.attachmentId, allowReattach: false },
+        ).catch(() => {});
+      }
       throwIfAborted(signal);
     }
   }

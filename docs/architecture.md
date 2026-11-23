@@ -17,8 +17,10 @@ flowchart TB
 
   subgraph host [Developer machine]
   Agent -->|shell: bsk ...| CLI[bsk CLI]
-  CLI <-->|JSON Lines / UDS| Daemon[bsk daemon]
-  Daemon <-->|WebSocket JSON| Ext[bsk extension MV3]
+  Agent <-->|stdio MCP| MCP[bsk mcp — 11 domain tools]
+  CLI <-->|IpcEnvelope JSONL / UDS or Named Pipe| Daemon[bsk daemon]
+  MCP <-->|IpcEnvelope JSONL / UDS or Named Pipe| Daemon
+  Daemon <-->|WebSocket JSON — Protocol 2.0| Ext[bsk extension MV3]
   end
 
   subgraph browser [Chromium]
@@ -30,31 +32,34 @@ flowchart TB
 
 ## Components
 
-### bsk CLI (`crates/bsk-cli`)
+### bsk CLI & MCP server (`crates/bsk-cli`)
 
-- Parses verb-noun subcommands (`bsk session start`, `bsk click`, …).
+- Parses verb-noun subcommands (`bsk open`, `bsk sync`, `bsk click`, `bsk step`, `bsk plan`, …) and hosts the stdio MCP server (`bsk mcp`) exposing 11 default domain tools (`bsk_session`, `bsk_page`, `bsk_inspect`, `bsk_interact`, `bsk_plan`, `bsk_tabs`, `bsk_assist`, `bsk_ledger`, `bsk_debug`, `bsk_video`, `bsk_record`, plus opt-in `bsk_recipe` when `BSK_RECIPES=1`).
 - Uses IPC to discover a running daemon. Automatically starts one only when
   discovery or its listener is absent, unless `BSK_AUTO_START=0` disables implicit
   startup. See [sandboxed agent setup](sandboxed-agents.md) for host-managed daemons.
-- Speaks JSON Lines over `$BSK_HOME/run/daemon.sock` (Unix) or a named pipe (Windows);
-  the default home is `~/.bsk`.
+- Speaks `IpcEnvelope` JSON Lines over `$BSK_HOME/run/daemon.sock` (Unix domain socket) or a deterministic Named Pipe `\\.\pipe\bsk-daemon-<hash>` derived from the user and endpoint/`BSK_HOME` (Windows); the default home is `~/.bsk`.
 - Renders human-readable output by default; `--json` emits structured responses.
 
 Key modules:
 
 | Module | Role |
 | --- | --- |
-| `cli/` | Clap command tree, per-tool handlers |
-| `ipc_client.rs` | UDS client, line framing |
-| `daemon/` | WS server, session routing, idle shutdown |
+| `cli/` | Clap command tree, zero-ceremony lifecycle (`open`/`sync`/`close`), `step`/`plan`/`view`, and `cli/mcp/` (11 MCP domain tools) |
+| `ipc_client.rs` | UDS / Windows Named Pipe client, `IpcEnvelope` line framing, rolling-upgrade envelope negotiation |
+| `daemon/` | WS server, `SessionRegistry` (queue + activity leases), `ImplicitScopeRegistry` (`scopes.rs`), `IntentWal` (`intent_wal.rs`), `DialogOperations`, `RunLogs`, idle shutdown |
 
 ### bsk daemon (same binary: `bsk daemon`)
 
 - In local mode, listens on loopback WebSocket (default **52800**, configurable with `bsk daemon start --port`) for extensions. The extension popup saves the matching connection port; saving ends existing sessions and reconnects when enabled.
 - Server mode supports authenticated remote extension connections with device pairing, renewal and revocation. Native TLS or a TLS reverse proxy provides WSS; the deployment supervisor owns server restarts.
-- Validates `Origin: chrome-extension://…` on handshake.
-- Maintains `browsers` (connected extensions) and `sessions` (Agent Window bindings).
-- **Per-session queue** serializes tool calls targeting one session.
+- Validates `Origin: chrome-extension://…` on upgrade and authenticates paired
+  local peers with nonce-bound HMAC proofs before the business handshake.
+  Local pairing is optional; unpaired peers retain the legacy handshake. Paired
+  identities cannot be claimed by unverified peers unless TrustLocal is explicitly
+  enabled. Origin is transcript context, not authorization. See [local pairing](local-pairing.md).
+- Maintains `browsers` (connected extensions), `sessions` (Agent Window bindings + RAII activity leases), `scopes` (caller-isolated implicit session/tab bindings, short `cN`/`oN` receipt aliases, and authoritative VOM cache), `intent_wal` (per-session/tab side-effect ledger gating retries after `effect_state: "unknown"`), `dialog_operations` (per-session native dialog state and decision lock), and `run_logs` (per-tab redacted step trace).
+- **Per-session queue** serializes session-queued tool calls while allowing `Unlocked` control/wait operations (`tool.cooperate`, `tool.dialog_accept`, `tool.dialog_dismiss`, `operation.*`) to run with active session liveness leases.
 - Forwards `tool.*` RPCs to the correct extension connection.
 
 State files under `~/.bsk/`:
@@ -62,7 +67,10 @@ State files under `~/.bsk/`:
 | File | Purpose |
 | --- | --- |
 | `daemon.lock` | Advisory lock — single daemon instance |
-| `daemon.json` | `{ sock_path, pid, ws_port, version }` |
+| `local-pairings.json` | Local daemon identity, active/unactivated devices and pending key transactions; private atomic storage |
+| `settings.json` | Persistent local authentication policy |
+| `daemon.json` | `{ sock_path, pid, ws_port, version, protocol_version, ipc_envelope }` |
+| `intent_ledger.jsonl` | Durable append-only `IntentWal` journal for uncertain browser side effects |
 | `daemon.log` | Rolling trace log |
 | `daemon.pid` | PID for status/doctor |
 
@@ -72,30 +80,32 @@ WXT / MV3 Chromium extension. Built with React popup and a service worker backgr
 
 | Directory | Responsibility |
 | --- | --- |
-| `transport/` | Pluggable `Transport` (v1: `WSTransport`) |
-| `tools/` | `ToolDispatcher` → 21 tool handlers |
-| `session-manager/` | Sessions, Agent Window, ref-store (`@e1`) |
+| `transport/` | `WSTransport` + generated Protocol `2.0` contracts (`transport/generated/`) |
+| `cooperation/` | `CooperationController` (`target` & `strict` guard policies, human intervention detection, VOM delta patching) |
+| `tools/` | `ToolDispatcher` → tool handlers, dialog control, file transfers, DOM extraction |
+| `session-manager/` | Sessions, Agent Window, stable ref-store (`@e1`) |
 | `browser-driver/` | CDP-backed browser operations |
-| `entrypoints/popup/` | Connection status UI |
-| `content/` | Control overlay in Agent Windows |
+| `entrypoints/popup/` | Connection status & pairing UI |
+| `content/` | Control overlay & human activity probes in controlled tabs |
 
 ### bsk-protocol (`crates/bsk-protocol`)
 
-Shared Rust types + JSON Schema generation. TypeScript mirrors frame shapes in
-`apps/extension/src/transport/types.ts` (kept in sync via tests and schema dumps).
+Single source of truth (`MethodSpec` in `method.rs` + `catalog.rs`) for Protocol `2.0`
+wire frames, dispatch/deadline/outcome policies, `ActionMetadata` injection, JSON Schemas
+(`crates/bsk-protocol/schema/`), and generated TypeScript contracts
+(`apps/extension/src/transport/generated/`, verified by `pnpm protocol:check`).
 
 ### Control policy and action evidence
 
-Protocol 1.8 adds explicit `control_policy` negotiation on `tool.cooperate` sync/enable.
-New CLI/plugin syncs and step post-syncs request `auto`, which preserves an established policy
-or selects `target` for an unconfigured session. Legacy callers that omit the field retain
-`strict`. Explicit `strict` or `target` selects a policy that is fixed for the session.
-CLI and daemon check peer support before
-forwarding new evidence fields; an older peer cannot silently discard a condition.
-Support is within protocol major 1, starting at 1.8; a future major is not assumed compatible.
-With a current CLI and an older extension, every sync/enable and step must explicitly request
-`strict`; conditions still require upgraded peers. A plugin that sends `--policy` requires a
-CLI that recognizes it. Upgrade the CLI and restart its daemon when the flag is unsupported.
+Protocol `2.0` enforces a unified handshake floor across CLI, daemon, and extension
+(see [version compatibility](protocol-compatibility.md)) and negotiates `control_policy`
+on `tool.cooperate` sync/enable. Zero-ceremony `bsk open` / `bsk sync`, `cooperate sync`,
+and `step` post-syncs request `auto` by default, selecting `target` policy for an
+unconfigured session and preserving an established policy thereafter. Explicit `--policy strict`
+or `--policy target` fixes the session's policy on first sync. Daemon `ImplicitScopeRegistry`
+mints short `cN` / `oN` aliases for `context_id` / `observation_id` in CLI and MCP envelopes
+and caches the latest authoritative VOM per `(session_id, tab_id)` across `unchanged` and
+text-patched `delta` syncs.
 
 `ActionMetadata` defines the shared wire fields below. Schema generation merges them into
 guarded action parameter schemas, including script/file operations and the active variants of
@@ -122,7 +132,7 @@ Conditions are browser-side preconditions, not an atomic transaction with the ap
 
 Action failures preserve `reason`, `phase`, `effect_state` and recovery guidance; failed conditions
 include target, field, expected and actual values. Unknown outcomes require application reconciliation.
-The daemon and plugin never replace caller receipts or automatically replay a business action.
+The daemon and `bsk mcp` never replace explicit caller receipts or automatically replay a business action.
 Completed tool results survive ordinary page/frame changes and unavailable post-action collection.
 Document or coverage changes still revoke the old context; subsequent actions require a fresh sync.
 In-flight input guards, human intervention, stop and cancellation remain enforced. A completed
@@ -138,7 +148,7 @@ See [shared browser control](shared-browser-control.zh-CN.md) for lifecycle deta
 5. Response travels CLI ← daemon ← extension; CLI prints result and exits.
 
 The [scroll-to primitive reference](scroll-to.md) documents `tool.scroll_to`,
-including its CLI/plugin mappings, visible-bounds contract and cancellation
+including its CLI/MCP mappings, visible-bounds contract and cancellation
 behavior. It follows the same routing path and is classified as a browser
 mutation for session queueing and user-interruption gating.
 
@@ -237,25 +247,44 @@ browser-skill/
 │   │   └── skill/        # Canonical CLI SKILL.md + references/
 │   └── bsk-protocol/      # Wire types + schemas
 ├── install.sh            # CLI installer (GitHub Releases)
-├── packages/dsh-plugin-browserskill/skill/  # DSH SKILL.md + references/
 └── docs/                 # architecture, guides
 ```
 
 
-The two skill directories above are the only authored skill sources. The CLI build
+`crates/bsk-cli/skill/` is the single canonical authored skill source. The CLI build
 embeds every file from its crate-local directory without copying or modifying sources.
 Installation writes the complete package. A versioned `.bsk-source` manifest tracks
 SHA-256 checksums per file; automatic updates verify all managed files and new-path
 collisions before replacing anything. Resources precede the entry point, and a pending
 manifest records expected old/new hashes so interrupted writes can be resumed safely.
 Known historical single-file checksums in `src/skill_install/legacy-digests.txt` are
-migration data, not a third instruction source. They recognize exact LF originals
+migration data, not a separate instruction source. They recognize exact LF originals
 and CRLF copies; recorded per-file checksums remain byte-exact. Frozen pre-bundle
 snapshots under `tests/fixtures/legacy-skills/` cover adoption and edit protection
-without requiring Git history during CI. Explicit custom installations opt out.
+without requiring Git history during CI. Explicit custom installations opt out. CI
+validates local links, entry point budgets, and Cargo package contents.
 
-The DSH build embeds only its entry point. Its npm package ships the complete `skill/`
-directory, registered with a module-relative `resourceBase` so agents can read references
-on demand regardless of their working directory. CI validates local links, entry point
-budgets, Cargo contents and the actual npm archive, including resource resolution from
-the unpacked runtime.
+## Local authorization lifecycle
+
+The extension first sends `system.ping` with `params.local_auth`. The daemon
+selects an offered active or staged credential and proves possession of its key;
+only then does the extension send its client proof. No business frames, registry
+updates or session purges happen before authorization succeeds.
+
+Activation and requested rotation persist a candidate, send `ready.rotation`,
+wait for the extension's strict IndexedDB commit and confirmation, then durably
+commit before sending `committed`. Recovery uses `ready.commit`, the saved key,
+and the current connection transcript. The extension promotes the candidate
+strictly before its business handshake. Exactly one final message is accepted.
+
+Device gates serialize the prelude, rotation, final authorization plus registry
+insertion, and revocation. Replacement activates the new record and revokes the
+old one atomically; socket and session cleanup finishes before success is reported.
+The daemon owns its loaded store only after acquiring `daemon.lock`. Online
+maintenance uses IPC; offline maintenance holds that same lock. Persistent
+revocation is also checked every second without blocking the async executor.
+
+The extension shares IndexedDB version 2 between independent `connection`, `local`
+and `migration` stores. Keys never enter `chrome.storage`, URLs sent over the
+network, or logs. A staged verifier has its own socket and no business dispatcher.
+The business transport reports connected only after its authenticator finishes.

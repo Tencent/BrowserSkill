@@ -1,16 +1,5 @@
 export const RECORD_FRAME_PORT = "bsk-record-frame";
-export const RECORD_FRAME_QUERY = "bsk-record-frame-query";
 export const RECORD_FRAME_START = "bsk-record-frame-start";
-
-export interface RecordFrameQueryMessage {
-  type: typeof RECORD_FRAME_QUERY;
-}
-
-export interface RecordFrameQueryResponse {
-  active: boolean;
-  requestId?: string;
-  startedAtMs?: number;
-}
 
 export interface RecordFrameStartMessage {
   type: typeof RECORD_FRAME_START;
@@ -30,9 +19,22 @@ export type RecordFramePortMessage =
       producerId: string;
     }
   | {
+      type: "subframe_added";
+      requestId: string;
+      producerId: string;
+    }
+  | {
       type: "stop";
       requestId: string;
       commandId: string;
+    }
+  | {
+      type: "cleanup";
+      requestId: string;
+    }
+  | {
+      type: "cleaned";
+      requestId: string;
     }
   | {
       type: "cancel";
@@ -45,14 +47,6 @@ export type RecordFramePortMessage =
       ok: boolean;
       error?: string;
     };
-
-export function isRecordFrameQueryMessage(value: unknown): value is RecordFrameQueryMessage {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as { type?: unknown }).type === RECORD_FRAME_QUERY
-  );
-}
 
 export function isRecordFrameStartMessage(value: unknown): value is RecordFrameStartMessage {
   if (typeof value !== "object" || value === null) return false;

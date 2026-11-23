@@ -52,6 +52,47 @@ describe("BorrowConfirmationOverlay", () => {
       await vi.advanceTimersByTimeAsync(150);
     });
     expect(onDeny).toHaveBeenCalledTimes(1);
+    expect(onDeny).toHaveBeenCalledWith(true);
+    expect(onAllow).not.toHaveBeenCalled();
+  });
+
+  it("passes timedOut: true when an inactive-tab toast progress transition ends", async () => {
+    const onAllow = vi.fn();
+    const onDeny = vi.fn();
+
+    const { container } = render(
+      <BorrowConfirmationOverlay
+        requests={[
+          {
+            id: "req-toast-timeout",
+            isActiveTab: false,
+            tabTitle: "Background Tab",
+            timeoutMs: 3_000,
+            onAllow,
+            onDeny,
+          },
+        ]}
+      />,
+    );
+
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    }
+    const toast = container.querySelector("[data-slot='borrow-confirmation-toast']");
+    expect(toast).toBeTruthy();
+    const progressBar = toast!.querySelector("[style*='width']");
+    expect(progressBar).toBeTruthy();
+    await act(() => {
+      const event = new TransitionEvent("transitionend", { bubbles: true });
+      Object.defineProperty(event, "propertyName", {
+        value: "width",
+        configurable: true,
+      });
+      progressBar!.dispatchEvent(event);
+    });
+    expect(onDeny).toHaveBeenCalledExactlyOnceWith(true);
     expect(onAllow).not.toHaveBeenCalled();
   });
 

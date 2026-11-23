@@ -1,18 +1,18 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "RecordStartResult",
-  "type": "object",
-  "required": [
-    "recording",
-    "tab_id"
-  ],
   "properties": {
     "recording": {
       "type": "boolean"
     },
     "tab_id": {
-      "type": "integer",
-      "format": "int64"
+      "format": "int64",
+      "type": "integer"
     }
-  }
+  },
+  "required": [
+    "tab_id",
+    "recording"
+  ],
+  "title": "RecordStartResult",
+  "type": "object"
 }

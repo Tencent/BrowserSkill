@@ -1,6 +1,4 @@
-import type { CdpDebuggee } from "@/browser-driver/chromium-cdp";
-import type { CdpRunner } from "@/tools/shared";
-import { sendToCdpTarget } from "@/tools/shared";
+import type { TabEventSource } from "@/browser-driver/frame-handles";
 import { requestMetadata } from "./journal";
 import { jsonPointer } from "./json-source";
 import {
@@ -54,10 +52,18 @@ interface Event {
     stack?: { callFrames?: { url?: string; lineNumber?: number; functionName?: string }[] };
   };
 }
+export interface DebugNetworkCdp {
+  sendToEventSource<T = unknown>(
+    source: TabEventSource,
+    method: string,
+    params?: object,
+  ): Promise<T>;
+}
+
 interface RequestRecord {
   entry: DebugRequest;
   rawId: string;
-  target: CdpDebuggee & { tabId: number };
+  target: TabEventSource;
   timestamp?: number;
   expectsExtra?: boolean;
 }
@@ -125,14 +131,14 @@ export class DebugNetworkStore {
 
   constructor(
     private readonly runId: string,
-    private readonly cdp: CdpRunner,
+    private readonly cdp: DebugNetworkCdp,
     private readonly changed: () => number,
     private readonly now: () => number = Date.now,
     private readonly retain?: (entry: DebugRequest) => void,
   ) {}
 
-  private key(source: CdpDebuggee, requestId: string): string {
-    return `${source.sessionId ?? "root"}:${requestId}`;
+  private key(source: TabEventSource, requestId: string): string {
+    return `${source.targetKey}:${requestId}`;
   }
 
   private tracked(id: string): boolean {
@@ -149,7 +155,7 @@ export class DebugNetworkStore {
     return this.entries.size + this.inflight.size;
   }
 
-  onEvent(source: CdpDebuggee & { tabId: number }, method: string, raw: unknown): void {
+  onEvent(source: TabEventSource, method: string, raw: unknown): void {
     if (!this.accepting || !method.startsWith("Network.")) return;
     const event = raw as Event;
     if (!event?.requestId) return;
@@ -401,12 +407,12 @@ export class DebugNetworkStore {
       this.jobs += 1;
       // Never call send(), which can reattach a returned tab. The production
       // runner supplies a direct command guarded by current task ownership.
-      void sendToCdpTarget<{ body: string; base64Encoded?: boolean }>(
-        this.cdp,
-        record.target,
-        "Network.getResponseBody",
-        { requestId: record.rawId },
-      )
+      void this.cdp
+        .sendToEventSource<{ body: string; base64Encoded?: boolean }>(
+          record.target,
+          "Network.getResponseBody",
+          { requestId: record.rawId },
+        )
         .then((result) => {
           if (!this.alive || !this.tracked(record.entry.id)) return;
           let body = result.body;
@@ -527,7 +533,7 @@ export class DebugNetworkStore {
   }
 
   /** Called on the CDP event path; annotations can precede requestWillBeSent. */
-  annotate(source: CdpDebuggee, rawId: string, annotation: ControlAnnotation): void {
+  annotate(source: TabEventSource, rawId: string, annotation: ControlAnnotation): void {
     const key = this.key(source, rawId);
     let requestBody: ReturnType<typeof redactBody> | undefined;
     let responseBody: ReturnType<typeof redactBody> | undefined;
@@ -565,13 +571,18 @@ export class DebugNetworkStore {
         },
       };
     }
+    const existing = this.annotations.get(key);
+    if (existing) this.annotations.delete(key);
     this.annotations.set(key, {
-      value: annotation,
-      requestBody,
-      responseBody,
-      responseHeaders,
-      headersTruncated: headers.truncated,
-      urlState,
+      value: { ...(existing?.value ?? {}), ...annotation },
+      requestBody: annotation.effective !== undefined ? requestBody : existing?.requestBody,
+      responseBody: annotation.mock !== undefined ? responseBody : existing?.responseBody,
+      responseHeaders: annotation.mock !== undefined ? responseHeaders : existing?.responseHeaders,
+      headersTruncated:
+        annotation.effective !== undefined
+          ? headers.truncated
+          : (existing?.headersTruncated ?? false),
+      urlState: annotation.effective !== undefined ? urlState : existing?.urlState,
     });
     while (this.annotations.size > 64)
       this.annotations.delete(this.annotations.keys().next().value!);
@@ -630,10 +641,10 @@ export class DebugNetworkStore {
     return (this.entries.get(id) ?? this.inflight.get(id))?.entry;
   }
 
-  detachTarget(sessionId: string): void {
+  detachTarget(targetKey: string): void {
     for (const record of this.records()) {
       const { entry, target } = record;
-      if (target.sessionId !== sessionId || entry.state !== "pending") continue;
+      if (target.targetKey !== targetKey || entry.state !== "pending") continue;
       entry.state = "interrupted";
       entry.error = "frame_detached";
       entry.finished_at = this.now();

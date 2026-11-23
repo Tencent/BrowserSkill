@@ -284,7 +284,7 @@ it("adds cooperation controls to the same card only after receiving real coopera
   await vi.advanceTimersByTimeAsync(1100);
   const card = f.find('[data-slot="control-overlay-card"]')!;
   const glow = f.find('[data-slot="control-overlay"]');
-  expect(card.querySelectorAll("button")).toHaveLength(1);
+  expect(card.querySelectorAll(".bsk-cooperation-actions button")).toHaveLength(1);
   expect(card.getAttribute("data-mode")).toBeNull();
   f.send({ type: INPUT_PASSTHROUGH, phase: "begin", id: "claim-click" });
   vi.mocked(chrome.runtime.sendMessage).mockClear();
@@ -294,11 +294,11 @@ it("adds cooperation controls to the same card only after receiving real coopera
   expect(f.find('[data-slot="cooperation-toolbar"]')).toBe(card);
   expect(f.find('[data-slot="control-overlay"]')).toBe(glow);
   expect(card.getAttribute("data-mode")).toBe("held");
-  expect(card.querySelectorAll("button")).toHaveLength(2);
+  expect(card.querySelectorAll(".bsk-cooperation-actions button")).toHaveLength(2);
   expect(f.visible("control-overlay-blocker")).toBe(false);
   const host = document.querySelector("browser-skill-overlay")!;
   expect(host.hasAttribute("data-bsk-overlay-surface")).toBe(false);
-  expect(host.hasAttribute(INPUT_PASSTHROUGH_ATTR)).toBe(false);
+  expect(host.hasAttribute(INPUT_PASSTHROUGH_ATTR)).toBe(true);
   expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
 });
 
