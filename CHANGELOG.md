@@ -50,6 +50,7 @@ determines which versions can connect.
 
 ### Fixed
 
+- Bounded Chrome debugger attachment waits to 10 seconds, returned a clear error when an attach does not answer, and fenced late attach completions so they are detached before a retry (#452).
 - Hardened daemon WebSocket lifecycle, audit resilience, dynamic `tool.debug` mutation policy, auto-update handover, and file-transfer/operational hygiene:
   - Added an explicit `Pending` close/cancellation token (`BrowserClient::close()`) and listener-wide shutdown `AbortToken` + task drain wired into `run_accept_loop`, `drive_connection`, `spawn_browser_liveness_reaper`, reconnect eviction, and WS accept-loop shutdown (preventing in-flight handshakes from registering after `WsHandle` exits) alongside TCP keepalive (`SO_KEEPALIVE` / Unix keepalive timers), bounded WS write timeouts, and periodic server-side WS Pings so evicted or half-open browser sockets immediately wake pending waiters and release Tokio tasks, file descriptors, and 64-connection semaphore permits; replaced per-connection 1 Hz `remote-authorization.json` disk polling with a single shared metadata-cached gateway monitor that parks when idle and eliminated redundant double JSON deserialization on every inbound WS frame.
   - Made the remote gateway `TcpListener::accept()` loop log and back off on transient errors (breaking only on fatal socket errors or shutdown, matching sibling listeners) and wired `WsHandle.task` exit monitoring into `daemon/start.rs` so the daemon never lingers as a zombie if its WS listener terminates.
