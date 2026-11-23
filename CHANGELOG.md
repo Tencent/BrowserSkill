@@ -170,6 +170,9 @@ determines which versions can connect.
   rules to visible non-sensitive `<input>` and `<textarea>` values while preserving browser
   UA `text-transform: none` defaults and byte-budget accounting (follow-up to
   [#613](https://github.com/Tencent/BrowserSkill/pull/613)).
+- Recording a contenteditable editor keeps the line breaks the person typed, so a
+  multi-line edit replays with its lines instead of collapsing into one
+  ([#594](https://github.com/Tencent/BrowserSkill/issues/594)).
 
 ### Removed
 
