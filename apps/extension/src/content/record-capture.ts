@@ -492,7 +492,13 @@ export function startRecordCapture(
       hoverSurfaceSignatures.set(el, hoverSurfaceSignature(el));
     }
   }
-  let generatedControlClick: Element | null = null;
+  let generatedControlClick: { control: HTMLElement; labelEvent: MouseEvent } | null = null;
+  let generatedControlClickTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearGeneratedControlClick = () => {
+    clearTimeout(generatedControlClickTimer);
+    generatedControlClickTimer = undefined;
+    generatedControlClick = null;
+  };
   const committedValues = new WeakMap<FillableElement, string>();
   // A "show password" toggle switches type=password to text; keep masking those
   // fields across the light DOM and open/closed ShadowRoots until recording cleanup.
@@ -827,13 +833,14 @@ export function startRecordCapture(
     // Only record clicks an LLM can re-identify (named interactive controls).
     const rawTarget = primaryEventTarget(event);
     const target = describeEventTarget(rawTarget);
-    if (!target) return;
+    if (!target) return false;
     emitStep({
       op: "click",
       target,
       geometry: geometryForEventTarget(rawTarget),
       expects_navigation: true,
     });
+    return true;
   };
 
   const emitHoverCandidateBeforeAction = (actionTarget: EventTarget | null) => {
@@ -900,8 +907,13 @@ export function startRecordCapture(
     if (event.button !== 0 || isExtensionOverlayEvent(event)) return;
     observeEventShadowRoots(event);
     const target = primaryEventTarget(event);
-    if (event.detail === 0 && generatedControlClick !== null && target === generatedControlClick) {
-      generatedControlClick = null;
+    if (
+      generatedControlClick !== null &&
+      target === generatedControlClick.control &&
+      (!generatedControlClick.labelEvent.defaultPrevented ||
+        generatedControlClick.labelEvent.eventPhase !== Event.NONE)
+    ) {
+      clearGeneratedControlClick();
       return;
     }
     if (
@@ -923,8 +935,17 @@ export function startRecordCapture(
       target instanceof Element ? target.closest("a,button,input,select,textarea") : null;
     if (label instanceof HTMLLabelElement && !nestedInteractive) {
       commitFillSession();
-      generatedControlClick = label.control;
-      emitClick(event);
+      clearGeneratedControlClick();
+      const recorded = emitClick(event);
+      const control = label.control;
+      if (recorded && control && !control.matches(":disabled")) {
+        // Native label activation forwards a click with the original pointer detail.
+        const activation = { control, labelEvent: event };
+        generatedControlClick = activation;
+        generatedControlClickTimer = setTimeout(() => {
+          if (generatedControlClick === activation) clearGeneratedControlClick();
+        }, 0);
+      }
       return;
     }
 
@@ -1128,6 +1149,7 @@ export function startRecordCapture(
     stopped = true;
     handlePasswordMutations(typeObserver.takeRecords());
     commitFillSession();
+    clearGeneratedControlClick();
     document.removeEventListener("click", onClick, true);
     document.removeEventListener("mouseover", onMouseOver, true);
     document.removeEventListener("focusin", onFocusIn, true);

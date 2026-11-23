@@ -176,6 +176,10 @@ determines which versions can connect.
 - Recording a contenteditable editor keeps the line breaks the person typed, so a
   multi-line edit replays with its lines instead of collapsing into one
   ([#594](https://github.com/Tencent/BrowserSkill/issues/594)).
+- Recording deduplicates synthetic control clicks forwarded by clicking a clickable
+  `<label>` (including trusted `detail: 1` pointer clicks on checkbox/radio labels)
+  instead of recording two clicks that toggle the control twice on replay, while
+  keeping plain `<label>` activations recorded on their target control (#645).
 
 ### Removed
 

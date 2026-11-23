@@ -94,6 +94,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 - 修复结构化提取（`extract table`、`extract list` 与 `extract discover`）未对可见非敏感 `<input>` 和 `<textarea>` 值应用计算后的 CSS `text-transform`（`uppercase` 与 `lowercase`）及渲染语言环境大小写规则的问题，同时保留浏览器默认样式表的 `text-transform: none` 行为与字节预算统计（[#613](https://github.com/Tencent/BrowserSkill/pull/613) 后续完善）。
 - 录制 contenteditable 编辑器时保留用户输入的换行，多行编辑按原样重放，不再被合并成一行
   （[#594](https://github.com/Tencent/BrowserSkill/issues/594)）。
+- 修复录制模式下点击可交互 `<label>`（含带 `cursor: pointer` 的复选框/单选框标签触发的 `detail: 1` 可信转发点击）时将 `<label>` 与目标控件重复录为两次点击导致回放反复切换的问题，同时保留普通 `<label>` 激活在目标控件上的单次点击记录（#645）。
 
 ### 移除
 
