@@ -121,16 +121,15 @@ fn bsk_doctor_runs_without_running_daemon() {
     );
 
     // Clean up the daemon that was auto-spawned above.
-    if let Ok(bytes) = std::fs::read(home.join("daemon.json")) {
-        if let Ok(info) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            if let Some(pid) = info["pid"].as_u64() {
-                let _ = Command::new(bsk_bin())
-                    .args(["daemon", "stop"])
-                    .env("BSK_HOME", &home)
-                    .output();
-                wait_for_pid_exit(pid as i32, Duration::from_secs(5));
-            }
-        }
+    if let Ok(bytes) = std::fs::read(home.join("daemon.json"))
+        && let Ok(info) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && let Some(pid) = info["pid"].as_u64()
+    {
+        let _ = Command::new(bsk_bin())
+            .args(["daemon", "stop"])
+            .env("BSK_HOME", &home)
+            .output();
+        wait_for_pid_exit(pid as i32, Duration::from_secs(5));
     }
 }
 
@@ -169,16 +168,15 @@ fn bsk_doctor_json_returns_structured_checks() {
     );
 
     // Clean up the daemon that was auto-spawned above.
-    if let Ok(bytes) = std::fs::read(home.join("daemon.json")) {
-        if let Ok(info) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            if let Some(pid) = info["pid"].as_u64() {
-                let _ = Command::new(bsk_bin())
-                    .args(["daemon", "stop"])
-                    .env("BSK_HOME", &home)
-                    .output();
-                wait_for_pid_exit(pid as i32, Duration::from_secs(5));
-            }
-        }
+    if let Ok(bytes) = std::fs::read(home.join("daemon.json"))
+        && let Ok(info) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && let Some(pid) = info["pid"].as_u64()
+    {
+        let _ = Command::new(bsk_bin())
+            .args(["daemon", "stop"])
+            .env("BSK_HOME", &home)
+            .output();
+        wait_for_pid_exit(pid as i32, Duration::from_secs(5));
     }
 }
 

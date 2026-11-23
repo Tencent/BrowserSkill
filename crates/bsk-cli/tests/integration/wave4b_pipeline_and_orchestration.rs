@@ -2357,3 +2357,605 @@ async fn file_transfer_teardown_effect_state_dialog_lock_cancel_and_wait_ms_acti
 
     handle.shutdown().await;
 }
+
+fn isolated_test_state(dir: &Path) -> Arc<bsk::daemon::DaemonState> {
+    Arc::new(bsk::daemon::DaemonState::new_isolated(
+        DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        dir,
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_debug_mutating_subactions_dynamic_policy_full_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("debug-policy.sock");
+    let handle = daemon::run_with_state(isolated_test_state(dir.path()), Some(sock.clone()))
+        .await
+        .unwrap();
+
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    do_handshake(&mut ws, "dbg-browser", "Debug Policy").await;
+    let (writer, mut reader) = ws.split();
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+
+    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<RequestFrame>();
+    let ws_reader_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = reader.next().await {
+            if let Message::Text(text) = msg
+                && let Ok(Frame::Request(req)) = serde_json::from_str::<Frame>(&text)
+            {
+                let _ = req_tx.send(req);
+            }
+        }
+    });
+
+    let mut client = IpcClient::connect(&sock).await.unwrap();
+
+    // Start session over real IPC + WS.
+    let start_task = {
+        let sock = sock.clone();
+        tokio::spawn(async move {
+            let mut c = IpcClient::connect(&sock).await.unwrap();
+            c.call_envelope::<Value, Value>(
+                "start-dbg",
+                Method::SessionStart,
+                Some(json!({})),
+                IpcRequestMeta {
+                    caller_scope: Some("scope-dbg".into()),
+                    bind_scope: true,
+                    ..Default::default()
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let start_req = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(start_req.method, Method::ToolSessionStart);
+    send_ws_response(
+        &writer,
+        start_req.id,
+        ResponseBody::Ok(json!({ "agent_window_id": 77 })),
+    )
+    .await;
+    let sid = start_task.await.unwrap().0.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session_id = bsk::daemon::sessions::SessionId(sid.clone());
+
+    // Seed an implicit context for tab 10 so we can verify disconnect clears it.
+    handle.state().scopes.record_cooperate_result_with_budget(
+        &session_id,
+        None,
+        &json!({
+            "control_policy": "target",
+            "tab_id": 10,
+            "context_id": "ctx-tab-10",
+            "observation_id": "obs-tab-10",
+            "observation": { "text": "hello" }
+        }),
+    );
+
+    // (a) Clean cancel of mutating `tool.debug(replay)` where extension proves
+    //     `effect_state: "none"` before dispatch:
+    //     Must preserve `err.data.effect_state == "none"` (under `EffectAwarePage`,
+    //     not stripped by `Ordinary`) and NOT lock `intent_wal` as UNKNOWN!
+    {
+        let cancel_target = "dbg-clean-cancel".to_owned();
+        let replay_task = {
+            let sock = sock.clone();
+            let sid = sid.clone();
+            let rpc_id = cancel_target.clone();
+            tokio::spawn(async move {
+                let mut c = IpcClient::connect(&sock).await.unwrap();
+                c.call_with_id::<Value, Value>(
+                    rpc_id,
+                    Method::ToolDebug,
+                    Some(json!({
+                        "session_id": sid,
+                        "action": "replay",
+                        "tab_id": 10,
+                        "request_id": "req-1",
+                        "context_id": "ctx-tab-10"
+                    })),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let replay_req = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay_req.method, Method::ToolDebug);
+
+        let _ = client
+            .call::<Value, Value>(
+                "cancel-clean",
+                Method::Cancel,
+                Some(json!({ "rpc_id": cancel_target })),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let cancel_ws = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancel_ws.method, Method::Cancel);
+        send_ws_response(
+            &writer,
+            replay_req.id,
+            ResponseBody::Err(bsk_protocol::RpcError {
+                code: ErrorCode::Cancelled,
+                message: "cancelled before replay executed".into(),
+                data: Some(json!({
+                    "effect_state": "none",
+                    "dispatched": false,
+                    "phase": "precondition"
+                })),
+            }),
+        )
+        .await;
+
+        let replay_err = tokio::time::timeout(Duration::from_secs(3), replay_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(replay_err.code, ErrorCode::Cancelled);
+        let data = replay_err
+            .data
+            .expect("mutating ToolDebug clean cancel must preserve structured effect_state");
+        assert_eq!(data["effect_state"], "none", "data={data:?}");
+        assert!(
+            handle
+                .state()
+                .intent_wal
+                .check_gate(&session_id, Some(10))
+                .is_ok(),
+            "clean cancel of tool.debug(replay) with effect_state=none must NOT lock intent_wal as UNKNOWN"
+        );
+    }
+
+    // (b) Timeout of mutating `tool.debug(rule_add)`:
+    //     Must forward WS `Method::Cancel` at deadline (`cancel_at_deadline: true`),
+    //     return `effect_state: "unknown"`, lock `intent_wal`, AND record an uncertain
+    //     error in `run_logs` (`is_mutating_with_params: true`)!
+    {
+        let rule_task = {
+            let sock = sock.clone();
+            let sid = sid.clone();
+            tokio::spawn(async move {
+                let mut c = IpcClient::connect(&sock).await.unwrap();
+                c.call_with_id::<Value, Value>(
+                    "dbg-timeout".into(),
+                    Method::ToolDebug,
+                    Some(json!({
+                        "session_id": sid,
+                        "action": "rule_add",
+                        "tab_id": 10,
+                        "url_pattern": "*://example.com/*",
+                        "rule_action": "block",
+                        "timeout_ms": 150
+                    })),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let rule_req = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rule_req.method, Method::ToolDebug);
+
+        // Extension does not respond before 150ms -> daemon MUST forward WS `cancel`!
+        let cancel_req = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .expect("mutating tool.debug(rule_add) must forward WS cancel at deadline")
+            .unwrap();
+        assert_eq!(cancel_req.method, Method::Cancel);
+        assert_eq!(cancel_req.params.unwrap()["rpc_id"], rule_req.id);
+
+        // Extension replies cancelled without proving effect_state -> unknown effect.
+        send_ws_response(
+            &writer,
+            rule_req.id,
+            ResponseBody::Err(bsk_protocol::RpcError {
+                code: ErrorCode::Cancelled,
+                message: "cancelled during execution".into(),
+                data: None,
+            }),
+        )
+        .await;
+
+        let rule_err = tokio::time::timeout(Duration::from_secs(3), rule_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(rule_err.code, ErrorCode::Timeout);
+        let data = rule_err
+            .data
+            .expect("mutating ToolDebug timeout must include effect_state");
+        assert_eq!(data["effect_state"], "unknown", "data={data:?}");
+        assert!(
+            handle
+                .state()
+                .intent_wal
+                .check_gate(&session_id, Some(10))
+                .is_err(),
+            "unknown-effect timeout on tool.debug(rule_add) must lock intent_wal"
+        );
+        // Verify `run_log` captured the uncertain mutating `tool.debug` error.
+        let run_log = client
+            .call::<Value, Value>(
+                "run-log-check",
+                Method::SessionRunLog,
+                Some(json!({ "session_id": sid })),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let steps = run_log["steps"].as_array().unwrap();
+        assert!(
+            steps
+                .iter()
+                .any(|s| s["kind"] == "uncertain" && s["method"] == "tool.debug"),
+            "run_log must mark uncertain mutating tool.debug errors: {steps:?}"
+        );
+        // Resolve the WAL lock so we can test disconnect next.
+        handle
+            .state()
+            .intent_wal
+            .resolve_async(&session_id, Some(10), None)
+            .await;
+    }
+
+    // (c) Mid-flight browser disconnect during `tool.debug(replay)`:
+    //     Must stamp `effect_state: "unknown"` AND clear stale implicit context!
+    handle.state().scopes.record_cooperate_result_with_budget(
+        &session_id,
+        None,
+        &json!({
+            "control_policy": "target",
+            "tab_id": 10,
+            "context_id": "ctx-tab-10-fresh",
+            "observation_id": "obs-tab-10-fresh",
+            "observation": { "text": "fresh" }
+        }),
+    );
+    assert_eq!(
+        handle
+            .state()
+            .scopes
+            .implicit_target_context(&session_id, Some(10)),
+        Some("ctx-tab-10-fresh".to_owned())
+    );
+    let disc_task = {
+        let sock = sock.clone();
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            let mut c = IpcClient::connect(&sock).await.unwrap();
+            c.call_with_id::<Value, Value>(
+                "dbg-disconnect".into(),
+                Method::ToolDebug,
+                Some(json!({
+                    "session_id": sid,
+                    "action": "replay",
+                    "tab_id": 10,
+                    "request_id": "req-2"
+                })),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let disc_req = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(disc_req.method, Method::ToolDebug);
+
+    // Close the browser socket while `tool.debug(replay)` is in-flight.
+    let _ = writer.lock().await.close().await;
+    ws_reader_task.abort();
+
+    let disc_err = tokio::time::timeout(Duration::from_secs(3), disc_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    let disc_data = disc_err
+        .data
+        .expect("mutating ToolDebug disconnect must carry effect_state");
+    assert_eq!(disc_data["effect_state"], "unknown", "data={disc_data:?}");
+    assert!(
+        handle
+            .state()
+            .scopes
+            .implicit_target_context(&session_id, Some(10))
+            .is_none(),
+        "stale implicit context must be cleared after unknown-effect disconnect"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_lifecycle_races_cancellable_scope_lock_multitab_context_and_stop_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("lifecycle-races.sock");
+    let handle = daemon::run_with_state(isolated_test_state(dir.path()), Some(sock.clone()))
+        .await
+        .unwrap();
+
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    do_handshake(&mut ws, "life-browser", "Lifecycle").await;
+    let (writer, mut reader) = ws.split();
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+
+    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<RequestFrame>();
+    let _ws_reader_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = reader.next().await {
+            if let Message::Text(text) = msg
+                && let Ok(Frame::Request(req)) = serde_json::from_str::<Frame>(&text)
+            {
+                let _ = req_tx.send(req);
+            }
+        }
+    });
+
+    // --- 1. Concurrent `session.start` waiting on `scope_start_lock` is cancellable ---
+    let start_1 = {
+        let sock = sock.clone();
+        tokio::spawn(async move {
+            let mut c = IpcClient::connect(&sock).await.unwrap();
+            c.call_envelope::<Value, Value>(
+                "scope-start-1",
+                Method::SessionStart,
+                Some(json!({})),
+                IpcRequestMeta {
+                    caller_scope: Some("shared-scope".into()),
+                    bind_scope: true,
+                    ..Default::default()
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let req_1 = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(req_1.method, Method::ToolSessionStart);
+
+    // Start a second `session.start` in the SAME scope (will block on `scope_start_lock`).
+    let start_2 = {
+        let sock = sock.clone();
+        tokio::spawn(async move {
+            let mut c = IpcClient::connect(&sock).await.unwrap();
+            c.call_envelope::<Value, Value>(
+                "scope-start-2",
+                Method::SessionStart,
+                Some(json!({})),
+                IpcRequestMeta {
+                    caller_scope: Some("shared-scope".into()),
+                    bind_scope: true,
+                    ..Default::default()
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    // Wait until `scope-start-2` registers in `abort_registry`, then cancel it while `start_1` still holds the lock!
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let mut admin = IpcClient::connect(&sock).await.unwrap();
+    let _ = admin
+        .call::<Value, Value>(
+            "cancel-start-2",
+            Method::Cancel,
+            Some(json!({ "rpc_id": "scope-start-2" })),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+
+    let start_2_err = tokio::time::timeout(Duration::from_secs(2), start_2)
+        .await
+        .expect("cancelled session.start waiting on scope_start_lock must return promptly")
+        .unwrap()
+        .0
+        .unwrap_err();
+    assert_eq!(start_2_err.code, ErrorCode::Cancelled);
+
+    // Now finish `start_1`.
+    send_ws_response(
+        &writer,
+        req_1.id,
+        ResponseBody::Ok(json!({ "agent_window_id": 55 })),
+    )
+    .await;
+    let sid = start_1.await.unwrap().0.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session_id = bsk::daemon::sessions::SessionId(sid.clone());
+
+    // --- 2. Multi-tab `--context` error (without `tab_id`) clears target tab, not active tab ---
+    handle.state().scopes.record_cooperate_result_with_budget(
+        &session_id,
+        None,
+        &json!({
+            "control_policy": "target",
+            "tab_id": 101,
+            "context_id": "ctx-bg-101",
+            "observation_id": "obs-bg-101",
+            "observation": { "text": "bg" }
+        }),
+    );
+    handle.state().scopes.record_cooperate_result_with_budget(
+        &session_id,
+        None,
+        &json!({
+            "control_policy": "target",
+            "tab_id": 202,
+            "context_id": "ctx-active-202",
+            "observation_id": "obs-active-202",
+            "observation": { "text": "active" }
+        }),
+    );
+    let click_bg = {
+        let sock = sock.clone();
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            let mut c = IpcClient::connect(&sock).await.unwrap();
+            c.call::<Value, Value>(
+                "click-bg",
+                Method::ToolClick,
+                Some(json!({
+                    "session_id": sid,
+                    "ref": "@e1",
+                    "context_id": "ctx-bg-101"
+                })),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let click_req = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    send_ws_response(
+        &writer,
+        click_req.id,
+        ResponseBody::Err(bsk_protocol::RpcError {
+            code: ErrorCode::ProtocolError,
+            message: "document changed".into(),
+            data: Some(json!({ "reason": "document_changed" })),
+        }),
+    )
+    .await;
+    assert!(click_bg.await.unwrap().is_err());
+    assert!(
+        handle
+            .state()
+            .scopes
+            .implicit_target_context(&session_id, Some(101))
+            .is_none(),
+        "background tab 101's implicit context must be cleared via tab_id_for_context"
+    );
+    assert_eq!(
+        handle
+            .state()
+            .scopes
+            .implicit_target_context(&session_id, Some(202)),
+        Some("ctx-active-202".to_owned()),
+        "active tab 202's implicit context must remain intact"
+    );
+
+    // --- 3. Malformed `tool.session_stop` payload reopens queue instead of deadlocking ---
+    let bad_stop = {
+        let sock = sock.clone();
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            let mut c = IpcClient::connect(&sock).await.unwrap();
+            c.call::<Value, Value>(
+                "stop-bad-payload",
+                Method::SessionStop,
+                Some(json!({ "session_id": sid })),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let stop_req = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stop_req.method, Method::ToolSessionStop);
+    // Return an invalid payload (`return_failures` wrong type) so `serde_json::from_value` fails.
+    send_ws_response(
+        &writer,
+        stop_req.id,
+        ResponseBody::Ok(json!({ "return_failures": "not-an-array" })),
+    )
+    .await;
+    let bad_stop_err = bad_stop.await.unwrap().unwrap_err();
+    assert_eq!(bad_stop_err.code, ErrorCode::ProtocolError);
+
+    // Queue must be reopened (NOT stuck in `SessionStopping`) so a follow-up tool works!
+    let snap_after = {
+        let sock = sock.clone();
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            let mut c = IpcClient::connect(&sock).await.unwrap();
+            c.call::<Value, Value>(
+                "snap-after-bad-stop",
+                Method::ToolSnapshot,
+                Some(json!({ "session_id": sid })),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let snap_req = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snap_req.method, Method::ToolSnapshot);
+    send_ws_response(
+        &writer,
+        snap_req.id,
+        ResponseBody::Ok(json!({ "ok": true })),
+    )
+    .await;
+    assert_eq!(snap_after.await.unwrap().unwrap()["ok"], true);
+
+    // --- 4. P1 #16: `spawn_if_live` refuses orphan queues for torn-down sessions & preserves tombstones ---
+    handle
+        .state()
+        .teardown_session(&session_id, RpcErrorReason::BrowserDisconnected.as_str());
+    assert!(
+        !handle.state().tool_queues.spawn_if_live(session_id.clone()),
+        "spawn_if_live must refuse to spawn a queue worker for an ended session"
+    );
+    let dead_dispatch = handle
+        .state()
+        .tool_queues
+        .dispatch(
+            &session_id,
+            Method::ToolSnapshot,
+            json!({ "session_id": sid }),
+            Duration::from_secs(1),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .into_rpc();
+    assert_eq!(dead_dispatch.code, ErrorCode::NotFound);
+    assert_eq!(
+        dead_dispatch.data.unwrap()["reason"],
+        RpcErrorReason::BrowserDisconnected.as_str()
+    );
+
+    handle.shutdown().await;
+}

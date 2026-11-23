@@ -64,6 +64,42 @@ export type TextDeltaRefusal =
 const BUDGET_MARGIN = 64;
 
 /**
+ * Returns the character index where searchable page content starts on `line`,
+ * skipping VOM syntax prefixes (`@vom`, `L1 page`, `@eN`, role, drag hints).
+ * Lines inside a `[§ active: ...]` block are raw body text, so their full
+ * trimmed text is searchable and never patchable as a plain node.
+ */
+function contentSearchStart(
+  meta: readonly VomLineMetadata[],
+  index: number,
+  activeScopeBody: readonly boolean[],
+): number | undefined {
+  const lineMeta = meta[index]!;
+  if (activeScopeBody[index]) return lineMeta.indent;
+  return lineMeta.contentStart;
+}
+
+function activeScopeBodyMask(meta: readonly VomLineMetadata[]): boolean[] {
+  const mask = new Array<boolean>(meta.length).fill(false);
+  let activeScopeIndent: number | undefined;
+  for (let i = 0; i < meta.length; i += 1) {
+    const entry = meta[i]!;
+    if (entry.kind === "active-scope") {
+      activeScopeIndent = entry.indent;
+      continue;
+    }
+    if (activeScopeIndent !== undefined) {
+      if (entry.indent > activeScopeIndent) {
+        mask[i] = true;
+        continue;
+      }
+      activeScopeIndent = undefined;
+    }
+  }
+  return mask;
+}
+
+/**
  * Replaces one text in the held lines. Only two kinds of line may carry it: the
  * line of the text itself, and ancestors whose name is exactly their children's
  * names joined, which is how the renderer derives a name from content. Any other
@@ -79,11 +115,26 @@ function replaceText(
   const old = encodeVomNameContent(before);
   const next = encodeVomNameContent(after);
   if (old === next) return [];
-  const hits = lines.flatMap((line, index) => (line.includes(old) ? [index] : []));
+  if (!old) return "text_outside_observation";
+  if (!next) return "structure_changed";
+  const rawOld = before.replace(/\s+/g, " ").trim();
+  const rawNext = after.replace(/\s+/g, " ").trim();
+  const inActiveScope = activeScopeBodyMask(meta);
+  const hits: number[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const start = contentSearchStart(meta, index, inActiveScope);
+    if (start === undefined) continue;
+    const line = lines[index]!;
+    if (line.includes(old, start) || (rawOld !== old && line.includes(rawOld, start))) {
+      hits.push(index);
+    }
+  }
   const leaf = hits[hits.length - 1];
   if (leaf === undefined) return "text_outside_observation";
   const leafMeta = meta[leaf]!;
-  if (!leafMeta.plainNamedNode || leafMeta.escapedName !== old) return "text_ambiguous";
+  if (inActiveScope[leaf] || !leafMeta.plainNamedNode || leafMeta.escapedName !== old) {
+    return "text_ambiguous";
+  }
   const ancestors = new Set<number>();
   for (let index = leaf - 1, limit = leafMeta.indent; index >= 0 && limit > 0; index--) {
     const level = meta[index]!.indent;
@@ -93,7 +144,7 @@ function replaceText(
   }
   for (const hit of hits) {
     if (hit === leaf) continue;
-    if (!ancestors.has(hit)) return "text_ambiguous";
+    if (!ancestors.has(hit) || inActiveScope[hit]) return "text_ambiguous";
     const ancestorMeta = meta[hit]!;
     const name = ancestorMeta.escapedName;
     if (!ancestorMeta.plainNamedNode || name === undefined || name.endsWith("…"))
@@ -102,6 +153,7 @@ function replaceText(
     const children: string[] = [];
     for (let index = hit + 1; index < lines.length && meta[index]!.indent > level; index++) {
       if (meta[index]!.indent !== level + 2) continue;
+      if (inActiveScope[index]) return "text_names_other_content";
       const child = meta[index]!.escapedName;
       if (child === undefined) return "text_names_other_content";
       children.push(child);
@@ -117,25 +169,48 @@ function replaceText(
   }
   // A label cut short may end inside this text. Then no line holds the whole
   // text, yet a fresh capture would show the cut copy differently.
-  let common = 0;
-  while (common < old.length && old[common] === next[common]) common++;
-  if (common + 1 < old.length) {
-    const probe = old.slice(0, common + 1);
+  const hasTruncatedCopy = (sourceOld: string, sourceNext: string): boolean => {
+    let common = 0;
+    while (common < sourceOld.length && sourceOld[common] === sourceNext[common]) common++;
+    if (common + 1 >= sourceOld.length) return false;
+    const probe = sourceOld.slice(0, common + 1);
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      const start = contentSearchStart(meta, lineIndex, inActiveScope);
+      if (start === undefined) continue;
       const line = lines[lineIndex]!;
       const silent = meta[lineIndex]!.silentlyTruncatesLabel;
-      for (let at = line.indexOf(probe); at >= 0; at = line.indexOf(probe, at + 1)) {
+      const isScopeBody = inActiveScope[lineIndex];
+      for (let at = line.indexOf(probe, start); at >= 0; at = line.indexOf(probe, at + 1)) {
         let length = probe.length;
-        while (length < old.length && line[at + length] === old[length]) length++;
+        while (length < sourceOld.length && line[at + length] === sourceOld[length]) length++;
         const end = line[at + length];
-        if (length < old.length && (end === "…" || (silent && end === '"')))
-          return "text_cut_by_truncation";
+        if (
+          length < sourceOld.length &&
+          (end === "…" || (silent && end === '"') || (isScopeBody && end === undefined))
+        ) {
+          return true;
+        }
       }
     }
+    return false;
+  };
+  if (hasTruncatedCopy(old, next) || (rawOld !== old && hasTruncatedCopy(rawOld, rawNext))) {
+    return "text_cut_by_truncation";
   }
   for (const index of hits) {
-    if (!touched.has(index)) touched.set(index, lines[index]!);
-    lines[index] = lines[index]!.replace(old, () => next);
+    const line = lines[index]!;
+    const currentMeta =
+      meta[index]!.nameStart !== undefined && meta[index]!.nameEnd !== undefined
+        ? meta[index]!
+        : inspectVomLine(line);
+    if (currentMeta.nameStart === undefined || currentMeta.nameEnd === undefined) {
+      return "text_ambiguous";
+    }
+    if (!touched.has(index)) touched.set(index, line);
+    const { nameStart, nameEnd } = currentMeta;
+    const updatedName =
+      index === leaf ? next : line.slice(nameStart, nameEnd).replace(old, () => next);
+    lines[index] = `${line.slice(0, nameStart)}${updatedName}${line.slice(nameEnd)}`;
     meta[index] = inspectVomLine(lines[index]!);
   }
   return hits.map((index) => index + 1);

@@ -10,6 +10,17 @@ use tokio::task::JoinHandle;
 use super::ipc::{DaemonStatus, full_envelope_handler};
 use super::state::{DAEMON_VERSION, DaemonState, PROTOCOL_VERSION};
 
+/// RAII guard ensuring `on_close` always runs when a spawned IPC connection
+/// task exits, including on panic or task cancellation, so `active_connections`
+/// can never leak and block daemon idle shutdown.
+struct ConnectionCloseGuard(Arc<dyn Fn() + Send + Sync>);
+
+impl Drop for ConnectionCloseGuard {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
 /// Owning handle around a spawned IPC server task. Returned by
 /// [`IpcServer::bind`] and the public [`super::run`] helper.
 pub struct IpcHandle {
@@ -115,14 +126,14 @@ mod unix {
                     match accepted {
                         Ok((stream, _addr)) => {
                             on_open();
+                            let close_guard = super::ConnectionCloseGuard(on_close.clone());
                             let handler = handler.clone();
                             let on_act = on_activity.clone();
-                            let on_done = on_close.clone();
                             tokio::spawn(async move {
+                                let _close_guard = close_guard;
                                 if let Err(err) = handle_connection(stream, handler, on_act).await {
                                     debug!(?err, "ipc connection ended with error");
                                 }
-                                on_done();
                             });
                         }
                         Err(err) => {
@@ -195,6 +206,69 @@ mod unix {
 
 #[cfg(unix)]
 pub use unix::{bind, serve};
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn ipc_connection_close_guard_runs_even_when_handler_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("panic-guard.sock");
+        let listener = bind(&sock).await.unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let active_open = Arc::clone(&active);
+        let active_close = Arc::clone(&active);
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let handler: crate::daemon::ipc::RpcHandler = Arc::new(|_id, _method, _params| {
+            Box::pin(async move {
+                panic!("simulated IPC handler panic");
+            })
+        });
+        let server = tokio::spawn(serve(
+            listener,
+            handler,
+            move || {
+                active_open.fetch_add(1, Ordering::SeqCst);
+            },
+            || {},
+            move || {
+                active_close.fetch_sub(1, Ordering::SeqCst);
+            },
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let req = serde_json::json!({
+            "id": "panic-1",
+            "method": "system.ping",
+            "params": {}
+        });
+        stream
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+        drop(stream);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while active.load(Ordering::SeqCst) != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "active_connections leaked after IPC handler panic"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let _ = stop_tx.send(());
+        server.await.unwrap();
+    }
+}
 
 #[cfg(windows)]
 mod windows {
@@ -298,14 +372,14 @@ mod windows {
                                 }
                             }
                             on_open();
+                            let close_guard = super::ConnectionCloseGuard(on_close.clone());
                             let handler = handler.clone();
                             let on_act = on_activity.clone();
-                            let on_done = on_close.clone();
                             tokio::spawn(async move {
+                                let _close_guard = close_guard;
                                 if let Err(err) = handle_connection(pipe, handler, on_act).await {
                                     debug!(?err, "named-pipe connection ended with error");
                                 }
-                                on_done();
                             });
                         }
                         Err(err) => {

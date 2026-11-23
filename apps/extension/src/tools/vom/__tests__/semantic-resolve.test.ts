@@ -247,4 +247,59 @@ describe("semantic sibling context", () => {
       expanded: false,
     });
   });
+
+  it("never derives a sensitive input's name from AX StaticText value and masks AX-only textboxes when requested", () => {
+    const resolvedSensitive = resolveSemanticGraph(
+      graph(
+        [
+          dom(1, "main"),
+          {
+            ...dom(10, "input"),
+            attrs: { type: "text", "data-bsk-record-password": "", placeholder: "Secret" },
+          },
+        ],
+        [
+          {
+            nodeId: "ax-10",
+            backendDOMNodeId: 10,
+            role: { type: "role", value: "textbox" },
+            value: { value: "PLAIN_SECRET_VALUE" },
+            childIds: ["ax-11"],
+          },
+          {
+            nodeId: "ax-11",
+            parentId: "ax-10",
+            role: { type: "role", value: "StaticText" },
+            name: { type: "computed", value: "PLAIN_SECRET_VALUE" },
+          },
+        ],
+      ),
+    );
+    const sensitiveNode = byBackend(resolvedSensitive, 10);
+    expect(sensitiveNode?.sensitive).toBe(true);
+    expect(sensitiveNode?.value).toBeUndefined();
+    expect(sensitiveNode?.name).toBe("Secret");
+    expect(JSON.stringify(sensitiveNode)).not.toContain("PLAIN_SECRET_VALUE");
+
+    const resolvedAxOnly = resolveSemanticGraph(
+      graph(
+        [],
+        [
+          {
+            nodeId: "ax-20",
+            backendDOMNodeId: 20,
+            role: { type: "role", value: "textbox" },
+            name: { type: "computed", value: "Password" },
+            value: { value: "AX_ONLY_SECRET" },
+          },
+        ],
+      ),
+      { redactUnverifiedAxValues: true },
+    );
+    const axOnlyNode = byBackend(resolvedAxOnly, 20);
+    expect(axOnlyNode?.sensitive).toBe(true);
+    expect(axOnlyNode?.value).toBeUndefined();
+    expect(axOnlyNode?.name).toBe("Password");
+    expect(JSON.stringify(axOnlyNode)).not.toContain("AX_ONLY_SECRET");
+  });
 });

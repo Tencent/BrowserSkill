@@ -38,11 +38,11 @@ function collector(shadowRoot?: (element: HTMLElement) => ShadowRoot | null) {
   dispose = attachCooperationCapture();
   return (
     kind = COOPERATION_READ,
-    lease = "first",
+    lease: string | undefined = kind === COOPERATION_ARM_FRAME ? undefined : "first",
     input?: InputExpectation,
   ): FrameState | undefined => {
     let result: unknown;
-    receive({ kind, lease, input }, {}, (value) => {
+    receive({ kind, ...(lease !== undefined ? { lease } : {}), input }, {}, (value) => {
       result = value;
     });
     return result as FrameState | undefined;
@@ -999,6 +999,46 @@ it("loads silently with zero startup messages and zero DOM listeners until expli
   });
 });
 
+it.each([
+  ["leased", "lease-arm"],
+  ["lease-less", undefined],
+] as const)("tears down all capture listeners and MutationObserver on COOPERATION_DISABLE after %s COOPERATION_ARM_FRAME", async (_mode, armLease) => {
+  const docAdd = vi.spyOn(document, "addEventListener");
+  const docRemove = vi.spyOn(document, "removeEventListener");
+  const winAdd = vi.spyOn(window, "addEventListener");
+  const winRemove = vi.spyOn(window, "removeEventListener");
+
+  const read = collector();
+  expect(docAdd).not.toHaveBeenCalled();
+  expect(winAdd).not.toHaveBeenCalled();
+
+  expect(read(COOPERATION_ARM_FRAME, armLease)).toEqual({ ok: true });
+  const attachedDocEvents = docAdd.mock.calls.map(([type]) => type);
+  const attachedWinEvents = winAdd.mock.calls.map(([type]) => type);
+  expect(attachedDocEvents.length).toBeGreaterThanOrEqual(19);
+  expect(attachedWinEvents).toEqual(expect.arrayContaining(["blur", "wheel"]));
+
+  // Release tears down every attached listener and disconnects the MutationObserver.
+  expect(read(COOPERATION_DISABLE, armLease ?? "release-lease")).toMatchObject({ busy: false });
+  expect(docRemove.mock.calls.map(([type]) => type)).toEqual(attachedDocEvents);
+  expect(winRemove.mock.calls.map(([type]) => type)).toEqual(attachedWinEvents);
+
+  // After disable, dynamic iframes no longer trigger COOPERATION_SUBFRAME_READY.
+  vi.mocked(chrome.runtime.sendMessage).mockClear();
+  document.body.appendChild(document.createElement("iframe"));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+
+  // A delayed COOPERATION_ARM_FRAME with a retired lease is ignored instead of re-arming.
+  if (armLease) {
+    docAdd.mockClear();
+    winAdd.mockClear();
+    expect(read(COOPERATION_ARM_FRAME, armLease)).toEqual({ ok: false });
+    expect(docAdd).not.toHaveBeenCalled();
+    expect(winAdd).not.toHaveBeenCalled();
+  }
+});
+
 it("ignores internal data-bsk-* attributes and browser-skill-overlay mutations and UI interactions", async () => {
   document.body.innerHTML =
     '<input id="search" aria-label="Search" value="ok"><input id="secret" aria-label="Secret" value="s3cr3t">';
@@ -1052,6 +1092,9 @@ it("ignores internal data-bsk-* attributes and browser-skill-overlay mutations a
     editing: false,
   });
   expect(afterOverlay.fields).toEqual([expect.objectContaining({ label: "Search", value: "ok" })]);
+  // Removing the recording DOM attribute after cleanup must not re-expose the secret field to cooperation.
+  secret.removeAttribute("data-bsk-record-password");
+  expect(read()!.fields).toEqual([expect.objectContaining({ label: "Search", value: "ok" })]);
   overlayHost.remove();
   document.documentElement.removeAttribute("data-bsk-record-document");
 });

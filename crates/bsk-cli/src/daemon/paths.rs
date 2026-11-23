@@ -31,10 +31,10 @@ pub(crate) const BSK_HOME_HINT: &str = "set BSK_HOME to a writable private direc
 /// 1. `BSK_HOME` env var (any non-empty value); or
 /// 2. `~/.bsk` (using [`dirs::home_dir`]).
 pub fn bsk_home() -> Result<PathBuf> {
-    if let Ok(p) = env::var(BSK_HOME_ENV) {
-        if !p.is_empty() {
-            return Ok(PathBuf::from(p));
-        }
+    if let Ok(p) = env::var(BSK_HOME_ENV)
+        && !p.is_empty()
+    {
+        return Ok(PathBuf::from(p));
     }
     let home = dirs::home_dir()
         .with_context(|| format!("could not determine user home directory; {BSK_HOME_HINT}"))?;

@@ -57,6 +57,8 @@ export interface VomNode {
   tag: string;
   rect: Rect | null;
   paintOrder: number;
+  /** Parsed integer CSS `z-index` when explicitly set (absent for `auto`). */
+  zIndex?: number;
   position: string;
   pointerEvents: string;
   cursor?: string;
@@ -156,6 +158,11 @@ export interface VomLineMetadata {
   role?: string;
   /** JSON-escaped inner text of the line's primary quoted name, if present. */
   escapedName?: string;
+  /** Start/end character offsets of `escapedName` inside the raw line (excluding surrounding quotes). */
+  nameStart?: number;
+  nameEnd?: number;
+  /** Character offset where post-prefix page content begins on the raw line, if any. */
+  contentStart?: number;
   /** True when the line is strictly `role "name"` without `@eN` or trailing annotations. */
   plainNamedNode: boolean;
   /** True when the renderer may cut the line's primary label without appending `…`. */

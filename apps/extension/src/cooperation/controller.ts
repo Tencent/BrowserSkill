@@ -12,6 +12,7 @@ import {
   type CdpRunner,
   cdpBlockedUrlReason,
   chromeTabsApi,
+  evictSessionCdpRunner,
   isRpcError,
   type PinnedSelectorTarget,
   readReportedTimeoutMs,
@@ -371,6 +372,7 @@ export class CooperationController implements ControlAuthority {
   private readonly tabs = new Map<number, TabState>();
   /** Keep a lost task target until explicit replacement; never fall back to the active tab. */
   private readonly defaultTabs = new Map<string, number>();
+  private readonly sessionCdps = new Map<string, Set<object>>();
   private readonly now: () => number;
   constructor(private readonly deps: CooperationDeps) {
     this.now = deps.now ?? Date.now;
@@ -803,6 +805,37 @@ export class CooperationController implements ControlAuthority {
   release(sessionId: string) {
     for (const [id, state] of this.tabs) if (state.sessionId === sessionId) this.releaseTab(id);
     this.defaultTabs.delete(sessionId);
+    const cdps = this.sessionCdps.get(sessionId);
+    if (cdps) {
+      for (const cdp of cdps) evictSessionCdpRunner(cdp, sessionId);
+      this.sessionCdps.delete(sessionId);
+    }
+  }
+  replaceTab(addedTabId: number, removedTabId: number) {
+    if (addedTabId === removedTabId) return;
+    const previous = this.tabs.get(removedTabId);
+    for (const [sessionId, tabId] of this.defaultTabs) {
+      if (tabId === removedTabId) this.defaultTabs.set(sessionId, addedTabId);
+    }
+    let next: TabState | undefined;
+    if (previous && (previous.held || previous.stopped || previous.intervened)) {
+      const session = this.deps.sessions.get(previous.sessionId);
+      if (session) {
+        next = this.track(session, addedTabId);
+        next.held = previous.held;
+        next.heldAt = previous.heldAt;
+        next.stopped = previous.stopped;
+        next.intervened = previous.intervened;
+        next.controlRevision = previous.controlRevision + 1;
+        next.authorityRevision = previous.authorityRevision + 1;
+        next.bootstrap = false;
+      }
+    }
+    if (previous) this.releaseTab(removedTabId);
+    if (next) {
+      this.changed(next);
+      this.sessionActivity(next.sessionId);
+    }
   }
   stopSession(sessionId: string) {
     for (const state of this.tabs.values())
@@ -822,8 +855,29 @@ export class CooperationController implements ControlAuthority {
     this.sessionActivity(sessionId);
   }
   syncSessions() {
+    const stale = new Set<string>();
     for (const sessionId of this.defaultTabs.keys())
-      if (!this.deps.sessions.has(sessionId)) this.release(sessionId);
+      if (!this.deps.sessions.has(sessionId)) stale.add(sessionId);
+    for (const state of this.tabs.values())
+      if (!this.deps.sessions.has(state.sessionId)) stale.add(state.sessionId);
+    for (const sessionId of this.sessionCdps.keys())
+      if (!this.deps.sessions.has(sessionId)) stale.add(sessionId);
+    for (const sessionId of stale) this.release(sessionId);
+  }
+  private runnerForSession<T extends CdpRunner>(cdp: T, session: SessionContext): T {
+    const sessionId = session.sessionId;
+    const sessionRef = new WeakRef(session);
+    const wrapped = sessionCdpRunner(cdp, sessionId, () => {
+      const live = sessionRef.deref();
+      return live !== undefined && this.deps.sessions.get(sessionId) === live;
+    });
+    let tracked = this.sessionCdps.get(sessionId);
+    if (!tracked) {
+      tracked = new Set();
+      this.sessionCdps.set(sessionId, tracked);
+    }
+    tracked.add(cdp);
+    return wrapped;
   }
   private async refresh(
     state: TabState,
@@ -941,11 +995,7 @@ export class CooperationController implements ControlAuthority {
   ): Promise<CooperateResult | RpcError> {
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return { code: "not_found", message: "Unknown session" };
-    cdp = sessionCdpRunner(
-      cdp,
-      session.sessionId,
-      () => this.deps.sessions.get(session.sessionId) === session,
-    );
+    cdp = this.runnerForSession(cdp, session);
     this.startSession(session.sessionId);
     if (!["enable", "status", "sync", "wait"].includes(params.action))
       return { code: "invalid_params", message: "Unknown cooperation action" };
@@ -1718,11 +1768,7 @@ export class CooperationController implements ControlAuthority {
       return invoke(cdp);
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return invoke(cdp);
-    cdp = sessionCdpRunner(
-      cdp,
-      session.sessionId,
-      () => this.deps.sessions.get(session.sessionId) === session,
-    );
+    cdp = this.runnerForSession(cdp, session);
     const targetPolicy = session.controlPolicy === "target";
     this.startSession(session.sessionId);
     if (
@@ -2815,7 +2861,11 @@ export class CooperationController implements ControlAuthority {
         sent &&
         !isRpcError(result) &&
         (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
-      if (["tool.evaluate", "tool.upload"].includes(req.method)) {
+      if (
+        !signal.aborted &&
+        !state.stopped &&
+        ["tool.evaluate", "tool.upload"].includes(req.method)
+      ) {
         const intact = !state.unavailable && state.epoch === epoch;
         const postActionReplyTimeoutMs =
           actionReplyTimeoutMs !== undefined

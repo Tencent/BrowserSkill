@@ -261,4 +261,95 @@ describe("local request control lifecycle", () => {
     expect(f.sendToEventSource).toHaveBeenCalledWith(ROOT, "Fetch.disable");
     await f.controls.stop();
   });
+
+  it("preserves pending mock and modify annotations when Fetch.requestPaused settles before Network.requestWillBeSent", async () => {
+    const f = fixture();
+    await f.controls.target(ROOT);
+    await f.controls.add({
+      match: { url: "https://site.test/mocked", method: "GET" },
+      effect: {
+        type: "mock",
+        status: 201,
+        headers: { "content-type": "application/json", "x-mock": "yes" },
+        body: '{"mocked":true}',
+      },
+    });
+    await f.controls.add({
+      match: { url: "https://site.test/modified", method: "POST" },
+      effect: {
+        type: "modify",
+        headers: { "x-edited": "1" },
+        json: { set: { role: "admin" } },
+      },
+    });
+
+    // Emit Fetch.requestPaused BEFORE Network.requestWillBeSent for both rules and wait for apply()'s finally().
+    f.controls.onEvent(ROOT, "Fetch.requestPaused", {
+      requestId: "fetch-mock-first",
+      networkId: "net-mock-first",
+      resourceType: "Fetch",
+      request: { url: "https://site.test/mocked", method: "GET", headers: {} },
+    });
+    f.controls.onEvent(ROOT, "Fetch.requestPaused", {
+      requestId: "fetch-mod-first",
+      networkId: "net-mod-first",
+      resourceType: "Fetch",
+      request: {
+        url: "https://site.test/modified",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        postData: '{"role":"user"}',
+      },
+    });
+    await vi.waitFor(() => {
+      expect(f.sendToEventSource).toHaveBeenCalledWith(
+        ROOT,
+        "Fetch.fulfillRequest",
+        expect.objectContaining({ requestId: "fetch-mock-first" }),
+      );
+      expect(f.sendToEventSource).toHaveBeenCalledWith(
+        ROOT,
+        "Fetch.continueRequest",
+        expect.objectContaining({ requestId: "fetch-mod-first" }),
+      );
+    });
+    // Allow apply()'s finally block annotate() call to finish before requestWillBeSent arrives.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    f.network.onEvent(ROOT, "Network.requestWillBeSent", {
+      requestId: "net-mock-first",
+      type: "Fetch",
+      request: { url: "https://site.test/mocked", method: "GET", headers: {} },
+    });
+    f.network.onEvent(ROOT, "Network.requestWillBeSent", {
+      requestId: "net-mod-first",
+      type: "Fetch",
+      request: {
+        url: "https://site.test/modified",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        postData: '{"role":"user"}',
+      },
+    });
+
+    const entries = f.network.list();
+    const mocked = entries.find((entry) => entry.url === "https://site.test/mocked");
+    expect(mocked).toMatchObject({
+      status: 201,
+      mime_type: "application/json",
+      response_headers: { "content-type": "application/json", "x-mock": "yes" },
+      response_body: { state: "available", text: '{"mocked":true}' },
+      intervention: { type: "mock", state: "applied" },
+    });
+
+    const modified = entries.find((entry) => entry.url === "https://site.test/modified");
+    expect(modified).toMatchObject({
+      request_headers: expect.objectContaining({ "x-edited": "1" }),
+      request_body: { state: "available", text: '{"role":"admin"}' },
+      intervention: { type: "modify", state: "applied" },
+    });
+
+    await f.controls.stop();
+  });
 });

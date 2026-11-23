@@ -394,3 +394,87 @@ it("auth failures back off for 30 seconds and explicit retry resets the delay", 
   await t.disconnect();
   vi.useRealTimers();
 });
+
+it("resets auth backoff on setUrl() and disconnect()", async () => {
+  vi.useFakeTimers();
+  FakeSocket.instances = [];
+  const authenticate = vi.fn().mockRejectedValue(new Error("server_unverified"));
+  const t = new WSTransport({
+    url: DEFAULT_DAEMON_WS_URL,
+    authenticate,
+    webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+  });
+
+  // 1) Trigger local auth backoff, then switch URL via setUrl(): must connect immediately.
+  const first = t.connect();
+  lastSocket().open();
+  await expect(first).rejects.toThrow("server_unverified");
+  await expect(t.connect()).rejects.toThrow("backoff");
+
+  expect(t.setUrl("wss://gateway.example/api/v1/local-browser/extension")).toBe(true);
+  authenticate.mockResolvedValue(undefined);
+  const switched = t.connect();
+  expect(lastSocket().url).toBe("wss://gateway.example/api/v1/local-browser/extension");
+  lastSocket().open();
+  await switched;
+  expect(t.state).toBe("connected");
+
+  // 2) Trigger auth backoff again, then disconnect(): next connect() must not stay locked out.
+  authenticate.mockRejectedValueOnce(new Error("server_unverified"));
+  lastSocket().serverClose();
+  await vi.advanceTimersByTimeAsync(1_000);
+  lastSocket().open();
+  await vi.waitFor(() => expect(authenticate).toHaveBeenCalledTimes(3));
+  await expect(t.connect()).rejects.toThrow("backoff");
+
+  await t.disconnect();
+  authenticate.mockResolvedValue(undefined);
+  const resumed = t.connect();
+  lastSocket().open();
+  await resumed;
+  expect(t.state).toBe("connected");
+  await t.disconnect();
+  vi.useRealTimers();
+});
+
+it("treats socket close during async unpaired authenticate resolution as normal reconnect, not auth failure backoff", async () => {
+  vi.useFakeTimers();
+  FakeSocket.instances = [];
+  let finishAuth!: () => void;
+  const authGate = new Promise<void>((resolve) => {
+    finishAuth = resolve;
+  });
+  const onAuthenticationError = vi.fn();
+  const authenticate = vi.fn(() => authGate);
+  const t = new WSTransport({
+    url: DEFAULT_DAEMON_WS_URL,
+    authenticate,
+    onAuthenticationError,
+    webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+  });
+
+  const pending = t.connect();
+  const first = lastSocket();
+  first.open();
+  expect(authenticate).toHaveBeenCalledOnce();
+
+  // Daemon closes the socket while unpaired authenticate() is still awaiting IndexedDB readLocalState().
+  first.serverClose(1006);
+  // Async read finishes and resolves without error (unpaired skip path).
+  finishAuth();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // Must NOT fire onAuthenticationError or enter 30s local_auth_backoff; normal 1s reconnect applies.
+  expect(onAuthenticationError).not.toHaveBeenCalled();
+  expect(FakeSocket.instances).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(FakeSocket.instances).toHaveLength(2);
+
+  authenticate.mockResolvedValue(undefined);
+  lastSocket().open();
+  await pending;
+  expect(t.state).toBe("connected");
+  await t.disconnect();
+  vi.useRealTimers();
+});

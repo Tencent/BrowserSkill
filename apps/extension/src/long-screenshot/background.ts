@@ -379,9 +379,30 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
           running.finished = true;
           running.paused = false;
         } else if (request.action === "pause" || request.action === "resume") {
-          running.paused = request.action === "pause";
-          await running.page?.({ action: "pause", paused: running.paused });
-          if (state) publish({ ...state, phase: running.paused ? "paused" : "capturing" });
+          const job = running;
+          job.paused = request.action === "pause";
+          try {
+            await job.page?.({ action: "pause", paused: job.paused });
+          } catch (error) {
+            if (
+              running !== job ||
+              job.controller.signal.aborted ||
+              state?.id !== job.id ||
+              !isCapturing(state)
+            ) {
+              return { ok: true, state };
+            }
+            throw error;
+          }
+          if (
+            running === job &&
+            !job.controller.signal.aborted &&
+            !job.finished &&
+            state?.id === job.id &&
+            isCapturing(state)
+          ) {
+            publish({ ...state, phase: job.paused ? "paused" : "capturing" });
+          }
         }
       }
       return { ok: true, state };

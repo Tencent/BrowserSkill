@@ -132,8 +132,10 @@ describe("document facts", () => {
         "overflow-y": "visible",
         width: "120px",
         height: "40px",
+        "z-index": "auto",
       },
     });
+    expect(nodes[0].zIndex).toBeUndefined();
     expect(nodes[0]).not.toHaveProperty("rect");
     expect(nodes[0]).not.toHaveProperty("excluded");
   });
@@ -357,10 +359,10 @@ describe("computed-style stealth prompt-injection stripper", () => {
         textContent: "INJ_FONTSIZE",
       }),
       styledNode(21, 20, "#text", { textContent: "INJ_FONTSIZE" }),
-      // 3) Zero-contrast color === ancestor background-color
+      // 3) Explicit same-element zero-contrast color === own background-color
       styledNode(30, 2, "span", {
         attrs: { class: "same-color" },
-        styles: { color: "rgb(255, 255, 255)" },
+        styles: { color: "rgb(255, 255, 255)", "background-color": "rgb(255, 255, 255)" },
         textContent: "INJ_ZEROCONTRAST",
       }),
       styledNode(31, 30, "#text", { textContent: "INJ_ZEROCONTRAST" }),
@@ -557,9 +559,9 @@ describe("computed-style stealth prompt-injection stripper", () => {
         textContent: "Visible child text",
       }),
       styledNode(13, 12, "#text", { textContent: "Visible child text" }),
-      // 2) zero-contrast container with direct hidden #cdata-section AND an empty visible <span>
+      // 2) transparent-foreground container with direct hidden #cdata-section AND an empty visible <span>
       styledNode(20, 1, "p", {
-        styles: { color: "rgb(255, 255, 255)" },
+        styles: { color: "rgba(0, 0, 0, 0)" },
         textContent: "INJ_WITH_EMPTY_SPAN",
       }),
       styledNode(21, 20, "#cdata-section", { textContent: "INJ_WITH_EMPTY_SPAN" }),
@@ -580,68 +582,74 @@ describe("computed-style stealth prompt-injection stripper", () => {
     expect(index.nodes.get(12)?.textContent).toBe("Visible child text");
   });
 
-  it("handles Tailwind v4 / CSS Color 4 opaque barriers, alpha channels, and oklch-on-oklch zero-contrast stealth", async () => {
+  it("never drops white hero headlines over <svg>, ::before/::after, composited <img>, sibling overlays, or Tailwind oklch cards while stripping transparent and same-element zero-contrast text", async () => {
     const nodes: DecodedNode[] = [
       styledNode(1, null, "body", {
-        bounds: [0, 0, 1000, 800],
+        bounds: [0, 0, 1280, 900],
         styles: { "background-color": "rgb(255, 255, 255)" },
       }),
-      // 1) Opaque Tailwind v4 dark bg-slate-900 (`oklch(...)`) stops white body inheritance
-      styledNode(10, 1, "div", {
+      // 1) White hero heading over <svg> illustration (transparent section bg inherits white body)
+      styledNode(10, 1, "section", { bounds: [0, 0, 1280, 400] }),
+      styledNode(11, 10, "svg", { bounds: [0, 0, 1280, 400] }),
+      styledNode(12, 10, "h1", {
+        bounds: [60, 100, 600, 64],
+        styles: { color: "rgb(255, 255, 255)" },
+        textContent: "Hero Over SVG Artwork",
+      }),
+      styledNode(13, 12, "#text", { textContent: "Hero Over SVG Artwork" }),
+      // 2) White hero heading over ::before dark pseudo-element (invisible in DOMSnapshot)
+      styledNode(20, 1, "section", {
+        attrs: { class: "hero-before-scrim" },
+        bounds: [0, 400, 1280, 300],
+      }),
+      styledNode(21, 20, "h1", {
+        bounds: [60, 460, 600, 64],
+        styles: { color: "rgb(255, 255, 255)" },
+        textContent: "Hero Over Pseudo-Element",
+      }),
+      styledNode(22, 21, "#text", { textContent: "Hero Over Pseudo-Element" }),
+      // 3) White hero heading over composited <img> with higher paintOrder than normal-flow heading
+      styledNode(30, 1, "section", { bounds: [0, 700, 1280, 200] }),
+      {
+        ...styledNode(31, 30, "img", { bounds: [0, 700, 1280, 200] }),
+        paintOrder: 50,
+      },
+      {
+        ...styledNode(32, 30, "h1", {
+          bounds: [60, 740, 600, 64],
+          styles: { color: "rgb(255, 255, 255)" },
+          textContent: "Hero Over Composited Image",
+        }),
+        paintOrder: 0,
+      },
+      styledNode(33, 32, "#text", { textContent: "Hero Over Composited Image" }),
+      // 4) White text over Tailwind v4 dark oklch card & translucent scrim
+      styledNode(40, 1, "div", {
         styles: { "background-color": "oklch(0.208 0.042 265.755)" },
       }),
-      styledNode(11, 10, "p", {
+      styledNode(41, 40, "p", {
         styles: { color: "rgb(255, 255, 255)" },
         textContent: "Readable white text on slate-900",
       }),
-      styledNode(12, 11, "#text", { textContent: "Readable white text on slate-900" }),
-      // 2) Translucent CSS Color 4 scrim (`0.15 <= alpha < 0.9`, both decimal and %) acts as barrier
-      styledNode(20, 1, "div", {
-        styles: { "background-color": "oklch(0.208 0.042 265.755 / 50%)" },
-      }),
-      styledNode(21, 20, "span", {
-        styles: { color: "rgb(255, 255, 255)" },
-        textContent: "Readable white text on 50% oklch scrim",
-      }),
-      styledNode(22, 21, "#text", { textContent: "Readable white text on 50% oklch scrim" }),
-      // 3) Nearly-transparent CSS Color 4 wrapper (`alpha < 0.15`) does NOT block white body inheritance
-      styledNode(30, 1, "div", {
-        styles: { "background-color": "oklch(0.208 0.042 265.755 / 5%)" },
-      }),
-      styledNode(31, 30, "span", {
-        styles: { color: "rgb(255, 255, 255)" },
-        textContent: "INJ_WHITE_THROUGH_FAINT_OKLCH",
-      }),
-      styledNode(32, 31, "#text", { textContent: "INJ_WHITE_THROUGH_FAINT_OKLCH" }),
-      // 4) oklch-on-oklch inherited zero-contrast injection inside dark slate-900 container
-      styledNode(40, 10, "span", {
-        styles: { color: "oklch(0.208 0.042 265.755)" },
-        textContent: "INJ_OKLCH_ON_OKLCH",
-      }),
-      styledNode(41, 40, "#text", { textContent: "INJ_OKLCH_ON_OKLCH" }),
-      // 5) CSS Color 4 transparent foreground (`oklch(... / 0)`) and zero-alpha `color-mix()` without `transparent` keyword
-      styledNode(50, 10, "span", {
+      styledNode(42, 41, "#text", { textContent: "Readable white text on slate-900" }),
+      // 5) Genuine invisible text: CSS Color 4 zero-alpha foreground and same-element opaque zero-contrast
+      styledNode(50, 40, "span", {
         styles: { color: "oklch(0.9 0.05 200 / 0)" },
         textContent: "INJ_OKLCH_TRANSPARENT_FG",
       }),
       styledNode(51, 50, "#text", { textContent: "INJ_OKLCH_TRANSPARENT_FG" }),
-      styledNode(52, 10, "span", {
-        styles: { color: "color-mix(in oklab, currentColor 0%, rgba(0, 0, 0, 0))" },
-        textContent: "INJ_COLOR_MIX_ZERO_ALPHA",
+      styledNode(52, 40, "span", {
+        styles: {
+          color: "oklch(0.208 0.042 265.755)",
+          "background-color": "oklch(0.208 0.042 265.755)",
+        },
+        textContent: "INJ_SELF_OKLCH_ZERO_CONTRAST",
       }),
-      styledNode(53, 52, "#text", { textContent: "INJ_COLOR_MIX_ZERO_ALPHA" }),
-      // 6) Cross-space zero contrast: `oklch(1 0 0)` foreground on `rgb(255, 255, 255)` body
-      styledNode(54, 1, "span", {
-        styles: { color: "oklch(1 0 0)" },
-        textContent: "INJ_OKLCH_WHITE_ON_RGB_WHITE",
-      }),
-      styledNode(55, 54, "#text", { textContent: "INJ_OKLCH_WHITE_ON_RGB_WHITE" }),
+      styledNode(53, 52, "#text", { textContent: "INJ_SELF_OKLCH_ZERO_CONTRAST" }),
     ];
 
     const index = await buildDocumentIndex(nodes);
-    expect([...index.excludedBackendNodeIds].sort((a, b) => a - b)).toEqual([
-      31, 32, 40, 41, 50, 51, 52, 53, 54, 55,
-    ]);
+    expect([...index.excludedBackendNodeIds].sort((a, b) => a - b)).toEqual([50, 51, 52, 53]);
   });
 
   it("exempts gradient text using background-clip: text or -webkit-background-clip: text while stripping clip-text without background-image", async () => {
@@ -689,7 +697,18 @@ describe("computed-style stealth prompt-injection stripper", () => {
         textContent: "Inline Gradient",
       }),
       styledNode(26, 25, "#text", { textContent: "Inline Gradient" }),
-      // 4) Attacker sets background-clip: text with background-image: none, transparent stops, same-color stops, or 0-span stop -> MUST be stripped
+      // 3b) Solid opaque background-color clipped to text (background-image: none) is visible!
+      styledNode(27, 1, "h2", {
+        styles: {
+          color: "rgba(0, 0, 0, 0)",
+          "background-color": "rgb(10, 100, 200)",
+          "background-image": "none",
+          "background-clip": "text",
+        },
+        textContent: "Solid Clipped Heading",
+      }),
+      styledNode(28, 27, "#text", { textContent: "Solid Clipped Heading" }),
+      // 4) background-clip: text with background-image: none and transparent bg is genuinely invisible -> stripped
       styledNode(30, 1, "span", {
         styles: {
           color: "rgba(0, 0, 0, 0)",
@@ -700,42 +719,10 @@ describe("computed-style stealth prompt-injection stripper", () => {
         textContent: "INJ_FAKE_CLIP_TEXT",
       }),
       styledNode(31, 30, "#text", { textContent: "INJ_FAKE_CLIP_TEXT" }),
-      styledNode(32, 1, "span", {
-        styles: {
-          color: "rgba(0, 0, 0, 0)",
-          "background-image": "linear-gradient(rgba(0, 0, 0, 0), transparent)",
-          "background-clip": "text",
-          "-webkit-background-clip": "text",
-        },
-        textContent: "INJ_TRANSPARENT_GRAD",
-      }),
-      styledNode(33, 32, "#text", { textContent: "INJ_TRANSPARENT_GRAD" }),
-      styledNode(34, 1, "span", {
-        styles: {
-          color: "rgba(0, 0, 0, 0)",
-          "background-image": "linear-gradient(rgb(255, 255, 255), rgb(254, 254, 254))",
-          "background-clip": "text",
-          "-webkit-background-clip": "text",
-        },
-        textContent: "INJ_WHITE_GRAD_ON_WHITE",
-      }),
-      styledNode(35, 34, "#text", { textContent: "INJ_WHITE_GRAD_ON_WHITE" }),
-      styledNode(36, 1, "span", {
-        styles: {
-          color: "rgba(0, 0, 0, 0)",
-          "background-image": "linear-gradient(rgb(0, 0, 0) 0%, transparent 0%, transparent 100%)",
-          "background-clip": "text",
-          "-webkit-background-clip": "text",
-        },
-        textContent: "INJ_ZERO_SPAN_GRAD",
-      }),
-      styledNode(37, 36, "#text", { textContent: "INJ_ZERO_SPAN_GRAD" }),
     ];
 
     const index = await buildDocumentIndex(nodes);
-    expect([...index.excludedBackendNodeIds].sort((a, b) => a - b)).toEqual([
-      30, 31, 32, 33, 34, 35, 36, 37,
-    ]);
+    expect([...index.excludedBackendNodeIds].sort((a, b) => a - b)).toEqual([30, 31]);
   });
 
   it("strips 1px microboxes on 2x HiDPI/Retina layouts and when overflow-x/y are computed as visible", async () => {

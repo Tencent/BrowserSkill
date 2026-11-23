@@ -645,10 +645,11 @@ impl Step {
             // Only keys known to move or edit are reversible: a shortcut, Enter, or a
             // key that deletes or types outside a text field can do anything.
             Action::Press => {
-                let (key, shortcut) = key_press(
-                    self.key.as_deref().unwrap_or_default(),
-                    self.modifiers.as_deref(),
-                );
+                let raw_key = self.key.as_deref().unwrap_or_default();
+                if !placeholders(raw_key).is_empty() {
+                    return Risk::Commit;
+                }
+                let (key, shortcut) = key_press(raw_key, self.modifiers.as_deref());
                 let editable = EDITABLE_ROLES
                     .iter()
                     .any(|role| self.target.role.eq_ignore_ascii_case(role));
@@ -1060,6 +1061,11 @@ impl Recipe {
                 target(&mut step.target);
                 step.value.as_mut().map(text);
                 step.values.iter_mut().flatten().for_each(text);
+                step.key.as_mut().map(text);
+                ensure!(
+                    step.key.as_deref().is_none_or(|k| !k.trim().is_empty()),
+                    "press key must not be empty"
+                );
                 for condition in &mut step.expect {
                     condition.target.as_mut().map(target);
                     if let ExpectedValue::String(equals) = &mut condition.equals {
@@ -1134,13 +1140,13 @@ impl Recipe {
         for segment in &self.segments {
             for step in &segment.steps {
                 for literal in step.value.iter().chain(step.values.iter().flatten()) {
-                    if placeholders(literal).is_empty() {
-                        if let Some(kind) = personal_data_hint(literal) {
-                            hints.insert(format!(
-                                "a value for \"{}\" contains {kind} and is stored in the file",
-                                step.target.name
-                            ));
-                        }
+                    if placeholders(literal).is_empty()
+                        && let Some(kind) = personal_data_hint(literal)
+                    {
+                        hints.insert(format!(
+                            "a value for \"{}\" contains {kind} and is stored in the file",
+                            step.target.name
+                        ));
                     }
                 }
             }
@@ -1590,6 +1596,59 @@ pub(crate) mod tests {
             segment.until.as_ref().unwrap().text.as_deref(),
             Some("Done Q1")
         );
+    }
+
+    #[test]
+    fn press_step_key_template_binds_and_rejects_blank_key() {
+        let mut value = report();
+        value["params"]["shortcut"] = json!({"type":"string"});
+        value["segments"][0]["steps"][2] = json!({
+            "action": "press",
+            "target": {"role": "textbox", "name": "Query"},
+            "key": "{{shortcut}}",
+            "risk": "reversible"
+        });
+        let recipe = parsed(value).unwrap();
+        assert_eq!(recipe.downgrades().len(), 1);
+        let bound = recipe
+            .bind(&BTreeMap::from([
+                ("region".into(), "East".into()),
+                ("quarter".into(), "Q1".into()),
+                ("shortcut".into(), "Ctrl+K".into()),
+            ]))
+            .unwrap();
+        assert_eq!(bound.segments[0].steps[2].key.as_deref(), Some("Ctrl+K"));
+        let blank_err = recipe
+            .bind(&BTreeMap::from([
+                ("region".into(), "East".into()),
+                ("quarter".into(), "Q1".into()),
+                ("shortcut".into(), "   ".into()),
+            ]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            blank_err.contains("press key must not be empty"),
+            "{blank_err}"
+        );
+
+        // Parameterized modifier + single-char key (`{{modifier}}+s`) must also classify as
+        // Commit before binding so it can never bypass human terminal approval.
+        let mut modifier_template = report();
+        modifier_template["params"]["modifier"] = json!({"type":"string"});
+        modifier_template["segments"][0]["steps"][2] = json!({
+            "action": "press",
+            "target": {"role": "textbox", "name": "Query"},
+            "key": "{{modifier}}+s"
+        });
+        assert!(
+            parsed(modifier_template.clone())
+                .unwrap_err()
+                .message
+                .contains("commit step")
+        );
+        modifier_template["segments"][0]["steps"][2]["risk"] = "reversible".into();
+        let approved = parsed(modifier_template).unwrap();
+        assert_eq!(approved.downgrades().len(), 1);
     }
 
     #[test]

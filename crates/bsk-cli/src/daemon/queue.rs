@@ -332,6 +332,47 @@ impl ToolQueueRegistry {
         });
     }
 
+    /// Spawn the worker task for `sid` only if `sid` is still live in
+    /// [`SessionRegistry`], holding the queue map lock across the liveness check.
+    ///
+    /// Because `teardown_session` removes `sid` from `SessionRegistry` *before*
+    /// calling `tool_queues.remove(sid)` (and never holds `SessionRegistry`'s
+    /// lock while locking `queues`), any concurrent teardown either:
+    /// 1. removes `sid` from `SessionRegistry` first -> this method sees
+    ///    `!contains(sid)` and spawns nothing (preserving the `ended` tombstone),
+    /// 2. or runs `tool_queues.remove(sid)` after this method releases `queues`
+    ///    -> removes the just-inserted queue so the worker exits immediately.
+    pub fn spawn_if_live(&self, sid: SessionId) -> bool {
+        let (tx, rx) = mpsc::channel::<ToolJob>(QUEUE_CAPACITY);
+        let state = Arc::new(Mutex::new(QueueState::default()));
+        let previous = {
+            let mut guard = self.queues.lock().expect("tool queue registry poisoned");
+            if !self.sessions.contains(&sid) {
+                return false;
+            }
+            guard.insert(
+                sid.clone(),
+                QueueEntry {
+                    sender: tx,
+                    accepting: true,
+                    state: Arc::clone(&state),
+                },
+            )
+        };
+        if previous.is_some() {
+            warn!(
+                session = %sid,
+                "tool queue respawned; previous worker will drain remaining jobs and exit"
+            );
+        }
+        let browsers = Arc::clone(&self.browsers);
+        let sessions = Arc::clone(&self.sessions);
+        tokio::spawn(async move {
+            run_worker(sid, rx, state, browsers, sessions).await;
+        });
+        true
+    }
+
     /// Drop the sender for `sid`. The worker observes the closed
     /// channel and exits after finishing any job already taken from
     /// the queue. Returns `true` if a queue was actually removed.
@@ -600,7 +641,7 @@ async fn dispatch_with_sender(
     lifecycle_cancel: Option<AbortToken>,
     cancel_cleanup_timeout: Duration,
 ) -> Result<Value, DispatchError> {
-    let deadline_cleanup = waits_for_deadline_cleanup(&method);
+    let deadline_cleanup = waits_for_deadline_cleanup(&method, &params);
     let (respond_tx, respond_rx) = oneshot::channel();
     let job = ToolJob {
         method,
@@ -614,6 +655,7 @@ async fn dispatch_with_sender(
         session_id,
     };
     let lifecycle_cancellable = job.lifecycle_cancel.is_some();
+    let inflight_cancellable = job.inflight.is_some();
     let dialog_changes = job
         .inflight
         .as_ref()
@@ -642,10 +684,13 @@ async fn dispatch_with_sender(
             mpsc::error::TrySendError::Closed(_) => DispatchError::QueueClosed,
         });
     }
-    // Lifecycle teardown, page actions and effect-aware transfers keep the worker busy
-    // for bounded compensation after their original deadline. Keep the outer
-    // waiter alive for the same grace period so it cannot abandon reconciliation.
-    let response_grace = if lifecycle_cancellable || deadline_cleanup {
+    // Lifecycle teardown, page actions, effect-aware transfers, AND any
+    // cancellable inflight tool keep the worker busy for bounded compensation
+    // (`cancel_cleanup_timeout`) after cancellation or deadline. Keep the outer
+    // waiter alive for the same grace period so cancelling a non-`cancel_at_deadline`
+    // tool near its deadline cannot return a premature `Timeout` while the worker
+    // is still cleaning up (leaving `busy == true`).
+    let response_grace = if lifecycle_cancellable || deadline_cleanup || inflight_cancellable {
         cancel_cleanup_timeout
     } else {
         Duration::ZERO
@@ -832,7 +877,7 @@ async fn forward_one(
             .is_ok()
     };
     let deadline_cancel: Option<&(dyn Fn() -> bool + Sync)> =
-        waits_for_deadline_cleanup(&job.method).then_some(&send_deadline_cancel);
+        waits_for_deadline_cleanup(&job.method, &job.params).then_some(&send_deadline_cancel);
     let waited = await_with_dialog_cancel(
         job.timeout,
         job.cancel_cleanup_timeout,
@@ -852,8 +897,8 @@ async fn forward_one(
         waited,
         WaitOutcome::Timeout | WaitOutcome::CleanupTimeout | WaitOutcome::TimeoutCleanupFailed
     ) && client.note_unresponsive_if_silent();
-    let policy = execution_policy(&job.method);
-    let response = match with_link_contract(&job.method, waited) {
+    let policy = execution_policy(&job.method, &job.params);
+    let response = match with_link_contract(&job.method, &job.params, waited) {
         WaitOutcome::Response(resp) => resp,
         WaitOutcome::CancelledAfterResponse(resp) => match policy.outcome {
             Outcome::SessionStop | Outcome::TabBorrow
@@ -1208,9 +1253,9 @@ async fn forward_one(
 /// stage — plain wait, cancel cleanup or deadline cleanup — so it is
 /// converted once, here, and every arm below then handles an error that
 /// already carries this method's effect contract.
-fn with_link_contract(method: &Method, waited: WaitOutcome) -> WaitOutcome {
-    fn settle(method: &Method, frame: ResponseFrame) -> ResponseFrame {
-        let outcome = execution_policy(method).outcome;
+fn with_link_contract(method: &Method, params: &Value, waited: WaitOutcome) -> WaitOutcome {
+    fn settle(method: &Method, params: &Value, frame: ResponseFrame) -> ResponseFrame {
+        let outcome = execution_policy(method, params).outcome;
         match frame.body {
             ResponseBody::Err(err) if super::browsers::is_link_failure(&err) => ResponseFrame {
                 id: frame.id,
@@ -1234,12 +1279,12 @@ fn with_link_contract(method: &Method, waited: WaitOutcome) -> WaitOutcome {
         }
     }
     match waited {
-        WaitOutcome::Response(frame) => WaitOutcome::Response(settle(method, frame)),
+        WaitOutcome::Response(frame) => WaitOutcome::Response(settle(method, params, frame)),
         WaitOutcome::CancelledAfterResponse(frame) => {
-            WaitOutcome::CancelledAfterResponse(settle(method, frame))
+            WaitOutcome::CancelledAfterResponse(settle(method, params, frame))
         }
         WaitOutcome::TimedOutAfterResponse(frame) => {
-            WaitOutcome::TimedOutAfterResponse(settle(method, frame))
+            WaitOutcome::TimedOutAfterResponse(settle(method, params, frame))
         }
         other => other,
     }
@@ -1357,8 +1402,8 @@ fn input_effect_data(
 // Page actions and full-page screenshots must cancel at the daemon deadline: local
 // deadlines cannot account for transit delays. Keep the queue held for cleanup.
 // Human interaction deadlines also dismiss their pending UI before releasing the queue.
-fn waits_for_deadline_cleanup(method: &Method) -> bool {
-    execution_policy(method).cancel_at_deadline
+fn waits_for_deadline_cleanup(method: &Method, params: &Value) -> bool {
+    execution_policy(method, params).cancel_at_deadline
 }
 
 fn unknown_borrow_error(code: ErrorCode) -> RpcError {
@@ -1928,11 +1973,19 @@ mod link_error_tests {
     }
 
     fn settled(method: Method, stage: fn(ResponseFrame) -> WaitOutcome) -> RpcError {
+        settled_with_params(method, &serde_json::Value::Null, stage)
+    }
+
+    fn settled_with_params(
+        method: Method,
+        params: &serde_json::Value,
+        stage: fn(ResponseFrame) -> WaitOutcome,
+    ) -> RpcError {
         let frame = ResponseFrame {
             id: "rpc".into(),
             body: ResponseBody::Err(reconnected()),
         };
-        match with_link_contract(&method, stage(frame)) {
+        match with_link_contract(&method, params, stage(frame)) {
             WaitOutcome::Response(frame)
             | WaitOutcome::CancelledAfterResponse(frame)
             | WaitOutcome::TimedOutAfterResponse(frame) => match frame.body {
@@ -1961,6 +2014,21 @@ mod link_error_tests {
             assert_eq!(upload["reason"], "transfer_outcome_unknown");
             assert_eq!(upload["effect_state"], "unknown");
 
+            let debug_replay = settled_with_params(
+                Method::ToolDebug,
+                &serde_json::json!({ "action": "replay" }),
+                stage,
+            );
+            let debug_replay = debug_replay.data.unwrap();
+            assert_eq!(debug_replay["effect_state"], "unknown");
+
+            let debug_list = settled_with_params(
+                Method::ToolDebug,
+                &serde_json::json!({ "action": "requests" }),
+                stage,
+            );
+            assert_eq!(debug_list.data.unwrap()["reason"], "extension_reconnected");
+
             let borrow = settled(Method::ToolTabBorrow, stage);
             assert_eq!(borrow.data.unwrap()["reason"], "borrow_outcome_unknown");
 
@@ -1979,7 +2047,11 @@ mod link_error_tests {
                 data: Some(serde_json::json!({ "reason": "navigation_timeout" })),
             }),
         };
-        match with_link_contract(&Method::ToolClick, WaitOutcome::Response(frame)) {
+        match with_link_contract(
+            &Method::ToolClick,
+            &serde_json::Value::Null,
+            WaitOutcome::Response(frame),
+        ) {
             WaitOutcome::Response(ResponseFrame {
                 body: ResponseBody::Err(err),
                 ..
