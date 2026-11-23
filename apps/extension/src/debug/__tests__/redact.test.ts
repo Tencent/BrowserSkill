@@ -186,6 +186,124 @@ describe("source-preserving evidence redaction", () => {
     expect(() => parseJsonSource('{"a":1,}')).toThrow();
   });
 
+  it("preserves plain text logs, NDJSON, JavaScript, and HTML starting with [ or { without unparsed_json wipes", () => {
+    const log = "[2026-11-21 10:00:00] INFO Server started token=secret123 user=alice";
+    expect(redactBody(log, "text/plain")).toEqual({
+      text: "[2026-11-21 10:00:00] INFO Server started token=[redacted] user=alice",
+      redacted: true,
+      truncated: false,
+      replay_safe: false,
+    });
+
+    const cleanLog = "[2026-11-21 10:00:00] INFO Health check ok";
+    expect(redactBody(cleanLog, "text/plain")).toEqual({
+      text: cleanLog,
+      redacted: false,
+      truncated: false,
+      replay_safe: true,
+    });
+
+    const ndjson = '{"id":1,"status":"ok"}\n{"id":2,"password":"secret"}\n';
+    for (const mime of ["application/x-ndjson", "application/jsonl", "text/plain"]) {
+      const res = redactBody(ndjson, mime);
+      expect(res.reason).toBeUndefined();
+      expect(res.text).toContain('{"id":1,"status":"ok"}');
+      expect(res.text).not.toContain("secret");
+      expect(res.redacted).toBe(true);
+    }
+
+    const script = "{ const items = [1, 2, 3]; console.log(items); }";
+    expect(redactBody(script, "application/javascript")).toEqual({
+      text: script,
+      redacted: false,
+      truncated: false,
+      replay_safe: true,
+    });
+
+    const html = '[Notice] <input type="password" value="s3cr3t"><p>Visible</p>';
+    expect(redactBody(html, "text/html")).toEqual({
+      text: '[Notice] <input data-bsk-redacted="true"><p>Visible</p>',
+      redacted: true,
+      truncated: false,
+      replay_safe: false,
+    });
+
+    // Oversized plain-text log starting with `[` truncates cleanly rather than wiping to empty.
+    const bigLog = `[INFO] ${"a".repeat(BODY_CHARS + 50)}`;
+    const bigRes = redactBody(bigLog, "text/plain");
+    expect(bigRes.reason).toBeUndefined();
+    expect(bigRes.truncated).toBe(true);
+    expect(bigRes.text.length).toBe(BODY_CHARS);
+    expect(bigRes.text.startsWith("[INFO] ")).toBe(true);
+
+    // Valid JSON returned with text/plain or empty Content-Type is still JSON-redacted.
+    expect(redactBody('{"user[password]":"secret","ok":true}', "text/plain").text).toBe(
+      '{"user[password]":"[redacted]","ok":true}',
+    );
+  });
+
+  it("redacts JSON-only secret fields in NDJSON records and omits oversized text/plain JSON prefixes", () => {
+    const ndjson = '{"id":1,"session_id":"sess-alpha-1"}\n{"id":2,"credentials":"cred-beta-2"}\n';
+    for (const mime of ["application/x-ndjson", "application/jsonl", "text/plain"]) {
+      const res = redactBody(ndjson, mime);
+      expect(res).toEqual({
+        text: '{"id":1,"session_id":"[redacted]"}\n{"id":2,"credentials":"[redacted]"}\n',
+        redacted: true,
+        truncated: false,
+        replay_safe: false,
+      });
+    }
+
+    // Malformed declared NDJSON must still fail closed rather than leaking unparsed lines.
+    expect(redactBody('{"id":1}\n{"session_id":"leak"', "application/x-ndjson")).toEqual({
+      text: "",
+      redacted: true,
+      truncated: true,
+      replay_safe: false,
+      reason: "unparsed_json",
+    });
+
+    // Oversized JSON served as text/plain is omitted instead of retaining an unredacted prefix.
+    const bigTextPlainJson = `{"session_id":"sess-secret-99","pad":"${"x".repeat(BODY_CHARS)}"}`;
+    expect(redactBody(bigTextPlainJson, "text/plain")).toEqual({
+      text: "",
+      redacted: true,
+      truncated: true,
+      replay_safe: false,
+    });
+
+    // Oversized plain-text logs with timestamp brackets still truncate without wiping.
+    const bigTimestampLog = `[2026-11-21 10:00:00] INFO ${"a".repeat(BODY_CHARS)}`;
+    const logRes = redactBody(bigTimestampLog, "text/plain");
+    expect(logRes.truncated).toBe(true);
+    expect(logRes.text.startsWith("[2026-11-21 10:00:00] INFO ")).toBe(true);
+    expect(logRes.text.length).toBe(BODY_CHARS);
+
+    // Valid JSON served under form, HTML, or JavaScript MIME types still runs JSON secret redaction.
+    const mislabeledJson = '{"session_id":"sess-leak-1","password":"pw-secret","ok":true}';
+    for (const mime of [
+      "application/x-www-form-urlencoded",
+      "text/html",
+      "application/javascript",
+    ]) {
+      expect(redactBody(mislabeledJson, mime)).toEqual({
+        text: '{"session_id":"[redacted]","password":"[redacted]","ok":true}',
+        redacted: true,
+        truncated: false,
+        replay_safe: false,
+      });
+    }
+
+    // Incomplete trailing NDJSON record under text/plain fails closed rather than leaking earlier records via redactText.
+    expect(redactBody('{"session_id":"sess-leak-2"}\n{"partial":', "text/plain")).toEqual({
+      text: "",
+      redacted: true,
+      truncated: true,
+      replay_safe: false,
+      reason: "unparsed_json",
+    });
+  });
+
   it("preserves numeric tokens in JSON pointer projections, including nested and duplicate keys", () => {
     const text = '{"a/b":[{"~":9007199254740993}],"id":1,"id":1e400}';
     expect(jsonPointer(text, "/a~1b/0/~0")).toBe("9007199254740993");

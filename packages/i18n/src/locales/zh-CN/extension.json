@@ -112,7 +112,11 @@
       "readFailed": "无法读取自动化设置，请重新打开插件。",
       "writeFailed": "保存失败，设置未更改，请重试。",
       "confirmTabBorrowInfoLabel": "借用标签页确认说明",
-      "requestHelpEnabledInfoLabel": "人工协助说明"
+      "requestHelpEnabledInfoLabel": "人工协助说明",
+      "openAgentWindowMinimized": "最小化打开 Agent 窗口",
+      "openAgentWindowMinimizedHint": "开启时，新建的后台 Agent 窗口直接以最小化状态创建，不在屏幕上闪出窗口；关闭时，以普通后台窗口打开。",
+      "openAgentWindowMinimizedScope": "自动保存到当前浏览器配置，对新建的后台 Agent 窗口生效；显式前台打开的会话和操作录制仍会正常显示窗口。",
+      "openAgentWindowMinimizedInfoLabel": "最小化打开 Agent 窗口说明"
     },
     "remoteLocal": "切换到本机",
     "remotePairing": "配对链接",

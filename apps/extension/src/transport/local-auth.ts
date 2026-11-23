@@ -213,7 +213,9 @@ export function createLocalAuthenticator(options: {
       (credential) => credential.role === "active" || credential.pending,
     );
     if (policy.skip || !offers.length) {
-      options.status({ state: "unverified_local", reason: policy.skip ? "skip" : "unpaired" });
+      if (socket.readyState === 1) {
+        options.status({ state: "unverified_local", reason: policy.skip ? "skip" : "unpaired" });
+      }
       return;
     }
     options.status({ state: "verifying" });

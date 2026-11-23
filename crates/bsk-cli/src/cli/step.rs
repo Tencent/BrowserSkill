@@ -1,9 +1,9 @@
 //! One explicit action, optional positive readiness condition, then read-only sync.
 use super::{
-    TOOL_IPC_TIMEOUT, business_rpc, cooperate,
+    business_rpc, cooperate,
     ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
-    observation_view,
+    observation_view, orchestration,
 };
 use anyhow::{Context, ensure};
 use bsk_protocol::{Method, tools::*};
@@ -171,10 +171,18 @@ pub(crate) fn action_params(
         object.insert("tab_id".into(), tab.into());
     }
     if let Some(ms) = v.get("timeout_ms") {
-        let raw = ms
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("action timeout_ms must be 1..=30000"))?;
-        super::orchestration::validate_action_timeout_ms(raw).map_err(anyhow::Error::msg)?;
+        let raw = ms.as_u64().ok_or_else(|| {
+            if matches!(action, Action::Navigate) {
+                anyhow::anyhow!("timeout_ms must be 1..=120000")
+            } else {
+                anyhow::anyhow!("action timeout_ms must be 1..=30000")
+            }
+        })?;
+        if matches!(action, Action::Navigate) {
+            orchestration::validate_open_timeout_ms(raw).map_err(anyhow::Error::msg)?;
+        } else {
+            orchestration::validate_action_timeout_ms(raw).map_err(anyhow::Error::msg)?;
+        }
     }
     let result = match action {
         Action::Click => {
@@ -236,7 +244,7 @@ pub(crate) fn await_ready(
         Method::ToolWaitForElement,
         json!({"session_id":session,"tab_id":tab,
         "selector":selector,"state":"visible","timeout_ms":wait_timeout_ms,"poll_ms":100}),
-        Duration::from_millis(wait_timeout_ms as u64 + 5000),
+        business_rpc::ipc_timeout(wait_timeout_ms),
     );
     match wait {
         Ok(wait) => {
@@ -254,42 +262,62 @@ pub(crate) fn await_ready(
     }
 }
 
+pub(crate) struct PostSyncOptions<'a> {
+    pub(crate) session: &'a str,
+    pub(crate) policy: cooperate::Policy,
+    pub(crate) tab: Option<i64>,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) hydrate_cache: bool,
+}
+
 /// The read-only sync that ends an operation, stored as `post` or `post_error`.
-pub(crate) fn post_sync(
-    session: &str,
-    policy: cooperate::Policy,
-    tab: Option<i64>,
-    max_tokens: Option<u32>,
+/// Requests daemon `ScopeResultMeta` on sync so `unchanged` and text-`delta`
+/// replies hydrate `post.observation.text` when `hydrate_cache` is true.
+pub(crate) fn post_sync_with_meta(
+    opts: PostSyncOptions<'_>,
     result: &mut Value,
     exit: &mut u8,
-    call: &mut impl FnMut(Method, Value, Duration) -> Result<Value, CliError>,
+    call: &mut impl FnMut(
+        Method,
+        Value,
+        Duration,
+        bool,
+    ) -> Result<(Value, Option<crate::ipc_client::ScopeResultMeta>), CliError>,
 ) {
+    let mut latest_meta = None;
     let sync = cooperate::settle::run(|mode| {
-        call(
+        let is_sync = matches!(mode, CooperateAction::Sync | CooperateAction::Enable);
+        let params = CooperateParams {
+            control_policy: is_sync.then_some(opts.policy.into()),
+            session_id: opts.session.to_owned(),
+            action: mode,
+            tab_id: opts.tab,
+            timeout_ms: Some(1000),
+            max_tokens: is_sync.then_some(opts.max_tokens).flatten(),
+        };
+        let ipc_timeout = cooperate::cooperate_ipc_timeout(params.timeout_ms);
+        let (val, scope_meta) = call(
             Method::ToolCooperate,
-            serde_json::to_value(CooperateParams {
-                control_policy: matches!(mode, CooperateAction::Sync | CooperateAction::Enable)
-                    .then_some(policy.into()),
-                session_id: session.to_owned(),
-                action: mode,
-                tab_id: tab,
-                timeout_ms: Some(1000),
-                max_tokens: matches!(mode, CooperateAction::Sync | CooperateAction::Enable)
-                    .then_some(max_tokens)
-                    .flatten(),
-            })
-            .expect("serializable sync"),
-            TOOL_IPC_TIMEOUT,
-        )
+            serde_json::to_value(params).expect("serializable sync"),
+            ipc_timeout,
+            is_sync,
+        )?;
+        if is_sync {
+            latest_meta = scope_meta;
+        }
+        Ok(val)
     })
     .and_then(|reply| {
-        cooperate::verify_policy(&reply, Some(policy.into()))?;
+        cooperate::verify_policy(&reply, Some(opts.policy.into()))?;
         Ok(reply)
     });
     match sync {
-        Ok(value) => {
+        Ok(mut value) => {
             if value["context_id"].as_str().is_none() {
                 *exit = (*exit).max(1);
+            }
+            if opts.hydrate_cache {
+                orchestration::hydrate_cached_observation(&mut value, latest_meta.as_ref());
             }
             result["post"] = value;
         }
@@ -300,25 +328,56 @@ pub(crate) fn post_sync(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn run(
     args: &StepArgs,
     method: Method,
     params: Value,
     mut call: impl FnMut(Method, Value, Duration) -> Result<Value, CliError>,
 ) -> (Value, u8) {
+    run_with_meta(args, method, params, true, |method, params, timeout, _| {
+        call(method, params, timeout).map(|val| (val, None))
+    })
+}
+
+pub(crate) fn run_with_meta(
+    args: &StepArgs,
+    method: Method,
+    params: Value,
+    hydrate_cache: bool,
+    mut call: impl FnMut(
+        Method,
+        Value,
+        Duration,
+        bool,
+    ) -> Result<(Value, Option<crate::ipc_client::ScopeResultMeta>), CliError>,
+) -> (Value, u8) {
     let start = Instant::now();
-    let action = match call(method, params, TOOL_IPC_TIMEOUT) {
-        Ok(value) => value,
+    let mut pinned_session = args
+        .session
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let action_timeout = orchestration::tool_ipc_timeout(&method, &params);
+    let (action, action_meta) = match call(method, params, action_timeout, pinned_session.is_none())
+    {
+        Ok((value, meta)) => (value, meta),
         Err(error) => {
             return (
                 json!({"ok":false,"phase":"action","action":{"error":failure(&error)},
-            "action_replayed":false,"rpc_calls":1,"elapsed_ms":start.elapsed().as_millis()}),
+                "action_replayed":false,"rpc_calls":1,"elapsed_ms":start.elapsed().as_millis()}),
                 error.exit_code(),
             );
         }
     };
+    if pinned_session.is_none()
+        && let Some(sm) = action_meta.filter(|m| !m.session_id.trim().is_empty())
+    {
+        pinned_session = Some(sm.session_id);
+    }
     let action_ms = start.elapsed().as_millis();
-    // Pin all reads to the action's actual tab; never follow a human's active tab.
+    // Pin all reads to the action's actual session and tab; never follow a concurrent scope rebind or human's active tab.
     let tab = action["tab_id"].as_i64().or(args.tab_id);
     // Navigation timeout is an RPC result, but the navigate command exits 4.
     let mut exit = if matches!(args.action, Action::Navigate) && action["reached"] == "timeout" {
@@ -328,12 +387,15 @@ pub(crate) fn run(
     };
     let mut result = json!({"ok":false,"action":{"result":action},"action_replayed":false});
     let mut rpc_calls = 1;
-    let mut call = |method, params, timeout| {
+    let mut counted_call = |method, params, timeout, want_meta| {
         rpc_calls += 1;
-        call(method, params, timeout)
+        call(method, params, timeout, want_meta)
     };
-    let session = args.session.as_deref().unwrap_or_default();
+    let session = pinned_session.as_deref().unwrap_or_default();
     if let Some(selector) = &args.until_visible {
+        let mut plain_call = |method, params, timeout| {
+            counted_call(method, params, timeout, false).map(|(val, _)| val)
+        };
         if await_ready(
             session,
             tab,
@@ -341,7 +403,7 @@ pub(crate) fn run(
             args.wait_timeout_ms,
             &mut result,
             &mut exit,
-            &mut call,
+            &mut plain_call,
         ) {
             result["phase"] = "readiness".into();
             result["rpc_calls"] = rpc_calls.into();
@@ -352,14 +414,17 @@ pub(crate) fn run(
         result["readiness"] = json!({"requested":false});
     }
     let ready_ms = start.elapsed().as_millis() - action_ms;
-    post_sync(
-        session,
-        args.policy,
-        tab,
-        args.max_tokens,
+    post_sync_with_meta(
+        PostSyncOptions {
+            session,
+            policy: args.policy,
+            tab,
+            max_tokens: args.max_tokens,
+            hydrate_cache,
+        },
         &mut result,
         &mut exit,
-        &mut call,
+        &mut counted_call,
     );
     result["phase"] = if exit == 0 {
         "observed"
@@ -437,6 +502,13 @@ impl<'a> Output<'a> {
         }
         if let Some(post) = reply.get_mut("post") {
             observation_view::attach(post, self.session, self.baseline.as_ref());
+            if self.baseline.is_none() && post.get("observation").is_some() {
+                if post["kind"] == "unchanged" {
+                    post["observation_origin"]["kind"] = "reused".into();
+                } else if post["kind"] == "delta" && post.get("observation_patch").is_some() {
+                    post["observation_origin"]["kind"] = "merged".into();
+                }
+            }
         }
         if let Some(saved) = self.saved {
             match saved.finish(&reply) {
@@ -453,10 +525,10 @@ impl<'a> Output<'a> {
                 }
             }
         }
-        if let Some(post) = reply.get_mut("post") {
-            if !self.match_text.is_empty() {
-                cooperate::presentation::filter(post, self.match_text, self.context_lines as usize);
-            }
+        if let Some(post) = reply.get_mut("post")
+            && !self.match_text.is_empty()
+        {
+            cooperate::presentation::filter(post, self.match_text, self.context_lines as usize);
         }
         println!(
             "{}",
@@ -488,31 +560,39 @@ pub fn dispatch(
     let aux_ctx = op_ctx.without_action_metadata();
     let mut first_rpc = true;
     let daemon = ensure_daemon().context("ensure daemon is running")?;
-    let need_scope_meta = session.trim().is_empty();
+    let hydrate_cache = args.baseline.is_none();
     let mut resolved_session: Option<String> = None;
-    let (reply, exit) = run(&args, method, params, |method, params, timeout| {
-        let rpc_ctx = if std::mem::take(&mut first_rpc) {
-            &op_ctx
-        } else {
-            &aux_ctx
-        };
-        let meta = crate::ipc_client::IpcRequestMeta {
-            return_scope_meta: need_scope_meta && method == Method::ToolCooperate,
-            ..Default::default()
-        };
-        let (val, resp_meta) = rpc_ctx.call_envelope(
-            daemon.sock_path.clone(),
-            "step",
-            method,
-            Some(params),
-            meta,
-            timeout,
-        )?;
-        if let Some(sm) = resp_meta.scope_meta {
-            resolved_session = Some(sm.session_id);
-        }
-        Ok(val)
-    });
+    let (reply, exit) = run_with_meta(
+        &args,
+        method,
+        params,
+        hydrate_cache,
+        |method, params, timeout, want_meta| {
+            let rpc_ctx = if std::mem::take(&mut first_rpc) {
+                &op_ctx
+            } else {
+                &aux_ctx
+            };
+            let meta = crate::ipc_client::IpcRequestMeta {
+                return_scope_meta: want_meta,
+                ..Default::default()
+            };
+            let (val, resp_meta) = rpc_ctx.call_envelope(
+                daemon.sock_path.clone(),
+                "step",
+                method,
+                Some(params),
+                meta,
+                timeout,
+            )?;
+            if let Some(ref sm) = resp_meta.scope_meta
+                && !sm.session_id.is_empty()
+            {
+                resolved_session = Some(sm.session_id.clone());
+            }
+            Ok((val, resp_meta.scope_meta))
+        },
+    );
     output
         .with_resolved_session(resolved_session.as_deref())
         .finish(reply, exit)
@@ -839,5 +919,56 @@ mod tests {
         assert_eq!(exit, 0);
         assert_eq!(reply["post"]["context_id"], "legacy");
         assert_eq!(reply["action_replayed"], false);
+    }
+
+    #[test]
+    fn implicit_session_resolved_by_action_is_pinned_for_readiness_and_post_sync() {
+        let mut args = args();
+        args.session = None;
+        args.until_visible = Some("#done".into());
+        let mut seen = Vec::new();
+        let (reply, exit) = run_with_meta(
+            &args,
+            Method::ToolClick,
+            json!({"session_id": "", "ref": "@e1"}),
+            true,
+            |method, params, _, want_meta| {
+                seen.push((
+                    method.clone(),
+                    params["session_id"].as_str().unwrap_or("").to_owned(),
+                    want_meta,
+                ));
+                match method {
+                    Method::ToolClick => Ok((
+                        json!({"tab_id": 7}),
+                        Some(crate::ipc_client::ScopeResultMeta {
+                            session_id: "sess-a".into(),
+                            ..Default::default()
+                        }),
+                    )),
+                    Method::ToolWaitForElement => Ok((json!({"satisfied": true}), None)),
+                    Method::ToolCooperate => Ok((
+                        json!({
+                            "tab_id": 7,
+                            "context_id": "ctx-a",
+                            "control_policy": "target",
+                            "kind": "baseline",
+                            "observation": {"text": "@vom 1\nL1 page"}
+                        }),
+                        None,
+                    )),
+                    other => panic!("unexpected method {other:?}"),
+                }
+            },
+        );
+        assert_eq!(exit, 0, "{reply}");
+        assert_eq!(
+            seen,
+            vec![
+                (Method::ToolClick, "".into(), true),
+                (Method::ToolWaitForElement, "sess-a".into(), false),
+                (Method::ToolCooperate, "sess-a".into(), true),
+            ]
+        );
     }
 }

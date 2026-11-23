@@ -145,7 +145,9 @@ def make_server(root, port):
                     body = (
                         "["
                         + ",".join(
-                            events.read_text().splitlines() if events.exists() else []
+                            events.read_text(encoding="utf-8", errors="replace").splitlines()
+                            if events.exists()
+                            else []
                         )
                         + "]"
                     )

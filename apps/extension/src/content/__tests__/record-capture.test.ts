@@ -126,6 +126,8 @@ describe("record-capture semantic", () => {
     input.type = "text"; // a "show password" toggle
     edit("BSK_SYNTHETIC_PASSWORDx");
     expect(input.hasAttribute("data-bsk-record-password")).toBe(true);
+    capture.stop();
+    expect(input.hasAttribute("data-bsk-record-password")).toBe(true);
     capture.dispose();
     expect(input.hasAttribute("data-bsk-record-password")).toBe(false);
 
@@ -133,6 +135,92 @@ describe("record-capture semantic", () => {
     expect(fills).toHaveLength(editWhileHidden ? 2 : 1);
     for (const fill of fills) expect(fill).toMatchObject({ value: "***", redacted: true });
     expect(JSON.stringify(steps)).not.toContain("BSK_SYNTHETIC_PASSWORD");
+  });
+
+  it("masks and cleans up revealed password inputs across pre-existing, dynamic, lazy, and closed ShadowRoots", async () => {
+    const closedRoots = new WeakMap<HTMLElement, ShadowRoot>();
+    vi.stubGlobal("chrome", {
+      dom: {
+        openOrClosedShadowRoot: (el: HTMLElement) => closedRoots.get(el) ?? null,
+      },
+      runtime: {
+        sendMessage: vi.fn((message: { sequence?: number }) =>
+          Promise.resolve({ ok: true, sequence: message.sequence }),
+        ),
+      },
+    });
+
+    // 1. Pre-existing open ShadowRoot
+    document.body.innerHTML = `<div id="open-host"></div><div id="lazy-host"></div><div id="closed-host"></div>`;
+    const openRoot = document.querySelector("#open-host")!.attachShadow({ mode: "open" });
+    openRoot.innerHTML = `<input id="open-pw" type="password" autocomplete="off" aria-label="Open PW">`;
+
+    // 2. Pre-existing closed ShadowRoot
+    const closedHost = document.querySelector<HTMLElement>("#closed-host")!;
+    const closedRoot = closedHost.attachShadow({ mode: "closed" });
+    closedRoots.set(closedHost, closedRoot);
+    closedRoot.innerHTML = `<input id="closed-pw" type="password" autocomplete="off" aria-label="Closed PW">`;
+
+    const capture = startRecordCapture("rec-shadow-pw", (step) => steps.push(step));
+
+    // 3. Dynamically inserted open ShadowRoot
+    const dynamicHost = document.createElement("div");
+    const dynamicRoot = dynamicHost.attachShadow({ mode: "open" });
+    dynamicRoot.innerHTML = `<input id="dyn-pw" type="password" autocomplete="off" aria-label="Dyn PW">`;
+    document.body.appendChild(dynamicHost);
+    await Promise.resolve();
+
+    // 4. Lazily attached open ShadowRoot on an already-connected host
+    const lazyHost = document.querySelector("#lazy-host")!;
+    const lazyRoot = lazyHost.attachShadow({ mode: "open" });
+    lazyRoot.innerHTML = `<input id="lazy-pw" type="password" autocomplete="off" aria-label="Lazy PW"><button id="lazy-toggle" type="button">Show</button>`;
+
+    const openPw = openRoot.querySelector<HTMLInputElement>("#open-pw")!;
+    const dynPw = dynamicRoot.querySelector<HTMLInputElement>("#dyn-pw")!;
+    const lazyPw = lazyRoot.querySelector<HTMLInputElement>("#lazy-pw")!;
+    const closedPw = closedRoot.querySelector<HTMLInputElement>("#closed-pw")!;
+
+    for (const [input, secret] of [
+      [openPw, "SHADOW_SECRET_OPEN"],
+      [dynPw, "SHADOW_SECRET_DYN"],
+      [lazyPw, "SHADOW_SECRET_LAZY"],
+    ] as const) {
+      input.dispatchEvent(new FocusEvent("focusin", { bubbles: true, composed: true }));
+      input.value = secret;
+      input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      input.type = "text";
+      input.dispatchEvent(new FocusEvent("focusout", { bubbles: true, composed: true }));
+    }
+
+    // Closed shadow root type toggle also gets marked & cleaned.
+    closedPw.value = "SHADOW_SECRET_CLOSED";
+    closedPw.type = "text";
+    await Promise.resolve();
+
+    capture.stop();
+    for (const input of [openPw, dynPw, lazyPw, closedPw]) {
+      expect(input.hasAttribute("data-bsk-record-password")).toBe(true);
+    }
+
+    capture.dispose();
+    for (const input of [openPw, dynPw, lazyPw, closedPw]) {
+      expect(input.hasAttribute("data-bsk-record-password")).toBe(false);
+    }
+
+    // After dispose(), observers are detached so later toggles leave zero residue.
+    openPw.type = "password";
+    openPw.type = "text";
+    await Promise.resolve();
+    expect(openPw.hasAttribute("data-bsk-record-password")).toBe(false);
+
+    const fills = steps.filter((step) => step.op === "fill");
+    expect(fills).toHaveLength(3);
+    for (const fill of fills) expect(fill).toMatchObject({ value: "***", redacted: true });
+    const serialized = JSON.stringify(steps);
+    expect(serialized).not.toContain("SHADOW_SECRET_OPEN");
+    expect(serialized).not.toContain("SHADOW_SECRET_DYN");
+    expect(serialized).not.toContain("SHADOW_SECRET_LAZY");
+    expect(serialized).not.toContain("SHADOW_SECRET_CLOSED");
   });
 
   it("ignores autocomplete suggestion clicks while a fill session is open", () => {
@@ -1747,5 +1835,106 @@ describe("record-capture semantic", () => {
     } finally {
       overlayHost.remove();
     }
+  });
+
+  it("avoids full-page querySelectorAll('*') and O(N) getComputedStyle scans during hover recording", () => {
+    const filler = Array.from({ length: 200 }, (_, i) => `<div class="card">Item ${i}</div>`).join(
+      "",
+    );
+    document.body.innerHTML = `
+      <button type="button" aria-haspopup="menu">More</button>
+      <ul class="dropdown-menu">
+        <li><a href="/settings">Settings</a></li>
+      </ul>
+      <section>${filler}</section>
+    `;
+    const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".dropdown-menu")!;
+    const link = document.querySelector("a")!;
+    mockRect(trigger, { left: 100, top: 10, width: 60, height: 32 });
+    mockRect(menu, { left: 100, top: 44, width: 140, height: 60 });
+    mockRect(link, { left: 108, top: 52, width: 120, height: 28 });
+
+    const qsaSpy = vi.spyOn(document, "querySelectorAll");
+    const styleSpy = vi.spyOn(window, "getComputedStyle").mockImplementation(
+      (el) =>
+        ({
+          cursor: el === trigger || el === link ? "pointer" : "auto",
+          display: "block",
+          pointerEvents: "auto",
+          position: "static",
+          visibility: "visible",
+        }) as CSSStyleDeclaration,
+    );
+    qsaSpy.mockClear();
+    styleSpy.mockClear();
+
+    const capture = startRecordCapture("rec-hover-perf", (step) => steps.push(step));
+    try {
+      mouseOver(trigger);
+      mouseOver(link);
+      click(link);
+    } finally {
+      capture.dispose();
+      qsaSpy.mockRestore();
+      styleSpy.mockRestore();
+    }
+
+    expect(qsaSpy.mock.calls.filter(([selector]) => selector === "*")).toHaveLength(0);
+    expect(styleSpy.mock.calls.length).toBeLessThan(30);
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+  });
+
+  it("preserves Account as the menu opener when pointer crosses a neighboring toolbar button before clicking inside the menu", () => {
+    document.body.innerHTML = `
+      <nav class="toolbar">
+        <button id="account" type="button" aria-haspopup="menu">Account</button>
+        <button id="notifications" type="button" aria-haspopup="menu">Notifications</button>
+      </nav>
+      <div id="account-menu" role="menu" style="display: none; position: absolute;">
+        <a id="settings" href="/settings">Settings</a>
+      </div>
+    `;
+    const account = document.getElementById("account")!;
+    const notifications = document.getElementById("notifications")!;
+    const menu = document.getElementById("account-menu")!;
+    const settings = document.getElementById("settings")!;
+
+    mockRect(account, { left: 100, top: 10, width: 90, height: 32 });
+    mockRect(notifications, { left: 200, top: 10, width: 110, height: 32 });
+    mockRect(menu, { left: 100, top: 44, width: 220, height: 80 });
+    mockRect(settings, { left: 110, top: 54, width: 180, height: 28 });
+
+    // Bubble-phase listener opens Account's menu when Account is hovered.
+    account.addEventListener("mouseover", () => {
+      menu.style.display = "block";
+    });
+
+    const styleSpy = vi.spyOn(window, "getComputedStyle").mockImplementation(
+      (el) =>
+        ({
+          cursor: el === account || el === notifications || el === settings ? "pointer" : "auto",
+          display: el instanceof HTMLElement && el.style.display ? el.style.display : "block",
+          pointerEvents: "auto",
+          position: el instanceof HTMLElement && el.style.position ? el.style.position : "static",
+          visibility: "visible",
+        }) as CSSStyleDeclaration,
+    );
+
+    const capture = startRecordCapture("rec-neighbor-toolbar", (step) => steps.push(step));
+    try {
+      mouseOver(account);
+      // Pointer crosses neighboring Notifications immediately on its way to Settings.
+      mouseOver(notifications);
+      mouseOver(settings);
+      click(settings);
+    } finally {
+      capture.dispose();
+      styleSpy.mockRestore();
+    }
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]?.target?.name).toBe("Account");
+    expect(steps[1]?.target?.name).toBe("Settings");
   });
 });

@@ -50,6 +50,17 @@ jobs:
       - run: python3 evals/browser/skills/browserskill-release-test/scripts/test_release_audit.py
       - run: node --test scripts/render-version-json.test.mjs
 
+  rust-msrv:
+    name: Check minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check the locked workspace with its declared minimum Rust version
+        run: |
+          msrv=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["rust-version"])')
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+          cargo +"$msrv" test --workspace --locked
+
   rust:
     name: Rust fmt, clippy, tests
     runs-on: ubuntu-latest
@@ -169,6 +180,9 @@ jobs:
           node scripts/check-skill-bundles.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check-crate-skill.mjs
+
+      - name: Run release-test audit helper tests
+        run: python evals/browser/skills/browserskill-release-test/scripts/test_release_audit.py
 
       - name: Run installer tests (Windows PowerShell 5.1)
         shell: powershell
@@ -314,6 +328,7 @@ jobs:
         run: >-
           node scripts/run-browser-tests.mjs
           src/tools/__tests__/download-effect-state.browser.test.ts
+          src/tools/__tests__/evaluate-abort.browser.test.ts
           src/tools/__tests__/click.browser.test.ts
           src/tools/__tests__/click-listener-observation.browser.test.ts
           src/tools/__tests__/dom-multiclick.browser.test.ts
@@ -381,6 +396,7 @@ jobs:
         run: >-
           node scripts/run-browser-tests.mjs
           src/content/__tests__/record-input-buttons.browser.test.ts
+          src/tools/__tests__/record-password-redaction.browser.test.ts
           src/tools/__tests__/focus.browser.test.ts
           src/tools/__tests__/scroll.browser.test.ts
           src/tools/__tests__/select.browser.test.ts

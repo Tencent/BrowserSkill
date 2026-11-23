@@ -21,5 +21,6 @@ export interface Transport {
   send(msg: ProtocolFrame): void;
   onMessage(handler: FrameHandler): Disposable;
   onConnectionStateChange(handler: ConnectionStateHandler): Disposable;
+  resetAuthenticationBackoff?(): void;
   readonly state: ConnectionState;
 }

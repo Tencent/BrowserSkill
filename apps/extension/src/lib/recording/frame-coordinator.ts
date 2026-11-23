@@ -24,12 +24,15 @@ interface ArmedRecording {
   agents: Map<string, FrameAgent>;
   onDocumentReady?: (scope: RecordingCaptureScope) => void | Promise<void>;
   finishing: boolean;
+  stopped: boolean;
 }
 
 interface FrameAgent extends RecordingCaptureScope {
   requestId: string;
   port: chrome.runtime.Port;
   stopWaiters: Map<string, (ok: boolean) => void>;
+  cleanupWaiters: Set<() => void>;
+  unresponsive?: boolean;
 }
 
 interface BrowserFrame {
@@ -44,6 +47,7 @@ interface BrowserFrameNavigation extends BrowserFrame {
 
 const RECORD_FRAME_START_TIMEOUT_MS = 3_000;
 const RECORD_FRAME_STOP_TIMEOUT_MS = 5_000;
+const RECORD_FRAME_CLEANUP_TIMEOUT_MS = 1_000;
 
 export interface RecordFrameCoordinatorDeps {
   getAllFrames(tabId: number): Promise<BrowserFrame[]>;
@@ -151,6 +155,7 @@ export class RecordFrameCoordinator {
       agents: new Map(),
       ...(onDocumentReady ? { onDocumentReady } : {}),
       finishing: false,
+      stopped: false,
     });
   }
 
@@ -185,7 +190,7 @@ export class RecordFrameCoordinator {
   ): RecordingCaptureScope | null {
     const address = senderAddress(sender);
     const recording = this.#recordings.get(requestId);
-    if (!address || !recording) return null;
+    if (!address || !recording || recording.stopped) return null;
     const agent = recording.agents.get(documentKey(address.tabId, address.documentId));
     if (!agent || agent.producerId !== producerId) return null;
     return {
@@ -198,13 +203,14 @@ export class RecordFrameCoordinator {
 
   async stop(requestId: string): Promise<boolean> {
     const recording = this.#recordings.get(requestId);
-    if (!recording) return true;
+    if (!recording || recording.stopped) return true;
     recording.finishing = true;
     const commandId = createRandomUuid();
     const agents = [...recording.agents.values()];
     const results = await Promise.all(
       agents.map((agent) => this.#stopAgent(agent, requestId, commandId)),
     );
+    if (this.#recordings.get(requestId) !== recording) return false;
     let failedAgents = agents.filter((_, index) => !results[index]);
     if (
       failedAgents.length > 0 &&
@@ -232,26 +238,47 @@ export class RecordFrameCoordinator {
           // Unreadable frame hierarchies remain unconfirmed.
         }
       }
+      if (this.#recordings.get(requestId) !== recording) return false;
       failedAgents = failedAgents.filter(
         (agent) => !hiddenByTab.get(agent.tabId)?.has(agent.browserFrameId),
       );
     }
     const succeeded = failedAgents.length === 0;
     if (succeeded) {
+      recording.stopped = true;
+      for (const tabId of recording.tabIds) this.#clearSubframeTimerForTabIfIdle(tabId, requestId);
+      // Keep proven-hidden unresponsive agents connected until `cleanup()` so
+      // an alive frame does not strip `data-bsk-record-password` on disconnect
+      // before trailing VOM capture finishes.
       agents.forEach((agent, index) => {
-        if (!results[index]) {
+        if (!results[index]) agent.unresponsive = true;
+      });
+    } else {
+      recording.finishing = false;
+    }
+    return succeeded;
+  }
+
+  async cleanup(requestId: string): Promise<void> {
+    const recording = this.#recordings.get(requestId);
+    if (!recording) return;
+    this.#recordings.delete(requestId);
+    for (const tabId of recording.tabIds) this.#clearSubframeTimerForTabIfIdle(tabId, requestId);
+    const agents = [...recording.agents.values()];
+    recording.agents.clear();
+    await Promise.all(
+      agents.map((agent) => {
+        if (agent.unresponsive) {
           try {
             agent.port.disconnect();
           } catch {
             // Ignore already-closed ports.
           }
+          return Promise.resolve();
         }
-      });
-      this.#recordings.delete(requestId);
-    } else {
-      recording.finishing = false;
-    }
-    return succeeded;
+        return this.#cleanupAgent(agent, requestId);
+      }),
+    );
   }
 
   cancel(requestId: string): void {
@@ -432,6 +459,7 @@ export class RecordFrameCoordinator {
           producerId,
           port,
           stopWaiters: new Map(),
+          cleanupWaiters: new Set(),
         };
         registered = agent;
         const key = documentKey(address.tabId, address.documentId);
@@ -465,16 +493,55 @@ export class RecordFrameCoordinator {
       ) {
         registered.stopWaiters.get(message.commandId)?.(message.ok === true);
         registered.stopWaiters.delete(message.commandId);
+        return;
+      }
+      if (message.type === "cleaned" && registered && message.requestId === registered.requestId) {
+        for (const notify of [...registered.cleanupWaiters]) notify();
+        registered.cleanupWaiters.clear();
       }
     });
     port.onDisconnect.addListener(() => {
       if (!registered) return;
       for (const resolve of registered.stopWaiters.values()) resolve(true);
+      registered.stopWaiters.clear();
+      for (const notify of [...registered.cleanupWaiters]) notify();
+      registered.cleanupWaiters.clear();
       const recording = this.#recordings.get(registered.requestId);
       const key = documentKey(registered.tabId, registered.documentId);
       if (recording?.agents.get(key) === registered) recording.agents.delete(key);
     });
   };
+
+  #cleanupAgent(agent: FrameAgent, requestId: string): Promise<void> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (disconnect: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        agent.cleanupWaiters.delete(onCleaned);
+        if (disconnect) {
+          try {
+            agent.port.disconnect();
+          } catch {
+            // Ignore already-closed ports.
+          }
+        }
+        resolve();
+      };
+      const onCleaned = () => finish(true);
+      const timer = setTimeout(() => finish(true), RECORD_FRAME_CLEANUP_TIMEOUT_MS);
+      agent.cleanupWaiters.add(onCleaned);
+      try {
+        agent.port.postMessage({
+          type: "cleanup",
+          requestId,
+        } satisfies RecordFramePortMessage);
+      } catch {
+        finish(false);
+      }
+    });
+  }
 
   #stopAgent(agent: FrameAgent, requestId: string, commandId: string): Promise<boolean> {
     return new Promise((resolve) => {
@@ -539,6 +606,11 @@ export class RecordFrameCoordinator {
         } satisfies RecordFramePortMessage);
       } catch {
         // A destroyed Document has no remaining capture state to cancel.
+      }
+      try {
+        agent.port.disconnect();
+      } catch {
+        // Ignore already-closed ports.
       }
     }
   }

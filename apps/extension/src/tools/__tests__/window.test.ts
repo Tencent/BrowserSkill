@@ -549,7 +549,11 @@ describe("handleSessionStart window size", () => {
   ] as const)("legacy unattended leaves browser settings authoritative (%s, %s)", async (confirmTabBorrow, requestHelpEnabled, borrow_confirmation, request_help) => {
     const preferences = new InteractionPreferenceStore();
     vi.spyOn(preferences, "ready").mockResolvedValue();
-    vi.spyOn(preferences, "get").mockReturnValue({ confirmTabBorrow, requestHelpEnabled });
+    vi.spyOn(preferences, "get").mockReturnValue({
+      confirmTabBorrow,
+      requestHelpEnabled,
+      openAgentWindowMinimized: false,
+    });
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
     for (const unattended of [false, true]) {
       expect(
@@ -599,6 +603,37 @@ describe("handleSessionStart window size", () => {
     });
     expect(aw.create).toHaveBeenCalledWith("about:blank", {
       focused: false,
+      excludeWindowIds: expect.any(Set),
+    });
+  });
+
+  it("forwards minimized: true for unfocused sessions when openAgentWindowMinimized is enabled", async () => {
+    const preferences = new InteractionPreferenceStore();
+    vi.spyOn(preferences, "ready").mockResolvedValue();
+    vi.spyOn(preferences, "get").mockReturnValue({
+      confirmTabBorrow: true,
+      requestHelpEnabled: true,
+      openAgentWindowMinimized: true,
+    });
+    const aw = fakeAgentWindow([100, 101, 102]);
+    const sm = new SessionManager({ agentWindow: aw });
+
+    await handleSessionStart(sm, { session_id: "bg-default" }, { preferences });
+    expect(aw.create).toHaveBeenNthCalledWith(1, "about:blank", {
+      minimized: true,
+      excludeWindowIds: expect.any(Set),
+    });
+
+    await handleSessionStart(sm, { session_id: "bg-explicit", focused: false }, { preferences });
+    expect(aw.create).toHaveBeenNthCalledWith(2, "about:blank", {
+      focused: false,
+      minimized: true,
+      excludeWindowIds: expect.any(Set),
+    });
+
+    await handleSessionStart(sm, { session_id: "fg-explicit", focused: true }, { preferences });
+    expect(aw.create).toHaveBeenNthCalledWith(3, "about:blank", {
+      focused: true,
       excludeWindowIds: expect.any(Set),
     });
   });

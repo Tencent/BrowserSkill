@@ -85,10 +85,37 @@ export function parseExpectations(value: unknown): ActionExpectation[] | RpcErro
 const SAMPLE_TARGET = `function(field, attribute, needRowAnchor) {
   if (!this.isConnected) return { connected: false };
   if (field === 'exists') return { connected: true, value: true };
-  if (field === 'text') return { connected: true, value: this.textContent };
+  if (field === 'text') {
+    const excludedSelector = "script,style,template,noscript,[data-bsk-overlay],[data-bsk-overlay-host],browser-skill-overlay";
+    if (!this.querySelector(excludedSelector)) return { connected: true, value: this.textContent };
+    const parts = [];
+    const stack = [];
+    for (let child = this.lastChild; child; child = child.previousSibling) stack.push(child);
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (current.nodeType === Node.TEXT_NODE) {
+        if (current.nodeValue) parts.push(current.nodeValue);
+      } else if (current.nodeType === Node.ELEMENT_NODE && !current.matches(excludedSelector)) {
+        for (let child = current.lastChild; child; child = child.previousSibling) stack.push(child);
+      }
+    }
+    return { connected: true, value: parts.join('') };
+  }
   const sensitiveSelector = ${JSON.stringify(SENSITIVE_READ_INPUT_SELECTOR)};
   const sensitive = this.matches(sensitiveSelector);
   if (field === 'attribute') return { connected: true, value: this.getAttribute(attribute), redacted: sensitive && attribute.toLowerCase() === 'value' };
+  if (field === 'checked') {
+    if (this instanceof HTMLInputElement) return { connected: true, value: this.checked };
+    const role = (this.getAttribute('role') ?? '').trim().toLowerCase();
+    if (['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'].includes(role)) {
+      const ariaChecked = (this.getAttribute('aria-checked') ?? '').trim().toLowerCase();
+      return {
+        connected: true,
+        value: ariaChecked === 'true' ? true : ariaChecked === 'false' ? false : null,
+      };
+    }
+    return { connected: true, value: typeof this.checked === 'boolean' ? this.checked : null };
+  }
   if (field) return { connected: true, value: this[field] ?? null, redacted: sensitive && field === 'value' };
   const style = getComputedStyle(this);
   let rowAnchor = null;

@@ -131,6 +131,7 @@ export class CdpReadGate {
     timeoutMs?: number,
     signal?: AbortSignal,
     processKey = targetProcessKey(target),
+    blockGateOnAbort = true,
   ): Promise<T> {
     signal?.throwIfAborted();
     let sessions = this.tabs.get(target.tabId);
@@ -167,7 +168,7 @@ export class CdpReadGate {
     );
     if (!signal) return work;
     return waitForAbort(work, signal, () => {
-      if (GUARDED_READS.has(method)) {
+      if (blockGateOnAbort && GUARDED_READS.has(method)) {
         blockUntilSettled(CdpReadTimeoutError.stillPending(method, target.tabId, processKey));
       }
     });
@@ -184,7 +185,7 @@ export class CdpReadGate {
 }
 
 /** Stop waiting on cancellation; native Chrome commands continue until they settle. */
-async function waitForAbort<T>(
+export async function waitForAbort<T>(
   work: Promise<T>,
   signal: AbortSignal,
   onAbort?: () => void,
@@ -195,6 +196,7 @@ async function waitForAbort<T>(
       work,
       new Promise<never>((_, reject) => {
         abort = () => {
+          void work.catch(() => {});
           onAbort?.();
           reject(signal.reason ?? new DOMException("Operation aborted", "AbortError"));
         };
@@ -259,6 +261,7 @@ export async function runCdpCommand<T>(
       pending,
       new Promise<never>((_, reject) => {
         deadline = setTimeout(() => {
+          void pending.catch(() => {});
           timedOut = true;
           console.warn("[bsk cdp] read timed out", details());
           const error = new CdpReadTimeoutError(method, target.tabId, timeoutMs, processKey);

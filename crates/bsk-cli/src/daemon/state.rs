@@ -81,7 +81,13 @@ impl DaemonState {
         &self,
         session_id: &SessionId,
         reason: &'static str,
-    ) -> (bool, Vec<std::path::PathBuf>, u64) {
+        audit_end_status: &'static str,
+    ) -> (
+        bool,
+        Vec<std::path::PathBuf>,
+        u64,
+        Option<super::sessions::PendingAuditEnd>,
+    ) {
         let (cancel_reason, include_dialog_retained) =
             if reason == bsk_protocol::RpcErrorReason::UserMovedTab.as_str() {
                 (CancelReason::UserMovedTab, true)
@@ -109,7 +115,9 @@ impl DaemonState {
                 );
             }
         }
-        let removed = self.sessions.teardown(session_id, reason);
+        let (removed, audit_end) =
+            self.sessions
+                .teardown_in_memory(session_id, reason, audit_end_status);
         self.record_session_stops
             .lock()
             .unwrap()
@@ -124,14 +132,20 @@ impl DaemonState {
         self.run_logs.remove_session(&session_id.0);
         self.scopes.on_session_ended(session_id, reason);
         let wal_seq = self.intent_wal.record_session_ended(session_id);
-        (removed, transfer_dirs, wal_seq)
+        (removed, transfer_dirs, wal_seq, audit_end)
     }
 
     pub fn teardown_session(&self, session_id: &SessionId, reason: &'static str) -> bool {
-        let (removed, transfer_dirs, wal_seq) = self.teardown_session_in_memory(session_id, reason);
-        if !transfer_dirs.is_empty() || wal_seq > 0 {
+        let (removed, transfer_dirs, wal_seq, audit_end) =
+            self.teardown_session_in_memory(session_id, reason, "interrupted");
+        if !transfer_dirs.is_empty() || wal_seq > 0 || audit_end.is_some() {
             let wal = self.intent_wal.clone();
             let cleanup = move || {
+                if let Some(pending) = audit_end {
+                    pending
+                        .audit
+                        .finish_session_end(pending.live_id, pending.status);
+                }
                 TransferRegistry::remove_dirs(transfer_dirs);
                 wal.flush_up_to(wal_seq);
             };
@@ -163,13 +177,21 @@ impl DaemonState {
             cancel,
         )
         .await?;
-        if graceful_audit {
-            self.sessions.mark_graceful_audit_end(session_id);
-        }
-        let (_, transfer_dirs, wal_seq) = self.teardown_session_in_memory(session_id, reason);
-        if !transfer_dirs.is_empty() || wal_seq > 0 {
+        let audit_end_status = if graceful_audit {
+            "ended"
+        } else {
+            "interrupted"
+        };
+        let (_, transfer_dirs, wal_seq, audit_end) =
+            self.teardown_session_in_memory(session_id, reason, audit_end_status);
+        if !transfer_dirs.is_empty() || wal_seq > 0 || audit_end.is_some() {
             let wal = self.intent_wal.clone();
             let _ = tokio::task::spawn_blocking(move || {
+                if let Some(pending) = audit_end {
+                    pending
+                        .audit
+                        .finish_session_end(pending.live_id, pending.status);
+                }
                 TransferRegistry::remove_dirs(transfer_dirs);
                 wal.flush_up_to(wal_seq);
             })
@@ -245,13 +267,40 @@ impl DaemonState {
         })
     }
     pub fn new(config: DaemonConfig) -> Self {
+        let home = super::paths::bsk_home().ok();
+        let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
+        let intent_wal = super::intent_wal::IntentWal::new(super::paths::intent_ledger_path().ok());
+        Self::new_with_stores(
+            config,
+            home.map(|path| path.join("audit")),
+            transfers,
+            intent_wal,
+        )
+    }
+
+    /// Construct a [`DaemonState`] whose on-disk stores (`audit/`, `transfers/`,
+    /// and `intent_ledger.jsonl`) are rooted inside `root` without touching
+    /// `$BSK_HOME` / `~/.bsk`.
+    pub fn new_isolated(config: DaemonConfig, root: &std::path::Path) -> Self {
+        let transfers = Arc::new(
+            TransferRegistry::at_root(root.join("transfers"))
+                .expect("initialise isolated transfer staging"),
+        );
+        let intent_wal = super::intent_wal::IntentWal::new(Some(root.join("intent_ledger.jsonl")));
+        Self::new_with_stores(config, Some(root.join("audit")), transfers, intent_wal)
+    }
+
+    fn new_with_stores(
+        config: DaemonConfig,
+        audit_dir: Option<std::path::PathBuf>,
+        transfers: Arc<TransferRegistry>,
+        intent_wal: super::intent_wal::IntentWal,
+    ) -> Self {
         if crate::cli::human_loop::legacy_help_override_requested() {
             crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
         }
         let browsers = Arc::new(BrowserRegistry::new());
-        let audit = Arc::new(super::audit::AuditStore::new(
-            super::paths::bsk_home().ok().map(|path| path.join("audit")),
-        ));
+        let audit = Arc::new(super::audit::AuditStore::new(audit_dir));
         let sessions = Arc::new(SessionRegistry::with_audit(Arc::clone(&audit)));
         let tool_inflight = Arc::new(ToolInflightRegistry::new());
         let tool_queues = Arc::new(ToolQueueRegistry::new(
@@ -260,7 +309,6 @@ impl DaemonState {
         ));
         let abort_registry = Arc::new(AbortRegistry::new());
         let session_interrupts = Arc::new(SessionInterruptRegistry::new());
-        let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
         Self {
             audit,
             local_auth: Arc::new(super::local_auth::LocalAuth::memory(config.local_auth)),
@@ -278,7 +326,7 @@ impl DaemonState {
             transfers,
             run_logs: Default::default(),
             scopes: Default::default(),
-            intent_wal: super::intent_wal::IntentWal::new(super::paths::intent_ledger_path().ok()),
+            intent_wal,
         }
     }
 }
@@ -328,10 +376,12 @@ impl DaemonHandle {
         let _ = await_join(self.session_idle_task).await;
         self.browser_liveness_task.abort();
         let _ = await_join(self.browser_liveness_task).await;
-        self.ws.shutdown.notify_waiters();
+        // Use `notify_one()` (which retains a permit if the accept loop has not
+        // polled yet or is between iterations) rather than `notify_waiters()`.
+        self.ws.shutdown.notify_one();
         let _ = await_join(self.ws.task).await;
         if let Some(ipc) = self.ipc {
-            ipc.shutdown.notify_waiters();
+            ipc.shutdown.notify_one();
             let _ = await_join(ipc.task).await;
         }
     }

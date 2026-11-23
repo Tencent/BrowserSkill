@@ -317,9 +317,13 @@ describe("interaction preferences", () => {
     await store.readyOrFallback();
     expect(store.get()).toEqual(DEFAULT_INTERACTION_PREFERENCES);
     await expect(store.ready()).rejects.toThrow("read failed");
-    await expect(store.set({ confirmTabBorrow: false, requestHelpEnabled: false })).rejects.toThrow(
-      "read failed",
-    );
+    await expect(
+      store.set({
+        confirmTabBorrow: false,
+        requestHelpEnabled: false,
+        openAgentWindowMinimized: false,
+      }),
+    ).rejects.toThrow("read failed");
     expect(storage.set).not.toHaveBeenCalled();
     expect(addListener).toHaveBeenCalledOnce();
   });
@@ -337,7 +341,11 @@ describe("interaction preferences", () => {
     const store = new InteractionPreferenceStore(storage);
     await store.readyOrFallback();
     await Promise.all([store.ready(), store.ready(), store.readyOrFallback()]);
-    expect(store.get()).toEqual({ confirmTabBorrow: false, requestHelpEnabled: false });
+    expect(store.get()).toEqual({
+      confirmTabBorrow: false,
+      requestHelpEnabled: false,
+      openAgentWindowMinimized: false,
+    });
     expect(storage.get).toHaveBeenCalledTimes(2);
     expect(addListener).toHaveBeenCalledOnce();
     expect(storage.set).not.toHaveBeenCalled();
@@ -350,7 +358,11 @@ describe("interaction preferences", () => {
     const storage = { get: vi.fn().mockRejectedValue(new Error("failed")), set: vi.fn() };
     const store = new InteractionPreferenceStore(storage);
     await expect(store.ready()).rejects.toThrow("failed");
-    const preferences = { confirmTabBorrow: enabled, requestHelpEnabled: enabled };
+    const preferences = {
+      confirmTabBorrow: enabled,
+      requestHelpEnabled: enabled,
+      openAgentWindowMinimized: !enabled,
+    };
     listener({ [INTERACTION_STORAGE_KEY]: { newValue: preferences } }, "local");
     await store.ready();
     expect(store.get()).toEqual(preferences);
@@ -371,7 +383,11 @@ describe("interaction preferences", () => {
     listener({ [INTERACTION_STORAGE_KEY]: { newValue: { requestHelpEnabled: false } } }, "local");
     reject(new Error("late failure"));
     await pending;
-    expect(store.get()).toEqual({ confirmTabBorrow: true, requestHelpEnabled: false });
+    expect(store.get()).toEqual({
+      confirmTabBorrow: true,
+      requestHelpEnabled: false,
+      openAgentWindowMinimized: false,
+    });
   });
 
   it("does not replace a newer storage event with a stale retry result", async () => {
@@ -394,22 +410,32 @@ describe("interaction preferences", () => {
     listener({ [INTERACTION_STORAGE_KEY]: { newValue: { confirmTabBorrow: false } } }, "local");
     read({ [INTERACTION_STORAGE_KEY]: DEFAULT_INTERACTION_PREFERENCES });
     await retry;
-    expect(store.get()).toEqual({ confirmTabBorrow: false, requestHelpEnabled: true });
+    expect(store.get()).toEqual({
+      confirmTabBorrow: false,
+      requestHelpEnabled: true,
+      openAgentWindowMinimized: false,
+    });
     expect(addListener).toHaveBeenCalledOnce();
   });
 
-  it("keeps both prompts enabled unless explicitly disabled", () => {
+  it("keeps both prompts enabled and minimized windows off unless explicitly configured", () => {
     for (const value of [
       null,
       undefined,
       {},
-      { confirmTabBorrow: 0, requestHelpEnabled: "false" },
+      { confirmTabBorrow: 0, requestHelpEnabled: "false", openAgentWindowMinimized: 1 },
     ]) {
       expect(normalizeInteractionPreferences(value)).toEqual(DEFAULT_INTERACTION_PREFERENCES);
     }
     expect(normalizeInteractionPreferences({ confirmTabBorrow: false })).toEqual({
       confirmTabBorrow: false,
       requestHelpEnabled: true,
+      openAgentWindowMinimized: false,
+    });
+    expect(normalizeInteractionPreferences({ openAgentWindowMinimized: true })).toEqual({
+      confirmTabBorrow: true,
+      requestHelpEnabled: true,
+      openAgentWindowMinimized: true,
     });
   });
 
@@ -434,9 +460,13 @@ describe("interaction preferences", () => {
       get: vi.fn().mockResolvedValue({}),
       set: vi.fn().mockRejectedValue(new Error("disk full")),
     });
-    await expect(store.set({ confirmTabBorrow: false, requestHelpEnabled: false })).rejects.toThrow(
-      "disk full",
-    );
+    await expect(
+      store.set({
+        confirmTabBorrow: false,
+        requestHelpEnabled: false,
+        openAgentWindowMinimized: true,
+      }),
+    ).rejects.toThrow("disk full");
     expect(store.get()).toEqual(DEFAULT_INTERACTION_PREFERENCES);
   });
 
@@ -450,19 +480,31 @@ describe("interaction preferences", () => {
         }),
     });
     await store.ready();
-    const pending = store.set({ confirmTabBorrow: false, requestHelpEnabled: true });
+    const pending = store.set({
+      confirmTabBorrow: false,
+      requestHelpEnabled: true,
+      openAgentWindowMinimized: false,
+    });
     await vi.waitFor(() => expect(written).toBeDefined());
     listener(
       {
         [INTERACTION_STORAGE_KEY]: {
-          newValue: { confirmTabBorrow: true, requestHelpEnabled: false },
+          newValue: {
+            confirmTabBorrow: true,
+            requestHelpEnabled: false,
+            openAgentWindowMinimized: true,
+          },
         },
       },
       "local",
     );
     written();
     await pending;
-    expect(store.get()).toEqual({ confirmTabBorrow: true, requestHelpEnabled: false });
+    expect(store.get()).toEqual({
+      confirmTabBorrow: true,
+      requestHelpEnabled: false,
+      openAgentWindowMinimized: true,
+    });
   });
 
   it.each([

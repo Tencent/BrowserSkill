@@ -151,6 +151,35 @@ def parse(text):
             return None
 
 
+def launcher(exe, platform=None):
+    """Return the argv prefix that actually starts ``exe``.
+
+    Windows cannot exec a file without an executable extension, even when it
+    carries a shebang, so the script-based ``--bsk`` wrappers described in the
+    evidence contract fail there with WinError 193. Run Python wrappers with the
+    current interpreter instead; native executables and ``.cmd``/``.bat`` shims
+    are launched unchanged. ``platform`` exists so the decision can be tested
+    without mutating ``os.name``, which would also change how ``pathlib`` builds
+    paths.
+    """
+    path = Path(exe)
+    platform = os.name if platform is None else platform
+    suffix = path.suffix.lower()
+    if platform != "nt" or suffix in {".exe", ".com", ".bat", ".cmd"}:
+        return [exe]
+    # CreateProcessW rejects `.py`/`.pyw` too, with or without a shebang.
+    if suffix in {".py", ".pyw"}:
+        return [sys.executable or "python", str(path)]
+    try:
+        with path.open("rb") as handle:
+            shebang = handle.readline(256).decode("utf-8", "replace").strip()
+    except OSError:
+        return [exe]
+    if shebang.startswith("#!") and "python" in shebang.lower():
+        return [sys.executable or "python", str(path)]
+    return [exe]
+
+
 def discover(bsk, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -165,9 +194,11 @@ def discover(bsk, directory):
             return
         seen.add(key)
         r = subprocess.run(
-            [bsk, *parts, "--help"],
+            [*launcher(bsk), *parts, "--help"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=20,
             env=env,
         )
@@ -175,7 +206,7 @@ def discover(bsk, directory):
             raise ValueError("Help discovery failed: " + key + " " + r.stderr)
         text = r.stdout
         file = directory / ((key.replace(" ", "__") or "root") + ".txt")
-        file.write_text(text)
+        file.write_text(text, encoding="utf-8")
         documents.append({"command": key, "path": file.name, "sha256": digest(file)})
         match = re.search(r"^Commands:\s*\n(.*?)(?=^\S|\Z)", text, re.M | re.S)
         children = (
@@ -187,9 +218,11 @@ def discover(bsk, directory):
         # exposes its subcommands when supported by the candidate binary.
         if not parts and "recipe" not in children:
             probe = subprocess.run(
-                [bsk, "recipe", "--help"],
+                [*launcher(bsk), "recipe", "--help"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=20,
                 env=env,
             )
@@ -582,7 +615,11 @@ def execute(args):
             else (subprocess.PIPE if args.interactive else subprocess.DEVNULL)
         )
         p = subprocess.Popen(
-            [exe, *argv], stdout=stdout, stderr=stderr, stdin=input_handle, env=env
+            [*launcher(exe), *argv],
+            stdout=stdout,
+            stderr=stderr,
+            stdin=input_handle,
+            env=env,
         )
         if args.interactive:
 
@@ -619,7 +656,11 @@ def execute(args):
             code = p.wait(timeout=args.timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            p.send_signal(signal.SIGINT)
+            if os.name == "nt":
+                # Windows has no SIGINT for processes; send_signal raises ValueError.
+                p.terminate()
+            else:
+                p.send_signal(signal.SIGINT)
             try:
                 code = p.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -634,8 +675,8 @@ def execute(args):
         if started_ms is not None and finished_ms is not None
         else 0.0
     )
-    out_text = (folder / "stdout.txt").read_text(errors="replace")
-    err_text = (folder / "stderr.txt").read_text(errors="replace")
+    out_text = (folder / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+    err_text = (folder / "stderr.txt").read_text(encoding="utf-8", errors="replace")
     parsed_json = parse(out_text.strip() or err_text.strip())
     metrics = extract_metrics(cmd_name, code, parsed_json, elapsed_ms)
     meta.update(
@@ -697,8 +738,8 @@ def read_record(root, record_id):
             raise ValueError("Changed raw " + kind)
     if (d / "stdin.txt").exists() and digest(d / "stdin.txt") != m.get("stdin_sha256"):
         raise ValueError("Changed protocol input")
-    out = (d / "stdout.txt").read_text(errors="replace")
-    err = (d / "stderr.txt").read_text(errors="replace")
+    out = (d / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+    err = (d / "stderr.txt").read_text(encoding="utf-8", errors="replace")
     parsed_json = parse(out.strip() or err.strip())
     if "elapsed_ms" not in m:
         s_ms = parse_iso_ms(m.get("started"))

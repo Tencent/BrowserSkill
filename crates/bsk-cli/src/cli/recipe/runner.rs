@@ -367,16 +367,68 @@ where
                 "recipes need target control; start a new session with a current extension",
             ));
         }
+        let prev_tab = self.tab;
+        let prev_ctx = self.context.clone();
+        let prev_obs = self.observation.clone();
         self.tab = reply["tab_id"].as_i64().or(self.tab);
         self.context = reply["context_id"].as_str().map(str::to_owned);
         self.observation = reply["observation_id"].as_str().map(str::to_owned);
-        self.stale_values = reply["kind"] == "delta";
         if let Some(text) = reply.pointer("/observation/text").and_then(Value::as_str) {
             self.check_version(text)?;
             self.text = Some(text.to_owned());
             self.truncated = reply["observation"]["truncated"] == true
                 || reply["observation"]["next_cursor"].is_string();
+            self.stale_values = false;
             self.origin_unverified = true;
+        } else if reply["kind"] == "delta" {
+            let exact_predecessor = !self.stale_values
+                && !self.truncated
+                && prev_tab == self.tab
+                && reply["history_complete"] == true
+                && reply
+                    .get("previous_context_id")
+                    .is_none_or(|id| prev_ctx.as_deref() == id.as_str())
+                && reply
+                    .get("previous_observation_id")
+                    .is_none_or(|id| prev_obs.as_deref() == id.as_str());
+            let patched = exact_predecessor
+                .then_some(self.text.as_deref())
+                .flatten()
+                .and_then(|prev| crate::daemon::scopes::apply_text_delta_patch(&reply, prev));
+            if let Some(text) = patched {
+                self.check_version(&text)?;
+                self.text = Some(text);
+                self.stale_values = false;
+                self.origin_unverified = true;
+            } else {
+                self.text = None;
+                self.stale_values = true;
+            }
+        } else if reply["kind"] == "unchanged" {
+            let history_ok = reply
+                .get("history_complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let no_changes = reply
+                .get("changes")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty);
+            let same_snapshot = prev_tab == self.tab
+                && history_ok
+                && no_changes
+                && reply
+                    .get("previous_context_id")
+                    .is_none_or(|id| prev_ctx.as_deref() == id.as_str())
+                && reply
+                    .get("previous_observation_id")
+                    .is_none_or(|id| prev_obs.as_deref() == id.as_str());
+            if !same_snapshot {
+                self.text = None;
+                self.stale_values = true;
+            }
+        } else {
+            self.text = None;
+            self.stale_values = true;
         }
         // A sync issues a fresh context even after a person acted, so a recipe must
         // read what they did itself. Anything before this run began is not its concern.
@@ -443,7 +495,7 @@ where
     /// An unchanged page gets no text in its sync, and a new run has none from before.
     /// Refs and the context survive a read under target control.
     fn read_text(&mut self) -> Flow<()> {
-        if self.text.is_some() {
+        if self.text.is_some() && !self.stale_values {
             return Ok(());
         }
         let mut params = json!({"session_id":self.options.session,"context_id":self.context});
@@ -460,6 +512,7 @@ where
         self.check_version(text)?;
         self.text = Some(text.to_owned());
         self.truncated = reply["truncated"] == true || reply["next_cursor"].is_string();
+        self.stale_values = false;
         self.origin_unverified = true;
         Ok(())
     }
@@ -560,6 +613,7 @@ where
                     self.context = None;
                     self.observation = None;
                     self.text = None;
+                    self.stale_values = false;
                     self.post = Value::Null;
                     self.origin_unverified = true;
                     return Ok(());
@@ -883,6 +937,10 @@ where
         loop {
             // Nothing a page on another site shows can satisfy this.
             self.check_origin()?;
+            if (self.stale_values || self.text.is_none()) && self.context.is_some() {
+                self.read_text()?;
+                self.check_origin()?;
+            }
             if !self.stale_values
                 && let Some(text) = &self.text
             {
@@ -1068,6 +1126,7 @@ where
                 if self.post.is_object() {
                     // An unchanged reply omits the text the caller now needs.
                     if self.post.get("observation").is_none()
+                        && !self.stale_values
                         && let Some(text) = self.text.take()
                     {
                         self.post["observation"] = json!({"text":text,"reused":true});
@@ -2221,5 +2280,91 @@ mod tests {
         let outcome = page.run(&recipe);
         assert_eq!(outcome.reply["reason"], "cancelled");
         assert_eq!(outcome.status, "handoff");
+    }
+
+    #[test]
+    fn unchanged_with_incomplete_history_or_changes_invalidates_and_snapshots() {
+        for bad_unchanged in [
+            json!({"tab_id": 7, "context_id": "c", "control_policy": "target", "kind": "unchanged", "history_complete": false, "changes": []}),
+            json!({"tab_id": 7, "context_id": "c", "control_policy": "target", "kind": "unchanged", "history_complete": true, "changes": [{"kind": "field", "ref": "@e1", "value": "East"}]}),
+        ] {
+            let recipe = bound(|_| {});
+            let mut options = Options::new("s".into(), None, Vec::new());
+            options.poll = Duration::from_millis(1);
+            let mut log = RunLog::disabled();
+            let mut syncs = 0usize;
+            let mut snapshots = 0usize;
+            let outcome = run(&recipe, options, &mut log, |method, _, _| match method {
+                Method::ToolTabList => Ok(json!({"tabs":[{"tab_id":7,"active":true,
+                    "url":"https://erp.example.com/report"}]})),
+                Method::ToolSelect | Method::ToolFill | Method::ToolClick => {
+                    Ok(json!({"tab_id": 7}))
+                }
+                Method::ToolCooperate => {
+                    syncs += 1;
+                    Ok(if syncs == 1 {
+                        sync_reply(PAGE)
+                    } else {
+                        bad_unchanged.clone()
+                    })
+                }
+                Method::ToolSnapshot => {
+                    snapshots += 1;
+                    Ok(json!({"tab_id": 7, "text": RESULT}))
+                }
+                Method::ToolWaitMs => Ok(json!({"waited_ms": 1})),
+                other => panic!("unexpected method {other:?}"),
+            });
+            assert_eq!(outcome.status, "completed", "{:?}", outcome.reply);
+            assert_eq!(outcome.reply["outputs"]["total"], "42");
+            assert!(
+                snapshots >= 1,
+                "expected ToolSnapshot refresh for {bad_unchanged}"
+            );
+        }
+    }
+
+    #[test]
+    fn await_until_rechecks_origin_after_fallback_snapshot() {
+        let recipe = bound(|r| {
+            r["outputs"] = json!({});
+        });
+        let mut options = Options::new("s".into(), None, Vec::new());
+        options.poll = Duration::from_millis(1);
+        let mut log = RunLog::disabled();
+        let mut syncs = 0usize;
+        let mut tab_lists = 0usize;
+        let outcome = run(&recipe, options, &mut log, |method, _, _| match method {
+            Method::ToolTabList => {
+                tab_lists += 1;
+                let url = if tab_lists <= 1 {
+                    "https://erp.example.com/report"
+                } else {
+                    "https://evil.other/phish"
+                };
+                Ok(json!({"tabs":[{"tab_id":7,"active":true,"url":url}]}))
+            }
+            Method::ToolSelect | Method::ToolFill | Method::ToolClick => Ok(json!({"tab_id": 7})),
+            Method::ToolCooperate => {
+                syncs += 1;
+                Ok(if syncs == 1 {
+                    sync_reply(PAGE)
+                } else {
+                    json!({
+                        "tab_id": 7,
+                        "context_id": "c-2",
+                        "control_policy": "target",
+                        "kind": "delta",
+                        "history_complete": true,
+                        "changes": [{"kind": "field", "ref": "@e1", "value": "East"}]
+                    })
+                })
+            }
+            Method::ToolSnapshot => Ok(json!({"tab_id": 7, "text": RESULT})),
+            Method::ToolWaitMs => Ok(json!({"waited_ms": 1})),
+            other => panic!("unexpected method {other:?}"),
+        });
+        assert_eq!(outcome.status, "handoff", "{:?}", outcome.reply);
+        assert_eq!(outcome.reply["reason"], "origin_mismatch");
     }
 }

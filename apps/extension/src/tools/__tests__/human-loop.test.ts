@@ -37,6 +37,7 @@ function installHelpLifecycleChrome() {
     >();
   const tabsOnActivated = chromeEvent<(activeInfo: chrome.tabs.TabActiveInfo) => unknown>();
   const tabsOnCreated = chromeEvent<(tab: chrome.tabs.Tab) => unknown>();
+  const tabsOnRemoved = chromeEvent<(tabId: number) => unknown>();
   const tabsOnUpdated =
     chromeEvent<(tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => unknown>();
   const webNavigationOnCompleted =
@@ -44,7 +45,12 @@ function installHelpLifecycleChrome() {
 
   vi.stubGlobal("chrome", {
     runtime: { onMessage: runtimeOnMessage },
-    tabs: { onActivated: tabsOnActivated, onCreated: tabsOnCreated, onUpdated: tabsOnUpdated },
+    tabs: {
+      onActivated: tabsOnActivated,
+      onCreated: tabsOnCreated,
+      onRemoved: tabsOnRemoved,
+      onUpdated: tabsOnUpdated,
+    },
     webNavigation: { onCompleted: webNavigationOnCompleted },
   });
 
@@ -52,6 +58,7 @@ function installHelpLifecycleChrome() {
     runtimeOnMessage,
     tabsOnActivated,
     tabsOnCreated,
+    tabsOnRemoved,
     tabsOnUpdated,
     webNavigationOnCompleted,
   };
@@ -156,6 +163,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockReturnValue({
       confirmTabBorrow: true,
       requestHelpEnabled: false,
+      openAgentWindowMinimized: false,
     });
     const deps = baseDeps({ preferences });
     expect(await handleRequestHelp(fakeManager("abcd", 99, 5), baseParams(), deps)).toMatchObject({
@@ -176,6 +184,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockImplementation(() => ({
       confirmTabBorrow: true,
       requestHelpEnabled: enabled,
+      openAgentWindowMinimized: false,
     }));
     let respond!: (value: unknown) => void;
     const deps = baseDeps({
@@ -217,6 +226,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockImplementation(() => ({
       confirmTabBorrow: true,
       requestHelpEnabled: enabled,
+      openAgentWindowMinimized: false,
     }));
     vi.spyOn(preferences, "subscribe").mockImplementation((listener) => {
       changed = () => listener(preferences.get());
@@ -260,6 +270,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockImplementation(() => ({
       confirmTabBorrow: true,
       requestHelpEnabled: enabled,
+      openAgentWindowMinimized: false,
     }));
     vi.spyOn(preferences, "subscribe").mockImplementation((listener) => {
       changed = () => listener(preferences.get());
@@ -878,7 +889,10 @@ describe("handleRequestHelp", () => {
   it("keeps user control active on new tabs without moving completion off the primary tab", async () => {
     vi.useFakeTimers();
     const chromeEvents = installHelpLifecycleChrome();
-    const sendToTab = vi.fn(async () => ({ type: "bsk-help-ack", ok: true }));
+    const sendToTab = vi.fn(async (_tabId: number, _msg: unknown) => ({
+      type: "bsk-help-ack",
+      ok: true,
+    }));
     const deps = baseDeps({
       autoAttachLifecycle: undefined,
       sendToTab,
@@ -1289,5 +1303,291 @@ describe("handleRequestHelp", () => {
     ac.abort();
     const res = await p;
     expect("code" in res ? res.code : (res as { outcome: string }).outcome).toMatch(/cancelled/);
+  });
+
+  it("cancels promptly, clears sibling compact banners, and detaches global listeners when primaryTabId closes", async () => {
+    vi.useFakeTimers();
+    const chromeEvents = installHelpLifecycleChrome();
+    const sendToTab = vi.fn(async (_tabId: number, _msg: unknown) => ({
+      type: "bsk-help-ack",
+      ok: true,
+    }));
+    const notifications = {
+      create: vi.fn(async () => "notif-1"),
+      clear: vi.fn(async () => true),
+    };
+    const deps = baseDeps({
+      autoAttachLifecycle: undefined,
+      sendToTab,
+      notifications,
+      tabsApi: {
+        get: vi.fn(async (tabId: number) => ({
+          id: tabId,
+          windowId: 99,
+          active: tabId === 6,
+          url: "https://app.example/login",
+        })) as never,
+        query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+      },
+    });
+
+    try {
+      const pending = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({
+          tab_id: 5,
+          timeout_ms: 300_000,
+          completion_criteria: { any: [{ url_contains: "/done" }] },
+        }),
+        deps,
+      );
+      await vi.waitFor(() => expect(sendToTab).toHaveBeenCalledWith(5, expect.anything()));
+
+      // User opens/switches to sibling tab 6 in the same Agent Window -> receives compact banner.
+      chromeEvents.tabsOnActivated.emit({ tabId: 6, windowId: 99 });
+      await vi.advanceTimersByTimeAsync(200);
+      await vi.waitFor(() =>
+        expect(sendToTab).toHaveBeenCalledWith(
+          6,
+          expect.objectContaining({ type: "bsk-help-request", displayMode: "compact" }),
+        ),
+      );
+
+      // Closing the primary tab resolves immediately instead of hanging 5 minutes.
+      sendToTab.mockClear();
+      chromeEvents.tabsOnRemoved.emit(5);
+      await expect(pending).resolves.toMatchObject({
+        code: "cancelled",
+        message: expect.stringContaining("primary tab was closed"),
+      });
+
+      // Sibling tab compact banner is torn down, closed tab 5 is skipped, and notification cleared.
+      expect(sendToTab).toHaveBeenCalledWith(
+        6,
+        expect.objectContaining({ type: "bsk-help-cancel" }),
+      );
+      expect(sendToTab).not.toHaveBeenCalledWith(5, expect.anything());
+      expect(notifications.clear).toHaveBeenCalled();
+
+      // All global lifecycle listeners are detached once no help requests remain active.
+      expect(chromeEvents.runtimeOnMessage.removeListener).toHaveBeenCalledOnce();
+      expect(chromeEvents.tabsOnCreated.removeListener).toHaveBeenCalledTimes(
+        chromeEvents.tabsOnCreated.addListener.mock.calls.length,
+      );
+      expect(chromeEvents.tabsOnActivated.removeListener).toHaveBeenCalledTimes(
+        chromeEvents.tabsOnActivated.addListener.mock.calls.length,
+      );
+      expect(chromeEvents.tabsOnRemoved.removeListener).toHaveBeenCalledTimes(
+        chromeEvents.tabsOnRemoved.addListener.mock.calls.length,
+      );
+      expect(chromeEvents.webNavigationOnCompleted.removeListener).toHaveBeenCalledTimes(
+        chromeEvents.webNavigationOnCompleted.addListener.mock.calls.length,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not force-scroll the target element again when switching tabs back to the primary tab", async () => {
+    vi.useFakeTimers();
+    const chromeEvents = installHelpLifecycleChrome();
+    const refStore = new RefStore();
+    refStore.set("e1", 42, { tabId: 5 });
+    const mgr = {
+      get: (id: string) =>
+        id === "abcd"
+          ? {
+              sessionId: "abcd",
+              agentWindowId: 99,
+              refStore,
+              borrowedTabs: new Map(),
+            }
+          : null,
+      findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
+    } as unknown as SessionManager;
+    const cdpSend = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "DOM.getContentQuads") {
+        return { quads: [[10, 20, 110, 20, 110, 60, 10, 60]] };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      }
+      return {};
+    });
+    const ac = new AbortController();
+    const deps = baseDeps({
+      autoAttachLifecycle: undefined,
+      signal: ac.signal,
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+      cdp: createStubCdpRunner({ send: cdpSend }),
+    });
+
+    try {
+      const pending = handleRequestHelp(
+        mgr,
+        baseParams({ tab_id: 5, targets: [{ ref: "@e1" }], timeout_ms: 60_000 }),
+        deps,
+      );
+      await vi.waitFor(() =>
+        expect(deps.sendToTab).toHaveBeenCalledWith(
+          5,
+          expect.objectContaining({ type: "bsk-help-request" }),
+        ),
+      );
+      const scrollCallsInitially = cdpSend.mock.calls.filter(
+        ([, method]) => method === "DOM.scrollIntoViewIfNeeded",
+      ).length;
+      expect(scrollCallsInitially).toBe(1);
+
+      // User switches to another tab (e.g. to copy OTP) and returns to primary tab 5.
+      chromeEvents.tabsOnActivated.emit({ tabId: 5, windowId: 99 });
+      await vi.advanceTimersByTimeAsync(200);
+      await vi.waitFor(() =>
+        expect(
+          (deps.sendToTab as ReturnType<typeof vi.fn>).mock.calls.length,
+        ).toBeGreaterThanOrEqual(2),
+      );
+
+      const scrollCallsAfterSwitch = cdpSend.mock.calls.filter(
+        ([, method]) => method === "DOM.scrollIntoViewIfNeeded",
+      ).length;
+      expect(scrollCallsAfterSwitch).toBe(1);
+
+      ac.abort();
+      await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels immediately when primaryTabId closes during setup before overlay registration", async () => {
+    const chromeEvents = installHelpLifecycleChrome();
+    let tabOpen = true;
+    const deps = baseDeps({
+      autoAttachLifecycle: undefined,
+      tabsApi: {
+        get: vi.fn(async (id: number) => {
+          if (!tabOpen) throw new Error(`No tab with id: ${id}`);
+          return { id, windowId: 99, active: true, url: "https://app.example/" } as never;
+        }),
+        query: vi.fn(async () =>
+          tabOpen ? ([{ id: 5, windowId: 99, active: true }] as never) : ([] as never),
+        ),
+      },
+      windows: {
+        update: vi.fn(async () => {
+          tabOpen = false;
+          chromeEvents.tabsOnRemoved.emit(5);
+          return {} as never;
+        }),
+      },
+      activateTab: vi.fn(async () => {
+        throw new Error("No tab with id: 5");
+      }),
+      sendToTab: vi.fn(async () => {
+        throw new Error("No tab with id: 5");
+      }),
+    });
+
+    const result = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ tab_id: 5, timeout_ms: 60_000 }),
+      deps,
+    );
+
+    expect(result).toEqual({
+      code: "cancelled",
+      message: "request_help primary tab was closed",
+    });
+    expect(chromeEvents.tabsOnRemoved.removeListener).toHaveBeenCalled();
+  });
+
+  it("sets hasDynamicRects: true when an iframe ref target is offscreen on tab switch back", async () => {
+    vi.useFakeTimers();
+    const chromeEvents = installHelpLifecycleChrome();
+    const refStore = new RefStore();
+    refStore.set("e1", 42, { tabId: 5 });
+    const mgr = {
+      get: (id: string) =>
+        id === "abcd"
+          ? {
+              sessionId: "abcd",
+              agentWindowId: 99,
+              refStore,
+              borrowedTabs: new Map(),
+            }
+          : null,
+      findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
+    } as unknown as SessionManager;
+    let quadCalls = 0;
+    const cdpSend = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "DOM.getContentQuads") {
+        quadCalls += 1;
+        // First capture (initial): visible; second capture (after tab switch back): offscreen.
+        if (quadCalls === 1) return { quads: [[10, 20, 110, 20, 110, 60, 10, 60]] };
+        return { quads: [[10, 2000, 110, 2000, 110, 2040, 10, 2040]] };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      }
+      return {};
+    });
+    const ac = new AbortController();
+    const sendToTab = vi.fn(async (_tabId: number, _msg: unknown) => ({
+      type: "bsk-help-ack",
+      ok: true,
+    }));
+    const deps = baseDeps({
+      autoAttachLifecycle: undefined,
+      signal: ac.signal,
+      sendToTab,
+      cdp: createStubCdpRunner({ send: cdpSend }),
+    });
+
+    try {
+      const pending = handleRequestHelp(
+        mgr,
+        baseParams({ tab_id: 5, targets: [{ ref: "@e1" }], timeout_ms: 60_000 }),
+        deps,
+      );
+      await vi.waitFor(() => expect(sendToTab).toHaveBeenCalledTimes(1));
+
+      // Switch back while target is scrolled offscreen -> rects may be empty, but hasDynamicRects stays true.
+      chromeEvents.tabsOnActivated.emit({ tabId: 5, windowId: 99 });
+      await vi.advanceTimersByTimeAsync(200);
+      await vi.waitFor(() => expect(sendToTab).toHaveBeenCalledTimes(2));
+
+      const rearmMsg = sendToTab.mock.calls[1]?.[1] as {
+        hasDynamicRects?: boolean;
+        rects?: unknown[];
+      };
+      expect(rearmMsg.hasDynamicRects).toBe(true);
+
+      // HELP_QUERY on remount also includes hasDynamicRects: true matching helpRequestMessage.
+      const queryReply = vi.fn();
+      chromeEvents.runtimeOnMessage.emit(
+        { type: "bsk-help-query" },
+        { tab: { id: 5 } as chrome.tabs.Tab },
+        queryReply,
+      );
+      await vi.waitFor(() => expect(queryReply).toHaveBeenCalledTimes(1));
+      expect(queryReply).toHaveBeenCalledWith(
+        expect.objectContaining({
+          active: true,
+          request: expect.objectContaining({
+            hasDynamicRects: true,
+          }),
+        }),
+      );
+
+      ac.abort();
+      await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

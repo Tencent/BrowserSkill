@@ -134,3 +134,40 @@ describe("LLM textbook click targets", () => {
     );
   });
 });
+
+describe("describeTarget label references across shadow trees", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  function shadowButton(outerLabel: boolean): Element {
+    document.body.innerHTML = `${outerLabel ? '<span id="name">Delete account</span>' : ""}<div id="host"></div>`;
+    const host = document.querySelector("#host")!;
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <span id="name">Save</span>
+      <button id="action" aria-labelledby="name"></button>
+    `;
+    return shadow.querySelector("button")!;
+  }
+
+  it("resolves aria-labelledby inside the element's own shadow root", () => {
+    expect(describeTarget(shadowButton(false))).toEqual({
+      tag: "button",
+      role: "button",
+      name: "Save",
+    });
+  });
+
+  it("prefers the shadow label over a same-id element in the outer document", () => {
+    expect(describeTarget(shadowButton(true)).name).toBe("Save");
+  });
+
+  it("still resolves aria-labelledby for light-DOM elements", () => {
+    document.body.innerHTML = `
+      <span id="save">Save</span>
+      <button id="action" aria-labelledby="save"></button>
+    `;
+    expect(describeTarget(document.querySelector("#action")!).name).toBe("Save");
+  });
+});
