@@ -33,6 +33,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- 在 Windows 上，`daemon stop`、daemon 状态检查、更新后的等待和残留清理不再把 CLI 无权打开的运行中进程（例如从管理员终端启动的进程）当作已退出。
 - 为 Chrome debugger attach 增加 10 秒上限；未响应时返回明确错误，并在允许重试前隔离并回滚迟到的 attach 完成（#452）。
 - 加固守护进程 WebSocket 生命周期、审计存储容错、`tool.debug` 动态副作用策略、自动更新交接及文件传输/运维可靠性：
   - 为 `Pending` 增加显式关闭/取消令牌（`BrowserClient::close()`），并在本地/远程监听退出时通过监听级 `AbortToken` 与活跃连接任务回收（`run_accept_loop`、`drive_connection`、`spawn_browser_liveness_reaper`、重连驱逐）阻断关闭后迟到握手继续注册，同时补齐 TCP Keepalive（`SO_KEEPALIVE` 与 Unix 保活参数）、WS 写超时与服务端周期性 WS Ping，彻底解决被淘汰或半开连接泄漏 Tokio 任务、文件描述符、64 并发连接许可及挂起等待方的问题；将远程模式每连接 1 Hz 读取 `remote-authorization.json` 替换为按文件元信息缓存且空闲自动休眠的全局共享监控器，并消除每条入站 WS 帧的二次 JSON 全量解析。
