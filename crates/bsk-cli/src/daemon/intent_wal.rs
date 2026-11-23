@@ -999,7 +999,17 @@ fn classify_dispatch_outcome(
     outcome: &Result<Value, DispatchError>,
 ) -> IntentState {
     match outcome {
-        Ok(_) => IntentState::Settled,
+        Ok(val) => {
+            if *method == Method::ToolDebug
+                && matches!(
+                    val.pointer("/replay/state").and_then(Value::as_str),
+                    Some("failed" | "interrupted")
+                )
+            {
+                return IntentState::Unknown;
+            }
+            IntentState::Settled
+        }
         Err(
             DispatchError::SessionNotFound { .. }
             | DispatchError::SessionStopping
@@ -1843,5 +1853,55 @@ mod tests {
             !restarted_status.frozen,
             "ended sessions resurrected as frozen on restart: {restarted_status:?}"
         );
+    }
+
+    #[test]
+    fn debug_replay_failed_or_interrupted_ok_freezes_tab_while_complete_settles() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = IntentWal::new(Some(dir.path().join("intent_ledger.jsonl")));
+        let session = SessionId("s-debug-replay".into());
+
+        // `complete` replay settles cleanly without freezing the tab.
+        let t_ok = wal.begin_dispatch(
+            &session,
+            Some(7),
+            Some("op-replay-ok"),
+            &Method::ToolDebug,
+            &json!({"action": "replay", "tab_id": 7}),
+        );
+        assert_eq!(
+            wal.finish_dispatch(
+                t_ok,
+                &Method::ToolDebug,
+                &Ok(json!({"tab_id": 7, "replay": {"state": "complete"}})),
+            ),
+            IntentState::Settled
+        );
+        assert!(wal.check_gate(&session, Some(7)).is_ok());
+
+        // `interrupted` and `failed` replays return Ok payloads with uncertain
+        // network side effects and must freeze the tab in `intent_wal`.
+        for (idx, state) in [(8i64, "interrupted"), (9i64, "failed")] {
+            let ticket = wal.begin_dispatch(
+                &session,
+                Some(idx),
+                Some(&format!("op-replay-{state}")),
+                &Method::ToolDebug,
+                &json!({"action": "replay", "tab_id": idx}),
+            );
+            assert_eq!(
+                wal.finish_dispatch(
+                    ticket,
+                    &Method::ToolDebug,
+                    &Ok(json!({"tab_id": idx, "replay": {"state": state}})),
+                ),
+                IntentState::Unknown,
+                "replay state `{state}` must be classified as IntentState::Unknown"
+            );
+            assert!(
+                wal.check_gate(&session, Some(idx)).is_err(),
+                "replay state `{state}` must freeze tab {idx}"
+            );
+        }
     }
 }

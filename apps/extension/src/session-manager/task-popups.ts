@@ -35,15 +35,14 @@ export async function withTaskPopups<T>(
     manager.get(task.sessionId) === task &&
     !manager.isWindowCloseExpected(task);
   const validSource = async (id: number) => {
-    if (!live() || invalid.has(id) || (task.remote && !isAgentControlledTab(task, id)))
-      return false;
+    if (!live() || invalid.has(id) || !isAgentControlledTab(task, id)) return false;
     try {
       const tab = await chrome.tabs.get(id);
       return (
         live() &&
         !invalid.has(id) &&
         tab.windowId === task.agentWindowId &&
-        (!task.remote || isAgentControlledTab(task, id))
+        isAgentControlledTab(task, id)
       );
     } catch {
       return false;
@@ -59,7 +58,15 @@ export async function withTaskPopups<T>(
     tabId: number;
   }) => {
     const parent = candidates.get(sourceTabId);
-    if (!live() || !listening || sourceFrameId !== 0 || !parent || candidates.has(tabId)) return;
+    if (
+      !live() ||
+      !listening ||
+      typeof sourceFrameId !== "number" ||
+      sourceFrameId < 0 ||
+      !parent ||
+      candidates.has(tabId)
+    )
+      return;
     const work = Promise.resolve()
       .then(async () => {
         if (!(await parent) || !(await validSource(sourceTabId))) return false;

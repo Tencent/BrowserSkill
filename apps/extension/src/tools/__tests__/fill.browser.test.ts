@@ -1,11 +1,11 @@
 // @vitest-environment node
 // Opt in with BSK_TEST_CHROME=/path/to/chrome; the suite owns its browser/profile and each test gets a fresh tab.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { CdpFrame } from "@/browser-driver/frame-graph";
+import { type FrameDocumentInfo, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleFill } from "../interaction";
 import { handleObserve } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -105,43 +105,47 @@ async function withFillBrowser(
     const ctx = await manager.start("aa11");
     const calls: string[] = [];
     let afterCommand: ((method: string, params?: object) => void | Promise<void>) | undefined;
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: async (_tabId, method, params) => {
         calls.push(method);
         const result = await send(method, params, sessionId);
         await afterCommand?.(method, params);
         return result as never;
       },
-    };
-    cdp.sendToTarget = (_target, method, params) => cdp.send(4, method, params);
-    cdp.getAttachmentId = () => sessionId;
-    cdp.getFrameGraph = async () => {
-      type FrameTree = { frame: { id: string }; childFrames?: FrameTree[] };
-      const { frameTree } = await send<{ frameTree: FrameTree }>(
-        "Page.getFrameTree",
-        {},
-        sessionId,
-      );
-      const frames: CdpFrame[] = [];
-      const visit = async (tree: FrameTree, parentFrameId?: string) => {
-        const owner = parentFrameId
-          ? await send<{ backendNodeId: number }>(
-              "DOM.getFrameOwner",
-              { frameId: tree.frame.id },
-              sessionId,
-            )
-          : undefined;
-        frames.push({
-          frameId: tree.frame.id,
-          parentFrameId,
-          target: { tabId: 4 },
-          ownerBackendNodeId: owner?.backendNodeId,
-        });
-        for (const child of tree.childFrames ?? []) await visit(child, tree.frame.id);
-      };
-      await visit(frameTree);
-      return { rootFrameId: frameTree.frame.id, frames };
-    };
+      sendToFrame: (_handle, method, params) => cdp.send(4, method, params),
+      getAttachmentId: () => sessionId,
+      getFrameDocuments: async () => {
+        type FrameTree = { frame: { id: string; loaderId?: string }; childFrames?: FrameTree[] };
+        const { frameTree } = await send<{ frameTree: FrameTree }>(
+          "Page.getFrameTree",
+          {},
+          sessionId,
+        );
+        const frames: FrameDocumentInfo[] = [];
+        const visit = async (tree: FrameTree, parentFrameId?: string) => {
+          const owner = parentFrameId
+            ? await send<{ backendNodeId: number }>(
+                "DOM.getFrameOwner",
+                { frameId: tree.frame.id },
+                sessionId,
+              )
+            : undefined;
+          const loaderId = tree.frame.loaderId ?? "";
+          frames.push({
+            handle: toFrameDocumentHandle(4, { frameId: tree.frame.id, loaderId }),
+            frameId: tree.frame.id,
+            loaderId,
+            parentFrameId,
+            ownerBackendNodeId: owner?.backendNodeId,
+            processKey: "root",
+            isOutOfProcess: false,
+          });
+          for (const child of tree.childFrames ?? []) await visit(child, tree.frame.id);
+        };
+        await visit(frameTree);
+        return { rootFrameId: frameTree.frame.id, frames };
+      },
+    });
     const deps = {
       cdp,
       tabsApi: {

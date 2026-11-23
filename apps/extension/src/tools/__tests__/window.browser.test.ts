@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner, ChromeTabsApi } from "../shared";
+import { type CdpRunner, ChromeTabsApi, createStubCdpRunner } from "../shared";
 import { handleWindowResize, type WindowResizeApi } from "../window";
 
 type Send = <T = Record<string, unknown>>(
@@ -123,12 +123,12 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("window resize in a real browser",
             get: (id) => evaluate(`chrome.tabs.get(${id})`),
             query: (query) => evaluate(`chrome.tabs.query(${JSON.stringify(query)})`),
           };
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: (id, method, params) =>
               evaluate(
                 `chrome.debugger.sendCommand({tabId:${id}},${JSON.stringify(method)},${JSON.stringify(params ?? {})})`,
               ),
-          };
+          });
           const manager = new SessionManager({
             agentWindow: {
               create: async () => ({ windowId, initialTabIds: [tabId] }),

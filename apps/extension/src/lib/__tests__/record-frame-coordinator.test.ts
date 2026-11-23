@@ -224,6 +224,13 @@ describe("RecordFrameCoordinator", () => {
     });
     await expect(stopping).resolves.toBe(true);
     expect(coordinator.sourceFor("rec-1", "producer-1", sender)).toBeNull();
+    expect(frame.port.disconnect).not.toHaveBeenCalled();
+
+    const cleaning = coordinator.cleanup("rec-1");
+    expect(frame.messages).toContainEqual({ type: "cleanup", requestId: "rec-1" });
+    frame.receive({ type: "cleaned", requestId: "rec-1" });
+    await expect(cleaning).resolves.toBeUndefined();
+    expect(frame.port.disconnect).toHaveBeenCalledOnce();
   });
 
   it("rejects a producer used from another Document", async () => {

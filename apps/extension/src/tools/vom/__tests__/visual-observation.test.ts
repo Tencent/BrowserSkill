@@ -10,7 +10,7 @@ import { RefStore } from "@/session-manager/ref-store";
 import type { ObserveResult } from "@/transport/types";
 import { auditContext } from "../../audit-context";
 import { handleObserve, handleSnapshot } from "../../observation";
-import type { CdpRunner } from "../../shared";
+import { type CdpRunner, createStubCdpRunner } from "../../shared";
 import type { DocumentIdentity } from "../facts";
 import {
   buildSemanticGraph,
@@ -66,6 +66,7 @@ function fixture(count = 20, maxTokens?: number) {
     visuals: candidates.map((_, key) => ({ key, parentId: 1, frameId: "top" })),
   };
   const output: ObservationOutput = {
+    rootFrameId: "top",
     candidates,
     identities: new Map([["top", identity]]),
     rootIdentity: identity,
@@ -86,7 +87,10 @@ function fixture(count = 20, maxTokens?: number) {
     if (method === "Runtime.releaseObjectGroup") return {};
     throw new Error(`unexpected ${method}`);
   });
-  const cdp = { send, getAttachmentId: () => "a" } as unknown as CdpRunner;
+  const cdp = createStubCdpRunner({
+    send: send as unknown as CdpRunner["send"],
+    getAttachmentId: () => "a",
+  });
   return {
     output,
     scene,
@@ -122,9 +126,11 @@ describe("visual observation output", () => {
           viewport: { width: 1200, height: 800 },
           documents: [
             {
-              target: { tabId: 4 },
+              handle: { tabId: 4, frameId: "top", loaderId: identity.loaderId },
               frameId: "top",
               loaderId: identity.loaderId,
+              processKey: "root",
+              isOutOfProcess: false,
               contextScopeId: "top",
               axNodes: [],
               domNodes: [1, 100, 101].map((id) => ({
@@ -290,7 +296,10 @@ describe("visual observation output", () => {
     const docs: Parameters<typeof buildSemanticGraph>[0]["documents"] = [
       {
         frameId: "top",
-        target: { tabId: 4 },
+        loaderId: "",
+        processKey: "root",
+        isOutOfProcess: false,
+        handle: { tabId: 4, frameId: "top", loaderId: "" },
         contextScopeId: "top",
         domNodes: [
           {
@@ -395,7 +404,10 @@ describe("visual observation output", () => {
           documents: [
             {
               frameId: "top",
-              target: { tabId: 4 },
+              loaderId: "",
+              processKey: "root",
+              isOutOfProcess: false,
+              handle: { tabId: 4, frameId: "top", loaderId: "" },
               contextScopeId: "top",
               axNodes: [],
               domNodes: [
@@ -423,9 +435,12 @@ describe("visual observation output", () => {
             },
             {
               frameId: "child",
+              loaderId: "",
+              processKey: "root",
+              isOutOfProcess: false,
               parentFrameId: "top",
               ownerBackendNodeId: 2,
-              target: { tabId: 4, sessionId: "oopif" },
+              handle: { tabId: 4, frameId: "child", loaderId: "" },
               contextScopeId: "child",
               axNodes: [],
               domNodes: [
@@ -581,14 +596,24 @@ it.each([
     if (method === "Runtime.releaseObjectGroup" || method.endsWith(".enable")) return {};
     throw new Error(`unexpected ${method}`);
   });
-  const cdp = {
-    send,
+  const cdp: CdpRunner = createStubCdpRunner({
+    send: send as unknown as CdpRunner["send"],
+    sendToFrame: ((_handle: unknown, method: string, params?: Record<string, unknown>) =>
+      send(4, method, params)) as CdpRunner["sendToFrame"],
     getAttachmentId: () => "a",
-    getFrameGraph: async () => ({
+    getFrameDocuments: async () => ({
       rootFrameId: "top",
-      frames: [{ frameId: "top", target: { tabId: 4 } }],
+      frames: [
+        {
+          frameId: "top",
+          loaderId: "",
+          handle: { tabId: 4, frameId: "top", loaderId: "" },
+          processKey: "root",
+          isOutOfProcess: false,
+        },
+      ],
     }),
-  } as unknown as CdpRunner;
+  });
   const tab = { id: 4, windowId: 100, active: true, url: "http://fixture.test" } as chrome.tabs.Tab;
   const deps = { cdp, tabsApi: { get: async () => tab, query: async () => [tab] } };
   const observed = await handleObserve(manager, { session_id: "test" }, deps);
@@ -599,8 +624,8 @@ it.each([
   expect(send.mock.calls.some((c) => c[1] === "Page.captureScreenshot")).toBe(false);
   await handleSnapshot(manager, { session_id: "test" }, deps);
   const captures = send.mock.calls.filter((c) => c[1] === "DOMSnapshot.captureSnapshot");
-  expect(captures[0][2]?.computedStyles).toHaveLength(28);
-  expect(captures[1][2]?.computedStyles).toHaveLength(15);
+  expect(captures[0][2]?.computedStyles).toHaveLength(29);
+  expect(captures[1][2]?.computedStyles).toHaveLength(16);
   expect([...ctx.refStore.entries()].some(([, entry]) => entry.kind === "visual-region")).toBe(
     false,
   );

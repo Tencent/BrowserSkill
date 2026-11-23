@@ -4,14 +4,19 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  type FrameNodeHandle,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import { SessionManager } from "@/session-manager/manager";
 import type { DragParams } from "@/transport/types";
 import { handleDrag } from "../drag";
 import { handleClick, handleHover } from "../interaction";
 import { handleObserve } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -101,20 +106,20 @@ async function harness(targetId: string, background: boolean) {
   const ctx = await manager.start("aa11");
   let hook: Hook = () => {};
   const calls: { method: string; params?: Record<string, unknown> }[] = [];
-  const forward = async <T>(target: CdpTarget, method: string, params?: object): Promise<T> => {
+  const forward = async <T>(
+    _handle: FrameDocumentHandle | FrameNodeHandle | { tabId: number },
+    method: string,
+    params?: object,
+  ): Promise<T> => {
     calls.push({ method, params: params as Record<string, unknown> });
-    const result = await send<T>(method, params, target.sessionId ?? sessionId);
+    const result = await send<T>(method, params, sessionId);
     await hook(method, params as Record<string, unknown>);
     return result;
   };
-  const cdp: CdpRunner = {
-    send: (_tab, method, params) => forward({ tabId: 4 }, method, params),
-    sendToTarget: forward,
-  };
   const frames = async () => {
-    type Tree = { frame: { id: string; name?: string }; childFrames?: Tree[] };
+    type Tree = { frame: { id: string; loaderId?: string; name?: string }; childFrames?: Tree[] };
     const { frameTree } = await send<{ frameTree: Tree }>("Page.getFrameTree", {}, sessionId);
-    const result: CdpFrame[] = [];
+    const result: FrameDocumentInfo[] = [];
     const visit = async (tree: Tree, parentFrameId?: string) => {
       const owner = parentFrameId
         ? await send<{ backendNodeId: number }>(
@@ -123,18 +128,26 @@ async function harness(targetId: string, background: boolean) {
             sessionId,
           )
         : undefined;
+      const loaderId = tree.frame.loaderId ?? "";
       result.push({
+        handle: toFrameDocumentHandle(4, { frameId: tree.frame.id, loaderId }),
         frameId: tree.frame.id,
+        loaderId,
         parentFrameId,
-        target: { tabId: 4 },
         ownerBackendNodeId: owner?.backendNodeId,
+        processKey: "root",
+        isOutOfProcess: false,
       });
       for (const child of tree.childFrames ?? []) await visit(child, tree.frame.id);
     };
     await visit(frameTree);
     return { rootFrameId: frameTree.frame.id, frames: result };
   };
-  cdp.getFrameGraph = frames;
+  const cdp: CdpRunner = createStubCdpRunner({
+    send: (_tab, method, params) => forward({ tabId: 4 }, method, params),
+    sendToFrame: forward,
+    getFrameDocuments: frames,
+  });
   cdp.verifyPointerTarget = pointerTargetValidator(cdp);
   const deps = {
     cdp,

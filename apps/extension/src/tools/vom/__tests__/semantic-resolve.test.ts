@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import type { CapturedNode } from "../capture";
 import { buildSemanticGraph, resolveSemanticGraph, type SemanticAxNode } from "../semantic-graph";
 
@@ -21,7 +22,16 @@ function graph(domNodes: CapturedNode[], axNodes: SemanticAxNode[] = []) {
     viewport: { width: 800, height: 600 },
     rootFrameId: "main",
     documents: [
-      { frameId: "main", contextScopeId: "main", target: { tabId: 1 }, domNodes, axNodes },
+      {
+        frameId: "main",
+        loaderId: "",
+        processKey: "root",
+        isOutOfProcess: false,
+        contextScopeId: "main",
+        handle: toFrameDocumentHandle(1, { frameId: "main" }),
+        domNodes,
+        axNodes,
+      },
     ],
   });
 }
@@ -208,5 +218,88 @@ describe("semantic sibling context", () => {
     );
     expect(byBackend(resolved, 18)?.rowAnchor).toBe("settlement-2026Q4.csv");
     expect(byBackend(resolved, 25)?.rowAnchor).toBeUndefined();
+  });
+
+  it("keeps popup state in structured hasPopup/expanded fields without mutating vom.name", () => {
+    const resolved = resolveSemanticGraph(
+      graph([
+        dom(1, "main"),
+        {
+          ...dom(10, "div", "Filter"),
+          attrs: { role: "combobox", "aria-haspopup": "listbox", "aria-expanded": "true" },
+        },
+        {
+          ...dom(11, "button", "More actions"),
+          attrs: { "aria-haspopup": "menu", "aria-expanded": "false" },
+        },
+      ]),
+    );
+    expect(byBackend(resolved, 10)).toMatchObject({
+      role: "combobox",
+      name: "Filter",
+      hasPopup: true,
+      expanded: true,
+    });
+    expect(byBackend(resolved, 11)).toMatchObject({
+      role: "button",
+      name: "More actions",
+      hasPopup: true,
+      expanded: false,
+    });
+  });
+
+  it("never derives a sensitive input's name from AX StaticText value and masks AX-only textboxes when requested", () => {
+    const resolvedSensitive = resolveSemanticGraph(
+      graph(
+        [
+          dom(1, "main"),
+          {
+            ...dom(10, "input"),
+            attrs: { type: "text", "data-bsk-record-password": "", placeholder: "Secret" },
+          },
+        ],
+        [
+          {
+            nodeId: "ax-10",
+            backendDOMNodeId: 10,
+            role: { type: "role", value: "textbox" },
+            value: { value: "PLAIN_SECRET_VALUE" },
+            childIds: ["ax-11"],
+          },
+          {
+            nodeId: "ax-11",
+            parentId: "ax-10",
+            role: { type: "role", value: "StaticText" },
+            name: { type: "computed", value: "PLAIN_SECRET_VALUE" },
+          },
+        ],
+      ),
+    );
+    const sensitiveNode = byBackend(resolvedSensitive, 10);
+    expect(sensitiveNode?.sensitive).toBe(true);
+    expect(sensitiveNode?.value).toBeUndefined();
+    expect(sensitiveNode?.name).toBe("Secret");
+    expect(JSON.stringify(sensitiveNode)).not.toContain("PLAIN_SECRET_VALUE");
+
+    const resolvedAxOnly = resolveSemanticGraph(
+      graph(
+        [],
+        [
+          {
+            nodeId: "ax-20",
+            backendDOMNodeId: 20,
+            role: { type: "role", value: "textbox" },
+            name: { type: "computed", value: "Password" },
+            value: { value: "AX_ONLY_SECRET" },
+          },
+        ],
+      ),
+      { redactUnverifiedAxValues: true },
+    );
+    const axOnlyNode = byBackend(resolvedAxOnly, 20);
+    expect(axOnlyNode?.sensitive).toBe(true);
+    expect(axOnlyNode?.value).toBeUndefined();
+    expect(axOnlyNode?.name).toBe("Password");
+    expect(JSON.stringify(axOnlyNode)).not.toContain("AX_ONLY_SECRET");
   });
 });

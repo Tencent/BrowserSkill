@@ -1,18 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
-import type { CdpRunner } from "../../shared";
+import { type FrameDocumentHandle, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
+import { type CdpRunner, createStubCdpRunner } from "../../shared";
 import type { CapturedNode } from "../capture";
 import type { FrameDocument, FrameOwnedAxNode } from "../frame-document";
-import { probeTooltipNames } from "../name-enrichment";
+import { clearTooltipCache, evictTooltipCacheForTab, probeTooltipNames } from "../name-enrichment";
 import { buildSemanticGraph, resolveSemanticGraph } from "../semantic-graph";
 import { stableIdentifierName } from "../semantic-graph/name-evidence";
 import { frameBackendKey } from "../semantic-graph/types";
 
 function document(
-  target: CdpTarget,
+  handle: FrameDocumentHandle,
   backendNodeId: number,
   accessibleName?: string,
-  frameId = "child",
+  frameId = handle.frameId || "child",
   x = 10,
 ): FrameDocument<FrameOwnedAxNode> {
   const node: CapturedNode = {
@@ -34,9 +34,12 @@ function document(
   };
   return {
     frameId,
+    loaderId: handle.loaderId,
+    processKey: "root",
+    isOutOfProcess: false,
     parentFrameId: "main",
     contextScopeId: "child",
-    target,
+    handle,
     axNodes: [],
     domNodes: [node],
     url: "https://example.com/frame",
@@ -56,66 +59,66 @@ function semantics(documents: FrameDocument<FrameOwnedAxNode>[]) {
 
 describe("tooltip name enrichment", () => {
   it("uses the owning frame target and upgrades an identifier name from a tooltip", async () => {
-    const target = { tabId: 7, sessionId: "oopif-session" };
+    const handle = toFrameDocumentHandle(7, { frameId: "child", loaderId: "oopif-loader" });
     let hovered = false;
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async (_tabId, method, params) => {
         if (method === "Input.dispatchMouseEvent") {
           hovered = (params as { x?: number }).x === 30;
         }
         return {};
       }) as CdpRunner["send"],
-      sendToTarget: vi.fn(async (_target, method) => {
+      sendToFrame: vi.fn(async (_handle, method) => {
         if (method === "Page.createIsolatedWorld") return { executionContextId: 11 };
         if (method === "DOM.resolveNode") return { object: { objectId: "button-501" } };
         if (method === "Runtime.callFunctionOn") {
           return { result: { value: hovered ? ["插入行"] : [] } };
         }
         return {};
-      }) as CdpRunner["sendToTarget"],
-    };
+      }) as CdpRunner["sendToFrame"],
+    });
 
-    const documents = [document(target, 501)];
+    const documents = [document(handle, 501)];
     const graph = semantics(documents);
     const names = await probeTooltipNames(cdp, 7, documents, graph);
 
     expect(names.get(frameBackendKey("child", 501))).toBe("插入行");
-    expect(cdp.sendToTarget).toHaveBeenCalledWith(
-      target,
+    expect(cdp.sendToFrame).toHaveBeenCalledWith(
+      handle,
       "Page.createIsolatedWorld",
       expect.objectContaining({ frameId: "child" }),
     );
 
     const sendsBeforeCache = vi.mocked(cdp.send).mock.calls.length;
-    const targetSendsBeforeCache = vi.mocked(
-      cdp.sendToTarget as NonNullable<CdpRunner["sendToTarget"]>,
-    ).mock.calls.length;
+    const frameSendsBeforeCache = vi.mocked(cdp.sendToFrame).mock.calls.length;
     const cached = await probeTooltipNames(cdp, 7, documents, graph);
     expect(cached.get(frameBackendKey("child", 501))).toBe("插入行");
     expect(cdp.send).toHaveBeenCalledTimes(sendsBeforeCache);
-    expect(cdp.sendToTarget).toHaveBeenCalledTimes(targetSendsBeforeCache);
+    expect(cdp.sendToFrame).toHaveBeenCalledTimes(frameSendsBeforeCache);
   });
 
   it("does not probe controls that already have a higher-confidence name", async () => {
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async () => ({})) as CdpRunner["send"],
-      sendToTarget: vi.fn(async () => ({ executionContextId: 12 })) as CdpRunner["sendToTarget"],
-    };
+      sendToFrame: vi.fn(async () => ({ executionContextId: 12 })) as CdpRunner["sendToFrame"],
+    });
 
-    const documents = [document({ tabId: 8 }, 601, "Add a new record")];
+    const documents = [
+      document(toFrameDocumentHandle(8, { frameId: "child" }), 601, "Add a new record"),
+    ];
     const names = await probeTooltipNames(cdp, 8, documents, semantics(documents));
 
     expect(names.size).toBe(0);
     expect(cdp.send).not.toHaveBeenCalled();
-    expect(cdp.sendToTarget).not.toHaveBeenCalled();
+    expect(cdp.sendToFrame).not.toHaveBeenCalled();
   });
 
   it("does not collect supplemental names from form controls", async () => {
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async () => ({})) as CdpRunner["send"],
-      sendToTarget: vi.fn(async () => ({ executionContextId: 12 })) as CdpRunner["sendToTarget"],
-    };
-    const inputDocument = document({ tabId: 8 }, 602);
+      sendToFrame: vi.fn(async () => ({ executionContextId: 12 })) as CdpRunner["sendToFrame"],
+    });
+    const inputDocument = document(toFrameDocumentHandle(8, { frameId: "child" }), 602);
     inputDocument.domNodes[0] = {
       ...inputDocument.domNodes[0],
       tag: "input",
@@ -129,22 +132,27 @@ describe("tooltip name enrichment", () => {
 
     expect(names.size).toBe(0);
     expect(cdp.send).not.toHaveBeenCalled();
-    expect(cdp.sendToTarget).not.toHaveBeenCalled();
+    expect(cdp.sendToFrame).not.toHaveBeenCalled();
   });
 
   it("remembers controls that revealed no tooltip so the miss is paid once", async () => {
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async () => ({})) as CdpRunner["send"],
-      sendToTarget: vi.fn(async (_target, method) => {
+      sendToFrame: vi.fn(async (_handle, method) => {
         if (method === "Page.createIsolatedWorld") return { executionContextId: 31 };
         if (method === "DOM.resolveNode") return { object: { objectId: "button-801" } };
         if (method === "Runtime.callFunctionOn") return { result: { value: [] } };
         return {};
-      }) as CdpRunner["sendToTarget"],
-    };
+      }) as CdpRunner["sendToFrame"],
+    });
 
     const documents = [
-      document({ tabId: 11, sessionId: "miss-session" }, 801, undefined, "miss-frame"),
+      document(
+        toFrameDocumentHandle(11, { frameId: "miss-frame", loaderId: "miss-loader" }),
+        801,
+        undefined,
+        "miss-frame",
+      ),
     ];
     const graph = semantics(documents);
 
@@ -165,19 +173,19 @@ describe("tooltip name enrichment", () => {
 
   it("keeps tooltip evidence isolated across sibling frame sessions", async () => {
     let hoveredX = -10;
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async (_tabId, method, params) => {
         if (method === "Input.dispatchMouseEvent") {
           hoveredX = (params as { x: number }).x;
         }
         return {};
       }) as CdpRunner["send"],
-      sendToTarget: vi.fn(async (target, method, params) => {
+      sendToFrame: vi.fn(async (handle, method, params) => {
         if (method === "Page.createIsolatedWorld") {
-          return { executionContextId: target.sessionId === "left-session" ? 21 : 22 };
+          return { executionContextId: handle.frameId === "left" ? 21 : 22 };
         }
         if (method === "DOM.resolveNode") {
-          return { object: { objectId: target.sessionId === "left-session" ? "left" : "right" } };
+          return { object: { objectId: handle.frameId === "left" ? "left" : "right" } };
         }
         if (method === "Runtime.callFunctionOn") {
           const objectId = (params as { objectId: string }).objectId;
@@ -190,17 +198,148 @@ describe("tooltip name enrichment", () => {
           return { result: { value } };
         }
         return {};
-      }) as CdpRunner["sendToTarget"],
-    };
+      }) as CdpRunner["sendToFrame"],
+    });
     const documents = [
-      document({ tabId: 9, sessionId: "left-session" }, 701, undefined, "left", 10),
-      document({ tabId: 9, sessionId: "right-session" }, 701, undefined, "right", 110),
+      document(
+        toFrameDocumentHandle(9, { frameId: "left", loaderId: "left-loader" }),
+        701,
+        undefined,
+        "left",
+        10,
+      ),
+      document(
+        toFrameDocumentHandle(9, { frameId: "right", loaderId: "right-loader" }),
+        701,
+        undefined,
+        "right",
+        110,
+      ),
     ];
 
     const names = await probeTooltipNames(cdp, 9, documents, semantics(documents));
 
     expect(names.get(frameBackendKey("left", 701))).toBe("Left action");
     expect(names.get(frameBackendKey("right", 701))).toBe("Right action");
+  });
+
+  it("includes loaderId in cache keys so recycled backendNodeIds after reload never reuse stale tooltips", async () => {
+    clearTooltipCache();
+    let label = "Archive";
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      sendToFrame: vi.fn(async (_handle, method) => {
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 41 };
+        if (method === "DOM.resolveNode") return { object: { objectId: "btn-901" } };
+        if (method === "Runtime.callFunctionOn") {
+          const calls = vi
+            .mocked(cdp.sendToFrame)
+            .mock.calls.filter(([, m]) => m === "Runtime.callFunctionOn").length;
+          return { result: { value: calls % 2 === 0 ? [label] : [] } };
+        }
+        return {};
+      }) as CdpRunner["sendToFrame"],
+    });
+
+    const firstDocs = [
+      document(
+        toFrameDocumentHandle(15, { frameId: "main", loaderId: "loader-v1" }),
+        901,
+        undefined,
+        "main",
+      ),
+    ];
+    const firstNames = await probeTooltipNames(cdp, 15, firstDocs, semantics(firstDocs));
+    expect(firstNames.get(frameBackendKey("main", 901))).toBe("Archive");
+
+    // Same tab, frame, URL, and backendNodeId, but new loaderId after page reload -> must re-probe!
+    label = "Delete permanently";
+    const reloadedDocs = [
+      document(
+        toFrameDocumentHandle(15, { frameId: "main", loaderId: "loader-v2" }),
+        901,
+        undefined,
+        "main",
+      ),
+    ];
+    const reloadedNames = await probeTooltipNames(cdp, 15, reloadedDocs, semantics(reloadedDocs));
+    expect(reloadedNames.get(frameBackendKey("main", 901))).toBe("Delete permanently");
+    clearTooltipCache();
+  });
+
+  it("evicts cached tooltips on navigation or tab close and detaches chrome lifecycle listeners when empty", async () => {
+    clearTooltipCache();
+    const removedListeners = new Set<(tabId: number) => void>();
+    const navListeners = new Set<(details: { tabId: number; frameId: number }) => void>();
+    const prevChrome = (globalThis as { chrome?: unknown }).chrome;
+    (globalThis as { chrome?: unknown }).chrome = {
+      tabs: {
+        onRemoved: {
+          addListener: (fn: (tabId: number) => void) => removedListeners.add(fn),
+          removeListener: (fn: (tabId: number) => void) => removedListeners.delete(fn),
+        },
+      },
+      webNavigation: {
+        onCommitted: {
+          addListener: (fn: (details: { tabId: number; frameId: number }) => void) =>
+            navListeners.add(fn),
+          removeListener: (fn: (details: { tabId: number; frameId: number }) => void) =>
+            navListeners.delete(fn),
+        },
+      },
+    };
+    try {
+      let tooltipCall = 0;
+      const cdp: CdpRunner = createStubCdpRunner({
+        send: vi.fn(async () => ({})) as CdpRunner["send"],
+        sendToFrame: vi.fn(async (_handle, method) => {
+          if (method === "Page.createIsolatedWorld") return { executionContextId: 51 };
+          if (method === "DOM.resolveNode") return { object: { objectId: "btn-950" } };
+          if (method === "Runtime.callFunctionOn") {
+            tooltipCall += 1;
+            return { result: { value: tooltipCall % 2 === 0 ? [`Tip ${tooltipCall}`] : [] } };
+          }
+          return {};
+        }) as CdpRunner["sendToFrame"],
+      });
+
+      const docs = [
+        document(
+          toFrameDocumentHandle(21, { frameId: "main", loaderId: "loader-a" }),
+          950,
+          undefined,
+          "main",
+        ),
+      ];
+      const graph = semantics(docs);
+      const initial = await probeTooltipNames(cdp, 21, docs, graph);
+      expect(initial.get(frameBackendKey("main", 950))).toBe("Tip 2");
+      expect(removedListeners.size).toBe(1);
+      expect(navListeners.size).toBe(1);
+
+      // Main-frame navigation evicts entries for tab 21 and detaches listeners once empty.
+      for (const listener of navListeners) listener({ tabId: 21, frameId: 0 });
+      expect(removedListeners.size).toBe(0);
+      expect(navListeners.size).toBe(0);
+
+      const afterNav = await probeTooltipNames(cdp, 21, docs, graph);
+      expect(afterNav.get(frameBackendKey("main", 950))).toBe("Tip 4");
+      expect(removedListeners.size).toBe(1);
+
+      // Tab close evicts entries and detaches listeners again.
+      for (const listener of removedListeners) listener(21);
+      expect(removedListeners.size).toBe(0);
+      expect(navListeners.size).toBe(0);
+
+      // Explicit eviction helper also clears cleanly.
+      const rePopulated = await probeTooltipNames(cdp, 21, docs, graph);
+      expect(rePopulated.get(frameBackendKey("main", 950))).toBe("Tip 6");
+      evictTooltipCacheForTab(21);
+      expect(removedListeners.size).toBe(0);
+    } finally {
+      clearTooltipCache();
+      (globalThis as { chrome?: unknown }).chrome = prevChrome;
+    }
   });
 });
 

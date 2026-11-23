@@ -1,7 +1,11 @@
 import type { CdpDispatchGuard } from "@/browser-driver/chromium-cdp";
-import type { CdpTarget, FrameDocumentHandle, FrameNodeHandle } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentHandle,
+  type FrameNodeHandle,
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import type { InteractionDeps } from "./interaction";
-import { type CdpRunner, delegateCdpRunner, sendToCdpTarget } from "./shared";
+import { type CdpRunner, delegateCdpRunner } from "./shared";
 import { waitBounded } from "./transfer-transaction";
 
 /** A retired pointer transaction must never resume input when a CDP reply arrives late. */
@@ -19,22 +23,27 @@ export function pointerTransactionDeps(
     if (retired || signal?.aborted)
       throw new DOMException("pointer transaction aborted", "AbortError");
   };
-  const send = async <T>(target: CdpTarget, method: string, params?: object): Promise<T> => {
+  const sendFrame = async <T>(
+    handle: FrameDocumentHandle | FrameNodeHandle,
+    method: string,
+    params?: object,
+    guard?: CdpDispatchGuard,
+  ): Promise<T> => {
     check();
     const mouse = params as { type?: string } | undefined;
     const onDispatch = () => {
       check();
       if (
         release?.attachmentId !== undefined &&
-        deps.cdp.getAttachmentId?.(target.tabId) !== release.attachmentId
+        deps.cdp.getAttachmentId(handle.tabId) !== release.attachmentId
       )
         throw new Error("pointer attachment changed");
       if (method === "Input.dispatchMouseEvent") {
         if (mouse?.type === "mousePressed") {
           release = {
-            tabId: target.tabId,
+            tabId: handle.tabId,
             params: { ...params, type: "mouseReleased", buttons: 0 },
-            attachmentId: deps.cdp.getAttachmentId?.(target.tabId),
+            attachmentId: deps.cdp.getAttachmentId(handle.tabId),
           };
         } else if (mouse?.type === "mouseMoved" && release) {
           release.params = {
@@ -47,17 +56,14 @@ export function pointerTransactionDeps(
           releasing = true;
         }
       }
+      guard?.onDispatch?.();
     };
-    const result = deps.cdp.sendGuarded
-      ? await deps.cdp.sendGuarded<T>(target, method, params, {
-          signal,
-          attachmentId: release?.attachmentId,
-          onDispatch,
-        })
-      : await (() => {
-          onDispatch();
-          return sendToCdpTarget<T>(deps.cdp, target, method, params);
-        })();
+    const result = await deps.cdp.sendToFrame<T>(handle, method, params, {
+      ...guard,
+      signal: guard?.signal ?? signal,
+      attachmentId: guard?.attachmentId ?? release?.attachmentId,
+      onDispatch,
+    });
     if (method === "Input.dispatchMouseEvent" && mouse?.type === "mouseReleased") {
       release = undefined;
       releasing = false;
@@ -65,84 +71,25 @@ export function pointerTransactionDeps(
     return result;
   };
   const cdp: CdpRunner = delegateCdpRunner(deps.cdp, {
-    send: (tabId, method, params) => send({ tabId }, method, params),
-    sendToTarget: send,
-    ...(deps.cdp.sendGuarded
-      ? {
-          sendGuarded: <T = unknown>(
-            target: CdpTarget,
-            method: string,
-            params: object | undefined,
-            guard: CdpDispatchGuard,
-          ) => {
-            check();
-            return deps.cdp.sendGuarded!<T>(target, method, params, {
-              ...guard,
-              signal: guard.signal ?? signal,
-              attachmentId: guard.attachmentId ?? release?.attachmentId,
-              onDispatch: () => {
-                check();
-                if (
-                  release?.attachmentId !== undefined &&
-                  deps.cdp.getAttachmentId?.(target.tabId) !== release.attachmentId
-                )
-                  throw new Error("pointer attachment changed");
-                guard.onDispatch?.();
-              },
-            });
-          },
-        }
-      : {}),
-    ...(deps.cdp.sendToFrame
-      ? {
-          sendToFrame: <T = unknown>(
-            handle: FrameDocumentHandle | FrameNodeHandle,
-            method: string,
-            params?: object,
-            guard?: CdpDispatchGuard,
-          ) => {
-            check();
-            return deps.cdp.sendToFrame!<T>(handle, method, params, {
-              ...guard,
-              signal: guard?.signal ?? signal,
-              attachmentId: guard?.attachmentId ?? release?.attachmentId,
-              onDispatch: () => {
-                check();
-                if (
-                  release?.attachmentId !== undefined &&
-                  deps.cdp.getAttachmentId?.(handle.tabId) !== release.attachmentId
-                )
-                  throw new Error("pointer attachment changed");
-                guard?.onDispatch?.();
-              },
-            });
-          },
-        }
-      : {}),
-    ...(deps.cdp.ensureAttachedToUrl
-      ? {
-          ensureAttachedToUrl: (tabId, expectedUrl) => {
-            check();
-            return deps.cdp.ensureAttachedToUrl!(tabId, expectedUrl);
-          },
-        }
-      : {}),
-    ...(deps.cdp.getMainFrameHandle
-      ? {
-          getMainFrameHandle: (tabId, sig) => {
-            check();
-            return deps.cdp.getMainFrameHandle!(tabId, sig ?? signal);
-          },
-        }
-      : {}),
-    ...(deps.cdp.getFrameGraph
-      ? {
-          getFrameGraph: (tabId, sig) => {
-            check();
-            return deps.cdp.getFrameGraph!(tabId, sig ?? signal);
-          },
-        }
-      : {}),
+    resourceCleanup: deps.cdp.resourceCleanup ?? deps.cdp,
+    send: <T>(tabId: number, method: string, params?: object, sig?: AbortSignal) =>
+      sendFrame<T>(toRootFrameHandle(tabId), method, params, sig ? { signal: sig } : undefined),
+    sendToFrame: sendFrame,
+    ensureAttachedToUrl: (tabId, expectedUrl) => {
+      check();
+      return deps.cdp.ensureAttachedToUrl(tabId, expectedUrl);
+    },
+    getMainFrameHandle: (tabId, sig) => {
+      check();
+      return deps.cdp.getMainFrameHandle(tabId, sig ?? signal);
+    },
+    getFrameDocuments: (tabId, sig, options) => {
+      check();
+      const combined = sig && signal ? AbortSignal.any([sig, signal]) : (sig ?? signal);
+      return options !== undefined
+        ? deps.cdp.getFrameDocuments(tabId, combined, options)
+        : deps.cdp.getFrameDocuments(tabId, combined);
+    },
   });
   const cleanupInput = async (deadline: number): Promise<void> => {
     if (!release) return;
@@ -150,12 +97,12 @@ export function pointerTransactionDeps(
     release = undefined;
     const ownsAttachment = () =>
       pending.attachmentId === undefined ||
-      deps.cdp.getAttachmentId?.(pending.tabId) === pending.attachmentId;
+      deps.cdp.getAttachmentId(pending.tabId) === pending.attachmentId;
     const detach = () => {
       if (!ownsAttachment()) return Promise.resolve();
       return pending.attachmentId === undefined
-        ? deps.cdp.detach?.(pending.tabId)
-        : deps.cdp.detach?.(pending.tabId, pending.attachmentId);
+        ? deps.cdp.detach(pending.tabId)
+        : deps.cdp.detach(pending.tabId, pending.attachmentId);
     };
     if (!ownsAttachment()) return;
     try {
@@ -167,14 +114,12 @@ export function pointerTransactionDeps(
         (pending.params as { button?: string }).button === "left" &&
         !releasing
       ) {
-        const cancel = deps.cdp.sendGuarded
-          ? deps.cdp.sendGuarded(
-              { tabId: pending.tabId },
-              "Input.cancelDragging",
-              {},
-              { attachmentId: pending.attachmentId },
-            )
-          : deps.cdp.send(pending.tabId, "Input.cancelDragging", {});
+        const cancel = deps.cdp.sendToFrame(
+          toRootFrameHandle(pending.tabId),
+          "Input.cancelDragging",
+          {},
+          { attachmentId: pending.attachmentId, allowReattach: false },
+        );
         await waitBounded(
           cancel,
           Math.min(deadline, Date.now() + 300),
@@ -186,16 +131,15 @@ export function pointerTransactionDeps(
       // Never replay an in-flight release or send cleanup on a new attachment.
       const cleanup = releasing
         ? detach()
-        : deps.cdp.sendGuarded
-          ? deps.cdp.sendGuarded(
-              { tabId: pending.tabId },
-              "Input.dispatchMouseEvent",
-              pending.params,
-              {
-                attachmentId: pending.attachmentId,
-              },
-            )
-          : deps.cdp.send(pending.tabId, "Input.dispatchMouseEvent", pending.params);
+        : deps.cdp.sendToFrame(
+            toRootFrameHandle(pending.tabId),
+            "Input.dispatchMouseEvent",
+            pending.params,
+            {
+              attachmentId: pending.attachmentId,
+              allowReattach: false,
+            },
+          );
       if (!cleanup) throw new Error("pointer input cleanup unavailable");
       await waitBounded(cleanup, deadline, undefined, "pointer input cleanup timed out");
     } catch (error) {

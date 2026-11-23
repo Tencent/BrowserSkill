@@ -44,6 +44,11 @@ may retain its old PATH even after a new terminal picks up the installation.
 
 ## 2. Install for the intended agent harness
 
+- **DeepSeek Harness (`dsh`):** install the [DSH plugin](README.md#deepseek-harness-plugin)
+  into the user's profile (`dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin`,
+  replacing `web` with their profile name), or install the skill directly via
+  `bsk install-skill --harness dsh --json`. The plugin already bundles `browser-skill`
+  and heals `~/.local/bin` on `PATH`, so skip `bsk install-skill` when the plugin is added.
 - **Supported harnesses:** inspect the available IDs and paths:
 
   ```sh

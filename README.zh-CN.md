@@ -61,7 +61,7 @@ https://github.com/user-attachments/assets/959cb520-80ba-4b9e-b6d8-d94523b03693
   </tr>
 </table>
 
-Qoder、Qoder CN 与 DeepSeek Harness 同样作为 skill 安装目标支持（`bsk install-skill --harness qoder`、`--harness qoder-cn` 和 `--harness dsh`）。
+Qoder、Qoder CN 与 DeepSeek Harness 同样作为 skill 安装目标支持（`bsk install-skill --harness qoder`、`--harness qoder-cn` 和 `--harness dsh`）；**[DeepSeek Harness](#deepseek-harness-插件)** 同时提供轻量插件（`@wxg-prc-cpg/browser-skill-dsh-plugin`），自带 skill 注册与按需 `bsk` 安装引导。
 
 这些 Agent，以及其他能调用 Shell 的 Agent，都可以通过同一套 **`bsk` CLI** 使用；支持 MCP 的客户端也可通过 **`bsk mcp`** 接入（[MCP 配置](docs/mcp.md)）。Agent 和模型由你选择，BrowserSkill 负责连接浏览器。
 
@@ -196,6 +196,32 @@ bsk session stop <id>
 
 在 WorkBuddy/CodeBuddy 或会回收命令子进程的宿主中，Agent 应先复用已有 daemon；需要启动时，在宿主管理的后台任务中运行 `bsk daemon start --foreground`，并在另一条工具调用中验证连接。[宿主配置指南](docs/sandboxed-agents.md)说明了如何共用 `BSK_HOME`、设置 `BSK_AUTO_START=0`，以及宿主无法维持任务时的独立终端兜底方式。
 
+### 关闭闲置的代理窗口
+
+任务完成后，可以让 Agent 结束浏览器会话。如果任务中断后代理窗口仍然开着，请在同一个 daemon 上查看会话列表：
+
+```sh
+bsk session list
+bsk session stop SESSION_ID
+```
+
+根据 `BROWSER`、`AGENT WINDOW` 和 `CONTROLLER / PROJECT` 列找到闲置的任务，将 `SESSION_ID` 替换为 `SESSION` 列的值。清理成功后，BrowserSkill 会归还借用的标签页，并在窗口中没有剩余用户标签页时关闭任务窗口。如果希望保存正在录制的操作记录，请使用 `bsk record stop`。
+
+如果窗口不在列表中，先确认使用的是任务当时的 `BSK_HOME`。如果窗口已经不属于任何会话，可以保存其中的工作后，在浏览器中手动关闭。
+
+## DeepSeek Harness 插件
+
+轻量版 [DSH 插件](packages/dsh-plugin-browserskill/README.md)（`@wxg-prc-cpg/browser-skill-dsh-plugin`）为 DeepSeek Harness profile 内置主仓统一的 `browser-skill` CLI skill，自动将 `~/.local/bin`（或配置的 `bskPath`）补入宿主 `PATH`，并在本机尚未安装 `bsk` 时提供按需自动安装与浏览器扩展连接引导；底层与其他所有 Agent 共享同一套 `bsk` CLI、daemon（自动识别 `DSH_SESSION_ID` 隔离会话）与独立 Agent Window 运行时。
+
+```sh
+dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
+dsh --profile web
+```
+
+将 `web` 替换为自己的 profile 名称。在对话中调用 `/browser-skill` 并描述任务即可——若本机未安装 `bsk`，Agent 会自动调用包内安装脚本并引导开启浏览器扩展，无需额外执行 `bsk install-skill`。
+
+[插件使用与配置](packages/dsh-plugin-browserskill/README.md) · [npm 包](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)
+
 ## 网站调试
 
 **让 Agent 看到问题发生时的浏览器证据。** 在你有权调试的网站上，先开启采集，再复现问题，随后在扩展中查看，或交给 Agent 分析。
@@ -294,7 +320,7 @@ bsk update --yes
 
 `bsk doctor` 会显示最近一次更新的结果；bsk home 下的 `update-state.json` 记录了它的阶段、结果和错误原因。同一个可执行文件的更新会依次进行，即使来自不同的 bsk home 也是如此，靠的是它旁边的 `.bsk.update.lock`（Windows 上为 `.bsk.exe.update.lock`），这个文件会一直保留。更新确认成功前，旧版本会以 `.bsk.old-*`（Windows 上为 `.bsk.exe.old-*`）的名字留在新版本旁边；仍在运行的旧版本会保留到对应进程退出，之后再启动 daemon 时会清理。Windows 上的自更新依赖重命名正在运行的可执行文件，NTFS 支持这一操作；文件系统不支持时，更新会失败，已安装的版本保持不变。bsk 支持 Windows 10 和 Windows Server 2016 及以上版本。
 
-扩展通过浏览器商店更新。通过 `bsk --version`、`bsk status` 和 `bsk doctor` 检查版本与连接。使用新功能时，保持 CLI、正在运行的 daemon 和扩展版本匹配。本 README 介绍当前仓库的能力，商店版本可能因审核而滞后；已发布内容以[更新日志](CHANGELOG.md)和 [Releases](https://github.com/Tencent/BrowserSkill/releases) 为准。
+扩展通过浏览器商店更新。如使用 DeepSeek Harness 插件，可在对应 profile 中单独更新（`dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest`）并重启该 profile。通过 `bsk --version`、`bsk status` 和 `bsk doctor` 检查版本与连接。使用新功能时，保持 CLI、正在运行的 daemon、扩展和可选 DSH 插件版本匹配。本 README 介绍当前仓库的能力，商店版本可能因审核而滞后；已发布内容以[更新日志](CHANGELOG.md)和 [Releases](https://github.com/Tencent/BrowserSkill/releases) 为准。
 
 受管理的 CLI skill 在文件未被修改时，会随 daemon 启动、`session start` 或 `doctor` 自动同步；本地修改和自定义 skill 会保留。开启新的 Agent 会话以加载更新后的指令，doctor 会提示暂停同步的安装。
 
@@ -321,6 +347,7 @@ bsk update --yes
 | 连接服务器上的 Agent | [远程浏览器连接](docs/remote-extension-connection.md) |
 | 在沙盒中使用 | [沙盒环境配置](docs/sandboxed-agents.md) |
 | 回看任务操作元数据 | [操作审计](docs/operation-audit.md) |
+| 接入 DeepSeek Harness | [DSH 插件](packages/dsh-plugin-browserskill/README.md) |
 | 通过 MCP 接入 | [MCP 服务](docs/mcp.md) |
 | 了解项目实现 | [架构](docs/architecture.md) · [协议](crates/bsk-protocol/README.md) |
 
@@ -341,6 +368,7 @@ CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作�
 | `crates/bsk-cli` | CLI、daemon 和内置 Agent skill |
 | `crates/bsk-protocol` | 通信类型与 JSON Schema |
 | `apps/extension` | 浏览器自动化、调试工作区和扩展界面 |
+| `packages/dsh-plugin-browserskill` | 轻量 DeepSeek Harness skill 与按需安装引导插件 |
 | `packages/ui`、`packages/i18n`、`packages/vom` | 共享 UI、多语言和页面观察 |
 | `evals/browser` | 本地测试页面与浏览器能力评测 |
 

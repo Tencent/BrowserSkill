@@ -140,6 +140,7 @@ struct ScopeSlot {
 struct TabContextCache {
     latest_ctx_id: Option<String>,
     latest_short_ctx: Option<String>,
+    implicit_ctx_usable: bool,
     latest_obs_id: Option<String>,
     latest_short_obs: Option<String>,
     last_vom: Option<String>,
@@ -162,6 +163,7 @@ struct SessionContextSlot {
     short_obs_ring: VecDeque<(String, String, Option<i64>)>,
     latest_ctx_id: Option<String>,
     latest_short_ctx: Option<String>,
+    implicit_ctx_usable: bool,
     latest_obs_id: Option<String>,
     latest_short_obs: Option<String>,
     last_vom: Option<String>,
@@ -594,12 +596,41 @@ impl ImplicitScopeRegistry {
             return slot
                 .tabs
                 .get(&tid)
+                .filter(|tab| tab.implicit_ctx_usable)
                 .and_then(|tab| tab.latest_ctx_id.clone());
         }
-        if slot.has_tab_history || !slot.tabs.is_empty() {
+        if slot.has_tab_history || !slot.tabs.is_empty() || !slot.implicit_ctx_usable {
             return None;
         }
         slot.latest_ctx_id.clone()
+    }
+
+    /// Revoke implicit `context_id` auto-injection on `tab_id` (or the session's
+    /// active tab) when a full-page navigation settles or an action error proves
+    /// that the cached control context was revoked, while retaining `c<N>` / `o<N>`
+    /// aliases, predecessor IDs, and `last_vom` so subsequent `unchanged` / `delta`
+    /// `cooperate` syncs still hydrate cleanly.
+    pub fn clear_implicit_tab_context(
+        &self,
+        session_id: &SessionId,
+        tab_id: Option<i64>,
+        matching_ctx: Option<&str>,
+    ) {
+        let mut guard = self.inner.lock().expect("implicit scope registry poisoned");
+        let Some(slot) = guard.sessions.get_mut(session_id) else {
+            return;
+        };
+        let matches =
+            |current: &Option<String>| matching_ctx.is_none() || current.as_deref() == matching_ctx;
+        if let Some(tid) = tab_id.or(slot.active_tab_id)
+            && let Some(tab) = slot.tabs.get_mut(&tid)
+            && matches(&tab.latest_ctx_id)
+        {
+            tab.implicit_ctx_usable = false;
+        }
+        if (tab_id.is_none() || slot.active_tab_id == tab_id) && matches(&slot.latest_ctx_id) {
+            slot.implicit_ctx_usable = false;
+        }
     }
 
     /// Track active-tab transitions (`tab_create`, `tab_select`, `tab_borrow`,
@@ -766,6 +797,7 @@ impl ImplicitScopeRegistry {
             );
             slot.latest_ctx_id = Some(ctx_id.to_string());
             slot.latest_short_ctx = Some(short.clone());
+            slot.implicit_ctx_usable = true;
             Some((short, ctx_id.to_string()))
         } else {
             None
@@ -825,6 +857,7 @@ impl ImplicitScopeRegistry {
             if let Some((ref short, ref uuid)) = minted_ctx {
                 tab_cache.latest_short_ctx = Some(short.clone());
                 tab_cache.latest_ctx_id = Some(uuid.clone());
+                tab_cache.implicit_ctx_usable = true;
             }
             if let Some((ref short, ref uuid)) = minted_obs {
                 tab_cache.latest_short_obs = Some(short.clone());

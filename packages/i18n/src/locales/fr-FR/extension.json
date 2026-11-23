@@ -112,7 +112,11 @@
       "readFailed": "Impossible de charger les paramètres. Rouvrez l'extension.",
       "writeFailed": "Enregistrement impossible. Vos paramètres n'ont pas changé. Réessayez.",
       "confirmTabBorrowInfoLabel": "À propos de la confirmation d'emprunt d'onglet",
-      "requestHelpEnabledInfoLabel": "À propos des demandes d'aide humaine"
+      "requestHelpEnabledInfoLabel": "À propos des demandes d'aide humaine",
+      "openAgentWindowMinimized": "Ouvrir les fenêtres de l'agent réduites",
+      "openAgentWindowMinimizedHint": "Si activé, les nouvelles fenêtres de l'agent en arrière-plan démarrent directement réduites au lieu d'apparaître à l'écran. Si désactivé, elles s'ouvrent comme des fenêtres normales sans focus.",
+      "openAgentWindowMinimizedScope": "Enregistré automatiquement pour ce profil de navigateur. S'applique aux nouvelles fenêtres de l'agent en arrière-plan ; les sessions explicites au premier plan et l'enregistrement d'actions s'ouvrent toujours visiblement.",
+      "openAgentWindowMinimizedInfoLabel": "À propos de l'ouverture réduite des fenêtres de l'agent"
     },
     "remoteLocal": "Basculer en local",
     "remotePairing": "Lien de couplage",

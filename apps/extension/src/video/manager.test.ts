@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import type { VideoHost, VideoHostCommand } from "./host-protocol";
 import { VIDEO_NAVIGATION_TIMEOUT_MS, VideoManager } from "./manager";
 import { VideoArtifactStore } from "./store";
@@ -46,16 +48,17 @@ async function setup() {
   const store = new MemoryStore();
   let owner = "local";
   let event: Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
+  const send = vi.fn(
+    async (_tab: number, method: string): Promise<any> =>
+      method === "Page.captureScreenshot" ? { data: "image" } : {},
+  );
   const cdp = {
     getAttachmentId: () => "one",
     onEvent: (_tabId: number, handler: typeof event) => {
       event = handler;
       return { dispose: vi.fn() };
     },
-    send: vi.fn(
-      async <T>(_tab: number, method: string): Promise<T> =>
-        (method === "Page.captureScreenshot" ? { data: "image" } : {}) as T,
-    ),
+    send,
   };
   const request = vi.fn(async <T>(command: VideoHostCommand): Promise<T> => {
     if (command.action === "start") {
@@ -85,7 +88,7 @@ async function setup() {
   const changed = vi.fn();
   const video = new VideoManager({
     sessions,
-    cdp: cdp as CdpRunner,
+    cdp: createStubCdpRunner({ ...cdp, send: send as CdpRunner["send"] }),
     store,
     owner: () => owner,
     tabs: { query: async () => [tab], get: async () => tab },
@@ -108,7 +111,11 @@ async function setup() {
       owner = value;
     },
     frame: (data: string, timestamp?: number) =>
-      event({ tabId: 7 }, "Page.screencastFrame", { data, metadata: { timestamp }, sessionId: 1 }),
+      event(rootEventSource(7), "Page.screencastFrame", {
+        data,
+        metadata: { timestamp },
+        sessionId: 1,
+      }),
   };
 }
 
@@ -428,5 +435,93 @@ describe("video lifetime and access", () => {
     await cancelled;
     expect(video.isRecording()).toBe(false);
     expect(request.mock.calls.some(([command]) => command.action === "start")).toBe(false);
+  });
+
+  it("releases its backgroundExecution lease after recording finishes, while preserving a pre-existing lease", async () => {
+    const debuggerApi: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target, method) =>
+        method === "Page.captureScreenshot" ? { data: "image" } : {},
+      ),
+      onEvent: { addListener: vi.fn(), removeListener: vi.fn() } as never,
+      onDetach: { addListener: vi.fn(), removeListener: vi.fn() } as never,
+    };
+    const cdp = new ChromiumCdp(debuggerApi);
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 10, initialTabIds: [7] }),
+        ensureActiveTab: async () => 7,
+        remove: async () => {},
+      },
+    });
+    await sessions.start("task");
+    const tab = {
+      id: 7,
+      windowId: 10,
+      active: true,
+      url: "https://example.test",
+      title: "Test",
+    } as chrome.tabs.Tab;
+    const store = new MemoryStore();
+    const request = vi.fn(async <T>(command: VideoHostCommand): Promise<T> => {
+      if (command.action === "start") {
+        const value: StoredVideo = {
+          ...command.recording,
+          state: "recording",
+          started_at: Date.now(),
+        };
+        await store.put(value);
+        return value as T;
+      }
+      if (command.action === "stop") {
+        const previous = await store.get(command.recording_id);
+        const value = {
+          ...previous!,
+          state: "ready",
+          byte_size: 3,
+          stop_reason: command.reason,
+          completeness: completeStop(command.reason) ? "complete" : "partial",
+        } as StoredVideo;
+        await store.put(value);
+        return value as T;
+      }
+      return undefined as T;
+    });
+    const video = new VideoManager({
+      sessions,
+      cdp,
+      store,
+      owner: () => "local",
+      tabs: { query: async () => [tab], get: async () => tab },
+      host: { request: request as VideoHost["request"], closeWhenIdle: async () => {} },
+      overlay: vi.fn(async () => ({})),
+    });
+
+    try {
+      // 1) Video acquires backgroundExecution when none existed, and releases it on stop.
+      expect(cdp.ownsBackgroundExecution("task", 7)).toBe(false);
+      const first = await video.start({ session_id: "task", request_id: "lease-release-1" });
+      expect(cdp.ownsBackgroundExecution("task", 7)).toBe(true);
+      await video.stop(first.recording.recording_id);
+      expect(cdp.ownsBackgroundExecution("task", 7)).toBe(false);
+
+      // 2) Failed startup also releases the lease.
+      request.mockRejectedValueOnce(new Error("encoder unavailable"));
+      await expect(
+        video.start({ session_id: "task", request_id: "lease-release-fail" }),
+      ).rejects.toThrow("encoder unavailable");
+      expect(cdp.ownsBackgroundExecution("task", 7)).toBe(false);
+
+      // 3) If the session already owned a backgroundExecution lease before video started, stop preserves it.
+      await cdp.acquireBackgroundExecution("task", 7);
+      expect(cdp.ownsBackgroundExecution("task", 7)).toBe(true);
+      const second = await video.start({ session_id: "task", request_id: "lease-preserve-1" });
+      await video.stop(second.recording.recording_id);
+      expect(cdp.ownsBackgroundExecution("task", 7)).toBe(true);
+    } finally {
+      await cdp.detachAll();
+      cdp.dispose();
+    }
   });
 });

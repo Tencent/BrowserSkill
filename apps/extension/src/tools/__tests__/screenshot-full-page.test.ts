@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { rootEventSource, targetEventSource } from "@/browser-driver/frame-handles";
 import { capturePage } from "@/long-screenshot/capture";
 import { ScreenshotExports } from "@/long-screenshot/exports";
 import { exportPng } from "@/long-screenshot/png";
 import { SessionManager } from "@/session-manager/manager";
 import { handleFullPageScreenshot } from "../screenshot-full-page";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 vi.mock("@/long-screenshot/page-client", () => ({
   createPageClient: () => ({ documentId: "document-one", prepare: async () => {}, page: vi.fn() }),
@@ -45,25 +46,35 @@ async function setup() {
   const disposeEvents = vi.fn(() => {
     onEvent = undefined;
   });
-  const cdp = {
-    onEvent: vi.fn((_tabId: number, handler: NonNullable<typeof onEvent>) => {
-      onEvent = handler;
-      return { dispose: disposeEvents };
+  const onEventMock = vi.fn((_tabId: number, handler: NonNullable<typeof onEvent>) => {
+    onEvent = handler;
+    return { dispose: disposeEvents };
+  });
+  const getAttachmentIdMock = vi.fn(() => "attachment-one" as string | undefined);
+  const sendMock = vi.fn(async <T>(_id: number, method: string, _params?: object): Promise<T> => {
+    if (method === "Page.startScreencast") {
+      onEvent?.(rootEventSource(7), "Page.screencastFrame", { sessionId: 1 });
+      return {} as T;
+    }
+    if (method === "Page.stopScreencast" || method === "Page.screencastFrameAck") return {} as T;
+    if (method === "Page.getFrameTree") return {} as T;
+    if (method === "Page.captureScreenshot") return { data: "cG5n" } as T;
+    throw new Error(`Unexpected CDP call: ${method}`);
+  });
+  const cdp = Object.assign(
+    createStubCdpRunner({
+      send: sendMock as CdpRunner["send"],
+      onEvent: onEventMock,
+      getAttachmentId: getAttachmentIdMock,
     }),
-    getAttachmentId: vi.fn(() => "attachment-one" as string | undefined),
-    send: vi.fn(async <T>(_id: number, method: string, _params?: object): Promise<T> => {
-      if (method === "Page.startScreencast") {
-        onEvent?.({ tabId: 7 }, "Page.screencastFrame", { sessionId: 1 });
-        return {} as T;
-      }
-      if (method === "Page.stopScreencast" || method === "Page.screencastFrameAck") return {} as T;
-      if (method === "Page.getFrameTree") return {} as T;
-      if (method === "Page.captureScreenshot") return { data: "cG5n" } as T;
-      throw new Error(`Unexpected CDP call: ${method}`);
-    }),
-  };
+    {
+      send: sendMock,
+      onEvent: onEventMock,
+      getAttachmentId: getAttachmentIdMock,
+    },
+  );
   const deps = {
-    cdp: cdp as CdpRunner & typeof cdp,
+    cdp,
     tabsApi: { get: vi.fn(async () => tab), query: vi.fn(async () => [tab]) },
     exports: new ScreenshotExports((id) => manager.has(id)),
   };
@@ -420,12 +431,12 @@ describe("Windows full-page rendering lifetime", () => {
     vi.mocked(capturePage).mockImplementationOnce(async (options) => {
       await options.screenshot();
       const frame = deps.cdp.onEvent.mock.calls[0][1];
-      frame({ tabId: 99 }, "Page.screencastFrame", { sessionId: 2 });
-      frame({ tabId: 7, sessionId: "child" }, "Page.screencastFrame", { sessionId: 3 });
-      frame({ tabId: 7 }, "Page.screencastVisibilityChanged", {});
-      frame({ tabId: 7 }, "Page.screencastFrame", { sessionId: 4 });
+      frame(rootEventSource(99), "Page.screencastFrame", { sessionId: 2 });
+      frame(targetEventSource(7, "child"), "Page.screencastFrame", { sessionId: 3 });
+      frame(rootEventSource(7), "Page.screencastVisibilityChanged", {});
+      frame(rootEventSource(7), "Page.screencastFrame", { sessionId: 4 });
       deps.cdp.getAttachmentId.mockReturnValue("replacement");
-      frame({ tabId: 7 }, "Page.screencastFrame", { sessionId: 5 });
+      frame(rootEventSource(7), "Page.screencastFrame", { sessionId: 5 });
       return { width: 64, height: 256 };
     });
     expect(await handleFullPageScreenshot(manager, { session_id: "one" }, deps)).toMatchObject({

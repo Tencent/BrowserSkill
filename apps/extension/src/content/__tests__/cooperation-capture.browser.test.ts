@@ -7,8 +7,15 @@ import { describe, expect, it, vi } from "vitest";
 import { guardedRunner } from "@/cooperation/action-guard";
 import { collectCooperationFrames } from "@/cooperation/browser-bridge";
 import { CooperationController } from "@/cooperation/controller";
-import { COOPERATION_ARM, COOPERATION_READ, type FrameState } from "@/cooperation/types";
+import {
+  COOPERATION_ARM,
+  COOPERATION_ARM_FRAME,
+  COOPERATION_DISABLE,
+  COOPERATION_READ,
+  type FrameState,
+} from "@/cooperation/types";
 import { SessionManager } from "@/session-manager/manager";
+import { createStubCdpRunner } from "@/tools/shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -41,7 +48,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("frame interaction coverage", () =
             ? '<!doctype html><iframe src="/delayed"></iframe>'
             : request.url === "/wheel"
               ? // A legacy handler, as Bilibili uses for volume (#550).
-                '<!doctype html><div style="height:400px"></div><script>window.counts={mousewheel:0};document.addEventListener("mousewheel",()=>counts.mousewheel++)</script>'
+                '<!doctype html><div style="height:400px"></div><script>window.counts={mousewheel:0,winMousewheel:0};document.addEventListener("mousewheel",()=>counts.mousewheel++);window.addEventListener("mousewheel",()=>counts.winMousewheel++)</script>'
               : request.url === "/frame" || request.url === "/delayed"
                 ? '<!doctype html><input aria-label="Frame" value="child">'
                 : '<!doctype html><input aria-label="Page" value="top"><iframe src="/frame"></iframe>',
@@ -302,10 +309,10 @@ globalThis.httpCooperationReady = true;`,
             expression: "document.querySelector('input').focus()",
           });
           const guarded = guardedRunner(
-            {
+            createStubCdpRunner({
               send: <T>(_tabId: number, method: string, params?: object) =>
                 enterSend<T>(method, params),
-            },
+            }),
             {
               prepare: async (input) => {
                 if (input)
@@ -442,13 +449,28 @@ globalThis.httpCooperationReady = true;`,
             }
           };
           const legacy = await createTab("/wheel");
-          await wheel("/wheel", { mousewheel: 1 });
+          const legacyFrames = await getAllFrames({ tabId: legacy.id });
+          await wheel("/wheel", { mousewheel: 1, winMousewheel: 1 });
+          // Arm solely via COOPERATION_ARM_FRAME (without COOPERATION_READ) then release via COOPERATION_DISABLE:
+          // the window wheel capture listener must be torn down so legacy window mousewheel fires again.
+          expect(
+            await sendMessage(
+              legacy.id,
+              { kind: COOPERATION_ARM_FRAME },
+              { documentId: legacyFrames[0].documentId },
+            ),
+          ).toEqual({ ok: true });
+          await wheel("/wheel", { mousewheel: 2, winMousewheel: 1 });
+          await collectCooperationFrames(legacy.id, COOPERATION_DISABLE, "wheel-arm-only");
+          await wheel("/wheel", { mousewheel: 3, winMousewheel: 2 });
           await collectCooperationFrames(legacy.id, COOPERATION_READ, "wheel");
-          await wheel("/wheel", { mousewheel: 2 });
+          await wheel("/wheel", { mousewheel: 4, winMousewheel: 2 });
           // Browsing never transfers control.
           expect(
             (await collectCooperationFrames(legacy.id, COOPERATION_READ, "wheel")).frames.get(0),
           ).toMatchObject({ human: 0 });
+          await collectCooperationFrames(legacy.id, COOPERATION_DISABLE, "wheel");
+          await wheel("/wheel", { mousewheel: 5, winMousewheel: 3 });
           await evaluate(`chrome.tabs.remove(${legacy.id})`);
           expect(executeScript).not.toHaveBeenCalled();
 

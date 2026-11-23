@@ -189,16 +189,16 @@ fn commit_staged_file(staged: &Path, target: &Path, backup: &Path) -> io::Result
     };
 
     if let Err(err) = fs::rename(staged, target) {
-        if let Some(old_file) = old_file.as_deref() {
-            if let Err(restore_err) = fs::rename(old_file, target) {
-                return Err(io::Error::new(
-                    restore_err.kind(),
-                    format!(
-                        "{err}; additionally failed to restore {}: {restore_err}",
-                        target.display()
-                    ),
-                ));
-            }
+        if let Some(old_file) = old_file.as_deref()
+            && let Err(restore_err) = fs::rename(old_file, target)
+        {
+            return Err(io::Error::new(
+                restore_err.kind(),
+                format!(
+                    "{err}; additionally failed to restore {}: {restore_err}",
+                    target.display()
+                ),
+            ));
         }
         return Err(err);
     }
@@ -217,10 +217,10 @@ fn rollback_installed_files(installed: &[(PathBuf, Option<PathBuf>)]) -> io::Res
                 continue;
             }
         }
-        if let Some(backup) = backup {
-            if let Err(err) = fs::rename(backup, target) {
-                rollback_error.get_or_insert(err);
-            }
+        if let Some(backup) = backup
+            && let Err(err) = fs::rename(backup, target)
+        {
+            rollback_error.get_or_insert(err);
         }
     }
     match rollback_error {

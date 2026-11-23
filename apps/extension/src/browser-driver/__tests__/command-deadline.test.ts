@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { createStubCdpRunner } from "@/tools/shared";
 import { isAbortError, isCaptureTerminalError } from "@/tools/vom/capture-abort";
 import { captureObservationFacts } from "@/tools/vom/capture-coordinator";
 import {
@@ -25,13 +26,14 @@ it("times out stuck snapshots with the actual method and stops fallback reads", 
       method === "DOMSnapshot.captureSnapshot" ? new Promise<never>(() => {}) : Promise.resolve({}),
     ),
   );
-  const work = captureObservationFacts({ send: send as never }, 4);
+  const work = captureObservationFacts(createStubCdpRunner({ send: send as never }), 4);
   const checked = expect(work).rejects.toThrow(
     "DOMSnapshot.captureSnapshot timed out after 20000ms (tab 4)",
   );
   await vi.advanceTimersByTimeAsync(CAPTURE_READ_TIMEOUT_MS);
   await checked;
   expect(send.mock.calls.map((call) => call[1])).toEqual([
+    "Page.getFrameTree",
     "DOMSnapshot.enable",
     "DOMSnapshot.captureSnapshot",
   ]);
@@ -40,12 +42,12 @@ it("times out stuck snapshots with the actual method and stops fallback reads", 
 
 it("does not start a snapshot after the frame graph read timed out", async () => {
   const send = vi.fn(async () => ({}));
-  const getFrameGraph = vi.fn(async () => {
+  const getFrameDocuments = vi.fn(async () => {
     throw new CdpReadTimeoutError("DOM.getFrameOwner", 4, READ_TIMEOUT_MS);
   });
-  await expect(captureObservationFacts({ send, getFrameGraph } as never, 4)).rejects.toThrow(
-    "DOM.getFrameOwner timed out",
-  );
+  await expect(
+    captureObservationFacts(createStubCdpRunner({ send: send as never, getFrameDocuments }), 4),
+  ).rejects.toThrow("DOM.getFrameOwner timed out");
   expect(send).not.toHaveBeenCalled();
 });
 

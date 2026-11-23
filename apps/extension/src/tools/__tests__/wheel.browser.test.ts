@@ -1,10 +1,16 @@
 // @vitest-environment node
 // Opt in with BSK_TEST_CHROME=/path/to/chrome. Uses an isolated browser/profile.
 import { describe, expect, it } from "vitest";
-import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentGraph,
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  type FrameNodeHandle,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import type { WheelParams } from "@/transport/types";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { handleWheel } from "../wheel";
 
 type Send = <T = Record<string, unknown>>(
@@ -31,6 +37,13 @@ async function withBrowser(
 }
 
 async function harness(send: Send) {
+  const { product } = await send<{ product: string }>("Browser.getVersion");
+  const chromeMajor = Number(/\/(\d+)\./.exec(product)?.[1] ?? 0);
+  // Chromium < 158 left CDP mouseWheel deltas unscaled at ingress so Blink's
+  // viewport-to-CSS conversion divided them by page zoom; Chromium 158+ scales
+  // CDP mouseWheel deltas as CSS pixels across browser zoom.
+  const expectedDelta = (delta: number, zoom: number) =>
+    chromeMajor >= 158 ? delta : delta / zoom;
   const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
     url: "about:blank",
   });
@@ -49,19 +62,30 @@ async function harness(send: Send) {
   const ctx = await manager.start("aa11");
   const calls: { method: string; sessionId?: string }[] = [];
   const after = { command: (_method: string) => {} };
-  const sessionFor = (target: CdpTarget) => target.sessionId ?? rootSession;
-  const forward = async <T>(target: CdpTarget, method: string, params?: object): Promise<T> => {
-    calls.push({ method, sessionId: target.sessionId });
-    const result = await send<T>(method, params, sessionFor(target));
+  type FrameRecord = FrameDocumentInfo & { name: string; targetSession?: string };
+  let currentFrames: FrameRecord[] = [];
+  const sessionForFrame = (frameId?: string) =>
+    (frameId ? currentFrames.find((f) => f.frameId === frameId)?.targetSession : undefined) ??
+    rootSession;
+  const forward = async <T>(
+    handle: FrameDocumentHandle | FrameNodeHandle | { tabId: number; frameId?: string },
+    method: string,
+    params?: object,
+  ): Promise<T> => {
+    const targetSession = handle.frameId
+      ? currentFrames.find((f) => f.frameId === handle.frameId)?.targetSession
+      : undefined;
+    calls.push({ method, sessionId: targetSession });
+    const result = await send<T>(method, params, targetSession ?? rootSession);
     after.command(method);
     return result;
   };
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: (_tab, method, params) => forward({ tabId: 4 }, method, params),
-    sendToTarget: forward,
-  };
-  const evaluate = async <T>(expression: string, frame?: CdpFrame): Promise<T> => {
-    const session = frame ? sessionFor(frame.target) : rootSession;
+    sendToFrame: forward,
+  });
+  const evaluate = async <T>(expression: string, frame?: FrameRecord): Promise<T> => {
+    const session = frame ? sessionForFrame(frame.frameId) : rootSession;
     const world = frame
       ? await send<{ executionContextId: number }>(
           "Page.createIsolatedWorld",
@@ -85,20 +109,21 @@ async function harness(send: Send) {
     expect(reply.exceptionDetails).toBeUndefined();
     return reply.result.value;
   };
-  const rememberRef = (frame: CdpFrame, backendNodeId: number) =>
+  const rememberRef = (frame: FrameRecord, backendNodeId: number) =>
     ctx.refStore.set("e1", backendNodeId, {
       tabId: 4,
       frameId: frame.frameId,
       loaderId: frame.loaderId,
     });
-  const ref = async (frame: CdpFrame, selector = "#probe") => {
+  const ref = async (frame: FrameRecord, selector = "#probe") => {
+    const frameSession = sessionForFrame(frame.frameId);
     const { executionContextId } = await send<{ executionContextId: number }>(
       "Page.createIsolatedWorld",
       {
         frameId: frame.frameId,
         worldName: "wheel-oracle",
       },
-      sessionFor(frame.target),
+      frameSession,
     );
     const { result } = await send<{ result: { objectId: string } }>(
       "Runtime.evaluate",
@@ -106,14 +131,14 @@ async function harness(send: Send) {
         expression: `document.querySelector(${JSON.stringify(selector)})`,
         contextId: executionContextId,
       },
-      sessionFor(frame.target),
+      frameSession,
     );
     const { node } = await send<{ node: { backendNodeId: number } }>(
       "DOM.describeNode",
       { objectId: result.objectId },
-      sessionFor(frame.target),
+      frameSession,
     );
-    await send("Runtime.releaseObject", { objectId: result.objectId }, sessionFor(frame.target));
+    await send("Runtime.releaseObject", { objectId: result.objectId }, frameSession);
     rememberRef(frame, node.backendNodeId);
   };
   const wheel = (params: Partial<WheelParams>, signal?: AbortSignal) =>
@@ -141,12 +166,21 @@ async function harness(send: Send) {
       });
       sessions.push(sessionId);
     }
-    const frames: (CdpFrame & { name: string })[] = [];
+    const frames: FrameRecord[] = [];
     for (const session of sessions) {
       const { frameTree } = await send<{ frameTree: Tree }>("Page.getFrameTree", {}, session);
-      const target = { tabId: 4, ...(session !== rootSession ? { sessionId: session } : {}) };
+      const targetSession = session !== rootSession ? session : undefined;
       const visit = (tree: Tree, parentFrameId = tree.frame.parentId) => {
-        frames.push({ frameId: tree.frame.id, parentFrameId, target, name: tree.frame.name ?? "" });
+        frames.push({
+          handle: toFrameDocumentHandle(4, { frameId: tree.frame.id, loaderId: "" }),
+          frameId: tree.frame.id,
+          loaderId: "",
+          parentFrameId,
+          processKey: targetSession ? `oopif:${targetSession}` : "root",
+          isOutOfProcess: Boolean(targetSession),
+          ...(targetSession ? { targetSession } : {}),
+          name: tree.frame.name ?? "",
+        });
         for (const child of tree.childFrames ?? []) visit(child, tree.frame.id);
       };
       visit(frameTree);
@@ -157,15 +191,27 @@ async function harness(send: Send) {
       const owner = await send<{ backendNodeId: number }>(
         "DOM.getFrameOwner",
         { frameId: frame.frameId },
-        sessionFor(parent.target),
+        parent.targetSession ?? rootSession,
       );
-      frame.ownerBackendNodeId = owner.backendNodeId;
+      (frame as { ownerBackendNodeId?: number }).ownerBackendNodeId = owner.backendNodeId;
     }
-    const graph: CdpFrameGraph = { rootFrameId: frames[0].frameId, frames };
-    cdp.getFrameGraph = async () => graph;
+    currentFrames = frames;
+    const graph: FrameDocumentGraph = { rootFrameId: frames[0].frameId, frames };
+    cdp.getFrameDocuments = async () => graph;
     return frames;
   };
-  return { send, rootSession, evaluate, ref, rememberRef, wheel, loadFrames, calls, after };
+  return {
+    send,
+    rootSession,
+    evaluate,
+    ref,
+    rememberRef,
+    wheel,
+    loadFrames,
+    expectedDelta,
+    calls,
+    after,
+  };
 }
 
 const LISTEN = `window.wheels = []; window.blockWheel = false;
@@ -202,13 +248,19 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wheel", () => {
     1, 1.25,
   ])("targets a nested scroller and respects preventDefault at zoom %s", async (zoom) => {
     await withBrowser(async (h) => {
+      const metrics = await h.send<{ cssVisualViewport: { zoom: number } }>(
+        "Page.getLayoutMetrics",
+        {},
+        h.rootSession,
+      );
+      expect(metrics.cssVisualViewport.zoom).toBeCloseTo(zoom, 4);
       await h.evaluate(
         `document.body.innerHTML = '<div id="panel" style="margin:50px;width:400px;height:250px;overflow:auto"><div id="content" style="width:2000px;height:3000px"></div></div>'; ${LISTEN}`,
       );
       expect(await h.wheel({ selector: "#panel", delta_y: 120 })).not.toHaveProperty("code");
       await expect
         .poll(() => h.evaluate<number>("document.querySelector('#panel').scrollTop"))
-        .toBeCloseTo(120 / zoom, 0);
+        .toBeCloseTo(h.expectedDelta(120, zoom), 0);
       expect(await h.evaluate("scrollY")).toBe(0);
       expect(await h.evaluate("window.wheels[0].ids")).toContain("panel");
       const before = await h.evaluate<number>("document.querySelector('#panel').scrollTop");
@@ -224,9 +276,8 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wheel", () => {
       await expect.poll(() => h.evaluate<number>("window.wheels.length")).toBe(1);
       const event = await h.evaluate<{ dx: number; dy: number }>("window.wheels[0]");
       expect(event).toMatchObject({ trusted: true, ctrl: true, shift: true });
-      // Native Chromium adjusts wheel deltas by page zoom before DOM delivery.
-      expect(event.dx).toBeCloseTo(25 / zoom, 3);
-      expect(event.dy).toBeCloseTo(-50 / zoom, 3);
+      expect(event.dx).toBeCloseTo(h.expectedDelta(25, zoom), 3);
+      expect(event.dy).toBeCloseTo(h.expectedDelta(-50, zoom), 3);
       await h.evaluate(
         "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))",
       );
@@ -275,7 +326,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wheel", () => {
           .toBe(true);
         const frames = await h.loadFrames();
         expect(frames.length).toBe(fixture === "snapshot-coordinates" ? 5 : 3);
-        expect(frames.some((frame) => frame.target.sessionId)).toBe(true);
+        expect(frames.some((frame) => frame.isOutOfProcess)).toBe(true);
         for (const frame of frames) await h.evaluate(`${LISTEN} window.blockWheel=true`, frame);
         for (const frame of frames) {
           for (const other of frames) await h.evaluate("window.wheels=[]", other);
@@ -288,7 +339,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wheel", () => {
             dx: 0,
             ids: expect.arrayContaining(["probe"]),
           });
-          expect(event.dy).toBeCloseTo(90 / zoom, 3);
+          expect(event.dy).toBeCloseTo(h.expectedDelta(90, zoom), 3);
           for (const other of frames.filter((other) => other !== frame))
             expect(await h.evaluate("window.wheels.length", other)).toBe(0);
         }

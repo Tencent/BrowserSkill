@@ -1,4 +1,4 @@
-import type { FrameNodeHandle } from "@/browser-driver/frame-graph";
+import type { FrameNodeHandle } from "@/browser-driver/frame-handles";
 import type { VisualCandidate } from "@/tools/vom/visual-discovery";
 
 export type BackendNodeId = number;
@@ -80,6 +80,33 @@ export class RefStore {
     return store;
   }
 
+  private domIdentityKey(input: DomRefInput): string {
+    return JSON.stringify([
+      this.documentRevision(input.tabId),
+      input.frameId ?? "",
+      input.loaderId ?? "",
+      input.backendNodeId,
+    ]);
+  }
+
+  /** Compute the ref names `allocateRef` would assign for a batch without mutating the store. */
+  previewRefs(inputs: readonly DomRefInput[]): string[] {
+    const staged = new Map<string, string>();
+    let nextRef = this.nextRef;
+    return inputs.map((input) => {
+      const key = this.domIdentityKey(input);
+      const existing = this.identities.get(input.tabId)?.get(key);
+      if (existing) return existing;
+      const stagedKey = `${input.tabId}\u0000${key}`;
+      let ref = staged.get(stagedKey);
+      if (!ref) {
+        ref = `e${nextRef++}`;
+        staged.set(stagedKey, ref);
+      }
+      return ref;
+    });
+  }
+
   /** Reserve a name while rendering; only published rows become actionable. */
   allocateRef(input: DomRefInput | VisualRefInput): string {
     if ("kind" in input) return this.allocateVisualRef();
@@ -88,12 +115,7 @@ export class RefStore {
       tab = new Map();
       this.identities.set(input.tabId, tab);
     }
-    const key = JSON.stringify([
-      this.documentRevision(input.tabId),
-      input.frameId ?? "",
-      input.loaderId ?? "",
-      input.backendNodeId,
-    ]);
+    const key = this.domIdentityKey(input);
     let ref = tab.get(key);
     if (!ref) {
       ref = `e${this.nextRef++}`;
@@ -160,20 +182,37 @@ export class RefStore {
       frameId?: string;
       loaderId?: string;
       documentElementBackendNodeId?: number;
+      name?: string;
       rowAnchor?: string;
     } = {},
   ): void {
     this.reserveRef(ref);
+    const key = normaliseRef(ref);
     const tabId = opts.tabId ?? null;
-    this.map.set(normaliseRef(ref), {
+    const existing = this.map.get(key);
+    const sameNode =
+      existing?.kind === "dom" &&
+      existing.backendNodeId === id &&
+      existing.tabId === tabId &&
+      (existing.frameId ?? "") === (opts.frameId ?? "") &&
+      (existing.loaderId ?? "") === (opts.loaderId ?? "") &&
+      (existing.documentElementBackendNodeId === undefined ||
+        opts.documentElementBackendNodeId === undefined ||
+        existing.documentElementBackendNodeId === opts.documentElementBackendNodeId);
+    const name = opts.name ?? (sameNode ? existing.name : undefined);
+    const rowAnchor = opts.rowAnchor ?? (sameNode ? existing.rowAnchor : undefined);
+    const documentElementBackendNodeId =
+      opts.documentElementBackendNodeId ??
+      (sameNode ? existing.documentElementBackendNodeId : undefined);
+    this.map.set(key, {
       kind: "dom",
+      ...(name ? { name } : {}),
+      ...(rowAnchor ? { rowAnchor } : {}),
       backendNodeId: id,
       tabId,
       ...(opts.frameId ? { frameId: opts.frameId } : {}),
       ...(opts.loaderId ? { loaderId: opts.loaderId } : {}),
-      ...(opts.documentElementBackendNodeId !== undefined
-        ? { documentElementBackendNodeId: opts.documentElementBackendNodeId }
-        : {}),
+      ...(documentElementBackendNodeId !== undefined ? { documentElementBackendNodeId } : {}),
       ...(tabId !== null
         ? {
             handle: buildDomHandle(
@@ -181,11 +220,10 @@ export class RefStore {
               id,
               opts.frameId,
               opts.loaderId,
-              opts.documentElementBackendNodeId,
+              documentElementBackendNodeId,
             ),
           }
         : {}),
-      ...(opts.rowAnchor ? { rowAnchor: opts.rowAnchor } : {}),
       generation: this.generation,
     });
   }

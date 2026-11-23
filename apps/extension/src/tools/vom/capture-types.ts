@@ -6,6 +6,8 @@ export interface CapturedNode {
   frameId?: string;
   /** Owning iframe backend node id; `null` for the top-level document. */
   ownerFrameBackendNodeId?: number | null;
+  /** Shadow root type (`"open"`, `"closed"`, `"user-agent"`) reported by Chrome DOMSnapshot for shadow-tree nodes. */
+  shadowRootType?: string;
   tag: string;
   attrs: Record<string, string>;
   /** Top-level viewport-relative CSS px, clipped to the owning frame viewport. */
@@ -13,6 +15,8 @@ export interface CapturedNode {
   /** Frame-local viewport-relative CSS px before top-level projection. */
   localRect?: Rect | null;
   paintOrder: number;
+  /** Parsed integer CSS `z-index` when explicitly set (absent for `auto`). */
+  zIndex?: number;
   position: string;
   pointerEvents: string;
   /**

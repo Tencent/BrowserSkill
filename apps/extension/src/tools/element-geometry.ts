@@ -1,7 +1,7 @@
 // Resolve and scroll nodes inside one CDP target. Cross-frame projection
 // belongs to frame-geometry.ts.
 
-import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import {
@@ -11,7 +11,7 @@ import {
   rectPolygon,
   type ViewportRect,
 } from "./geometry";
-import { type CdpRunner, isRpcError } from "./shared";
+import { type CdpRunner, isRpcError, withRemoteObject } from "./shared";
 
 const ELEMENT_NOT_VISIBLE_MESSAGE =
   "element not visible (no content quads, box model, or visible descendant bounds)";
@@ -65,22 +65,24 @@ export async function scrollNodeIntoView(
 
   const objectIdOrErr = await backendNodeToObject(cdp, tabId, backendNodeId);
   if (isRpcError(objectIdOrErr)) return objectIdOrErr;
-  try {
-    await cdp.send(tabId, "Runtime.callFunctionOn", {
-      objectId: objectIdOrErr,
-      functionDeclaration: `function() {
-        this.scrollIntoView({ block: 'center', inline: 'center' });
-      }`,
-      returnByValue: true,
-    });
-    return null;
-  } catch (err) {
-    if (isStaleFrameHandleError(err)) throw err;
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
+  return withRemoteObject(cdp, tabId, objectIdOrErr, async (objectId) => {
+    try {
+      await cdp.send(tabId, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: `function() {
+          this.scrollIntoView({ block: 'center', inline: 'center' });
+        }`,
+        returnByValue: true,
+      });
+      return null;
+    } catch (err) {
+      if (isStaleFrameHandleError(err)) throw err;
+      return {
+        code: "cdp_failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
 }
 
 function validCdpRegion(quads: number[][] | undefined): Region {
@@ -152,12 +154,13 @@ async function descendantBoundingRect(
     console.debug("[bsk element-geometry] resolveNode for descendant bounds failed", objectIdOrErr);
     return null;
   }
-  try {
-    const evaluated = await cdp.send<{
-      result?: { value?: ViewportRect | null };
-    }>(tabId, "Runtime.callFunctionOn", {
-      objectId: objectIdOrErr,
-      functionDeclaration: `function() {
+  return withRemoteObject(cdp, tabId, objectIdOrErr, async (objectId) => {
+    try {
+      const evaluated = await cdp.send<{
+        result?: { value?: ViewportRect | null };
+      }>(tabId, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: `function() {
         const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
         const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
         const rects = [];
@@ -188,13 +191,14 @@ async function descendantBoundingRect(
         const bottom = Math.max(...rects.map((r) => r.bottom));
         return { x: left, y: top, width: right - left, height: bottom - top };
       }`,
-      returnByValue: true,
-    });
-    return parseViewportRect(evaluated.result?.value);
-  } catch (err) {
-    console.debug("[bsk element-geometry] descendant bounds failed", err);
-    return null;
-  }
+        returnByValue: true,
+      });
+      return parseViewportRect(evaluated.result?.value);
+    } catch (err) {
+      console.debug("[bsk element-geometry] descendant bounds failed", err);
+      return null;
+    }
+  });
 }
 
 function parseViewportRect(value: unknown): ViewportRect | null {

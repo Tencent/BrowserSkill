@@ -112,7 +112,11 @@
       "readFailed": "Einstellungen konnten nicht geladen werden. Öffnen Sie die Erweiterung erneut.",
       "writeFailed": "Speichern nicht möglich. Ihre Einstellungen wurden nicht geändert. Versuchen Sie es erneut.",
       "confirmTabBorrowInfoLabel": "Über die Bestätigung des Tab-Ausleihens",
-      "requestHelpEnabledInfoLabel": "Über Anfragen nach menschlicher Hilfe"
+      "requestHelpEnabledInfoLabel": "Über Anfragen nach menschlicher Hilfe",
+      "openAgentWindowMinimized": "Agent-Fenster minimiert öffnen",
+      "openAgentWindowMinimizedHint": "Wenn aktiviert, starten neue Agent-Fenster im Hintergrund direkt minimiert, statt auf dem Bildschirm zu erscheinen. Wenn deaktiviert, werden sie als normale Fenster ohne Fokus geöffnet.",
+      "openAgentWindowMinimizedScope": "Wird automatisch für dieses Browserprofil gespeichert. Gilt für neue Agent-Fenster im Hintergrund; explizite Vordergrundsitzungen und Aktionsaufzeichnungen werden weiterhin sichtbar geöffnet.",
+      "openAgentWindowMinimizedInfoLabel": "Über das minimierte Öffnen von Agent-Fenstern"
     },
     "remoteLocal": "Zu lokal wechseln",
     "remotePairing": "Kopplungslink",

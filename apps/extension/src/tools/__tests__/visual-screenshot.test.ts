@@ -1,10 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { CdpReadGate, READ_TIMEOUT_MS } from "@/browser-driver/command-deadline";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
 import { SessionManager } from "@/session-manager/manager";
 import { handleClick } from "../interaction";
 import { handleScreenshot } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { consumeVisualCapture, issueVisualCapture } from "../visual-capture";
 import { captureVisualScreenshot, visualScreenshotScale } from "../visual-screenshot";
 import { resolveVisualRegionNow, verifyVisualHit } from "../visual-target";
@@ -106,7 +105,7 @@ function fixture(child = false, oopif = false) {
   const controller = new AbortController();
   const send = vi.fn(
     async (
-      target: CdpTarget,
+      target: { tabId: number; sessionId?: string },
       method: string,
       params: Record<string, unknown> = {},
     ): Promise<Record<string, unknown>> => {
@@ -165,24 +164,27 @@ function fixture(child = false, oopif = false) {
       throw new Error(`unexpected ${method} ${target.sessionId}`);
     },
   );
-  const cdp: CdpRunner = {
-    send: ((tabId, method, params) =>
-      send({ tabId }, method, params as Record<string, unknown>)) as CdpRunner["send"],
-    sendToTarget: send as unknown as CdpRunner["sendToTarget"],
-    sendToFrame: ((handle, method, params) =>
-      send(
-        oopif && handle.frameId !== "top"
-          ? { tabId: handle.tabId, sessionId: "oopif" }
-          : { tabId: handle.tabId },
-        method,
-        params as Record<string, unknown>,
-      )) as CdpRunner["sendToFrame"],
-    hasOwnFrameTarget: (_tabId, frameId) => oopif && frameId !== "top",
-    getAttachmentId: () => control.attachmentId,
-    getFrameGraph: vi.fn(async () => {
-      throw new Error("whole page discovery forbidden");
+  const getFrameDocuments = vi.fn(async () => {
+    throw new Error("whole page discovery forbidden");
+  });
+  const cdp = Object.assign(
+    createStubCdpRunner({
+      send: ((tabId, method, params) =>
+        send({ tabId }, method, params as Record<string, unknown>)) as CdpRunner["send"],
+      sendToFrame: ((handle, method, params) =>
+        send(
+          oopif && handle.frameId && handle.frameId !== "top"
+            ? { tabId: handle.tabId, sessionId: "oopif" }
+            : { tabId: handle.tabId },
+          method,
+          params as Record<string, unknown>,
+        )) as CdpRunner["sendToFrame"],
+      hasOwnFrameTarget: (_tabId, frameId) => oopif && frameId !== "top",
+      getAttachmentId: () => control.attachmentId,
+      getFrameDocuments,
     }),
-  };
+    { getFrameDocuments },
+  );
   return { candidate, cdp, send, control, controller, topRows, childRows };
 }
 
@@ -238,7 +240,7 @@ describe("visual screenshot", () => {
     const f = fixture(child, oopif);
     const result = await captureVisualScreenshot(f.cdp, f.candidate);
     expect(result).toMatchObject({ width: child ? 200 : 100, height: child ? 80 : 40 });
-    expect(f.cdp.getFrameGraph).not.toHaveBeenCalled();
+    expect(f.cdp.getFrameDocuments).not.toHaveBeenCalled();
     const names = f.send.mock.calls.map((c) => c[1]);
     expect(names.filter((n) => n === "DOM.getFrameOwner")).toHaveLength(child ? 2 : 0);
     expect(names.filter((n) => n === "DOM.resolveNode")).toHaveLength(child ? 4 : 2);
@@ -310,7 +312,7 @@ describe("visual screenshot", () => {
     expect(f.send.mock.calls.find((c) => c[1] === "Page.captureScreenshot")?.[2]).toMatchObject({
       clip: crop,
     });
-    expect(f.cdp.getFrameGraph).not.toHaveBeenCalled();
+    expect(f.cdp.getFrameDocuments).not.toHaveBeenCalled();
   });
 
   it("runs the live reader on only connected local ancestry", async () => {
@@ -519,6 +521,53 @@ describe("visual screenshot", () => {
     expect(result).toMatchObject({ width: 100, height: 40, format: "png" });
     expect(sendToTab).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    "dom-replacement",
+    "visual-replacement",
+  ] as const)("rejects a visual ref replaced during attach (%s) without capturing the stale candidate", async (kind) => {
+    const f = fixture();
+    const manager = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 100, initialTabIds: [] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 4,
+      },
+    });
+    const ctx = await manager.start("race");
+    ctx.refStore.replace([["e1", { kind: "visual-region", candidate: f.candidate }]]);
+    const tab = {
+      id: 4,
+      windowId: 100,
+      active: true,
+      url: "https://example.test/",
+    } as chrome.tabs.Tab;
+    const tabsApi = { get: async () => tab, query: async () => [tab] };
+    f.cdp.ensureAttachedToUrl = vi.fn(async () => {
+      if (kind === "dom-replacement") {
+        ctx.refStore.replace([["e1", { backendNodeId: 777, tabId: 4 }]]);
+      } else {
+        ctx.refStore.replace([
+          ["e1", { kind: "visual-region", candidate: { ...f.candidate, backendNodeId: 888 } }],
+        ]);
+      }
+    });
+    const result = await handleScreenshot(
+      manager,
+      { session_id: "race", ref: "e1" },
+      {
+        cdp: f.cdp,
+        tabsApi,
+        captureApi: { ...tabsApi, captureVisibleTab: vi.fn() },
+        sendToTab: vi.fn(async () => ({})),
+      },
+    );
+    expect(result).toMatchObject({
+      code: "not_found",
+      data: { reason: "visual_target_changed" },
+    });
+    expect(f.send.mock.calls.some((c) => c[1] === "Page.captureScreenshot")).toBe(false);
+  });
 });
 
 async function pointFixture(child = false, oopif = false) {
@@ -619,7 +668,7 @@ it.each([
   expect(result).toMatchObject({ x: child ? 220 : 60, y: child ? 280 : 40 });
   expect(f.hitPoints.at(-1)).toEqual([60, 40]);
   expect(f.input.map((e) => e.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
-  expect(f.cdp.getFrameGraph).not.toHaveBeenCalled();
+  expect(f.cdp.getFrameDocuments).not.toHaveBeenCalled();
   const count = f.input.length;
   expect(await handleClick(f.manager, f.params, f.deps)).toHaveProperty(
     "data.reason",
@@ -893,7 +942,7 @@ describe("visual hit shadow boundaries", () => {
       }
       target.remove();
       expect(await verifyVisualHit(f.cdp, state, { x: 20, y: 30 })).toBe(false);
-      expect(f.cdp.getFrameGraph).not.toHaveBeenCalled();
+      expect(f.cdp.getFrameDocuments).not.toHaveBeenCalled();
     } finally {
       for (const { root, original } of hits) {
         if (original) Object.defineProperty(root, "elementFromPoint", original);
@@ -978,7 +1027,7 @@ it.each([
       expect(result).toHaveProperty("data.reason", "visual_capture_stale");
       expect(f.input).toHaveLength(0);
     }
-    expect(f.cdp.getFrameGraph).not.toHaveBeenCalled();
+    expect(f.cdp.getFrameDocuments).not.toHaveBeenCalled();
   } finally {
     if (hitDescriptor) Object.defineProperty(document, "elementFromPoint", hitDescriptor);
     else Reflect.deleteProperty(document, "elementFromPoint");

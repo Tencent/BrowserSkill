@@ -1,8 +1,8 @@
 import {
-  cdpTargetKey,
   type FrameNodeHandle,
+  frameProcessBoundary,
   StaleFrameHandleError,
-} from "@/browser-driver/frame-graph";
+} from "@/browser-driver/frame-handles";
 import type { NodeAddress } from "./frame-geometry";
 import {
   clipPolygon,
@@ -101,14 +101,20 @@ async function projectRect(
     );
   }
   const parent = frame.parentFrameId ? await context.frame(frame.parentFrameId) : undefined;
-  if (parent && cdpTargetKey(parent.target) === cdpTargetKey(frame.target)) {
+  if (parent && parent.processKey === frame.processKey) {
     // DOM rectangles are document-local. Same-target iframe quads are already
     // target-local, so cross this one boundary before the target projection.
-    const viewport = await context.viewport(frame.target);
+    const process = frameProcessBoundary(frame);
+    const viewport = await context.viewport(process);
     if (frame.ownerBackendNodeId === undefined || !viewport) {
       throw new Error("scroll-to could not resolve the frame viewport");
     }
-    const local = await context.snapshotProjection(frame, frame.ownerBackendNodeId, [], viewport);
+    const local = await context.snapshotProjection(
+      { process, frameId: frame.frameId },
+      frame.ownerBackendNodeId,
+      [],
+      viewport,
+    );
     if (local.status !== "available") throw new Error("scroll-to could not project the frame");
     region = projectRegionToViewport(region, local.projection.geometry);
   }

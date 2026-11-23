@@ -1,4 +1,6 @@
+import { ActionCheckError } from "@/cooperation/action-checks";
 import { withInputReady } from "./input-readiness";
+import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 import { consumeVisualCapture, isVisualPointRequest } from "./visual-capture";
 import { resolveVisualRegionNow, sameVisualMapping, verifyVisualHit } from "./visual-target";
 import { isAbortError } from "./vom/capture-abort";
@@ -17,7 +19,8 @@ import {
   type FrameDocumentHandle,
   type FrameNodeHandle,
   isStaleFrameHandleError,
-} from "@/browser-driver/frame-graph";
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import {
   RECORD_PASSWORD_ATTRIBUTE,
   SENSITIVE_AUTOCOMPLETE_SELECTOR,
@@ -48,12 +51,12 @@ import { backendNodeToObject } from "./element-geometry";
 import { rpcError } from "./errors";
 import { FOCUS_CHECK } from "./focus-state";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
+import { resolveMainDocumentSelector } from "./selector-resolution";
 import {
   type CdpDispatchGuard,
   type CdpRunner,
   type ChromeTabsApi,
   cdpRunnerForFrame,
-  cdpRunnerForTarget,
   delegateCdpRunner,
   enforceAgentWindow,
   isRpcError,
@@ -61,6 +64,7 @@ import {
   type ResolvedTargetTab,
   resolveTargetTab,
   sendToFrameHandle,
+  withRemoteObject,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 
@@ -154,6 +158,7 @@ export async function resolveBackendNode(
   params: { ref?: string; selector?: string },
   toolName: string,
   strictSelector = false,
+  options?: { childTimeoutMs?: number; stopSignal?: AbortSignal },
 ): Promise<
   | {
       handle: FrameNodeHandle;
@@ -191,73 +196,15 @@ export async function resolveBackendNode(
       ...(resolved.rowAnchor ? { rowAnchor: resolved.rowAnchor } : {}),
     };
   }
-  // selector path
-  try {
-    // Selector lookup itself attaches CDP, even when no element is found.
-    cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    const doc = await cdp.send<{ root?: { nodeId?: number } }>(target.tabId, "DOM.getDocument", {
-      depth: 0,
-    });
-    const rootNodeId = doc.root?.nodeId;
-    if (typeof rootNodeId !== "number") {
-      return {
-        code: "cdp_failed",
-        message: "DOM.getDocument returned no root nodeId",
-      };
-    }
-    const query = { nodeId: rootNodeId, selector: params.selector };
-    let nodeId: number | undefined;
-    if (strictSelector) {
-      const found = await cdp.send<{ nodeIds: number[] }>(
-        target.tabId,
-        "DOM.querySelectorAll",
-        query,
-      );
-      if (found.nodeIds.length > 1)
-        return {
-          code: "invalid_params",
-          message: `${toolName}: selector matched ${found.nodeIds.length} elements; use a VOM ref or a narrower selector`,
-        };
-      nodeId = found.nodeIds[0];
-    } else {
-      nodeId = (await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", query))
-        .nodeId;
-    }
-    if (typeof nodeId !== "number" || nodeId === 0) {
-      return rpcError(
-        "not_found",
-        "selector_not_found",
-        `selector ${params.selector} did not match any element`,
-      );
-    }
-    const described = await cdp.send<{ node?: { backendNodeId?: number } }>(
-      target.tabId,
-      "DOM.describeNode",
-      { nodeId },
-    );
-    const backendNodeId = described.node?.backendNodeId;
-    if (typeof backendNodeId !== "number") {
-      return {
-        code: "cdp_failed",
-        message: "DOM.describeNode returned no backendNodeId",
-      };
-    }
-    return {
-      handle: {
-        tabId: target.tabId,
-        frameId: "",
-        loaderId: "",
-        backendNodeId,
-      },
-      backendNodeId,
-      usedSelector: params.selector,
-    };
-  } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
+  // selector path (`expect` preconditions intentionally stay main-document-scoped)
+  cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+  return resolveMainDocumentSelector(cdp, target.tabId, params.selector as string, {
+    toolName,
+    multiMatch: strictSelector ? "reject" : "first",
+    scope: toolName === "precondition" ? "main" : "all",
+    childTimeoutMs: options?.childTimeoutMs,
+    stopSignal: options?.stopSignal,
+  });
 }
 
 const BLUR_TARGET = `function() {
@@ -277,21 +224,20 @@ function checkFocusAbort(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new DOMException("interaction aborted", "AbortError");
 }
 
+function combineSignals(
+  first: AbortSignal | undefined,
+  second: AbortSignal | undefined,
+): AbortSignal | undefined {
+  return first && second ? AbortSignal.any([first, second]) : (first ?? second);
+}
+
 // Only focus/blur use this view. Guard every CDP boundary, including commands
 // inside selector resolution and frame scrolling, without changing other tools.
 function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
   return delegateCdpRunner(cdp, {
-    send: <T = unknown>(tabId: number, method: string, params?: object) => {
+    send: <T = unknown>(tabId: number, method: string, params?: object, sig?: AbortSignal) => {
       checkFocusAbort(signal);
-      return cdp.send<T>(tabId, method, params);
-    },
-    sendToTarget: <T = unknown>(
-      target: Parameters<NonNullable<CdpRunner["sendToTarget"]>>[0],
-      method: string,
-      params?: object,
-    ) => {
-      checkFocusAbort(signal);
-      return cdpRunnerForTarget(cdp, target).send<T>(target.tabId, method, params);
+      return cdp.send<T>(tabId, method, params, combineSignals(sig, signal));
     },
     sendToFrame: <T = unknown>(
       handle: FrameDocumentHandle | FrameNodeHandle,
@@ -300,20 +246,26 @@ function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
       guard?: CdpDispatchGuard,
     ) => {
       checkFocusAbort(signal);
-      return sendToFrameHandle<T>(cdp, handle, method, params, guard);
+      const combined = combineSignals(guard?.signal, signal);
+      return sendToFrameHandle<T>(
+        cdp,
+        handle,
+        method,
+        params,
+        combined ? { ...guard, signal: combined } : guard,
+      );
     },
-    getFrameGraph: cdp.getFrameGraph
-      ? (tabId) => {
-          checkFocusAbort(signal);
-          return cdp.getFrameGraph!(tabId);
-        }
-      : undefined,
-    getMainFrameHandle: cdp.getMainFrameHandle
-      ? (tabId) => {
-          checkFocusAbort(signal);
-          return cdp.getMainFrameHandle!(tabId);
-        }
-      : undefined,
+    getFrameDocuments: (tabId, sig, options) => {
+      checkFocusAbort(signal);
+      const combined = combineSignals(sig, signal);
+      return options !== undefined
+        ? cdp.getFrameDocuments(tabId, combined, options)
+        : cdp.getFrameDocuments(tabId, combined);
+    },
+    getMainFrameHandle: (tabId, sig) => {
+      checkFocusAbort(signal);
+      return cdp.getMainFrameHandle(tabId, combineSignals(sig, signal));
+    },
   });
 }
 
@@ -358,9 +310,6 @@ async function changeFocus(
   const ctx = lookupSession(manager, params, action);
   if (isRpcError(ctx)) return ctx;
   const cdp = focusCdp(deps.cdp, deps.signal);
-  let objectId: string | undefined;
-  let cleanupCdp: CdpRunner | undefined;
-  let tabId: number | undefined;
   try {
     checkFocusAbort(deps.signal);
     const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
@@ -368,13 +317,12 @@ async function changeFocus(
     if (isRpcError(target)) return target;
     const denied = enforceAgentWindow(ctx, target, action);
     if (denied) return denied;
-    tabId = target.tabId;
+    const tabId = target.tabId;
     const dialogCursor = markDialogCursor(deps.cdp, tabId);
     const node = await resolveBackendNode(cdp, ctx, target, params, action);
     checkFocusAbort(deps.signal);
     if (isRpcError(node)) return node;
     const nodeCdp = cdpRunnerForFrame(cdp, node.handle);
-    cleanupCdp = cdpRunnerForFrame(deps.cdp, node.handle);
     deps.cdp.trackSessionTab?.(ctx.sessionId, tabId);
 
     if (action === "focus") {
@@ -383,64 +331,67 @@ async function changeFocus(
       if (scrollErr) return scrollErr;
     }
     const resolved = await backendNodeToObject(nodeCdp, tabId, node.backendNodeId);
-    // Keep the handle before checking cancellation so finally can release it.
-    if (!isRpcError(resolved)) objectId = resolved;
-    checkFocusAbort(deps.signal);
-    if (isRpcError(resolved)) return resolved;
-
-    const runScript = async <T>(functionDeclaration: string): Promise<T | undefined> => {
-      const reply = await nodeCdp.send<FocusScriptReply<T>>(
-        target.tabId,
-        "Runtime.callFunctionOn",
-        {
-          objectId,
-          functionDeclaration,
-          returnByValue: true,
-        },
-      );
+    if (isRpcError(resolved)) {
       checkFocusAbort(deps.signal);
-      if (reply.exceptionDetails) {
-        const details = reply.exceptionDetails;
+      return resolved;
+    }
+
+    return await withRemoteObject(deps.cdp, node.handle, resolved, async (objectId) => {
+      checkFocusAbort(deps.signal);
+      const runScript = async <T>(functionDeclaration: string): Promise<T | undefined> => {
+        const reply = await nodeCdp.send<FocusScriptReply<T>>(
+          target.tabId,
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration,
+            returnByValue: true,
+          },
+        );
+        checkFocusAbort(deps.signal);
+        if (reply.exceptionDetails) {
+          const details = reply.exceptionDetails;
+          throw new Error(
+            `${action} script failed: ${details.exception?.description ?? details.text ?? "unknown exception"}`,
+          );
+        }
+        return reply.result?.value;
+      };
+
+      let wasFocused: boolean | undefined;
+      if (action === "focus") {
+        await nodeCdp.send(tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+        checkFocusAbort(deps.signal);
+      } else {
+        const mutation = await runScript<{ ok: boolean; was_focused: boolean }>(BLUR_TARGET);
+        if (typeof mutation?.ok !== "boolean" || typeof mutation.was_focused !== "boolean") {
+          throw new Error("blur script returned an unexpected result");
+        }
+        if (!mutation.ok) {
+          return { code: "invalid_params", message: "target element does not support blur()" };
+        }
+        wasFocused = mutation.was_focused;
+      }
+      // Use a separate call so microtasks from focus/blur handlers finish before
+      // we report success. In particular, a blur handler can restore focus.
+      const focused = await runScript<boolean>(FOCUS_CHECK);
+      if (typeof focused !== "boolean") {
+        throw new Error(`${action} verification returned an unexpected result`);
+      }
+      if (focused !== (action === "focus")) {
         throw new Error(
-          `${action} script failed: ${details.exception?.description ?? details.text ?? "unknown exception"}`,
+          action === "focus"
+            ? "target element did not become focused"
+            : "target element remained focused after blur()",
         );
       }
-      return reply.result?.value;
-    };
-
-    let wasFocused: boolean | undefined;
-    if (action === "focus") {
-      await nodeCdp.send(tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
-      checkFocusAbort(deps.signal);
-    } else {
-      const mutation = await runScript<{ ok: boolean; was_focused: boolean }>(BLUR_TARGET);
-      if (typeof mutation?.ok !== "boolean" || typeof mutation.was_focused !== "boolean") {
-        throw new Error("blur script returned an unexpected result");
-      }
-      if (!mutation.ok) {
-        return { code: "invalid_params", message: "target element does not support blur()" };
-      }
-      wasFocused = mutation.was_focused;
-    }
-    // Use a separate call so microtasks from focus/blur handlers finish before
-    // we report success. In particular, a blur handler can restore focus.
-    const focused = await runScript<boolean>(FOCUS_CHECK);
-    if (typeof focused !== "boolean") {
-      throw new Error(`${action} verification returned an unexpected result`);
-    }
-    if (focused !== (action === "focus")) {
-      throw new Error(
-        action === "focus"
-          ? "target element did not become focused"
-          : "target element remained focused after blur()",
-      );
-    }
-    return attachDialogs(deps.cdp, tabId, dialogCursor, {
-      tab_id: tabId,
-      used_ref: node.usedRef,
-      used_selector: node.usedSelector,
-      focused,
-      ...(action === "blur" ? { was_focused: wasFocused! } : {}),
+      return attachDialogs(deps.cdp, tabId, dialogCursor, {
+        tab_id: tabId,
+        used_ref: node.usedRef,
+        used_selector: node.usedSelector,
+        focused,
+        ...(action === "blur" ? { was_focused: wasFocused! } : {}),
+      });
     });
   } catch (err) {
     const aborted = throwIfAborted(deps.signal);
@@ -450,16 +401,6 @@ async function changeFocus(
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
     };
-  } finally {
-    if (objectId !== undefined && cleanupCdp && tabId !== undefined) {
-      // Cleanup must also run after cancellation. Navigation may have already
-      // disposed the object, which must not replace the operation's result.
-      try {
-        await cleanupCdp.send(tabId, "Runtime.releaseObject", { objectId });
-      } catch {
-        // The target or execution context may no longer exist.
-      }
-    }
   }
 }
 
@@ -748,6 +689,7 @@ export async function handleHover(
   const ctxOrErr = lookupSession(manager, params, "hover");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
+  const deadline = Date.now() + (params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS);
   const aborted = throwIfAborted(deps.signal);
   if (aborted) return aborted;
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
@@ -761,71 +703,94 @@ export async function handleHover(
   const cancelled = throwIfAborted(deps.signal);
   if (cancelled) return cancelled;
 
-  deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-  const geometry = await resolveNodeGeometry(deps.cdp, target.tabId, node.handle, {
-    scrollIntoView: true,
-  });
-  if (isRpcError(geometry)) return geometry;
-  const centre = geometry.actionPoint;
+  return withInputReady(
+    ctx,
+    target.tabId,
+    { ...deps, deadline, preserveWindowFocus: true },
+    async (input) => {
+      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      const geometry = await resolveNodeGeometry(deps.cdp, target.tabId, node.handle, {
+        scrollIntoView: true,
+      });
+      if (isRpcError(geometry)) return geometry;
+      const centre = geometry.actionPoint;
 
-  if (throwIfAborted(deps.signal)) {
-    return { code: "cancelled", message: "hover aborted" };
-  }
-
-  const modifiers = modifiersBitfield(params.modifiers);
-  const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, centre.x, centre.y);
-  let automationBypassEnabled = false;
-  let hoverCompleted = false;
-  if (overlayBlocking && deps.bypassOverlay) {
-    try {
-      await deps.bypassOverlay(target.tabId, true);
-      automationBypassEnabled = true;
-    } catch (err) {
-      console.debug("[bsk interaction] overlay bypass enable failed", err);
-    }
-  }
-
-  try {
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: centre.x,
-      y: centre.y,
-      modifiers,
-    });
-    const settleMs = params.settle_ms ?? DEFAULT_HOVER_SETTLE_MS;
-    if (settleMs > 0) {
-      await wait(settleMs, deps.signal);
-    }
-    hoverCompleted = true;
-  } catch (err) {
-    if (isAbortLikeError(err)) {
-      return { code: "cancelled", message: "hover aborted" };
-    }
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  } finally {
-    if (
-      automationBypassEnabled &&
-      deps.bypassOverlay &&
-      (!deps.keepOverlayBypassAfterHover || !hoverCompleted)
-    ) {
-      try {
-        await deps.bypassOverlay(target.tabId, false);
-      } catch (err) {
-        console.debug("[bsk interaction] overlay bypass disable failed", err);
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "hover aborted" };
       }
-    }
-  }
 
-  return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-    tab_id: target.tabId,
-    used_ref: node.usedRef,
-    used_selector: node.usedSelector,
-    x: centre.x,
-    y: centre.y,
-  });
+      const modifiers = modifiersBitfield(params.modifiers);
+      const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, centre.x, centre.y);
+      let automationBypassEnabled = false;
+      let hoverCompleted = false;
+      if (overlayBlocking && deps.bypassOverlay) {
+        try {
+          await deps.bypassOverlay(target.tabId, true);
+          automationBypassEnabled = true;
+        } catch (err) {
+          console.debug("[bsk interaction] overlay bypass enable failed", err);
+        }
+      }
+
+      try {
+        if (deps.cdp.verifyPointerTarget) {
+          await deps.cdp.verifyPointerTarget({ handle: node.handle }, centre);
+        }
+        if (throwIfAborted(deps.signal)) {
+          return { code: "cancelled", message: "hover aborted" };
+        }
+        input.markSent();
+        await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: centre.x,
+          y: centre.y,
+          modifiers,
+        });
+        const settleMs = params.settle_ms ?? DEFAULT_HOVER_SETTLE_MS;
+        if (settleMs > 0) {
+          await wait(settleMs, deps.signal);
+        }
+        hoverCompleted = true;
+      } catch (err) {
+        if (err instanceof ActionCheckError) {
+          return {
+            ...err.rpcError,
+            data: { ...err.rpcError.data, effect_state: "none" },
+          };
+        }
+        if (isStaleFrameHandleError(err)) {
+          return rpcError("not_found", "ref_not_found", err.message);
+        }
+        if (deps.signal?.aborted || isAbortLikeError(err) || isAbortError(err)) {
+          return { code: "cancelled", message: "hover aborted" };
+        }
+        return {
+          code: err instanceof Error && err.name === "TimeoutError" ? "timeout" : "cdp_failed",
+          message: err instanceof Error ? err.message : String(err),
+        };
+      } finally {
+        if (
+          automationBypassEnabled &&
+          deps.bypassOverlay &&
+          (!deps.keepOverlayBypassAfterHover || !hoverCompleted)
+        ) {
+          try {
+            await deps.bypassOverlay(target.tabId, false);
+          } catch (err) {
+            console.debug("[bsk interaction] overlay bypass disable failed", err);
+          }
+        }
+      }
+
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
+        used_ref: node.usedRef,
+        used_selector: node.usedSelector,
+        x: centre.x,
+        y: centre.y,
+      });
+    },
+  );
 }
 
 interface OverlayHitInspection {
@@ -966,6 +931,7 @@ type SelectMutationResult =
       reason: "option_not_found" | "option_ambiguous" | "target_disabled";
       missing?: string;
       ambiguous?: string;
+      disabled?: string;
       count?: number;
       available?: string[];
     };
@@ -1346,58 +1312,59 @@ export async function handleFill(
     throw err;
   }
   if (isRpcError(objectIdOrErr)) return objectIdOrErr;
-  const objectId = objectIdOrErr;
+  const resolvedObjectId = objectIdOrErr;
   const clearBefore = params.clear_before ?? true;
 
-  try {
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "fill aborted" };
-    }
-    await deps.cdp.beginDomMutation?.();
+  return await withRemoteObject(deps.cdp, node.handle, resolvedObjectId, async (objectId) => {
+    try {
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "fill aborted" };
+      }
+      await deps.cdp.beginDomMutation?.();
 
-    // Step 1: Merged validation, conditional scroll, focus, and clearing/caret setup.
-    const step1Reply = await nodeCdp.send<FillScriptReply<FillStep1Result>>(
-      target.tabId,
-      "Runtime.callFunctionOn",
-      {
-        objectId,
-        functionDeclaration: FILL_STEP1_FUNCTION,
-        arguments: [{ value: params.value }, { value: clearBefore }, { value: !node.frameId }],
-        awaitPromise: true,
-        returnByValue: true,
-      },
-    );
-    if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-    if (step1Reply.exceptionDetails || !step1Reply.result?.value) {
-      return fillError("fill_failed", "fill preparation script failed");
-    }
-    const step1 = step1Reply.result.value;
-    if ("error" in step1) {
-      // Step 1 reports these validation errors only before clearing; its focus is
-      // preparation, so the requested write never started. `fill_target_changed`
-      // is reported after clearing and keeps an unknown effect.
-      const preWrite =
-        step1.reason === "target_not_fillable" || step1.reason === "fill_value_invalid";
-      return fillError(step1.reason, step1.error, preWrite);
-    }
-    if (
-      typeof step1.before !== "string" ||
-      typeof step1.expected !== "string" ||
-      (step1.write !== "insert" && step1.write !== "value")
-    ) {
-      return fillError("fill_failed", "fill preparation returned an unexpected result");
-    }
-
-    const checkReady = async (
-      placeCaret = false,
-      verifyCaret = false,
-    ): Promise<FillReadiness | RpcError> => {
-      const reply = await nodeCdp.send<FillScriptReply<FillReadiness>>(
+      // Step 1: Merged validation, conditional scroll, focus, and clearing/caret setup.
+      const step1Reply = await nodeCdp.send<FillScriptReply<FillStep1Result>>(
         target.tabId,
         "Runtime.callFunctionOn",
         {
           objectId,
-          functionDeclaration: `function(before, placeCaret, verifyCaret) {
+          functionDeclaration: FILL_STEP1_FUNCTION,
+          arguments: [{ value: params.value }, { value: clearBefore }, { value: !node.frameId }],
+          awaitPromise: true,
+          returnByValue: true,
+        },
+      );
+      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      if (step1Reply.exceptionDetails || !step1Reply.result?.value) {
+        return fillError("fill_failed", "fill preparation script failed");
+      }
+      const step1 = step1Reply.result.value;
+      if ("error" in step1) {
+        // Step 1 reports these validation errors only before clearing; its focus is
+        // preparation, so the requested write never started. `fill_target_changed`
+        // is reported after clearing and keeps an unknown effect.
+        const preWrite =
+          step1.reason === "target_not_fillable" || step1.reason === "fill_value_invalid";
+        return fillError(step1.reason, step1.error, preWrite);
+      }
+      if (
+        typeof step1.before !== "string" ||
+        typeof step1.expected !== "string" ||
+        (step1.write !== "insert" && step1.write !== "value")
+      ) {
+        return fillError("fill_failed", "fill preparation returned an unexpected result");
+      }
+
+      const checkReady = async (
+        placeCaret = false,
+        verifyCaret = false,
+      ): Promise<FillReadiness | RpcError> => {
+        const reply = await nodeCdp.send<FillScriptReply<FillReadiness>>(
+          target.tabId,
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: `function(before, placeCaret, verifyCaret) {
             if (!(${FILL_EDITABLE_FUNCTION}).call(this) ||
                 (${FILL_VALUE_FUNCTION}).call(this) !== before) return 'fill_target_changed';
             if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
@@ -1437,159 +1404,175 @@ export async function handleFill(
             }
             return this.ownerDocument.hasFocus() ? 'ready' : 'background';
           }`,
-          arguments: [{ value: step1.before }, { value: placeCaret }, { value: verifyCaret }],
-          returnByValue: true,
-        },
-      );
-      const state = reply.result?.value;
-      if (
-        reply.exceptionDetails ||
-        (state !== "ready" &&
-          state !== "background" &&
-          state !== "fill_target_changed" &&
-          state !== "fill_focus_lost")
-      ) {
-        return fillError(
-          "fill_failed",
-          "fill readiness script failed or returned an unexpected result",
+            arguments: [{ value: step1.before }, { value: placeCaret }, { value: verifyCaret }],
+            returnByValue: true,
+          },
         );
-      }
-      return state;
-    };
-
-    const focusViaCdp = async (): Promise<RpcError | null> => {
-      try {
-        await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
-        return null;
-      } catch (error) {
-        const editable = await nodeCdp.send<FillScriptReply<boolean>>(
-          target.tabId,
-          "Runtime.callFunctionOn",
-          { objectId, functionDeclaration: FILL_EDITABLE_FUNCTION, returnByValue: true },
-        );
-        if (throwIfAborted(deps.signal)) {
-          return { code: "cancelled", message: "fill aborted" };
-        }
-        if (!editable.exceptionDetails && editable.result?.value === false) {
+        const state = reply.result?.value;
+        if (
+          reply.exceptionDetails ||
+          (state !== "ready" &&
+            state !== "background" &&
+            state !== "fill_target_changed" &&
+            state !== "fill_focus_lost")
+        ) {
           return fillError(
-            "target_not_fillable",
-            "fill target is not editable or its input type is unsupported",
+            "fill_failed",
+            "fill readiness script failed or returned an unexpected result",
           );
         }
-        throw error;
-      }
-    };
+        return state;
+      };
 
-    // An unfocused page applies focus(), but runs its focus listeners only when
-    // the renderer receives focus with the next Input command. Deliver it before
-    // clearing or writing, so listeners that set defaults cannot run in between.
-    // On a visible page, a pointer move outside the viewport (sent to the tab,
-    // which also focuses OOPIF widgets) reaches no element and grants no user
-    // activation. A hidden page processes pointer moves only on its next frame,
-    // and a hovered page would see the pointer leave, so those, and a move that
-    // does not deliver focus, use a no-op key press, which pages can observe as
-    // an empty key.
-    let pointerFlush: boolean | undefined;
-    const canFlushWithPointer = async (): Promise<boolean> => {
-      if (pointerFlush !== undefined) return pointerFlush;
-      pointerFlush = step1.visible && step1.hovered === false;
-      if (step1.visible && step1.hovered === null && node.frameId) {
-        // The target's frame cannot read a cross-origin parent; ask the tab.
-        const top = await deps.cdp
-          .send<{ result?: { value?: unknown } }>(target.tabId, "Runtime.evaluate", {
-            expression: "document.querySelector(':hover') === null",
+      const focusViaCdp = async (): Promise<RpcError | null> => {
+        try {
+          await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+          return null;
+        } catch (error) {
+          const editable = await nodeCdp.send<FillScriptReply<boolean>>(
+            target.tabId,
+            "Runtime.callFunctionOn",
+            { objectId, functionDeclaration: FILL_EDITABLE_FUNCTION, returnByValue: true },
+          );
+          if (throwIfAborted(deps.signal)) {
+            return { code: "cancelled", message: "fill aborted" };
+          }
+          if (!editable.exceptionDetails && editable.result?.value === false) {
+            return fillError(
+              "target_not_fillable",
+              "fill target is not editable or its input type is unsupported",
+            );
+          }
+          throw error;
+        }
+      };
+
+      // An unfocused page applies focus(), but runs its focus listeners only when
+      // the renderer receives focus with the next Input command. Deliver it before
+      // clearing or writing, so listeners that set defaults cannot run in between.
+      // On a visible page, a pointer move outside the viewport (sent to the tab,
+      // which also focuses OOPIF widgets) reaches no element and grants no user
+      // activation. A hidden page processes pointer moves only on its next frame,
+      // and a hovered page would see the pointer leave, so those, and a move that
+      // does not deliver focus, use a no-op key press, which pages can observe as
+      // an empty key.
+      let pointerFlush: boolean | undefined;
+      const canFlushWithPointer = async (): Promise<boolean> => {
+        if (pointerFlush !== undefined) return pointerFlush;
+        pointerFlush = step1.visible && step1.hovered === false;
+        if (step1.visible && step1.hovered === null && node.frameId) {
+          // The target's frame cannot read a cross-origin parent; ask the tab.
+          const top = await deps.cdp
+            .send<{ result?: { value?: unknown } }>(target.tabId, "Runtime.evaluate", {
+              expression: "document.querySelector(':hover') === null",
+              returnByValue: true,
+            })
+            .catch(() => undefined);
+          pointerFlush = top?.result?.value === true;
+        }
+        return pointerFlush;
+      };
+      const focusDelivered = async (): Promise<boolean> => {
+        const reply = await nodeCdp.send<FillScriptReply<boolean>>(
+          target.tabId,
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: "function() { return Boolean(this.ownerDocument?.hasFocus?.()); }",
             returnByValue: true,
-          })
-          .catch(() => undefined);
-        pointerFlush = top?.result?.value === true;
-      }
-      return pointerFlush;
-    };
-    const focusDelivered = async (): Promise<boolean> => {
-      const reply = await nodeCdp.send<FillScriptReply<boolean>>(
-        target.tabId,
-        "Runtime.callFunctionOn",
-        {
-          objectId,
-          functionDeclaration: "function() { return Boolean(this.ownerDocument?.hasFocus?.()); }",
-          returnByValue: true,
-        },
-      );
-      return !reply.exceptionDetails && reply.result?.value === true;
-    };
-    const flushBackgroundFocus = async (): Promise<void> => {
-      if (await canFlushWithPointer()) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const moved = await Promise.race([
-          deps.cdp
-            .send(target.tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: -1, y: -1 })
-            // A refused or late move falls back to the key press below.
-            .then(
-              () => true,
-              () => false,
-            ),
-          // The page became hidden after Step 1; its move waits for a frame.
-          new Promise<false>((resolve) => {
-            timer = setTimeout(() => resolve(false), FILL_POINTER_FLUSH_TIMEOUT_MS);
-          }),
-        ]).finally(() => clearTimeout(timer));
-        if (throwIfAborted(deps.signal)) return;
-        if (moved && (await focusDelivered())) return;
-        pointerFlush = false;
-      }
-      try {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-          type: "rawKeyDown",
-          commands: [],
-        });
-      } finally {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
-      }
-    };
+          },
+        );
+        return !reply.exceptionDetails && reply.result?.value === true;
+      };
+      const flushBackgroundFocus = async (): Promise<void> => {
+        if (await canFlushWithPointer()) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const moved = await Promise.race([
+            deps.cdp
+              .send(target.tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: -1, y: -1 })
+              // A refused or late move falls back to the key press below.
+              .then(
+                () => true,
+                () => false,
+              ),
+            // The page became hidden after Step 1; its move waits for a frame.
+            new Promise<false>((resolve) => {
+              timer = setTimeout(() => resolve(false), FILL_POINTER_FLUSH_TIMEOUT_MS);
+            }),
+          ]).finally(() => clearTimeout(timer));
+          if (throwIfAborted(deps.signal)) return;
+          if (moved && (await focusDelivered())) return;
+          pointerFlush = false;
+        }
+        let keyDownDispatched = false;
+        try {
+          await sendToFrameHandle(
+            deps.cdp,
+            toRootFrameHandle(target.tabId),
+            "Input.dispatchKeyEvent",
+            {
+              type: "rawKeyDown",
+              commands: [],
+            },
+            {
+              signal: deps.signal,
+              onDispatch: () => {
+                keyDownDispatched = true;
+              },
+            },
+          );
+        } finally {
+          if (keyDownDispatched) {
+            await deps.cdp
+              .send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" })
+              .catch(() => {});
+          }
+        }
+      };
 
-    const verifyRestoredFocus = async (expectedBefore: string): Promise<RpcError | null> => {
-      const focusErr = await focusViaCdp();
-      if (focusErr) return focusErr;
-      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-      if (!step1.hasFocus) {
-        await flushBackgroundFocus();
+      const verifyRestoredFocus = async (expectedBefore: string): Promise<RpcError | null> => {
+        const focusErr = await focusViaCdp();
+        if (focusErr) return focusErr;
         if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-      }
-      const restored = await nodeCdp.send<FillScriptReply<FillReadiness>>(
-        target.tabId,
-        "Runtime.callFunctionOn",
-        {
-          objectId,
-          functionDeclaration: `async function(before) {
+        if (!step1.hasFocus) {
+          await flushBackgroundFocus();
+          if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+        }
+        const restored = await nodeCdp.send<FillScriptReply<FillReadiness>>(
+          target.tabId,
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: `async function(before) {
             await Promise.resolve();
             await Promise.resolve();
             if (!(${FILL_EDITABLE_FUNCTION}).call(this) || (${FILL_VALUE_FUNCTION}).call(this) !== before) return 'fill_target_changed';
             if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
             return this.ownerDocument.hasFocus() ? 'ready' : 'background';
           }`,
-          arguments: [{ value: expectedBefore }],
-          awaitPromise: true,
-          returnByValue: true,
-        },
-      );
-      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-      const state = restored.result?.value;
-      if (restored.exceptionDetails || (state !== "ready" && state !== "background")) {
-        return fillError(
-          state === "fill_target_changed" || state === "fill_focus_lost" ? state : "fill_failed",
-          "fill target changed or lost focus after restoring focus",
+            arguments: [{ value: expectedBefore }],
+            awaitPromise: true,
+            returnByValue: true,
+          },
         );
-      }
-      return null;
-    };
+        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+        const state = restored.result?.value;
+        if (restored.exceptionDetails || (state !== "ready" && state !== "background")) {
+          return fillError(
+            state === "fill_target_changed" || state === "fill_focus_lost" ? state : "fill_failed",
+            "fill target changed or lost focus after restoring focus",
+          );
+        }
+        return null;
+      };
 
-    const runFallbackPrep = async (): Promise<FillFallbackPreparation | RpcError> => {
-      const fallbackPrep = await nodeCdp.send<FillScriptReply<FillFallbackPreparation>>(
-        target.tabId,
-        "Runtime.callFunctionOn",
-        {
-          objectId,
-          functionDeclaration: `async function(value, clearBefore) {
+      const runFallbackPrep = async (): Promise<FillFallbackPreparation | RpcError> => {
+        const fallbackPrep = await nodeCdp.send<FillScriptReply<FillFallbackPreparation>>(
+          target.tabId,
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: `async function(value, clearBefore) {
             await Promise.resolve();
             await Promise.resolve();
             const preparation = (${FILL_PREPARATION_FUNCTION}).call(this, value, clearBefore);
@@ -1616,189 +1599,241 @@ export async function handleFill(
             }
             return { ...preparation, focused: this.getRootNode().activeElement === this };
           }`,
-          arguments: [{ value: params.value }, { value: clearBefore }],
-          awaitPromise: true,
-          returnByValue: true,
-        },
-      );
-      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-      if (fallbackPrep.exceptionDetails || !fallbackPrep.result?.value) {
-        return fillError("fill_failed", "fill preparation script failed");
-      }
-      return fallbackPrep.result.value;
-    };
-
-    let cleared = step1.cleared;
-    let usedCdpFocus = false;
-    // Fallback path only when Step 1 could not finish preparation in-place
-    // (e.g. DOM.focus fallback, contenteditable range placement, number/email
-    // --no-clear append, or unfocused background tab requiring deferred-focus flush).
-    if (!step1.focused) {
-      usedCdpFocus = true;
-      if (cleared) {
-        // Clearing lost focus once; verify focus and empty value after restoring focus once.
-        const restoreErr = await verifyRestoredFocus("");
-        if (restoreErr) return restoreErr;
-      } else {
-        const focusErr = await focusViaCdp();
-        if (focusErr) return focusErr;
-        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-      }
-    }
-
-    if (!step1.readyForInsert || !step1.focused) {
-      if (!step1.hasFocus) {
-        await flushBackgroundFocus();
-        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-      }
-
-      if (!cleared && (clearBefore || !step1.focused || !step1.hasFocus)) {
-        let prepVal = await runFallbackPrep();
-        if (isRpcError(prepVal)) return prepVal;
-        if ("error" in prepVal && prepVal.reason === "fill_focus_lost" && !usedCdpFocus) {
-          usedCdpFocus = true;
-          const focusErr = await focusViaCdp();
-          if (focusErr) return focusErr;
-          if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-          if (!step1.hasFocus) {
-            await flushBackgroundFocus();
-            if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-          }
-          prepVal = await runFallbackPrep();
-          if (isRpcError(prepVal)) return prepVal;
-        }
-        if ("error" in prepVal) return fillError(prepVal.reason, prepVal.error);
-        step1.before = prepVal.before;
-        step1.expected = prepVal.expected;
-        cleared = clearBefore;
-
-        if (!prepVal.focused) {
-          const restoreErr = await verifyRestoredFocus(step1.before);
-          if (restoreErr) return restoreErr;
-        }
-      }
-
-      if (step1.write === "insert" && params.value !== "") {
-        if (step1.native && !clearBefore && !step1.supportsSelection) {
-          try {
-            await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-              type: "rawKeyDown",
-              commands: ["moveToEndOfDocument"],
-            });
-          } finally {
-            await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
-          }
-          if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-        }
-        if (!step1.native || (!clearBefore && !step1.supportsSelection)) {
-          let ready = await checkReady(!step1.native);
-          if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-          if (!step1.native && (ready === "ready" || ready === "background")) {
-            ready = await checkReady(false, true);
-            if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-          }
-          if (typeof ready !== "string") return ready;
-          if (ready !== "ready" && ready !== "background") {
-            return fillError(
-              ready,
-              "fill target changed or lost focus while positioning the caret",
-            );
-          }
-        }
-      }
-    }
-
-    // Step 2: Core write.
-    let valueAssigned = false;
-    if (step1.write === "value") {
-      if (!(cleared && step1.expected === "")) {
-        const assigned = await nodeCdp.send<FillScriptReply<boolean>>(
-          target.tabId,
-          "Runtime.callFunctionOn",
-          {
-            objectId,
-            functionDeclaration: `function(expected) {
-              const changed = this.value !== expected;
-              Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(this, expected);
-              return changed;
-            }`,
-            arguments: [{ value: step1.expected }],
+            arguments: [{ value: params.value }, { value: clearBefore }],
+            awaitPromise: true,
             returnByValue: true,
           },
         );
         if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-        if (assigned.exceptionDetails) {
-          return fillError("fill_failed", "fill value assignment script failed");
+        if (fallbackPrep.exceptionDetails || !fallbackPrep.result?.value) {
+          return fillError("fill_failed", "fill preparation script failed");
         }
-        valueAssigned = assigned.result?.value === true;
+        return fallbackPrep.result.value;
+      };
+
+      let cleared = step1.cleared;
+      let usedCdpFocus = false;
+      // Fallback path only when Step 1 could not finish preparation in-place
+      // (e.g. DOM.focus fallback, contenteditable range placement, number/email
+      // --no-clear append, or unfocused background tab requiring deferred-focus flush).
+      if (!step1.focused) {
+        usedCdpFocus = true;
+        if (cleared) {
+          // Clearing lost focus once; verify focus and empty value after restoring focus once.
+          const restoreErr = await verifyRestoredFocus("");
+          if (restoreErr) return restoreErr;
+        } else {
+          const focusErr = await focusViaCdp();
+          if (focusErr) return focusErr;
+          if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+        }
       }
-    } else if (params.value !== "") {
-      await deps.cdp.send(target.tabId, "Input.insertText", {
-        text: params.value.replace(/\r\n?/g, "\n"),
+
+      if (!step1.readyForInsert || !step1.focused) {
+        if (!step1.hasFocus) {
+          await flushBackgroundFocus();
+          if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+        }
+
+        if (!cleared && (clearBefore || !step1.focused || !step1.hasFocus)) {
+          let prepVal = await runFallbackPrep();
+          if (isRpcError(prepVal)) return prepVal;
+          if ("error" in prepVal && prepVal.reason === "fill_focus_lost" && !usedCdpFocus) {
+            usedCdpFocus = true;
+            const focusErr = await focusViaCdp();
+            if (focusErr) return focusErr;
+            if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+            if (!step1.hasFocus) {
+              await flushBackgroundFocus();
+              if (throwIfAborted(deps.signal))
+                return { code: "cancelled", message: "fill aborted" };
+            }
+            prepVal = await runFallbackPrep();
+            if (isRpcError(prepVal)) return prepVal;
+          }
+          if ("error" in prepVal) return fillError(prepVal.reason, prepVal.error);
+          step1.before = prepVal.before;
+          step1.expected = prepVal.expected;
+          cleared = clearBefore;
+
+          if (!prepVal.focused) {
+            const restoreErr = await verifyRestoredFocus(step1.before);
+            if (restoreErr) return restoreErr;
+          }
+        }
+
+        if (step1.write === "insert" && params.value !== "") {
+          if (step1.native && !clearBefore && !step1.supportsSelection) {
+            let keyDownDispatched = false;
+            try {
+              await sendToFrameHandle(
+                deps.cdp,
+                toRootFrameHandle(target.tabId),
+                "Input.dispatchKeyEvent",
+                {
+                  type: "rawKeyDown",
+                  commands: ["moveToEndOfDocument"],
+                },
+                {
+                  signal: deps.signal,
+                  onDispatch: () => {
+                    keyDownDispatched = true;
+                  },
+                },
+              );
+            } finally {
+              if (keyDownDispatched) {
+                await deps.cdp
+                  .send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" })
+                  .catch(() => {});
+              }
+            }
+            if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+          }
+          if (!step1.native || (!clearBefore && !step1.supportsSelection)) {
+            let ready = await checkReady(!step1.native);
+            if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+            if (!step1.native && (ready === "ready" || ready === "background")) {
+              ready = await checkReady(false, true);
+              if (throwIfAborted(deps.signal))
+                return { code: "cancelled", message: "fill aborted" };
+            }
+            if (typeof ready !== "string") return ready;
+            if (ready !== "ready" && ready !== "background") {
+              return fillError(
+                ready,
+                "fill target changed or lost focus while positioning the caret",
+              );
+            }
+          }
+        }
+      }
+
+      // Step 2: Core write.
+      let valueAssigned = false;
+      if (step1.write === "value") {
+        if (!(cleared && step1.expected === "")) {
+          if (usedCdpFocus || !step1.readyForInsert || !step1.focused) {
+            await deps.cdp.beginDomMutation?.();
+            if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+          }
+          const assigned = await nodeCdp.send<FillScriptReply<boolean>>(
+            target.tabId,
+            "Runtime.callFunctionOn",
+            {
+              objectId,
+              functionDeclaration: `function(expected) {
+              const changed = this.value !== expected;
+              Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(this, expected);
+              return changed;
+            }`,
+              arguments: [{ value: step1.expected }],
+              returnByValue: true,
+            },
+          );
+          if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+          if (assigned.exceptionDetails) {
+            return fillError("fill_failed", "fill value assignment script failed");
+          }
+          valueAssigned = assigned.result?.value === true;
+        }
+      } else if (params.value !== "") {
+        await deps.cdp.send(target.tabId, "Input.insertText", {
+          text: params.value.replace(/\r\n?/g, "\n"),
+        });
+      }
+
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "fill aborted" };
+      }
+
+      // Step 3: Merged event dispatch + optimistic value/connection readback.
+      const finalValueAlreadyNotified =
+        (clearBefore && params.value === "" && !valueAssigned) ||
+        (step1.write === "insert" && params.value !== "");
+      const notifyInput = !finalValueAlreadyNotified;
+      let verified: FillScriptReply<FillVerificationResult>;
+      try {
+        verified = await nodeCdp.send<FillScriptReply<FillVerificationResult>>(
+          target.tabId,
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: FILL_STEP3_FUNCTION,
+            arguments: [
+              { value: notifyInput },
+              { value: step1.expected },
+              { value: step1.isSensitive },
+              { value: FILL_MAX_ACTUAL_VALUE_CHARS },
+            ],
+            awaitPromise: true,
+            returnByValue: true,
+          },
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (
+          finalValueAlreadyNotified &&
+          !deps.signal?.aborted &&
+          (isStaleFrameHandleError(err) ||
+            /Cannot find context|Execution context was destroyed|Inspected target navigated or closed/i.test(
+              msg,
+            ))
+        ) {
+          const chars =
+            !step1.isSensitive && step1.expected.length > FILL_MAX_ACTUAL_VALUE_CHARS
+              ? Array.from(step1.expected)
+              : null;
+          const actualValue = step1.isSensitive
+            ? undefined
+            : chars && chars.length > FILL_MAX_ACTUAL_VALUE_CHARS
+              ? chars.slice(0, FILL_MAX_ACTUAL_VALUE_CHARS).join("")
+              : step1.expected;
+          return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+            tab_id: target.tabId,
+            used_ref: node.usedRef,
+            used_selector: node.usedSelector,
+            value_length: step1.expected.length,
+            ...(actualValue !== undefined ? { actual_value: actualValue } : {}),
+          });
+        }
+        throw err;
+      }
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "fill aborted" };
+      }
+      const verification = verified.result?.value;
+      if (
+        verified.exceptionDetails ||
+        typeof verification?.connected !== "boolean" ||
+        typeof verification?.valueLength !== "number" ||
+        typeof verification?.sensitive !== "boolean"
+      ) {
+        return fillError(
+          "fill_failed",
+          "fill verification script failed or returned an unexpected result",
+        );
+      }
+      if (!verification.connected) {
+        return fillError("fill_target_changed", "fill target was removed or replaced during input");
+      }
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
+        used_ref: node.usedRef,
+        used_selector: node.usedSelector,
+        value_length: verification.valueLength,
+        ...(!verification.sensitive && typeof verification.actualValue === "string"
+          ? { actual_value: verification.actualValue }
+          : {}),
+        ...(verification.formatted ? { formatted: true } : {}),
       });
+    } catch (err) {
+      if (isStaleFrameHandleError(err)) {
+        return rpcError("not_found", "ref_not_found", err.message);
+      }
+      return fillError("fill_failed", err instanceof Error ? err.message : String(err));
     }
-
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "fill aborted" };
-    }
-
-    // Step 3: Merged event dispatch + optimistic value/connection readback.
-    const finalValueAlreadyNotified =
-      (clearBefore && params.value === "" && !valueAssigned) ||
-      (step1.write === "insert" && params.value !== "");
-    const notifyInput = !finalValueAlreadyNotified;
-    const verified = await nodeCdp.send<FillScriptReply<FillVerificationResult>>(
-      target.tabId,
-      "Runtime.callFunctionOn",
-      {
-        objectId,
-        functionDeclaration: FILL_STEP3_FUNCTION,
-        arguments: [
-          { value: notifyInput },
-          { value: step1.expected },
-          { value: step1.isSensitive },
-          { value: FILL_MAX_ACTUAL_VALUE_CHARS },
-        ],
-        awaitPromise: true,
-        returnByValue: true,
-      },
-    );
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "fill aborted" };
-    }
-    const verification = verified.result?.value;
-    if (
-      verified.exceptionDetails ||
-      typeof verification?.connected !== "boolean" ||
-      typeof verification?.valueLength !== "number" ||
-      typeof verification?.sensitive !== "boolean"
-    ) {
-      return fillError(
-        "fill_failed",
-        "fill verification script failed or returned an unexpected result",
-      );
-    }
-    if (!verification.connected) {
-      return fillError("fill_target_changed", "fill target was removed or replaced during input");
-    }
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      tab_id: target.tabId,
-      used_ref: node.usedRef,
-      used_selector: node.usedSelector,
-      value_length: verification.valueLength,
-      ...(!verification.sensitive && typeof verification.actualValue === "string"
-        ? { actual_value: verification.actualValue }
-        : {}),
-      ...(verification.formatted ? { formatted: true } : {}),
-    });
-  } catch (err) {
-    if (isStaleFrameHandleError(err)) {
-      return rpcError("not_found", "ref_not_found", err.message);
-    }
-    return fillError("fill_failed", err instanceof Error ? err.message : String(err));
-  } finally {
-    await nodeCdp.send(target.tabId, "Runtime.releaseObject", { objectId }).catch(() => undefined);
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2033,109 +2068,194 @@ export async function handlePress(
       ? await resolveBackendNode(deps.cdp, ctx, target, params, "press")
       : undefined;
   if (node && isRpcError(node)) return node;
-  return withInputReady(ctx, target.tabId, { ...deps, deadline }, async (input) => {
-    // Optional focus before key dispatch.
-    if (node) {
-      const nodeCdp = cdpRunnerForFrame(deps.cdp, node.handle);
+  return withInputReady(
+    ctx,
+    target.tabId,
+    { ...deps, deadline, preserveWindowFocus: true },
+    async (input) => {
+      // Optional focus before key dispatch.
+      if (node) {
+        const nodeCdp = cdpRunnerForFrame(deps.cdp, node.handle);
+        try {
+          deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+          const scrollErr = await scrollElementAndFramesIntoView(
+            deps.cdp,
+            target.tabId,
+            node.handle,
+          );
+          if (scrollErr) return scrollErr;
+          if (throwIfAborted(deps.signal)) {
+            return { code: "cancelled", message: "press aborted" };
+          }
+          await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+        } catch (err) {
+          if (isStaleFrameHandleError(err)) {
+            return rpcError("not_found", "ref_not_found", err.message);
+          }
+          return {
+            code: "cdp_failed",
+            message: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "press aborted" };
+      }
+
+      const modifiers = modifiersBitfield(mods);
+      // Suppress `text` when any non-shift modifier is held — `Ctrl+a`
+      // should not also type the character "a" into the focused field.
+      const suppressText = mods.some((m) => m === "ctrl" || m === "meta" || m === "alt");
+      // Enter can navigate on keydown (links) or keypress (form submission).
+      // Let Chromium dispatch that pair in one command: a separate char command
+      // would either fail the old document's guard or reach the new document.
+      const enterText = descriptor.key === "Enter" && !suppressText ? descriptor.text : undefined;
+      let keyDownDispatched = false;
+      let keyReleased = false;
+      const releaseKey = () =>
+        deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key: descriptor.key,
+          code: descriptor.code,
+          windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
+          modifiers,
+        });
+      const runBoundedPressStep = async (
+        paramsObj: object,
+        timeoutMessage: string,
+        onDispatched?: () => void,
+      ) => {
+        const stepAbort = new AbortController();
+        const forward = () => stepAbort.abort();
+        deps.signal?.addEventListener("abort", forward, { once: true });
+        if (deps.signal?.aborted) stepAbort.abort();
+        let dispatched = false;
+        try {
+          await waitBounded(
+            sendToFrameHandle(
+              deps.cdp,
+              toRootFrameHandle(target.tabId),
+              "Input.dispatchKeyEvent",
+              paramsObj,
+              {
+                signal: stepAbort.signal,
+                onDispatch: () => {
+                  if (stepAbort.signal.aborted || Date.now() >= deadline) {
+                    throw new DOMException(timeoutMessage, "AbortError");
+                  }
+                  dispatched = true;
+                  onDispatched?.();
+                },
+              },
+            ),
+            deadline,
+            deps.signal,
+            timeoutMessage,
+          );
+        } catch (err) {
+          if (!dispatched) stepAbort.abort();
+          throw err;
+        } finally {
+          deps.signal?.removeEventListener("abort", forward);
+        }
+      };
       try {
+        let cancelled = false;
         deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-        const scrollErr = await scrollElementAndFramesIntoView(deps.cdp, target.tabId, node.handle);
-        if (scrollErr) return scrollErr;
-        if (throwIfAborted(deps.signal)) {
+        await runBoundedPressStep(
+          {
+            type: enterText ? "keyDown" : "rawKeyDown",
+            key: descriptor.key,
+            code: descriptor.code,
+            windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
+            modifiers,
+            ...(enterText ? { text: enterText } : {}),
+          },
+          "press keyDown timed out",
+          () => {
+            deps.onInputSent?.(target.tabId);
+            input.markSent();
+            keyDownDispatched = true;
+          },
+        );
+        cancelled = throwIfAborted(deps.signal) !== null;
+        if (
+          !cancelled &&
+          !enterText &&
+          !suppressText &&
+          typeof descriptor.text === "string" &&
+          descriptor.text.length > 0
+        ) {
+          await runBoundedPressStep(
+            {
+              type: "char",
+              key: descriptor.key,
+              code: descriptor.code,
+              text: descriptor.text,
+              modifiers,
+            },
+            "press char timed out",
+          );
+          cancelled = throwIfAborted(deps.signal) !== null;
+        }
+        if (!cancelled && params.hold_ms && params.hold_ms > 0) {
+          await sleep(params.hold_ms, deps.signal);
+          if (throwIfAborted(deps.signal)) {
+            // Still send keyUp so the page doesn't think the key is stuck
+            // down — best-effort.
+            cancelled = true;
+          }
+        }
+        deps.onInputSent?.(target.tabId);
+        keyReleased = true;
+        await waitBounded(
+          releaseKey(),
+          Math.max(deadline, Date.now() + 1_000),
+          undefined,
+          "press keyUp timed out",
+        );
+        if (cancelled || throwIfAborted(deps.signal)) {
           return { code: "cancelled", message: "press aborted" };
         }
-        await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
       } catch (err) {
         if (isStaleFrameHandleError(err)) {
           return rpcError("not_found", "ref_not_found", err.message);
         }
+        if (err instanceof BoundedWaitError) {
+          return {
+            code: err.kind === "aborted" ? "cancelled" : "timeout",
+            message: err.kind === "aborted" ? "press aborted" : err.message,
+          };
+        }
         return {
-          code: "cdp_failed",
+          code:
+            deps.signal?.aborted || isAbortError(err)
+              ? "cancelled"
+              : err instanceof Error && err.name === "TimeoutError"
+                ? "timeout"
+                : "cdp_failed",
           message: err instanceof Error ? err.message : String(err),
         };
-      }
-    }
-
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "press aborted" };
-    }
-
-    const modifiers = modifiersBitfield(mods);
-    // Suppress `text` when any non-shift modifier is held — `Ctrl+a`
-    // should not also type the character "a" into the focused field.
-    const suppressText = mods.some((m) => m === "ctrl" || m === "meta" || m === "alt");
-    // Enter can navigate on keydown (links) or keypress (form submission).
-    // Let Chromium dispatch that pair in one command: a separate char command
-    // would either fail the old document's guard or reach the new document.
-    const enterText = descriptor.key === "Enter" && !suppressText ? descriptor.text : undefined;
-    try {
-      let cancelled = false;
-      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-      deps.onInputSent?.(target.tabId);
-      input.markSent();
-      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-        type: enterText ? "keyDown" : "rawKeyDown",
-        key: descriptor.key,
-        code: descriptor.code,
-        windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
-        modifiers,
-        ...(enterText ? { text: enterText } : {}),
-      });
-      cancelled = throwIfAborted(deps.signal) !== null;
-      if (
-        !cancelled &&
-        !enterText &&
-        !suppressText &&
-        typeof descriptor.text === "string" &&
-        descriptor.text.length > 0
-      ) {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-          type: "char",
-          key: descriptor.key,
-          code: descriptor.code,
-          text: descriptor.text,
-          modifiers,
-        });
-        cancelled = throwIfAborted(deps.signal) !== null;
-      }
-      if (!cancelled && params.hold_ms && params.hold_ms > 0) {
-        await sleep(params.hold_ms, deps.signal);
-        if (throwIfAborted(deps.signal)) {
-          // Still send keyUp so the page doesn't think the key is stuck
-          // down — best-effort.
-          cancelled = true;
+      } finally {
+        if (keyDownDispatched && !keyReleased) {
+          await waitBounded(
+            releaseKey(),
+            Date.now() + 1_000,
+            undefined,
+            "press keyUp cleanup timed out",
+          ).catch(() => {});
         }
       }
-      deps.onInputSent?.(target.tabId);
-      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-        type: "keyUp",
+
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
         key: descriptor.key,
         code: descriptor.code,
-        windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
-        modifiers,
+        modifiers: mods,
       });
-      if (cancelled || throwIfAborted(deps.signal)) {
-        return { code: "cancelled", message: "press aborted" };
-      }
-    } catch (err) {
-      return {
-        code:
-          deps.signal?.aborted || isAbortError(err)
-            ? "cancelled"
-            : err instanceof Error && err.name === "TimeoutError"
-              ? "timeout"
-              : "cdp_failed",
-        message: err instanceof Error ? err.message : String(err),
-      };
-    }
-
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      tab_id: target.tabId,
-      key: descriptor.key,
-      code: descriptor.code,
-      modifiers: mods,
-    });
-  });
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2151,13 +2271,19 @@ const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
   }
   const multiple = select.multiple;
   const opts = Array.from(select.options);
+  const isDisabledOption = (o) =>
+    Boolean(
+      o.disabled ||
+        (typeof o.closest === 'function' && o.closest('optgroup[disabled]')) ||
+        (typeof o.matches === 'function' && o.matches(':disabled')),
+    );
   const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
   const formatCandidate = (o) => {
     const lbl = norm(o.getAttribute('label')) || norm(o.text);
     if (!lbl || o.value === lbl) return JSON.stringify(o.value);
     return (o.value === '' ? '""' : o.value) + '=' + JSON.stringify(lbl);
   };
-  const available = opts.slice(0, 12).map(formatCandidate);
+  const available = opts.filter((o) => !isDisabledOption(o)).slice(0, 12).map(formatCandidate);
   const selectedIndices = new Set();
   for (const v of values) {
     const byValue = [];
@@ -2165,8 +2291,12 @@ const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
       if (opts[i].value === v) byValue.push(i);
     }
     if (byValue.length > 0) {
-      for (const idx of byValue) selectedIndices.add(idx);
-      continue;
+      const enabledByValue = byValue.filter((idx) => !isDisabledOption(opts[idx]));
+      if (enabledByValue.length > 0) {
+        for (const idx of enabledByValue) selectedIndices.add(idx);
+        continue;
+      }
+      return { ok: false, reason: 'target_disabled', disabled: v, available };
     }
     const vTrim = norm(v);
     if (vTrim) {
@@ -2178,18 +2308,22 @@ const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
           byExactLabel.push(i);
         }
       }
-      if (byExactLabel.length === 1) {
-        selectedIndices.add(byExactLabel[0]);
-        continue;
-      }
-      if (byExactLabel.length > 1) {
-        return {
-          ok: false,
-          reason: 'option_ambiguous',
-          ambiguous: v,
-          count: byExactLabel.length,
-          available,
-        };
+      if (byExactLabel.length > 0) {
+        const enabledByExactLabel = byExactLabel.filter((idx) => !isDisabledOption(opts[idx]));
+        if (enabledByExactLabel.length === 1) {
+          selectedIndices.add(enabledByExactLabel[0]);
+          continue;
+        }
+        if (enabledByExactLabel.length > 1) {
+          return {
+            ok: false,
+            reason: 'option_ambiguous',
+            ambiguous: v,
+            count: enabledByExactLabel.length,
+            available,
+          };
+        }
+        return { ok: false, reason: 'target_disabled', disabled: v, available };
       }
       const vLower = vTrim.toLowerCase();
       const byLowerLabel = [];
@@ -2200,18 +2334,22 @@ const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
           byLowerLabel.push(i);
         }
       }
-      if (byLowerLabel.length === 1) {
-        selectedIndices.add(byLowerLabel[0]);
-        continue;
-      }
-      if (byLowerLabel.length > 1) {
-        return {
-          ok: false,
-          reason: 'option_ambiguous',
-          ambiguous: v,
-          count: byLowerLabel.length,
-          available,
-        };
+      if (byLowerLabel.length > 0) {
+        const enabledByLowerLabel = byLowerLabel.filter((idx) => !isDisabledOption(opts[idx]));
+        if (enabledByLowerLabel.length === 1) {
+          selectedIndices.add(enabledByLowerLabel[0]);
+          continue;
+        }
+        if (enabledByLowerLabel.length > 1) {
+          return {
+            ok: false,
+            reason: 'option_ambiguous',
+            ambiguous: v,
+            count: enabledByLowerLabel.length,
+            available,
+          };
+        }
+        return { ok: false, reason: 'target_disabled', disabled: v, available };
       }
     }
     return { ok: false, reason: 'option_not_found', missing: v, available };
@@ -2265,9 +2403,9 @@ export async function handleSelect(
   if (isRpcError(node)) return node;
   const nodeCdp = cdpRunnerForFrame(deps.cdp, node.handle);
 
-  let objectId: string;
+  let resolvedObjectId: string;
   try {
-    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    deps.cdp.trackSessionTab(ctx.sessionId, target.tabId);
     const described = await nodeCdp.send<{ node?: DescribedNode }>(
       target.tabId,
       "DOM.describeNode",
@@ -2296,29 +2434,7 @@ export async function handleSelect(
     }
     const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
     if (isRpcError(objectIdOrErr)) return objectIdOrErr;
-    objectId = objectIdOrErr;
-    // Validate the requested options before scrolling or focusing: moving focus
-    // can blur another field and run its change or autosave handlers, so only a
-    // rejection reported here is free of page effects.
-    const validated = await nodeCdp.send<{
-      result?: { value?: SelectMutationResult | { ok: true; multiple: boolean } | null };
-    }>(target.tabId, "Runtime.callFunctionOn", {
-      objectId,
-      functionDeclaration: SELECT_OPTIONS_FUNCTION,
-      arguments: [{ value: params.values }, { value: false }],
-      returnByValue: true,
-    });
-    const validation = validated.result?.value;
-    if (!validation?.ok) return selectFailure(validation, true);
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "select aborted" };
-    }
-    const scrollErr = await scrollElementAndFramesIntoView(deps.cdp, target.tabId, node.handle);
-    if (scrollErr) return scrollErr;
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "select aborted" };
-    }
-    await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+    resolvedObjectId = objectIdOrErr;
   } catch (err) {
     if (isStaleFrameHandleError(err)) {
       return rpcError("not_found", "ref_not_found", err.message, PRE_WRITE_FAILURE);
@@ -2329,38 +2445,76 @@ export async function handleSelect(
     };
   }
 
-  if (throwIfAborted(deps.signal)) {
-    return { code: "cancelled", message: "select aborted" };
-  }
+  return await withRemoteObject(deps.cdp, node.handle, resolvedObjectId, async (objectId) => {
+    try {
+      // Validate the requested options before scrolling or focusing: moving focus
+      // can blur another field and run its change or autosave handlers, so only a
+      // rejection reported here is free of page effects.
+      const validated = await nodeCdp.send<{
+        result?: { value?: SelectMutationResult | { ok: true; multiple: boolean } | null };
+      }>(target.tabId, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: SELECT_OPTIONS_FUNCTION,
+        arguments: [{ value: params.values }, { value: false }],
+        returnByValue: true,
+      });
+      const validation = validated.result?.value;
+      if (!validation?.ok) return selectFailure(validation, true);
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "select aborted" };
+      }
+      const scrollErr = await scrollElementAndFramesIntoView(deps.cdp, target.tabId, node.handle);
+      if (scrollErr) return scrollErr;
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "select aborted" };
+      }
+      await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+    } catch (err) {
+      if (isStaleFrameHandleError(err)) {
+        return rpcError("not_found", "ref_not_found", err.message, PRE_WRITE_FAILURE);
+      }
+      return {
+        code: "cdp_failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
 
-  try {
-    await deps.cdp.beginDomMutation?.();
-    const evaluated = await nodeCdp.send<{
-      result?: { value?: SelectMutationResult | null };
-    }>(target.tabId, "Runtime.callFunctionOn", {
-      objectId,
-      functionDeclaration: SELECT_OPTIONS_FUNCTION,
-      arguments: [{ value: params.values }, { value: true }],
-      returnByValue: true,
-    });
-    const mutation = evaluated.result?.value;
-    // The page changed after validation, and focus already moved; keep the
-    // effect unknown even though no option was changed.
-    if (!mutation?.ok) return selectFailure(mutation, false);
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      tab_id: target.tabId,
-      used_ref: node.usedRef,
-      used_selector: node.usedSelector,
-      multiple: mutation.multiple,
-      selected_values: mutation.selected_values,
-      selected_labels: mutation.selected_labels,
-    });
-  } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "select aborted" };
+    }
+
+    try {
+      await deps.cdp.beginDomMutation?.();
+      const evaluated = await nodeCdp.send<{
+        result?: { value?: SelectMutationResult | null };
+      }>(target.tabId, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: SELECT_OPTIONS_FUNCTION,
+        arguments: [{ value: params.values }, { value: true }],
+        returnByValue: true,
+      });
+      const mutation = evaluated.result?.value;
+      // The page changed after validation, and focus already moved; keep the
+      // effect unknown even though no option was changed.
+      if (!mutation?.ok) return selectFailure(mutation, false);
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
+        used_ref: node.usedRef,
+        used_selector: node.usedSelector,
+        multiple: mutation.multiple,
+        selected_values: mutation.selected_values,
+        selected_labels: mutation.selected_labels,
+      });
+    } catch (err) {
+      if (isStaleFrameHandleError(err)) {
+        return rpcError("not_found", "ref_not_found", err.message);
+      }
+      return {
+        code: "cdp_failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
 }
 
 /** Maps a rejected option match. `preWrite` only before scrolling or focusing. */
@@ -2370,10 +2524,21 @@ function selectFailure(
 ): RpcError {
   const effect = preWrite ? PRE_WRITE_FAILURE : {};
   if (mutation?.reason === "target_disabled") {
+    const suffix = mutation.available?.length
+      ? ` (available: ${mutation.available.join(" | ")})`
+      : "";
     return {
       code: "invalid_params",
-      message: "select requires an enabled <select>",
-      data: { reason: "target_disabled", ...effect },
+      message:
+        mutation.disabled !== undefined
+          ? `option ${JSON.stringify(mutation.disabled)} is disabled in <select>${suffix}`
+          : "select requires an enabled <select>",
+      data: {
+        reason: "target_disabled",
+        ...effect,
+        ...(mutation.disabled !== undefined ? { disabled: mutation.disabled } : {}),
+        ...(mutation.available ? { available: mutation.available } : {}),
+      },
     };
   }
   if (mutation?.reason === "option_ambiguous") {

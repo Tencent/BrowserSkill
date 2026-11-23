@@ -22,6 +22,7 @@ interface RuntimeEvaluateReply {
 
 interface HoverCandidate {
   backendNodeId: number;
+  frameId?: string;
   label?: string;
   x: number;
   y: number;
@@ -168,16 +169,21 @@ function capturedText(node: CapturedNode): string | undefined {
   return clean || undefined;
 }
 
+function hoverNodeKey(frameId: string | undefined, backendNodeId: number): string {
+  return `${frameId ?? ""}\u0000${backendNodeId}`;
+}
+
 function hasGraphicDescendant(
   node: CapturedNode,
-  childrenByParentId: Map<number, CapturedNode[]>,
+  childrenByParentKey: Map<string, CapturedNode[]>,
   depth = 0,
 ): boolean {
   if (depth > 3) return false;
-  for (const child of childrenByParentId.get(node.backendNodeId) ?? []) {
+  for (const child of childrenByParentKey.get(hoverNodeKey(node.frameId, node.backendNodeId)) ??
+    []) {
     const tag = child.tag.toLowerCase();
     if (["img", "svg", "use", "path", "i"].includes(tag)) return true;
-    if (hasGraphicDescendant(child, childrenByParentId, depth + 1)) return true;
+    if (hasGraphicDescendant(child, childrenByParentKey, depth + 1)) return true;
   }
   return false;
 }
@@ -188,7 +194,7 @@ function roleOf(node: CapturedNode): string {
 
 function scoreHoverCandidate(
   node: CapturedNode,
-  childrenByParentId: Map<number, CapturedNode[]>,
+  childrenByParentKey: Map<string, CapturedNode[]>,
   cssHoverPoints: Array<{ x: number; y: number }>,
 ): HoverCandidate | null {
   const rect = node.rect;
@@ -209,13 +215,14 @@ function scoreHoverCandidate(
     rect,
     cursor: node.cursor,
     pointerEvents: node.pointerEvents,
-    hasGraphicDescendant: hasGraphicDescendant(node, childrenByParentId),
+    hasGraphicDescendant: hasGraphicDescendant(node, childrenByParentKey),
     cssHoverMatch,
   });
 
   if (!decision.eligible) return null;
   return {
     backendNodeId: node.backendNodeId,
+    ...(node.frameId ? { frameId: node.frameId } : {}),
     label,
     x: rect.x + rect.w / 2,
     y: rect.y + rect.h / 2,
@@ -228,29 +235,35 @@ function buildHoverCandidates(
   nodes: CapturedNode[],
   cssHoverPoints: Array<{ x: number; y: number }>,
 ): HoverCandidate[] {
-  const childrenByParentId = new Map<number, CapturedNode[]>();
-  const parentByBackendId = new Map<number, number | null>();
+  const childrenByParentKey = new Map<string, CapturedNode[]>();
+  const parentByNodeKey = new Map<string, string | null>();
   for (const node of nodes) {
-    parentByBackendId.set(node.backendNodeId, node.parentBackendNodeId);
-    if (node.parentBackendNodeId === null) continue;
-    const children = childrenByParentId.get(node.parentBackendNodeId) ?? [];
+    const key = hoverNodeKey(node.frameId, node.backendNodeId);
+    const parentKey =
+      node.parentBackendNodeId === null
+        ? null
+        : hoverNodeKey(node.frameId, node.parentBackendNodeId);
+    parentByNodeKey.set(key, parentKey);
+    if (parentKey === null) continue;
+    const children = childrenByParentKey.get(parentKey) ?? [];
     children.push(node);
-    childrenByParentId.set(node.parentBackendNodeId, children);
+    childrenByParentKey.set(parentKey, children);
   }
 
   const candidates = nodes
-    .map((node) => scoreHoverCandidate(node, childrenByParentId, cssHoverPoints))
+    .map((node) => scoreHoverCandidate(node, childrenByParentKey, cssHoverPoints))
     .filter((candidate): candidate is HoverCandidate => candidate !== null)
     .sort((a, b) => b.score - a.score);
 
   const deduped: HoverCandidate[] = [];
-  const seen = new Set<number>();
+  const seen = new Set<string>();
   for (const candidate of candidates) {
-    if (seen.has(candidate.backendNodeId)) continue;
-    if (deduped.some((existing) => sameHoverCluster(existing, candidate, parentByBackendId))) {
+    const key = hoverNodeKey(candidate.frameId, candidate.backendNodeId);
+    if (seen.has(key)) continue;
+    if (deduped.some((existing) => sameHoverCluster(existing, candidate, parentByNodeKey))) {
       continue;
     }
-    seen.add(candidate.backendNodeId);
+    seen.add(key);
     deduped.push(candidate);
     if (deduped.length >= MAX_HOVER_TRIGGERS) break;
   }
@@ -260,25 +273,27 @@ function buildHoverCandidates(
 function sameHoverCluster(
   a: HoverCandidate,
   b: HoverCandidate,
-  parentByBackendId: Map<number, number | null>,
+  parentByNodeKey: Map<string, string | null>,
 ): boolean {
   if (Math.hypot(a.x - b.x, a.y - b.y) <= 8) return true;
+  if ((a.frameId ?? "") !== (b.frameId ?? "")) return false;
+  const aKey = hoverNodeKey(a.frameId, a.backendNodeId);
+  const bKey = hoverNodeKey(b.frameId, b.backendNodeId);
   return (
-    isBackendAncestor(a.backendNodeId, b.backendNodeId, parentByBackendId) ||
-    isBackendAncestor(b.backendNodeId, a.backendNodeId, parentByBackendId)
+    isBackendAncestor(aKey, bKey, parentByNodeKey) || isBackendAncestor(bKey, aKey, parentByNodeKey)
   );
 }
 
 function isBackendAncestor(
-  ancestorId: number,
-  nodeId: number,
-  parentByBackendId: Map<number, number | null>,
+  ancestorKey: string,
+  nodeKey: string,
+  parentByNodeKey: Map<string, string | null>,
 ): boolean {
-  let parentId = parentByBackendId.get(nodeId);
+  let parentKey = parentByNodeKey.get(nodeKey);
   let guard = 0;
-  while (parentId !== null && parentId !== undefined && guard < parentByBackendId.size) {
-    if (parentId === ancestorId) return true;
-    parentId = parentByBackendId.get(parentId);
+  while (parentKey !== null && parentKey !== undefined && guard < parentByNodeKey.size) {
+    if (parentKey === ancestorKey) return true;
+    parentKey = parentByNodeKey.get(parentKey);
     guard += 1;
   }
   return false;
@@ -349,13 +364,14 @@ export async function probeHoverSurfaces(
     if (candidates.length === 0) return [];
 
     const results: CapturedSurfaceProbe[] = [];
-    const seen = new Set<number>();
+    const seen = new Set<string>();
     throwIfAborted(options.signal);
     for (const candidate of candidates.slice(0, MAX_HOVER_TRIGGERS)) {
       throwIfAborted(options.signal);
       if (!budget.canAfford(HOVER_CANDIDATE_COST_MS)) break;
       if (results.length >= MAX_HOVER_SURFACES) break;
-      if (seen.has(candidate.backendNodeId)) continue;
+      const candidateKey = hoverNodeKey(candidate.frameId, candidate.backendNodeId);
+      if (seen.has(candidateKey)) continue;
       try {
         await clearHover(cdp, tabId);
         throwIfAborted(options.signal);
@@ -385,9 +401,10 @@ export async function probeHoverSurfaces(
           runtimeValue<HoverRuntimeItem[]>(collected) ?? [],
         );
         if (subItems.length === 0) continue;
-        seen.add(candidate.backendNodeId);
+        seen.add(candidateKey);
         results.push({
           triggerBackendNodeId: candidate.backendNodeId,
+          ...(candidate.frameId ? { triggerFrameId: candidate.frameId } : {}),
           triggerPoint: { x: candidate.x, y: candidate.y },
           triggerAction: "hover",
           subItems,

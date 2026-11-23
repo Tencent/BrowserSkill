@@ -1,5 +1,5 @@
 import type { RenderedRef } from "@browser-skill/vom";
-import type { FrameDocumentHandle } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
 import {
   type CaptureVomMatchNode,
   type CaptureVomObservationResult,
@@ -131,6 +131,7 @@ export async function captureRecordingObservation(input: {
   const captured = await captureVomObservation(input.cdp, input.tabId, url, {
     maxTokens: input.maxTokens,
     redactValues: input.redactValues,
+    redactUnverifiedAxValues: true,
     conditionalSurfaceProbe: false,
     signal: input.signal,
   });

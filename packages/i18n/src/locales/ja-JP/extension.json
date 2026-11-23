@@ -112,7 +112,11 @@
       "readFailed": "設定を読み込めませんでした。拡張機能を開き直してください。",
       "writeFailed": "保存できませんでした。設定は変更されていません。もう一度お試しください。",
       "confirmTabBorrowInfoLabel": "タブ借用の確認について",
-      "requestHelpEnabledInfoLabel": "人によるサポート要求について"
+      "requestHelpEnabledInfoLabel": "人によるサポート要求について",
+      "openAgentWindowMinimized": "Agent ウィンドウを最小化して開く",
+      "openAgentWindowMinimizedHint": "オンにすると、新しいバックグラウンドの Agent ウィンドウは画面に表示されず最初から最小化された状態で開きます。オフにすると、通常の非フォーカスウィンドウとして開きます。",
+      "openAgentWindowMinimizedScope": "このブラウザプロファイルに自動的に保存され、新しいバックグラウンドの Agent ウィンドウに適用されます。明示的なフォアグラウンドセッションと操作の記録は引き続き表示された状態で開きます。",
+      "openAgentWindowMinimizedInfoLabel": "Agent ウィンドウを最小化して開く設定について"
     },
     "remoteLocal": "ローカルに切り替え",
     "remotePairing": "ペアリングリンク",

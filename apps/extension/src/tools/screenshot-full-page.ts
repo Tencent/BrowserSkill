@@ -216,7 +216,9 @@ export async function handleFullPageScreenshot(
           page: (command) => {
             if (command.action !== "finish") phase = `page ${command.action}`;
             const run = () => client.page(command);
-            return command.action !== "finish" && deps.cdp.runBrowserMutation
+            return command.action !== "finish" &&
+              command.action !== "inspect" &&
+              deps.cdp.runBrowserMutation
               ? deps.cdp.runBrowserMutation(run)
               : run();
           },

@@ -1,4 +1,9 @@
-import { selectionMarker, type VomNode, type VomScene } from "@browser-skill/vom";
+import {
+  selectionMarker,
+  VOM_DERIVED_NAME_CAP,
+  type VomNode,
+  type VomScene,
+} from "@browser-skill/vom";
 import { playbackProgressMedia } from "./media-progress";
 
 /** Reuse the observation's semantic nodes. Only normalized selection hints from
@@ -92,6 +97,8 @@ const factFields = [
   "visible",
   "pointer_events",
   "attributes",
+  "has_popup",
+  "expanded",
   "src",
 ] as const;
 // Stands in for learned text inside a derived name; HTML text never contains it.
@@ -386,7 +393,7 @@ export function preparationEvidence(
         // Keep every known character exact; never shorten the old observation
         // when an added tooltip hides previously observed text instead.
         if (
-          original?.name?.length === 240 &&
+          original?.name?.length === VOM_DERIVED_NAME_CAP &&
           original.name !== prior?.name &&
           prior?.name &&
           node.name?.startsWith(prior.name)
@@ -521,6 +528,8 @@ function signature(
       semanticAttributes.map((key) =>
         tolerate && contentAttributes.has(key) ? undefined : node.attrs?.[key],
       ),
+      node.hasPopup,
+      node.expanded,
     ];
   };
   const rows = (list: VomNode[], relax: boolean): Row[] =>
@@ -581,7 +590,9 @@ function sameUnrelaxedNodeFacts(a: VomNode, b: VomNode): boolean {
     !jsonPrimitiveEq(a.checked, b.checked) ||
     !jsonPrimitiveEq(a.disabled, b.disabled) ||
     !jsonPrimitiveEq(a.inert, b.inert) ||
-    !jsonPrimitiveEq(a.modal, b.modal)
+    !jsonPrimitiveEq(a.modal, b.modal) ||
+    !jsonPrimitiveEq(a.hasPopup, b.hasPopup) ||
+    !jsonPrimitiveEq(a.expanded, b.expanded)
   ) {
     return false;
   }

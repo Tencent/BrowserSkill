@@ -1,5 +1,5 @@
-import { type CdpFrame, toFrameDocumentHandle } from "@/browser-driver/frame-graph";
-import { type CdpRunner, sendToFrameHandle } from "./shared";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
+import { type CdpRunner, sendToFrameHandle, withObjectGroup } from "./shared";
 import type { DocumentIdentity } from "./vom/facts";
 export const SERIALIZATION = {
   serialization: "deep",
@@ -39,24 +39,22 @@ export function unwrap(reply: RuntimeReply): unknown {
 }
 export async function documentIdentity(
   cdp: CdpRunner,
-  frame: CdpFrame,
+  frameHandle: FrameDocumentHandle,
   attachmentId: string,
   unavailable: () => never = () => {
     throw new Error("Could not establish DOM document identity");
   },
 ): Promise<{ identity: DocumentIdentity; contextId: number }> {
-  const frameHandle = toFrameDocumentHandle(frame.target.tabId, frame);
   const world = await sendToFrameHandle<{ executionContextId: number }>(
     cdp,
     frameHandle,
     "Page.createIsolatedWorld",
     {
-      frameId: frame.frameId,
+      frameId: frameHandle.frameId,
       worldName: "bsk-extract",
     },
   );
-  const group = `bsk-extract-root-${crypto.randomUUID()}`;
-  try {
+  return withObjectGroup(cdp, frameHandle, "bsk-extract-root", async (group) => {
     const root = unwrap(
       await sendToFrameHandle<RuntimeReply>(cdp, frameHandle, "Runtime.evaluate", {
         expression: "document.documentElement",
@@ -66,7 +64,7 @@ export async function documentIdentity(
       }),
     ) as { backendNodeId?: number } | null;
     if (!root?.backendNodeId) unavailable();
-    cdp.recordFrameDocumentElement?.(
+    cdp.recordFrameDocumentElement(
       frameHandle.tabId,
       frameHandle.frameId,
       frameHandle.loaderId,
@@ -82,9 +80,5 @@ export async function documentIdentity(
       },
       contextId: world.executionContextId,
     };
-  } finally {
-    await sendToFrameHandle(cdp, frameHandle, "Runtime.releaseObjectGroup", {
-      objectGroup: group,
-    }).catch(() => {});
-  }
+  });
 }

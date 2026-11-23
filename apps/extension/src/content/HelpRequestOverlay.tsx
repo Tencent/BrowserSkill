@@ -22,6 +22,8 @@ export interface HelpRequestData {
   selectors: string[];
   /** Pre-resolved top-viewport rectangles, used for cross-frame targets. */
   rects?: HelpHighlightRect[];
+  /** True when the request tracks ref-backed rects that can scroll back into view even if `rects` is currently empty. */
+  hasDynamicRects?: boolean;
   /** Re-resolve cross-frame rectangles after scroll, resize, or layout changes. */
   refreshRects?: () => Promise<HelpHighlightRect[] | undefined>;
   onContinue: (note: string) => void;
@@ -218,31 +220,61 @@ export function HelpRequestOverlay({ request }: Props) {
     dragStartRef.current = null;
   }, [request?.id]);
 
+  const hasDynamicRects =
+    !isCompact && (request?.hasDynamicRects === true || (request?.rects?.length ?? 0) > 0);
+
   useEffect(() => {
-    if (!request || isCompact || !request.refreshRects) return;
+    if (!request || !hasDynamicRects || !request.refreshRects) return;
     let disposed = false;
     let resolving = false;
+    let pendingTrailing = false;
+    let throttleTimer: number | null = null;
     const refresh = async () => {
-      if (resolving) return;
+      if (disposed) return;
+      if (resolving) {
+        pendingTrailing = true;
+        return;
+      }
       resolving = true;
       try {
         const rects = await request.refreshRects?.();
         if (!disposed && rects) setLiveRects(rects);
       } finally {
         resolving = false;
+        if (!disposed && pendingTrailing) {
+          pendingTrailing = false;
+          scheduleRefresh();
+        }
       }
     };
-    const onViewportChange = () => void refresh();
-    window.addEventListener("scroll", onViewportChange, true);
-    window.addEventListener("resize", onViewportChange);
-    const interval = window.setInterval(onViewportChange, 500);
+    const scheduleRefresh = () => {
+      if (disposed) return;
+      if (throttleTimer !== null) {
+        pendingTrailing = true;
+        return;
+      }
+      void refresh();
+      throttleTimer = window.setTimeout(() => {
+        throttleTimer = null;
+        if (!disposed && pendingTrailing) {
+          pendingTrailing = false;
+          void refresh();
+        }
+      }, 150);
+    };
+    window.addEventListener("scroll", scheduleRefresh, true);
+    window.addEventListener("resize", scheduleRefresh);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 500);
     return () => {
       disposed = true;
-      window.removeEventListener("scroll", onViewportChange, true);
-      window.removeEventListener("resize", onViewportChange);
+      if (throttleTimer !== null) window.clearTimeout(throttleTimer);
+      window.removeEventListener("scroll", scheduleRefresh, true);
+      window.removeEventListener("resize", scheduleRefresh);
       window.clearInterval(interval);
     };
-  }, [request, isCompact]);
+  }, [request, hasDynamicRects]);
 
   // Scroll the first matched target into view once per distinct request id.
   useLayoutEffect(() => {
@@ -261,7 +293,7 @@ export function HelpRequestOverlay({ request }: Props) {
 
   // Keep highlight boxes aligned with the page as it scrolls / resizes.
   useEffect(() => {
-    if (!request) {
+    if (!request || (effectiveSelectors.length === 0 && effectiveRects.length === 0)) {
       setBoxes((prev) => (prev.length === 0 ? prev : []));
       return;
     }
@@ -270,6 +302,7 @@ export function HelpRequestOverlay({ request }: Props) {
       setBoxes((prev) => (boxesEqual(prev, nextBoxes) ? prev : nextBoxes));
     };
     update();
+    if (effectiveSelectors.length === 0) return;
     window.addEventListener("scroll", update, true);
     window.addEventListener("resize", update);
     const interval = window.setInterval(update, 500);

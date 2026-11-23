@@ -1,8 +1,9 @@
 import {
-  type CdpFrame,
   type FrameDocumentHandle,
+  type FrameDocumentInfo,
   isStaleFrameHandleError,
-} from "@/browser-driver/frame-graph";
+  rootProcessBoundary,
+} from "@/browser-driver/frame-handles";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import {
@@ -229,11 +230,11 @@ async function readFrame(
   } finally {
     if (cdp.getAttachmentId?.(document.tabId) === document.attachmentId) {
       await sendToFrameHandle(
-        cdp,
+        cdp.resourceCleanup ?? cdp,
         document,
         "Runtime.releaseObjectGroup",
         { objectGroup: verified.objectGroup },
-        { attachmentId: document.attachmentId },
+        { attachmentId: document.attachmentId, allowReattach: false },
       ).catch(() => {});
     }
     throwIfAborted(signal);
@@ -272,10 +273,12 @@ export async function resolveVisualRegionNow(
   const frameHandles = new Map<string, FrameDocumentHandle>(
     path.map(({ frame: item }) => [item.document.frameId, item.document]),
   );
-  const frames: CdpFrame[] = path.map(({ frame: item }) => ({
+  const frames: FrameDocumentInfo[] = path.map(({ frame: item }) => ({
+    handle: item.document,
     frameId: item.document.frameId,
     loaderId: item.document.loaderId,
-    target: { tabId },
+    processKey: "root",
+    isOutOfProcess: false,
     ...(item.parent
       ? {
           parentFrameId: item.parent.frame.document.frameId,
@@ -347,7 +350,7 @@ export async function resolveVisualRegionNow(
       const parentViewport = await geometry.viewport(parent);
       if (!parentViewport) return stale("parent viewport unavailable");
       const local = await geometry.snapshotProjection(
-        { target: { tabId }, frameId: item.document.frameId },
+        { process: rootProcessBoundary(tabId), frameId: item.document.frameId },
         item.parent.ownerBackendNodeId,
         [],
         parentViewport,
@@ -467,11 +470,11 @@ export async function verifyCapturedTarget(
       const verified = await resolveVerifiedNode(cdp, frame.document, anchor, signal);
       if (verified.status !== "current") return stale(`visual DOM identity ${verified.status}`);
       await sendToFrameHandle(
-        cdp,
+        cdp.resourceCleanup ?? cdp,
         frame.document,
         "Runtime.releaseObjectGroup",
         { objectGroup: verified.objectGroup },
-        { attachmentId: frame.document.attachmentId },
+        { attachmentId: frame.document.attachmentId, allowReattach: false },
       ).catch(() => {});
       throwIfAborted(signal);
       if (frame.parent) {
@@ -596,11 +599,11 @@ export async function verifyVisualHit(
     } finally {
       if (cdp.getAttachmentId?.(document.tabId) === document.attachmentId) {
         await sendToFrameHandle(
-          cdp,
+          cdp.resourceCleanup ?? cdp,
           document,
           "Runtime.releaseObjectGroup",
           { objectGroup: verified.objectGroup },
-          { attachmentId: document.attachmentId },
+          { attachmentId: document.attachmentId, allowReattach: false },
         ).catch(() => {});
       }
       throwIfAborted(signal);

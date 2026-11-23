@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import {
   RECORD_DOCUMENT_ATTRIBUTE,
   recordingDocumentMarkerValue,
@@ -13,7 +14,10 @@ describe("projectRecordSafeObservation", () => {
       frameDocuments: [
         {
           frameId: "child",
-          target: { tabId: 4, sessionId: "oopif-session" },
+          loaderId: "",
+          processKey: "root",
+          isOutOfProcess: false,
+          handle: toFrameDocumentHandle(4, { frameId: "child" }),
           contextScopeId: "scope-1",
           axNodes: [],
           domNodes: [
@@ -56,7 +60,10 @@ describe("projectRecordSafeObservation", () => {
       frameDocuments: [
         {
           frameId: "root",
-          target: { tabId: 4 },
+          loaderId: "",
+          processKey: "root",
+          isOutOfProcess: false,
+          handle: toFrameDocumentHandle(4, { frameId: "root" }),
           contextScopeId: "scope-1",
           axNodes: [],
           domNodes: [

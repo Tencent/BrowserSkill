@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { handleSessionStop } from "@/tools/session";
 import { resolveCdpAccessibleTargetTab, resolveTargetTab } from "@/tools/shared";
-import { handleTabCreate } from "@/tools/tabs";
+import { handleTabCreate, handleTabReturn } from "@/tools/tabs";
 import { SessionManager } from "../manager";
 import { beginTabCreation } from "../tab-creation";
 import { AgentWindowRouting } from "../window-routing";
@@ -47,6 +48,7 @@ async function fixture() {
       onDetached: event<(id: number, info: object) => void>(),
       onUpdated: event<(id: number, info: object, tab: chrome.tabs.Tab) => void>(),
       onRemoved: event<(id: number, info: object) => void>(),
+      onReplaced: event<(addedTabId: number, removedTabId: number) => void>(),
       get: vi.fn(async (id: number) => {
         const tab = tabs.get(id);
         if (!tab) throw new Error("No tab");
@@ -552,5 +554,83 @@ describe("Agent Window routing", () => {
     await vi.advanceTimersByTimeAsync(150);
     expect(f.tabs.get(101)?.windowId).toBe(1);
     expect(f.api.windows.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps replaced Agent-created and borrowed tabs in the Agent Window and supports tab_return & session_stop", async () => {
+    const f = await fixture();
+    // Simulate a borrowed tab (105) originally from user window 1, now living in Agent Window 10.
+    f.tabs.set(105, { id: 105, windowId: 10, active: false, incognito: false } as chrome.tabs.Tab);
+    f.task.borrowedTabs.set(105, {
+      tabId: 105,
+      originalWindowId: 1,
+      originalIndex: 0,
+      originalPinned: false,
+      originalGroupId: -1,
+    });
+
+    // Chrome Memory Saver / prerender replaces both an agentCreated tab (100 -> 200)
+    // and a borrowed tab (105 -> 205) in place inside Agent Window 10.
+    f.tabs.delete(100);
+    f.tabs.set(200, { id: 200, windowId: 10, active: true, incognito: false } as chrome.tabs.Tab);
+    f.manager.replaceTab(200, 100);
+    f.api.tabs.onReplaced.emit(200, 100);
+
+    f.tabs.delete(105);
+    f.tabs.set(205, { id: 205, windowId: 10, active: false, incognito: false } as chrome.tabs.Tab);
+    f.manager.replaceTab(205, 105);
+    f.api.tabs.onReplaced.emit(205, 105);
+
+    // Even if Chrome also fires onCreated/onUpdated for the replacement tabIds,
+    // AgentWindowRouting must NOT move them out to the user window after 100ms.
+    f.api.tabs.onCreated.emit(f.tabs.get(200)!);
+    f.api.tabs.onCreated.emit(f.tabs.get(205)!);
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(f.api.tabs.move).not.toHaveBeenCalled();
+    expect(f.tabs.get(200)?.windowId).toBe(10);
+    expect(f.tabs.get(205)?.windowId).toBe(10);
+    expect(f.task.agentCreatedTabs.has(200)).toBe(true);
+    expect(f.task.agentCreatedTabs.has(100)).toBe(false);
+    expect(f.task.borrowedTabs.get(205)?.tabId).toBe(205);
+    expect(f.task.borrowedTabs.has(105)).toBe(false);
+
+    // tool.tab_return works on the replacement tabId (205) and returns it to window 1.
+    const tabMutationApi = {
+      get: f.api.tabs.get,
+      query: vi.fn(async (info: chrome.tabs.QueryInfo) =>
+        [...f.tabs.values()].filter((t) =>
+          info.windowId === undefined ? true : t.windowId === info.windowId,
+        ),
+      ),
+      move: f.api.tabs.move,
+      update: f.api.tabs.update,
+      remove: vi.fn(async (id: number) => {
+        f.tabs.delete(id);
+      }),
+      create: vi.fn(),
+      group: vi.fn(),
+    };
+    const returned = await handleTabReturn(
+      f.manager,
+      { session_id: "agent", tab_id: 205 },
+      {
+        tabs: tabMutationApi as never,
+        windows: f.api.windows as never,
+      },
+    );
+    expect(returned).toMatchObject({ tab_id: 205, returned_to_window_id: 1 });
+    expect(f.tabs.get(205)?.windowId).toBe(1);
+
+    // session_stop cleanly closes the Agent Window without leaking the replaced owned tab (200).
+    const stopped = await handleSessionStop(
+      f.manager,
+      { session_id: "agent" },
+      {
+        tabsQuery: { get: f.api.tabs.get, query: tabMutationApi.query } as never,
+        tabManagement: { tabs: tabMutationApi as never, windows: f.api.windows as never },
+      },
+    );
+    expect(stopped).toEqual({});
+    expect(f.manager.has("agent")).toBe(false);
   });
 });

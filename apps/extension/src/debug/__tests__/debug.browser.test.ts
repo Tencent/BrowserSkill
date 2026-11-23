@@ -4,7 +4,7 @@
 import { writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { handleClick } from "@/tools/interaction";
 import { DebugManager } from "../manager";
@@ -15,7 +15,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 type Event = { sessionId?: string; method: string; params?: Record<string, unknown> };
-type Listener = (source: CdpDebuggee, method: string, params: unknown) => void;
+type Listener = Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0];
 
 describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser website debugging", () => {
   it("captures and verifies an HTTP 200 business failure, redirects, iframe requests and cleanup", async () => {

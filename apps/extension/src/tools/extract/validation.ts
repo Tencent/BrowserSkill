@@ -1,3 +1,4 @@
+import { BSK_OVERLAY_SELECTOR, SENSITIVE_EXTRACT_INPUT_SELECTOR } from "@/lib/dom-predicates";
 import type { RpcError, RpcErrorReason } from "@/transport/types";
 import type { CollectorOptions, ExtractParams } from "./types";
 
@@ -115,5 +116,7 @@ export function validateExtract(params: ExtractParams): CollectorOptions {
     max_columns: maxColumns,
     max_bytes: bound(params.max_bytes, 1_048_576, 4_194_304, "max_bytes", 1_024),
     timeout_ms: bound(params.timeout_ms, 5_000, 15_000, "timeout_ms", 100),
+    sensitive: SENSITIVE_EXTRACT_INPUT_SELECTOR,
+    overlaySelector: BSK_OVERLAY_SELECTOR,
   };
 }

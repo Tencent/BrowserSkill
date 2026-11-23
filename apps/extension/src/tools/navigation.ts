@@ -47,6 +47,7 @@ import {
   isRpcError,
   lookupSession,
   type ResolvedTargetTab,
+  readReportedTimeoutMs,
   resolveTargetTab,
 } from "./shared";
 
@@ -90,19 +91,30 @@ interface ReadyStateProbeReply {
  * Read `document.readyState` on the tab's main execution context.
  * Returns `null` when CDP cannot evaluate (detached tab, etc.).
  */
+const CDP_READY_PROBE_TIMEOUT_MS = 1_500;
+const CDP_PREFLIGHT_TIMEOUT_MS = 2_500;
+
 export async function probeMainFrameReadyState(
   cdp: CdpRunner,
   tabId: number,
 ): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const reply = await cdp.send<ReadyStateProbeReply>(tabId, "Runtime.evaluate", {
-      expression: "document.readyState",
-      returnByValue: true,
-    });
-    const value = reply.result?.value;
+    const reply = await Promise.race([
+      cdp.send<ReadyStateProbeReply>(tabId, "Runtime.evaluate", {
+        expression: "document.readyState",
+        returnByValue: true,
+      }),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), CDP_READY_PROBE_TIMEOUT_MS);
+      }),
+    ]);
+    const value = reply?.result?.value;
     return typeof value === "string" ? value : null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -930,16 +942,24 @@ interface MainFrameInfo {
 }
 
 async function readMainFrameInfo(cdp: CdpRunner, tabId: number): Promise<MainFrameInfo> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const tree = await cdp.send<{
-      frameTree?: { frame?: { id?: string; loaderId?: string } };
-    }>(tabId, "Page.getFrameTree", {});
+    const tree = await Promise.race([
+      cdp.send<{
+        frameTree?: { frame?: { id?: string; loaderId?: string } };
+      }>(tabId, "Page.getFrameTree", {}),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), CDP_READY_PROBE_TIMEOUT_MS);
+      }),
+    ]);
     return {
-      frameId: tree.frameTree?.frame?.id ?? null,
-      loaderId: tree.frameTree?.frame?.loaderId ?? null,
+      frameId: tree?.frameTree?.frame?.id ?? null,
+      loaderId: tree?.frameTree?.frame?.loaderId ?? null,
     };
   } catch {
     return { frameId: null, loaderId: null };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1028,21 +1048,54 @@ async function prepareNavigation(
   ctx: SessionContext,
   target: ResolvedTargetTab,
   deps: NavigationDeps,
+  timeoutMs = DEFAULT_NAV_TIMEOUT_MS,
 ): Promise<"browser" | "cdp"> {
   deps.signal?.throwIfAborted();
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
   if (cdpBlockedUrlReason(target.url) || cdpBlockedUrlReason(target.pendingUrl)) return "browser";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let preflightTimedOut = false;
+  const preflightMs = Math.min(CDP_PREFLIGHT_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs / 2)));
   try {
-    await acquireNavigationExecution(manager, ctx, target.tabId, deps);
-    await ensureCdpReady(deps.cdp, target.tabId);
-    // Successor request termination is part of navigation waiting, even if
-    // optional network capture was unavailable during debugger attachment.
-    await deps.cdp.send(target.tabId, "Network.enable", {});
+    const preflight = (async () => {
+      await acquireNavigationExecution(manager, ctx, target.tabId, deps);
+      await ensureCdpReady(deps.cdp, target.tabId);
+      // Successor request termination is part of navigation waiting, even if
+      // optional network capture was unavailable during debugger attachment.
+      await deps.cdp.send(target.tabId, "Network.enable", {});
+    })();
+    void preflight.catch(() => {});
+    await Promise.race([
+      preflight,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          preflightTimedOut = true;
+          reject(new Error("CDP navigation preflight timed out"));
+        }, preflightMs);
+      }),
+    ]);
     return "cdp";
   } catch (error) {
-    // Only preflight access denial permits fallback. Never replay a sent action.
-    if (!isCdpExtensionAccessDenied(error)) throw error;
+    // Only preflight access denial or an unresponsive departing renderer permits
+    // browser-API fallback. Never replay an already-sent navigation.
+    if (deps.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error;
+    }
+    const reattachTimedOut =
+      error instanceof Error &&
+      error.message.includes("Chrome did not respond during debugger reattachment");
+    const readTimedOut = error instanceof Error && error.name === "CdpReadTimeoutError";
+    if (
+      !isCdpExtensionAccessDenied(error) &&
+      !preflightTimedOut &&
+      !reattachTimedOut &&
+      !readTimedOut
+    ) {
+      throw error;
+    }
     return "browser";
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1050,6 +1103,14 @@ function navigationError(error: unknown): RpcError {
   return error instanceof Error && error.name === "AbortError"
     ? { code: "cancelled", message: "Navigation cancelled" }
     : cdpError(error);
+}
+
+function beforeUnloadDismissedError(): RpcError {
+  return {
+    code: "cancelled",
+    message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
+    data: { reason: "user_cancelled", effect_state: "none" },
+  };
 }
 
 /** Recover only a failed preflight; never replay an already-dispatched navigation. */
@@ -1063,6 +1124,7 @@ async function recoverBrowserNavigation(
   timeoutMs: number,
   requestedUrl?: string,
   allowSameDocument = false,
+  reportedTimeoutMs = timeoutMs,
 ): Promise<ReloadResult | RpcError> {
   const tabId = target.tabId;
   const controlled = isAgentControlledTab(ctx, tabId);
@@ -1098,19 +1160,92 @@ async function recoverBrowserNavigation(
           signal.throwIfAborted();
           return !!event.documentId && frame?.documentId === event.documentId;
         };
+        const withinDeadline = async <T>(
+          work: () => Promise<T>,
+        ): Promise<{ ok: true; value: T } | { ok: false }> => {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) return { ok: false };
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          let onAbort: (() => void) | undefined;
+          try {
+            const pending = work();
+            void pending.catch(() => {});
+            return await Promise.race([
+              pending.then((value) => ({ ok: true as const, value })),
+              new Promise<{ ok: false }>((resolve) => {
+                timer = setTimeout(() => resolve({ ok: false }), remaining);
+                onAbort = () => resolve({ ok: false });
+                if (signal.aborted) onAbort();
+                else signal.addEventListener("abort", onAbort, { once: true });
+              }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+            if (onAbort) signal.removeEventListener("abort", onAbort);
+          }
+        };
         try {
           if (!(await isCurrent())) return false;
           const tab = await checkControl(signal);
           if (cdpBlockedUrlReason(event.url ?? tab.url))
             throw new Error("Navigation remains on a restricted page");
-          await acquireNavigationExecution(manager, ctx, tabId, deps, signal);
+          const acquired = await withinDeadline(() =>
+            acquireNavigationExecution(manager, ctx, tabId, deps, signal),
+          );
+          if (!acquired.ok) {
+            signal.throwIfAborted();
+            return false;
+          }
           if (!(await isCurrent())) return false;
-          await deps.cdp.send(tabId, "Page.enable", {});
+          const enabled = await withinDeadline(() => deps.cdp.send(tabId, "Page.enable", {}));
+          if (!enabled.ok) {
+            signal.throwIfAborted();
+            return false;
+          }
           if (!(await isCurrent())) return false;
           if (waitUntil === "networkidle" || (sameDocument && waitUntil !== "commit")) {
-            const frame = await readMainFrameInfo(deps.cdp, tabId);
-            if (!(await isCurrent())) return false;
-            if (!frame.frameId) throw new Error("No main frame after navigation");
+            let frame: { frameId: string; loaderId: string | null } | null = null;
+            while (!frame) {
+              let readTimedOut = false;
+              const treeRes = await withinDeadline(async () => {
+                try {
+                  return await deps.cdp.send<{
+                    frameTree?: { frame?: { id?: string; loaderId?: string } };
+                  }>(tabId, "Page.getFrameTree", {});
+                } catch (error) {
+                  if (error instanceof Error && error.name === "CdpReadTimeoutError") {
+                    readTimedOut = true;
+                    return undefined;
+                  }
+                  throw error;
+                }
+              });
+              if (!treeRes.ok) {
+                signal.throwIfAborted();
+                return false;
+              }
+              if (!(await isCurrent())) return false;
+              if (readTimedOut) {
+                if (sameDocument) return false;
+                const delayMs = Math.min(50, deadline - Date.now());
+                if (delayMs <= 0) return false;
+                const waited = await withinDeadline(
+                  () => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
+                );
+                if (!waited.ok) {
+                  signal.throwIfAborted();
+                  return false;
+                }
+                if (!(await isCurrent())) return false;
+                continue;
+              }
+              const frameId = treeRes.value?.frameTree?.frame?.id ?? null;
+              if (!frameId) throw new Error("No main frame after navigation");
+              frame = {
+                frameId,
+                loaderId: treeRes.value?.frameTree?.frame?.loaderId ?? null,
+              };
+            }
             const remaining = deadline - Date.now();
             if (remaining <= 0) return false;
             const waiting = linkedAbortSignal(signal);
@@ -1124,7 +1259,13 @@ async function recoverBrowserNavigation(
               { loaderId: frame.loaderId ?? undefined },
             );
             try {
-              await deps.cdp.send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
+              const lifecycleEnabled = await withinDeadline(() =>
+                deps.cdp.send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true }),
+              );
+              if (!lifecycleEnabled.ok) {
+                signal.throwIfAborted();
+                return false;
+              }
               if ((await wait.promise).reached !== "match") return false;
             } finally {
               waiting.abort();
@@ -1152,7 +1293,7 @@ async function recoverBrowserNavigation(
       reached: outcome.reached === "match" ? waitUntil : "timeout",
       ...(outcome.reached === "timeout"
         ? {
-            error_text: `timed out waiting for ${waitUntil} during navigation recovery after ${timeoutMs}ms`,
+            error_text: `timed out waiting for ${waitUntil} during navigation recovery after ${reportedTimeoutMs}ms`,
           }
         : {}),
     };
@@ -1189,9 +1330,12 @@ export async function handleNavigate(
 
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_NAV_TIMEOUT_MS;
+  const reportedTimeoutMs = readReportedTimeoutMs(params) ?? timeoutMs;
+  const startedAt = Date.now();
 
   try {
-    if ((await prepareNavigation(manager, ctx, target, deps)) === "browser") {
+    if ((await prepareNavigation(manager, ctx, target, deps, timeoutMs)) === "browser") {
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
       const recovered = await recoverBrowserNavigation(
         deps,
         manager,
@@ -1199,9 +1343,10 @@ export async function handleNavigate(
         target,
         (api) => api.update(target.tabId, { url: params.url }),
         waitUntil,
-        timeoutMs,
+        remainingMs,
         params.url,
         true,
+        reportedTimeoutMs,
       );
       if (isRpcError(recovered)) return recovered;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, { ...recovered, url: params.url });
@@ -1246,22 +1391,14 @@ export async function handleNavigate(
       const stopped = await waitPromise;
       waitAbort.cleanup();
       if (refused || stopped.lastLifecycle === "dialog_dismissed")
-        return {
-          code: "cancelled",
-          message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
-          data: { reason: "user_cancelled" },
-        };
+        return beforeUnloadDismissedError();
       throw err;
     }
     if ((await wait.dialogDecision()) === false) {
       waitAbort.abort();
       await waitPromise;
       waitAbort.cleanup();
-      return {
-        code: "cancelled",
-        message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
-        data: { reason: "user_cancelled" },
-      };
+      return beforeUnloadDismissedError();
     }
     frameId = nav.frameId ?? "";
     loaderId = nav.loaderId ?? "";
@@ -1271,12 +1408,7 @@ export async function handleNavigate(
       waitAbort.abort();
       const stopped = await waitPromise;
       waitAbort.cleanup();
-      if (stopped.lastLifecycle === "dialog_dismissed")
-        return {
-          code: "cancelled",
-          message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
-          data: { reason: "user_cancelled" },
-        };
+      if (stopped.lastLifecycle === "dialog_dismissed") return beforeUnloadDismissedError();
       return {
         code: "cdp_failed",
         message: `Page.navigate rejected: ${nav.errorText}`,
@@ -1285,13 +1417,9 @@ export async function handleNavigate(
     const outcome = await finishLifecycleWait(wait, waitPromise, beforeReadyState);
     waitAbort.cleanup();
     if (outcome.reached === "cancelled") {
-      return {
-        code: "cancelled",
-        message:
-          outcome.lastLifecycle === "dialog_dismissed"
-            ? "Agent dismissed beforeunload; navigation cancelled and the page was kept"
-            : "navigate aborted",
-      };
+      return outcome.lastLifecycle === "dialog_dismissed"
+        ? beforeUnloadDismissedError()
+        : { code: "cancelled", message: "navigate aborted" };
     }
     const finalUrl = await readTabUrl(deps.tabsApi, target.tabId);
     if (outcome.reached === "match") {
@@ -1344,9 +1472,12 @@ async function handleHistory(
 
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
+  const reportedTimeoutMs = readReportedTimeoutMs(params) ?? timeoutMs;
+  const startedAt = Date.now();
 
   try {
-    if ((await prepareNavigation(manager, ctx, target, deps)) === "browser") {
+    if ((await prepareNavigation(manager, ctx, target, deps, timeoutMs)) === "browser") {
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
       const recovered = await recoverBrowserNavigation(
         deps,
         manager,
@@ -1354,9 +1485,10 @@ async function handleHistory(
         target,
         (api) => (direction === "back" ? api.goBack(target.tabId) : api.goForward(target.tabId)),
         waitUntil,
-        timeoutMs,
+        remainingMs,
         undefined,
         true,
+        reportedTimeoutMs,
       );
       if (isRpcError(recovered)) return recovered;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
@@ -1405,16 +1537,27 @@ async function handleHistory(
     try {
       await deps.cdp.send(target.tabId, "Page.navigateToHistoryEntry", { entryId: targetEntry.id });
     } catch (err) {
+      const refused = (await wait.dialogDecision()) === false;
+      waitAbort.abort();
+      const stopped = await waitPromise;
+      waitAbort.cleanup();
+      if (refused || stopped.lastLifecycle === "dialog_dismissed")
+        return beforeUnloadDismissedError();
+      throw err;
+    }
+    if ((await wait.dialogDecision()) === false) {
       waitAbort.abort();
       await waitPromise;
       waitAbort.cleanup();
-      throw err;
+      return beforeUnloadDismissedError();
     }
 
     const outcome = await finishLifecycleWait(wait, waitPromise, beforeReadyState);
     waitAbort.cleanup();
     if (outcome.reached === "cancelled") {
-      return { code: "cancelled", message: `navigate_${direction} aborted` };
+      return outcome.lastLifecycle === "dialog_dismissed"
+        ? beforeUnloadDismissedError()
+        : { code: "cancelled", message: `navigate_${direction} aborted` };
     }
     const finalUrl = await readTabUrl(deps.tabsApi, target.tabId);
     if (outcome.reached === "match") {
@@ -1475,11 +1618,14 @@ export async function handleReload(
 
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
+  const reportedTimeoutMs = readReportedTimeoutMs(params) ?? timeoutMs;
   const ignoreCache = params.hard === true;
+  const startedAt = Date.now();
 
   try {
-    if ((await prepareNavigation(manager, ctx, target, deps)) === "browser") {
+    if ((await prepareNavigation(manager, ctx, target, deps, timeoutMs)) === "browser") {
       const previousUrl = await readTabUrl(deps.tabsApi, target.tabId);
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
       const recovered = await recoverBrowserNavigation(
         deps,
         manager,
@@ -1487,7 +1633,10 @@ export async function handleReload(
         target,
         (api) => api.reload(target.tabId, { bypassCache: ignoreCache }),
         waitUntil,
-        timeoutMs,
+        remainingMs,
+        undefined,
+        false,
+        reportedTimeoutMs,
       );
       if (isRpcError(recovered)) return recovered;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
@@ -1513,16 +1662,27 @@ export async function handleReload(
     try {
       await deps.cdp.send(target.tabId, "Page.reload", { ignoreCache });
     } catch (err) {
+      const refused = (await wait.dialogDecision()) === false;
+      waitAbort.abort();
+      const stopped = await waitPromise;
+      waitAbort.cleanup();
+      if (refused || stopped.lastLifecycle === "dialog_dismissed")
+        return beforeUnloadDismissedError();
+      throw err;
+    }
+    if ((await wait.dialogDecision()) === false) {
       waitAbort.abort();
       await waitPromise;
       waitAbort.cleanup();
-      throw err;
+      return beforeUnloadDismissedError();
     }
 
     const outcome = await finishLifecycleWait(wait, waitPromise, beforeReadyState);
     waitAbort.cleanup();
     if (outcome.reached === "cancelled") {
-      return { code: "cancelled", message: "reload aborted" };
+      return outcome.lastLifecycle === "dialog_dismissed"
+        ? beforeUnloadDismissedError()
+        : { code: "cancelled", message: "reload aborted" };
     }
     const finalUrl = await readTabUrl(deps.tabsApi, target.tabId);
     if (outcome.reached === "match") {

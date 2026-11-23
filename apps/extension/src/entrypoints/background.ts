@@ -40,13 +40,19 @@ import {
   forgetOverlayInjectedTab,
   injectCooperationAllFrames,
   RuntimeContentScriptCoordinator,
+  sendTabMessageBounded,
 } from "@/lib/runtime-content-scripts";
 import { captureTaskPreview, focusTask } from "@/lib/task-preview";
 import { attachUiChannel } from "@/lib/ui-channel";
 import { attachLongScreenshot } from "@/long-screenshot/background";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
-import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  SessionManager,
+} from "@/session-manager/manager";
+import { RefStore } from "@/session-manager/ref-store";
 import { AgentWindowRouting } from "@/session-manager/window-routing";
 import {
   attachBorrowNotificationButtonHandler,
@@ -59,6 +65,10 @@ import {
 import { ToolDispatcher } from "@/tools/dispatcher";
 import { clearHelpForSession, hasActiveHelp } from "@/tools/human-loop";
 import {
+  clearObserveIdentityStreaksForSession,
+  clearObserveIdentityStreaksForTab,
+} from "@/tools/observation";
+import {
   activeRecordingCount,
   attachRecordFinishListener,
   attachRecordQueryListener,
@@ -68,8 +78,13 @@ import {
   type RecordRuntimeDeps,
   subscribeActiveRecordings,
 } from "@/tools/record";
-import { cdpBlockedUrlReason, chromeTabsApi } from "@/tools/shared";
-import { chromeTabMutationApi } from "@/tools/tabs";
+import {
+  cdpBlockedUrlReason,
+  chromeTabsApi,
+  evictSessionCdpRunner,
+  isRpcError,
+} from "@/tools/shared";
+import { chromeTabMutationApi, returnBorrowedTab } from "@/tools/tabs";
 import { detectBrowserMeta } from "@/transport/handshake";
 import { createLocalAuthenticator } from "@/transport/local-auth";
 import { watchRemoteAuthorization } from "@/transport/remote-authorization";
@@ -129,11 +144,15 @@ export default defineBackground(() => {
     },
     onSessionReleased: (ctx) => {
       dispatcher.cancelSession(ctx.sessionId);
+      void dispatcher.releaseHoverForSession(ctx.sessionId).catch(() => {});
+      void dispatcher.releaseScreenshotExports(ctx.sessionId).catch(() => {});
       cooperation.release(ctx.sessionId);
+      evictSessionCdpRunner(cdp, ctx.sessionId);
       debug.releaseSession(ctx.sessionId);
       void video.stopSession(ctx.sessionId).catch(() => {});
-      clearRecordingForSession(ctx.sessionId);
+      clearRecordingForSession(ctx.sessionId, recordDeps);
       clearHelpForSession(ctx.sessionId);
+      clearObserveIdentityStreaksForSession(ctx.sessionId);
     },
     onSessionsChanged: onOverlaySessionStateChanged,
   });
@@ -175,6 +194,9 @@ export default defineBackground(() => {
       sessions.invalidateTabRefs(tabId);
       cooperation.invalidate(tabId);
     },
+    onRouteChanged: (tabId, url) => {
+      cooperation.invalidateRoute(tabId, url);
+    },
     onChildFramesInvalidated: (tabId, staleFrameIds) => {
       sessions.invalidateTabChildFrames(tabId, staleFrameIds);
       cooperation.invalidateChildFrames(tabId);
@@ -203,6 +225,15 @@ export default defineBackground(() => {
         await ensureOverlayInjected(tabId);
       }
       try {
+        if (recordingId === null) {
+          await sendTabMessageBounded(
+            tabId,
+            { type: VIDEO_OVERLAY, recording_id: null },
+            undefined,
+            { frameId: 0 },
+          );
+          return {};
+        }
         // Another content script can receive messages before the overlay script
         // mounts, resolving undefined instead of reporting a missing receiver.
         // The overlay stays hidden until its own video handshake completes.
@@ -265,7 +296,7 @@ export default defineBackground(() => {
   const minimizedControlSessions = new Set<string>();
 
   attachLocalPairing(controller, transport);
-  watchRemoteAuthorization();
+  watchRemoteAuthorization({ onAuthorized: () => transport.resetAuthenticationBackoff() });
   const daemonPort = watchDaemonConnection(
     (url, remote) => {
       const key = JSON.stringify([remote ? "remote" : "local", url, remote?.deviceId ?? null]);
@@ -279,6 +310,7 @@ export default defineBackground(() => {
         remoteEndpoint.url === remote.url
       ) {
         remoteEndpoint = remote;
+        transport.resetAuthenticationBackoff();
         return;
       }
       // Connection identity is public metadata. Credential rotation updates the
@@ -286,6 +318,7 @@ export default defineBackground(() => {
       void controller.reconfigureTransport(key, () => {
         connectionPreferenceValid = true;
         remoteEndpoint = remote;
+        transport.resetAuthenticationBackoff();
         transport.setUrl(url);
       });
     },
@@ -361,7 +394,7 @@ export default defineBackground(() => {
     }
     const state = overlayStateForTab(tabId, windowId);
     try {
-      await chrome.tabs.sendMessage(tabId, state);
+      await sendTabMessageBounded(tabId, state);
     } catch {
       // Restricted pages and uninjected free tabs cannot receive messages.
     }
@@ -451,34 +484,43 @@ export default defineBackground(() => {
     debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
     cdp.forgetClosedTab?.(tabId);
+    dispatcher.forgetClosedTab(tabId);
+    clearObserveIdentityStreaksForTab(tabId);
     debug.sync();
+  });
+  chrome.tabs.onReplaced?.addListener((addedTabId, removedTabId) => {
+    forgetOverlayInjectedTab(removedTabId);
+    const replacedSessions = sessions.replaceTab(addedTabId, removedTabId);
+    windowRouting.handleTabReplaced(addedTabId, removedTabId);
+    cdp.replaceTab(addedTabId, removedTabId);
+    cooperation.replaceTab(addedTabId, removedTabId);
+    dispatcher.forgetClosedTab(removedTabId);
+    void video.stopTab(removedTabId, "tab_closed").catch(() => {});
+    debug.stopTab(removedTabId, "tab_closed");
+    clearObserveIdentityStreaksForTab(removedTabId);
+    debug.sync();
+    if (replacedSessions.length > 0) {
+      void chrome.tabs
+        .get(addedTabId)
+        .then((tab) => pushOverlayStateForTab(addedTabId, tab.windowId))
+        .catch(() => {});
+    }
   });
   // Reconcile dynamic Tier B content-script registrations on SW startup so
   // idle browser startups always begin with zero registered content scripts.
   void runtimeScripts.sync();
-  const cleanupAfterDisconnect = createDisconnectCleanup({
-    manager: sessions,
-    // Same contract as the dispatcher's `tool.session_stop`: without these
-    // deps the agent-tab cleanup and the window-release path are dead code.
-    sessionStopDeps: {
-      cdp,
-      tabManagement: { tabs: chromeTabMutationApi },
-      tabsQuery: chromeTabsApi,
-    },
-    onSessionsChanged: onOverlaySessionStateChanged,
-  });
   const recordDeps = {
     tabsApi: chrome.tabs,
     cdp,
     frameCoordinator: recordFrameCoordinator,
     sendToTab: (tabId: number, msg: Parameters<typeof chrome.tabs.sendMessage>[1]) =>
-      chrome.tabs.sendMessage(tabId, msg),
+      sendTabMessageBounded(tabId, msg),
     bypassOverlay: async (tabId: number, enabled: boolean) => {
       if (enabled) {
         await ensureOverlayInjected(tabId);
       }
       try {
-        await chrome.tabs.sendMessage(tabId, {
+        await sendTabMessageBounded(tabId, {
           type: OVERLAY_AUTOMATION_BYPASS,
           enabled,
         });
@@ -487,19 +529,53 @@ export default defineBackground(() => {
       }
     },
   } satisfies RecordRuntimeDeps;
+  const cleanupAfterDisconnect = createDisconnectCleanup({
+    manager: sessions,
+    cancelAll: () => dispatcher.beginDisconnectCleanup(),
+    awaitPendingStarts: () => dispatcher.awaitPendingStarts(),
+    cancelSession: (sessionId) => dispatcher.cancelSession(sessionId),
+    awaitSessionCancelled: (sessionId) => dispatcher.awaitSessionCancelled(sessionId),
+    releaseHover: (sessionId) => dispatcher.releaseHoverForSession(sessionId),
+    onSessionStopped: async (sessionId) => {
+      await video.stopSession(sessionId).catch(() => {});
+      debug.releaseSession(sessionId);
+      await dispatcher.releaseScreenshotExports(sessionId);
+      cooperation.release(sessionId);
+      clearObserveIdentityStreaksForSession(sessionId);
+      evictSessionCdpRunner(cdp, sessionId);
+    },
+    // Same contract as the dispatcher's `tool.session_stop`: without these
+    // deps the agent-tab cleanup and the window-release path are dead code.
+    sessionStopDeps: {
+      cdp,
+      recording: recordDeps,
+      tabManagement: { tabs: chromeTabMutationApi },
+      tabsQuery: chromeTabsApi,
+    },
+    onSessionsChanged: onOverlaySessionStateChanged,
+  });
   recordFrameCoordinator.attach();
   attachRecordStepListener(recordDeps);
   attachRecordFinishListener(recordDeps);
   attachRecordQueryListener(recordDeps);
 
+  let lastInteractionPolicy = interactionPolicy(interactionPreferences.get());
   interactionPreferences.subscribe((preferences) => {
+    const nextPolicy = interactionPolicy(preferences);
+    if (
+      nextPolicy.borrow_confirmation === lastInteractionPolicy.borrow_confirmation &&
+      nextPolicy.request_help === lastInteractionPolicy.request_help
+    ) {
+      return;
+    }
+    lastInteractionPolicy = nextPolicy;
     for (const ctx of sessions.list()) {
       try {
         transport.send({
           event: "session.interaction_changed",
           payload: {
             session_id: ctx.sessionId,
-            interaction: interactionPolicy(preferences),
+            interaction: nextPolicy,
           },
         });
       } catch {
@@ -578,28 +654,34 @@ export default defineBackground(() => {
       "[browser-skill] chrome.notifications.onButtonClicked unavailable; borrow Allow/Deny buttons will be inactive",
     );
   }
-  // MV3 service worker keepalive + reconnect supervisor (review M4/M5
-  // C3 + C4). Every 30s the alarm wakes the SW; if the transport is
-  // not connected we force a fresh connect attempt so we never sit on
-  // a stale `disconnected` state when the setTimeout-based reconnect
-  // dies with the SW. Reconnect is skipped when the user has disabled
-  // the BrowserSkill connection.
-  startKeepalive({
-    transport,
-    requestConnect: () => controller.requestConnect(),
-  });
-
   // Application-level heartbeat (Chrome 116+): while the post-handshake
   // link is live, beat every 20s so WebSocket activity keeps the service
   // worker — and thus the daemon connection — alive during use, rather
   // than depending on the boundary-hugging 30s keepalive alarm. The
   // daemon also uses these beats to reap a silently-dead browser.
-  startHeartbeat({
+  const heartbeat = startHeartbeat({
     send: (frame) => transport.send(frame),
     onActiveChange: (cb) =>
       controller.subscribe((snap) =>
         cb(snap.state === "connected" || snap.state === "version_skew"),
       ),
+  });
+
+  // MV3 service worker keepalive + reconnect supervisor (review M4/M5
+  // C3 + C4). Every 30s the alarm wakes the SW; if the transport is
+  // not connected we force a fresh connect attempt so we never sit on
+  // a stale `disconnected` state when the setTimeout-based reconnect
+  // dies with the SW. When already connected post-handshake, also emit
+  // a heartbeat in case SW timer throttling delayed `setInterval`.
+  startKeepalive({
+    transport,
+    requestConnect: () => controller.requestConnect(),
+    onConnectedTick: () => {
+      const { state } = controller.snapshot();
+      if (state === "connected" || state === "version_skew") {
+        heartbeat.beat();
+      }
+    },
   });
 
   // Wake-driven reconnect (best effort). An MV3 service worker is killed
@@ -628,8 +710,38 @@ export default defineBackground(() => {
       daemonPort.ready,
       getAuditEnabled(),
     ]);
+    await cdp
+      .reconcileOrphanedAttachments((tabId) => sessions.findControllingSession(tabId) !== null)
+      .catch((err) => console.warn("[browser-skill] orphan debugger reconciliation failed", err));
+    const orphanContexts = new Map<number, SessionContext>();
+    await sessions
+      .reapOrphanAgentWindows({
+        returnBorrowedTab: async (windowId, borrowed, entry, orphanWindowIds) => {
+          let orphanCtx = orphanContexts.get(windowId);
+          if (!orphanCtx) {
+            orphanCtx = {
+              sessionId: entry.sessionId ?? `orphan-${windowId}`,
+              agentWindowId: windowId,
+              refStore: new RefStore(),
+              borrowedTabs: new Map((entry.borrowedTabs ?? []).map((item) => [item.tabId, item])),
+              agentCreatedTabs: new Set(entry.ownedTabIds),
+              createdAtMs: entry.updatedAtMs,
+            };
+            orphanContexts.set(windowId, orphanCtx);
+          }
+          const outcome = await returnBorrowedTab(orphanCtx, borrowed.tabId, {
+            tabs: chromeTabMutationApi,
+            tabsQuery: chromeTabsApi,
+            isAgentWindowId: (id) => sessions.isTrackedAgentWindow(id) || orphanWindowIds.has(id),
+          });
+          if (!isRpcError(outcome)) orphanCtx.borrowedTabs.delete(borrowed.tabId);
+          return !isRpcError(outcome);
+        },
+      })
+      .catch((err) => console.warn("[browser-skill] orphan window reap failed", err));
     controller.setAuditEnabled(auditEnabled);
     const cleanup = async () => {
+      dispatcher.beginDisconnectCleanup();
       await video
         .disconnect()
         .catch((error) => console.warn("Video finalization failed during disconnect", error));
@@ -645,7 +757,6 @@ export default defineBackground(() => {
       beforeDisconnect: cleanup,
       onDisconnected: cleanup,
     });
-    await sessions.reapOrphanAgentWindows();
   })().catch((err) => {
     console.error("[browser-skill] controller failed to attach", err);
   });

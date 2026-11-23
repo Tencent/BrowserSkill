@@ -127,7 +127,7 @@ describe("renderVom single-layer page", () => {
     { checked: false, marker: " [unchecked]" },
     { checked: "mixed" as const, marker: " [mixed]" },
     { checked: undefined, marker: "" },
-  ])("renders checkbox state separately from its value: %j", ({ checked, marker }) => {
+  ])("renders checkbox state separately from explicit values: %j", ({ checked, marker }) => {
     const out = renderVom(
       scene([
         node({
@@ -137,13 +137,53 @@ describe("renderVom single-layer page", () => {
           role: "checkbox",
           name: "Subscribe",
           checked,
-          value: "on",
+          value: "weekly",
+          attrs: { value: "weekly" },
           rect: { x: 0, y: 0, w: 20, h: 20 },
         }),
       ]),
     );
-    expect(out.text).toContain('@e1 checkbox "Subscribe"' + marker + ' ="on"');
+    expect(out.text).toContain('@e1 checkbox "Subscribe"' + marker + ' ="weekly"');
     expect(out.refs).toHaveLength(1);
+  });
+
+  it("omits synthetic default ='on' on checkboxes without an explicit value attribute (including when redacted)", () => {
+    const unchecked = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          tag: "input",
+          role: "checkbox",
+          name: "Accept terms",
+          checked: false,
+          value: "on",
+          inputState: "empty",
+          rect: { x: 0, y: 0, w: 20, h: 20 },
+        }),
+      ]),
+    );
+    expect(unchecked.text).toContain('@e1 checkbox "Accept terms" [unchecked]');
+    expect(unchecked.text).not.toContain('="on"');
+
+    const redacted = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          tag: "input",
+          role: "checkbox",
+          name: "Accept terms",
+          checked: true,
+          value: "on",
+          inputState: "filled",
+          rect: { x: 0, y: 0, w: 20, h: 20 },
+        }),
+      ]),
+      { redactValues: true },
+    );
+    expect(redacted.text).toContain('@e1 checkbox "Accept terms" [checked]');
+    expect(redacted.text).not.toContain('="•••"');
   });
   it.each([100, 600, 2000])("bounds sibling-context reads for %i repeated actions", (count) => {
     let nameReads = 0;
@@ -916,6 +956,36 @@ describe("renderVom single-layer page", () => {
       ].join("\n"),
     );
     expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it("propagates trigger frameId onto active scope header and body rows in prepareObservationRender", () => {
+    const prepared = prepareObservationRender({
+      ...scene([
+        node({ id: 1, role: "RootWebArea", name: "Host", frameId: "main" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "tab",
+          name: "Child Tab",
+          tag: "button",
+          frameId: "oopif-1",
+        }),
+      ]),
+      activeScopeBlocks: [
+        {
+          triggerId: 2,
+          label: "Child Tab",
+          lines: ["OOPIF panel line 1", "OOPIF panel line 2"],
+        },
+      ],
+    });
+    const rows = Array.from({ [Symbol.iterator]: () => prepared.rows });
+    const scopeHeader = rows.find((row) => row.text.includes("[§ active: Child Tab]"));
+    const scopeLine1 = rows.find((row) => row.text.includes("OOPIF panel line 1"));
+    const scopeLine2 = rows.find((row) => row.text.includes("OOPIF panel line 2"));
+    expect(scopeHeader?.frameId).toBe("oopif-1");
+    expect(scopeLine1?.frameId).toBe("oopif-1");
+    expect(scopeLine2?.frameId).toBe("oopif-1");
   });
 
   it("does not render redundant children inside named ref controls", () => {
@@ -2527,6 +2597,122 @@ describe("selection evidence", () => {
         { ref: "e1", backendNodeId: 301 },
         { ref: "e2", backendNodeId: 399 },
       ]);
+    });
+
+    it("budgets the L2 occlusion footer line in renderDoubleLayer, preserves generic Chinese headings, and renders popup tags without duplication", () => {
+      // 1. Two-layer modal scene: maxTokens budget includes the `L2 page — occluded by L1` footer.
+      const modalNodes: VomNode[] = [
+        node({ id: 1, tag: "main", role: "main", rect: { x: 0, y: 0, w: 1280, h: 720 } }),
+        ...Array.from({ length: 12 }, (_, idx) =>
+          node({
+            id: 10 + idx,
+            parentId: 1,
+            backendNodeId: 100 + idx,
+            tag: "button",
+            role: "button",
+            name: `Background action item ${idx + 1}`,
+            rect: { x: 10, y: idx * 40, w: 200, h: 32 },
+          }),
+        ),
+        node({
+          id: 50,
+          tag: "div",
+          role: "dialog",
+          name: "Confirm action",
+          modal: true,
+          position: "fixed",
+          paintOrder: 10,
+          rect: { x: 200, y: 100, w: 600, h: 400 },
+        }),
+        ...Array.from({ length: 8 }, (_, idx) =>
+          node({
+            id: 60 + idx,
+            parentId: 50,
+            backendNodeId: 200 + idx,
+            tag: "button",
+            role: "button",
+            name: `Modal option button ${idx + 1} with detailed description`,
+            paintOrder: 10,
+            rect: { x: 220, y: 120 + idx * 36, w: 300, h: 30 },
+          }),
+        ),
+      ];
+      for (const budget of [45, 65, 90, 120]) {
+        const out = renderVom(scene(modalNodes), { maxTokens: budget });
+        // Estimate matches render.ts estimateVomTokens (~chars / 3.5 per line); ensure L2 footer never pushes output unboundedly past budget.
+        const bodyLines = out.text.split("\n").filter((line) => !line.startsWith("[truncated:"));
+        const approxTokens = bodyLines.reduce(
+          (sum, line) => sum + Math.max(1, Math.ceil((line.length + 1) / 3.5)),
+          0,
+        );
+        expect(approxTokens).toBeLessThanOrEqual(budget);
+      }
+
+      // 2. Generic Chinese headings ("欢迎", "联系方式") are preserved as section context rather than suppressed by benchmark filters.
+      const headingScene = scene([
+        node({ id: 1, tag: "section", role: "region" }),
+        node({ id: 2, parentId: 1, tag: "h2", role: "heading", name: "欢迎" }),
+        node({
+          id: 3,
+          parentId: 1,
+          backendNodeId: 11,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+        node({ id: 4, tag: "section", role: "region" }),
+        node({ id: 5, parentId: 4, tag: "h2", role: "heading", name: "联系方式" }),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 12,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+      ]);
+      const headingOut = renderVom(headingScene);
+      expect(headingOut.text).toContain("[ctx: 欢迎]");
+      expect(headingOut.text).toContain("[ctx: 联系方式]");
+
+      // 3. Popup state tags: custom combobox gets `[custom-dropdown: expanded]` without `[expanded]` inside quotes;
+      //    popup buttons/menuitems emit post-quote `[expanded]` / `[has-submenu]`.
+      const popupOut = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 21,
+            tag: "div",
+            role: "combobox",
+            name: "Filter",
+            expanded: true,
+            hasPopup: "listbox",
+            attrs: { "aria-expanded": "true", "aria-haspopup": "listbox" },
+          }),
+          node({
+            id: 2,
+            backendNodeId: 22,
+            tag: "button",
+            role: "button",
+            name: "Products",
+            expanded: true,
+            hasPopup: "menu",
+          }),
+          node({
+            id: 3,
+            backendNodeId: 23,
+            tag: "div",
+            role: "menuitem",
+            name: "Export",
+            expanded: false,
+            hasPopup: "menu",
+          }),
+        ]),
+      );
+      expect(popupOut.text).toContain('@e1 combobox "Filter" [custom-dropdown: expanded]');
+      expect(popupOut.text).not.toContain('"Filter [expanded]"');
+      expect(popupOut.text).toContain('@e2 button "Products" [expanded]');
+      expect(popupOut.text).toContain('@e3 menuitem "Export" [has-submenu]');
     });
   });
 });

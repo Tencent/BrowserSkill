@@ -1,4 +1,10 @@
-import { estimateLineTokens } from "@browser-skill/vom";
+import {
+  encodeVomNameContent,
+  estimateLineTokens,
+  inspectVomLine,
+  VOM_DERIVED_NAME_CAP,
+  type VomLineMetadata,
+} from "@browser-skill/vom";
 import type { FrameState } from "./types";
 
 type Frames = ReadonlyMap<number, FrameState>;
@@ -8,6 +14,7 @@ export interface HeldText {
   text: string;
   truncated: boolean;
   maxTokens?: number;
+  lineMeta?: readonly VomLineMetadata[];
   /** A delta rewrote this text after the capture that published the refs. */
   patched?: boolean;
 }
@@ -21,6 +28,7 @@ export interface LinePatch {
 
 export interface TextDelta {
   text: string;
+  lineMeta: VomLineMetadata[];
   lines: LinePatch[];
   changes: {
     frame_id: number;
@@ -52,16 +60,44 @@ export type TextDeltaRefusal =
   | "text_cut_by_truncation"
   | "token_budget_shift";
 
-/** A name derived from content is cut here without a mark (semantic-graph/resolve.ts). */
-const DERIVED_NAME_CAP = 240;
 /** Headroom for the header and notice lines, which a capture costs as one block. */
 const BUDGET_MARGIN = 64;
-/** Inner text of a rendered name: the renderer collapses whitespace and writes JSON strings. */
-const rendered = (value: string) => JSON.stringify(value.replace(/\s+/g, " ").trim()).slice(1, -1);
-const depth = (line: string) => line.length - line.trimStart().length;
-const QUOTED = /"((?:[^"\\]|\\.)*)"/;
-/** `role "name"` and nothing else: no ref, state, value or context label. */
-const nameOnly = (line: string) => /^ *[A-Za-z][\w-]* "((?:[^"\\]|\\.)*)"$/.exec(line)?.[1];
+
+/**
+ * Returns the character index where searchable page content starts on `line`,
+ * skipping VOM syntax prefixes (`@vom`, `L1 page`, `@eN`, role, drag hints).
+ * Lines inside a `[§ active: ...]` block are raw body text, so their full
+ * trimmed text is searchable and never patchable as a plain node.
+ */
+function contentSearchStart(
+  meta: readonly VomLineMetadata[],
+  index: number,
+  activeScopeBody: readonly boolean[],
+): number | undefined {
+  const lineMeta = meta[index]!;
+  if (activeScopeBody[index]) return lineMeta.indent;
+  return lineMeta.contentStart;
+}
+
+function activeScopeBodyMask(meta: readonly VomLineMetadata[]): boolean[] {
+  const mask = new Array<boolean>(meta.length).fill(false);
+  let activeScopeIndent: number | undefined;
+  for (let i = 0; i < meta.length; i += 1) {
+    const entry = meta[i]!;
+    if (entry.kind === "active-scope") {
+      activeScopeIndent = entry.indent;
+      continue;
+    }
+    if (activeScopeIndent !== undefined) {
+      if (entry.indent > activeScopeIndent) {
+        mask[i] = true;
+        continue;
+      }
+      activeScopeIndent = undefined;
+    }
+  }
+  return mask;
+}
 
 /**
  * Replaces one text in the held lines. Only two kinds of line may carry it: the
@@ -71,35 +107,54 @@ const nameOnly = (line: string) => /^ *[A-Za-z][\w-]* "((?:[^"\\]|\\.)*)"$/.exec
  */
 function replaceText(
   lines: string[],
+  meta: VomLineMetadata[],
   touched: Map<number, string>,
   before: string,
   after: string,
 ): TextDeltaRefusal | number[] {
-  const old = rendered(before);
-  const next = rendered(after);
+  const old = encodeVomNameContent(before);
+  const next = encodeVomNameContent(after);
   if (old === next) return [];
-  const hits = lines.flatMap((line, index) => (line.includes(old) ? [index] : []));
+  if (!old) return "text_outside_observation";
+  if (!next) return "structure_changed";
+  const rawOld = before.replace(/\s+/g, " ").trim();
+  const rawNext = after.replace(/\s+/g, " ").trim();
+  const inActiveScope = activeScopeBodyMask(meta);
+  const hits: number[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const start = contentSearchStart(meta, index, inActiveScope);
+    if (start === undefined) continue;
+    const line = lines[index]!;
+    if (line.includes(old, start) || (rawOld !== old && line.includes(rawOld, start))) {
+      hits.push(index);
+    }
+  }
   const leaf = hits[hits.length - 1];
   if (leaf === undefined) return "text_outside_observation";
-  if (nameOnly(lines[leaf]!) !== old) return "text_ambiguous";
+  const leafMeta = meta[leaf]!;
+  if (inActiveScope[leaf] || !leafMeta.plainNamedNode || leafMeta.escapedName !== old) {
+    return "text_ambiguous";
+  }
   const ancestors = new Set<number>();
-  for (let index = leaf - 1, limit = depth(lines[leaf]!); index >= 0 && limit > 0; index--) {
-    const level = depth(lines[index]!);
+  for (let index = leaf - 1, limit = leafMeta.indent; index >= 0 && limit > 0; index--) {
+    const level = meta[index]!.indent;
     if (level >= limit) continue;
     ancestors.add(index);
     limit = level;
   }
   for (const hit of hits) {
     if (hit === leaf) continue;
-    if (!ancestors.has(hit)) return "text_ambiguous";
-    const line = lines[hit]!;
-    const name = nameOnly(line);
-    if (name === undefined || name.endsWith("…")) return "text_names_other_content";
-    const level = depth(line);
+    if (!ancestors.has(hit) || inActiveScope[hit]) return "text_ambiguous";
+    const ancestorMeta = meta[hit]!;
+    const name = ancestorMeta.escapedName;
+    if (!ancestorMeta.plainNamedNode || name === undefined || name.endsWith("…"))
+      return "text_names_other_content";
+    const level = ancestorMeta.indent;
     const children: string[] = [];
-    for (let index = hit + 1; index < lines.length && depth(lines[index]!) > level; index++) {
-      if (depth(lines[index]!) !== level + 2) continue;
-      const child = QUOTED.exec(lines[index]!)?.[1];
+    for (let index = hit + 1; index < lines.length && meta[index]!.indent > level; index++) {
+      if (meta[index]!.indent !== level + 2) continue;
+      if (inActiveScope[index]) return "text_names_other_content";
+      const child = meta[index]!.escapedName;
       if (child === undefined) return "text_names_other_content";
       children.push(child);
     }
@@ -107,31 +162,56 @@ function replaceText(
       children.join(" ") !== name ||
       name.split(old).length !== 2 ||
       // Escaped lengths are never shorter than the names themselves.
-      name.length >= DERIVED_NAME_CAP ||
-      name.length - old.length + next.length >= DERIVED_NAME_CAP
+      name.length >= VOM_DERIVED_NAME_CAP ||
+      name.length - old.length + next.length >= VOM_DERIVED_NAME_CAP
     )
       return "text_names_other_content";
   }
   // A label cut short may end inside this text. Then no line holds the whole
   // text, yet a fresh capture would show the cut copy differently.
-  let common = 0;
-  while (common < old.length && old[common] === next[common]) common++;
-  if (common + 1 < old.length) {
-    const probe = old.slice(0, common + 1);
-    for (const line of lines) {
-      const silent = /^ *@context /.test(line) || line.includes(" canvas ");
-      for (let at = line.indexOf(probe); at >= 0; at = line.indexOf(probe, at + 1)) {
+  const hasTruncatedCopy = (sourceOld: string, sourceNext: string): boolean => {
+    let common = 0;
+    while (common < sourceOld.length && sourceOld[common] === sourceNext[common]) common++;
+    if (common + 1 >= sourceOld.length) return false;
+    const probe = sourceOld.slice(0, common + 1);
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      const start = contentSearchStart(meta, lineIndex, inActiveScope);
+      if (start === undefined) continue;
+      const line = lines[lineIndex]!;
+      const silent = meta[lineIndex]!.silentlyTruncatesLabel;
+      const isScopeBody = inActiveScope[lineIndex];
+      for (let at = line.indexOf(probe, start); at >= 0; at = line.indexOf(probe, at + 1)) {
         let length = probe.length;
-        while (length < old.length && line[at + length] === old[length]) length++;
+        while (length < sourceOld.length && line[at + length] === sourceOld[length]) length++;
         const end = line[at + length];
-        if (length < old.length && (end === "…" || (silent && end === '"')))
-          return "text_cut_by_truncation";
+        if (
+          length < sourceOld.length &&
+          (end === "…" || (silent && end === '"') || (isScopeBody && end === undefined))
+        ) {
+          return true;
+        }
       }
     }
+    return false;
+  };
+  if (hasTruncatedCopy(old, next) || (rawOld !== old && hasTruncatedCopy(rawOld, rawNext))) {
+    return "text_cut_by_truncation";
   }
   for (const index of hits) {
-    if (!touched.has(index)) touched.set(index, lines[index]!);
-    lines[index] = lines[index]!.replace(old, () => next);
+    const line = lines[index]!;
+    const currentMeta =
+      meta[index]!.nameStart !== undefined && meta[index]!.nameEnd !== undefined
+        ? meta[index]!
+        : inspectVomLine(line);
+    if (currentMeta.nameStart === undefined || currentMeta.nameEnd === undefined) {
+      return "text_ambiguous";
+    }
+    if (!touched.has(index)) touched.set(index, line);
+    const { nameStart, nameEnd } = currentMeta;
+    const updatedName =
+      index === leaf ? next : line.slice(nameStart, nameEnd).replace(old, () => next);
+    lines[index] = `${line.slice(0, nameStart)}${updatedName}${line.slice(nameEnd)}`;
+    meta[index] = inspectVomLine(lines[index]!);
   }
   return hits.map((index) => index + 1);
 }
@@ -175,10 +255,14 @@ export function textDelta(
   // Activity that no frame can account for keeps requiring a fresh observation.
   if (!logged.length) return "unlogged_activity";
   const lines = held.text.split("\n");
+  const meta =
+    held.lineMeta && held.lineMeta.length === lines.length
+      ? [...held.lineMeta]
+      : lines.map((line) => inspectVomLine(line));
   const touched = new Map<number, string>();
   const changes: TextDelta["changes"] = [];
   for (const change of logged) {
-    const result = replaceText(lines, touched, change.previous_value, change.value);
+    const result = replaceText(lines, meta, touched, change.previous_value, change.value);
     if (typeof result === "string") return result;
     if (!result.length) continue;
     // Report an element that changed twice once, from its first text to its last.
@@ -207,6 +291,7 @@ export function textDelta(
     return "token_budget_shift";
   return {
     text: lines.join("\n"),
+    lineMeta: meta,
     lines: patch,
     changes: changes.filter((change) => change.previous_value !== change.value),
     focusMoved,

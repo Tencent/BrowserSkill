@@ -48,23 +48,61 @@ export function collectDomRead(this: Element, options: ReadOptions): RawRead {
         let value: string | boolean | null = null;
         if (field.read === "exists") value = !!element;
         else if (element) {
-          // Mask the entire text field if its subtree includes sensitive data.
-          // Attribute access on sensitive controls is also closed, not just value.
+          // Mask the entire text field if its subtree includes sensitive data that can
+          // appear in textContent. Void <input> elements (e.g. hidden CSRF tokens,
+          // password, file) store their value outside textContent and must not blank out
+          // container reads; direct reads on those inputs still match element.matches().
           const sensitive =
             element.matches(options.sensitive) ||
-            (field.read === "text" && !!element.querySelector(options.sensitive));
-          if (
-            sensitive ||
-            element.closest(
-              "script,style,template,noscript,[data-bsk-overlay],[data-bsk-overlay-host],browser-skill-overlay",
-            )
-          )
-            redacted.push(field.key);
-          else if (field.read === "text") value = element.textContent;
-          else if (field.read === "attribute") value = element.getAttribute(field.attribute!);
-          else if (field.read === "checked")
-            value = element instanceof HTMLInputElement ? element.checked : null;
-          else if (
+            (field.read === "text" &&
+              Array.from(element.querySelectorAll(options.sensitive)).some(
+                (match) => !(match instanceof HTMLInputElement) || match.textContent !== "",
+              ));
+          const excludedAncestors =
+            options.excludedAncestors ??
+            "script,style,template,noscript,[data-bsk-overlay],[data-bsk-overlay-host],browser-skill-overlay";
+          if (sensitive || element.closest(excludedAncestors)) redacted.push(field.key);
+          else if (field.read === "text") {
+            if (!element.querySelector(excludedAncestors)) {
+              value = element.textContent;
+            } else {
+              const parts: string[] = [];
+              const stack: Node[] = [];
+              for (let child = element.lastChild; child; child = child.previousSibling) {
+                stack.push(child);
+              }
+              while (stack.length > 0) {
+                const current = stack.pop()!;
+                if (current.nodeType === Node.TEXT_NODE) {
+                  if (current.nodeValue) parts.push(current.nodeValue);
+                } else if (
+                  current.nodeType === Node.ELEMENT_NODE &&
+                  !(current as Element).matches(excludedAncestors)
+                ) {
+                  for (let child = current.lastChild; child; child = child.previousSibling) {
+                    stack.push(child);
+                  }
+                }
+              }
+              value = parts.join("");
+            }
+          } else if (field.read === "attribute") value = element.getAttribute(field.attribute!);
+          else if (field.read === "checked") {
+            if (element instanceof HTMLInputElement) value = element.checked;
+            else {
+              const role = (element.getAttribute("role") ?? "").trim().toLowerCase();
+              if (
+                ["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"].includes(role)
+              ) {
+                const ariaChecked = (element.getAttribute("aria-checked") ?? "")
+                  .trim()
+                  .toLowerCase();
+                value = ariaChecked === "true" ? true : ariaChecked === "false" ? false : null;
+              } else {
+                value = null;
+              }
+            }
+          } else if (
             element instanceof HTMLInputElement ||
             element instanceof HTMLTextAreaElement ||
             element instanceof HTMLSelectElement

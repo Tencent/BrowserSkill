@@ -1,10 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
 import {
-  type CdpDebuggee,
   type CdpDebuggerApi,
   ChromiumCdp,
   DEFAULT_IDLE_DETACH_MS,
 } from "@/browser-driver/chromium-cdp";
+import { toFrameDocumentHandle, toRootFrameHandle } from "@/browser-driver/frame-handles";
 import type { InputPassthroughMessage } from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDownload } from "../download";
@@ -31,8 +31,10 @@ function event<T extends unknown[]>() {
   };
 }
 
+type RawDebuggerEventArgs = Parameters<Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0]>;
+
 async function fixture(options: { idleDetachMs?: number } = {}) {
-  const onEvent = event<[CdpDebuggee, string, unknown]>();
+  const onEvent = event<RawDebuggerEventArgs>();
   const onDetach = event<[chrome.debugger.Debuggee, string]>();
   const inputs: string[] = [];
   const api: CdpDebuggerApi = {
@@ -208,9 +210,9 @@ it.each([
 });
 
 it.each([
-  undefined,
-  "child-session",
-])("checks cancellation at native dispatch for target %s", async (sessionId) => {
+  "",
+  "child-frame",
+])("checks cancellation at native dispatch for frame %s", async (frameId) => {
   const f = await fixture();
   const abort = new AbortController();
   const attach = deferred<void>();
@@ -220,8 +222,8 @@ it.each([
     return attach.promise;
   });
   const scope = pointerTransactionDeps(f.deps, abort.signal);
-  const pending = scope.deps.cdp.sendToTarget!(
-    { tabId: 7, sessionId },
+  const pending = scope.deps.cdp.sendToFrame(
+    toFrameDocumentHandle(7, { frameId }),
     "Input.dispatchMouseEvent",
     { type: "mousePressed" },
   );
@@ -249,8 +251,8 @@ it("refuses guarded cleanup sends and detaches for a replaced attachment without
     const attachmentId = f.cdp.getAttachmentId(7)!;
     await f.cdp.detach(7);
     const cleanup = () =>
-      f.cdp.sendGuarded(
-        { tabId: 7 },
+      f.cdp.sendToFrame(
+        toRootFrameHandle(7),
         "Input.dispatchMouseEvent",
         { type: "mouseReleased" },
         { attachmentId },

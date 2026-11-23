@@ -117,8 +117,18 @@ describe("visual candidate deduplication", () => {
     const input: VisualDiscoveryResult = {
       ...discovery([candidate(2)]),
       complete: false,
-      issues: [{ reason: "geometry-unavailable", target: { tabId: 1 }, frameId: "missing" }],
-      captureIssues: [{ stage: "ax", reason: "capture-unavailable", target: { tabId: 1 } }],
+      issues: [
+        { reason: "geometry-unavailable", tabId: 1, processKey: "root", frameId: "missing" },
+      ],
+      captureIssues: [
+        {
+          stage: "ax",
+          reason: "capture-unavailable",
+          tabId: 1,
+          processKey: "root",
+          frameId: "main",
+        },
+      ],
     };
     const result = await deduplicateVisualCandidates(input);
     expect(result.complete).toBe(false);

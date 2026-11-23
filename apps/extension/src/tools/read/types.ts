@@ -8,6 +8,7 @@ export interface ReadOptions {
   max_bytes: number;
   timeout_ms: number;
   sensitive: string;
+  excludedAncestors?: string;
 }
 export interface RawRead {
   frame_url: string;

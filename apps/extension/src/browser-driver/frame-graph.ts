@@ -1,69 +1,23 @@
+import type { FrameDocumentGraphOptions } from "./frame-handles";
+
+export {
+  type FrameDocumentGraph,
+  type FrameDocumentGraphOptions,
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  type FrameNodeHandle,
+  isStaleFrameHandleError,
+  StaleFrameHandleError,
+  type TabEventSource,
+  toFrameDocumentHandle,
+  toRootFrameHandle,
+  type UnavailableFrameDocument,
+} from "./frame-handles";
+
+/** Internal to `browser-driver/` — never import outside `apps/extension/src/browser-driver/`. */
 export interface CdpTarget {
   tabId: number;
   sessionId?: string;
-}
-
-/**
- * Stable cross-layer document/frame addressing handle.
- * Never carries transient CDP `sessionId`; `ChromiumCdp` resolves `frameId` to
- * its live session internally and validates `loaderId` (+ optional `documentElementBackendNodeId`).
- */
-export interface FrameDocumentHandle {
-  tabId: number;
-  frameId: string;
-  loaderId: string;
-  documentElementBackendNodeId?: number;
-}
-
-/**
- * Stable cross-layer DOM node addressing handle.
- * Never carries transient CDP `sessionId`; `ChromiumCdp` routes and validates
- * `frameId` + `loaderId` (+ optional `documentElementBackendNodeId`) internally.
- */
-export interface FrameNodeHandle {
-  tabId: number;
-  frameId: string;
-  loaderId: string;
-  backendNodeId: number;
-  documentElementBackendNodeId?: number;
-}
-
-export class StaleFrameHandleError extends Error {
-  readonly tabId: number;
-  readonly frameId: string;
-
-  constructor(handle: { tabId: number; frameId: string }, detail?: string);
-  constructor(tabId: number, frameId: string, detail?: string);
-  constructor(
-    tabOrHandle: number | { tabId: number; frameId: string },
-    frameOrDetail?: string,
-    maybeDetail?: string,
-  ) {
-    const tabId = typeof tabOrHandle === "number" ? tabOrHandle : tabOrHandle.tabId;
-    const frameId = typeof tabOrHandle === "number" ? (frameOrDetail ?? "") : tabOrHandle.frameId;
-    const detail = typeof tabOrHandle === "number" ? maybeDetail : frameOrDetail;
-    super(detail ?? `Frame ${frameId} in tab ${tabId} changed or is no longer available`);
-    this.name = "StaleFrameHandleError";
-    this.tabId = tabId;
-    this.frameId = frameId;
-  }
-}
-
-export function isStaleFrameHandleError(error: unknown): error is StaleFrameHandleError {
-  return error instanceof StaleFrameHandleError;
-}
-
-export function toFrameDocumentHandle(
-  tabId: number,
-  frame: { frameId: string; loaderId?: string },
-  documentElementBackendNodeId?: number,
-): FrameDocumentHandle {
-  return {
-    tabId,
-    frameId: frame.frameId,
-    loaderId: frame.loaderId ?? "",
-    ...(documentElementBackendNodeId !== undefined ? { documentElementBackendNodeId } : {}),
-  };
 }
 
 export interface CdpFrame {
@@ -82,6 +36,8 @@ export interface CdpFrameGraph {
   /** Unavailable subtrees are excluded from routing, but remain visible as gaps. */
   unavailableFrames?: CdpFrame[];
 }
+
+export type CdpFrameGraphOptions = FrameDocumentGraphOptions;
 
 export function omitFrameSubtrees(
   graph: CdpFrameGraph,

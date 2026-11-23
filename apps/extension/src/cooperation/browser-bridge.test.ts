@@ -4,6 +4,7 @@ import {
   attachCooperation,
   COOPERATION_SUBFRAME_DEBOUNCE_MS,
   collectCooperationFrames,
+  FRAME_REPLY_TIMEOUT_MS,
 } from "./browser-bridge";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import type { FrameOwner } from "./hidden-frames";
@@ -99,7 +100,7 @@ it("keeps the collection deadline when a retry never responds", async () => {
   const result = expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toThrow(
     "A page frame is not responding",
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   await result;
   expect(send).toHaveBeenCalledTimes(2);
 });
@@ -125,7 +126,7 @@ it("cannot arm a late retry after the collection deadline", async () => {
   const result = expect(collectCooperationFrames(7, COOPERATION_ARM, "lease")).rejects.toThrow(
     "A page frame is not responding",
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   await result;
   reply(undefined);
   await vi.advanceTimersByTimeAsync(25);
@@ -297,19 +298,40 @@ it.each([
   expect(result.gaps).toEqual([{ frame_id: 3, url: expected, reason: "load_error" }]);
 });
 
-it("does not retry a denied injection or install collectors during release", async () => {
+it("evicts rejected executeScript repairs so transient failures can recover, and never installs collectors during release", async () => {
   const send = vi.fn().mockRejectedValue(missingReceiver());
   const execute = bridge(send);
-  execute.mockRejectedValue(new Error("Cannot access contents of the page"));
+  execute.mockRejectedValueOnce(new Error("Transient injection failure")).mockResolvedValueOnce([]);
   const repairs: FrameRepairs = new Map();
-  for (const kind of [COOPERATION_READ, COOPERATION_READ, COOPERATION_DISABLE])
-    await expect(
-      collectCooperationFrames(7, kind, "lease", undefined, repairs),
-    ).rejects.toMatchObject({
-      reason: "frame_unobservable",
-    });
-  expect(execute).toHaveBeenCalledOnce();
-  expect(send).toHaveBeenCalledTimes(3);
+
+  // First read hits transient executeScript rejection -> fails with frame_unobservable and evicts cache.
+  await expect(
+    collectCooperationFrames(7, COOPERATION_READ, "lease", undefined, repairs),
+  ).rejects.toMatchObject({
+    reason: "frame_unobservable",
+  });
+  expect(repairs.size).toBe(0);
+
+  // Release never calls executeScript even when the frame has no cached repair.
+  await expect(
+    collectCooperationFrames(7, COOPERATION_DISABLE, "lease", undefined, repairs),
+  ).rejects.toMatchObject({
+    reason: "frame_unobservable",
+  });
+  expect(execute).toHaveBeenCalledTimes(1);
+
+  // Next read retries executeScript and succeeds once the frame becomes scriptable.
+  send.mockRejectedValueOnce(missingReceiver()).mockResolvedValueOnce(frame(2));
+  const recovered = await collectCooperationFrames(
+    7,
+    COOPERATION_READ,
+    "lease",
+    undefined,
+    repairs,
+  );
+  expect(recovered.frames.get(0)?.human).toBe(2);
+  expect(execute).toHaveBeenCalledTimes(2);
+  expect(repairs.has(main.documentId)).toBe(true);
 });
 
 it.each([
@@ -335,7 +357,7 @@ it("cannot arm a repaired collector after the deadline", async () => {
   const result = expect(collectCooperationFrames(7, COOPERATION_ARM, "lease")).rejects.toThrow(
     "not responding",
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   await result;
   finish();
   await vi.advanceTimersByTimeAsync(25);
@@ -453,7 +475,7 @@ const settle = async <T>(work: Promise<T>) => {
     (value) => ({ value }),
     (error: unknown) => ({ error }),
   );
-  await vi.advanceTimersByTimeAsync(1200);
+  await vi.advanceTimersByTimeAsync(FRAME_REPLY_TIMEOUT_MS);
   return outcome as Promise<{ value?: T; error?: unknown }>;
 };
 
@@ -904,4 +926,222 @@ it("injects cooperation.js into dynamic subframes on COOPERATION_SUBFRAME_READY 
   }
   await vi.advanceTimersByTimeAsync(COOPERATION_SUBFRAME_DEBOUNCE_MS);
   expect(executeScript).not.toHaveBeenCalled();
+});
+
+it("forwards the active tab lease on COOPERATION_ARM_FRAME and disarms an in-flight arm that races release", async () => {
+  vi.useFakeTimers();
+  const committedListeners = new Set<
+    (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void
+  >();
+  let resolveInFlightArm!: (value: { ok: true }) => void;
+  let holdNextArm = false;
+  const sendMessage = vi.fn(async (_tab: number, message: { kind: string; lease?: string }) => {
+    if (message.kind === COOPERATION_ARM_FRAME) {
+      if (holdNextArm) {
+        holdNextArm = false;
+        return new Promise<{ ok: true }>((resolve) => {
+          resolveInFlightArm = resolve;
+        });
+      }
+      return { ok: true };
+    }
+    return frame();
+  });
+  vi.stubGlobal("chrome", {
+    runtime: {
+      id: "test",
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
+    webNavigation: {
+      getAllFrames: vi.fn(async () => [main]),
+      onBeforeNavigate: { addListener: vi.fn(), removeListener: vi.fn() },
+      onCommitted: {
+        addListener: (
+          listener: (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void,
+        ) => committedListeners.add(listener),
+        removeListener: (
+          listener: (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void,
+        ) => committedListeners.delete(listener),
+      },
+    },
+    tabs: {
+      get: vi.fn(async (id: number) => ({ id, windowId: 10, url: main.url })),
+      sendMessage,
+      onRemoved: { addListener: vi.fn(), removeListener: vi.fn() },
+      onDetached: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
+    scripting: { executeScript: vi.fn().mockResolvedValue([]) },
+  });
+
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 10, initialTabIds: [7] }),
+      ensureActiveTab: async () => 7,
+      remove: async () => {},
+    },
+  });
+  await manager.start("s-1");
+  const controller = attachCooperation(
+    manager,
+    () => {},
+    () => {},
+  );
+  controller.startSession("s-1");
+
+  // Initial observation establishes the tab's active lease.
+  await controller.observeTab(7);
+  const readCall = sendMessage.mock.calls.find(([, msg]) => msg.kind === COOPERATION_READ);
+  const activeLease = readCall?.[1].lease;
+  expect(activeLease).toEqual(expect.any(String));
+
+  // Subsequent onCommitted forwards that active lease in COOPERATION_ARM_FRAME.
+  sendMessage.mockClear();
+  holdNextArm = true;
+  for (const listener of committedListeners) {
+    listener({
+      tabId: 7,
+      frameId: 2,
+      documentId: "racing-child",
+    } as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+  }
+  expect(sendMessage).toHaveBeenCalledWith(
+    7,
+    { kind: COOPERATION_ARM_FRAME, lease: activeLease },
+    { documentId: "racing-child" },
+  );
+
+  // Release the tab while the arm RPC is still in flight; once it resolves, bridge must disarm it.
+  controller.releaseTab(7);
+  resolveInFlightArm({ ok: true });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(sendMessage).toHaveBeenCalledWith(
+    7,
+    { kind: COOPERATION_DISABLE, lease: activeLease },
+    { documentId: "racing-child" },
+  );
+});
+
+it("carries the active lease into injectCooperationAllFrames and never rearms a tab released mid-injection", async () => {
+  vi.useFakeTimers();
+  const messageListeners: Array<
+    (message: unknown, sender: chrome.runtime.MessageSender) => unknown
+  > = [];
+  let resolveInject!: () => void;
+  let injectedDynamicFrame = false;
+  const sendMessage = vi.fn(
+    async (
+      _tabId: number,
+      message: { kind?: string; lease?: string },
+      target?: { documentId?: string },
+    ) => {
+      if (message.kind === COOPERATION_ARM_FRAME) {
+        if (target?.documentId === "dyn-iframe" && !injectedDynamicFrame) {
+          throw new Error("Could not establish connection. Receiving end does not exist.");
+        }
+        return { ok: true };
+      }
+      if (message.kind === COOPERATION_READ) {
+        return {
+          revision: 1,
+          typing: false,
+          focused: false,
+          dirty: false,
+          focusMoved: false,
+          edits: 0,
+          scrolls: 0,
+          selection: 0,
+          interaction: 0,
+          structure: 0,
+        };
+      }
+      return { ok: true };
+    },
+  );
+  const executeScript = vi.fn(
+    () =>
+      new Promise<unknown[]>((resolve) => {
+        resolveInject = () => {
+          injectedDynamicFrame = true;
+          resolve([]);
+        };
+      }),
+  );
+
+  vi.stubGlobal("chrome", {
+    runtime: {
+      id: "ext",
+      onMessage: {
+        addListener: (fn: (message: unknown, sender: chrome.runtime.MessageSender) => unknown) => {
+          messageListeners.push(fn);
+        },
+        removeListener: vi.fn(),
+      },
+    },
+    webNavigation: {
+      getAllFrames: vi.fn().mockResolvedValue([
+        { frameId: 0, parentFrameId: -1, documentId: "root-doc", url: "https://example.com" },
+        { frameId: 2, parentFrameId: 0, documentId: "dyn-iframe", url: "https://child.example" },
+      ]),
+      onBeforeNavigate: { addListener: vi.fn(), removeListener: vi.fn() },
+      onCommitted: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
+    tabs: {
+      get: vi.fn().mockResolvedValue({ id: 7, windowId: 10, active: true }),
+      sendMessage,
+      onRemoved: { addListener: vi.fn(), removeListener: vi.fn() },
+      onDetached: { addListener: vi.fn(), removeListener: vi.fn() },
+    },
+    scripting: { executeScript },
+  });
+
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 10, initialTabIds: [7] }),
+      ensureActiveTab: async () => 7,
+      remove: async () => {},
+    },
+  });
+  await manager.start("s-1");
+  const controller = attachCooperation(
+    manager,
+    () => {},
+    () => {},
+  );
+  controller.startSession("s-1");
+
+  await controller.observeTab(7);
+  const activeLease = sendMessage.mock.calls.find(([, msg]) => msg.kind === COOPERATION_READ)?.[1]
+    .lease;
+  expect(activeLease).toEqual(expect.any(String));
+
+  sendMessage.mockClear();
+  executeScript.mockClear();
+
+  // Dynamic iframe notifies readiness -> debounced injectCooperationAllFrames starts.
+  for (const listener of messageListeners) {
+    listener({ kind: COOPERATION_SUBFRAME_READY }, {
+      id: "ext",
+      tab: { id: 7 },
+    } as chrome.runtime.MessageSender);
+  }
+  await vi.advanceTimersByTimeAsync(50);
+
+  expect(sendMessage).toHaveBeenCalledWith(
+    7,
+    { kind: COOPERATION_ARM_FRAME, lease: activeLease },
+    { documentId: "dyn-iframe" },
+  );
+  expect(executeScript).toHaveBeenCalledTimes(1);
+
+  // Release tab BEFORE executeScript finishes.
+  sendMessage.mockClear();
+  controller.releaseTab(7);
+  await Promise.resolve();
+  resolveInject();
+  await vi.advanceTimersByTimeAsync(0);
+
+  // Must NOT send a post-injection COOPERATION_ARM_FRAME after release.
+  expect(
+    sendMessage.mock.calls.filter(([, msg]) => msg.kind === COOPERATION_ARM_FRAME),
+  ).toHaveLength(0);
 });

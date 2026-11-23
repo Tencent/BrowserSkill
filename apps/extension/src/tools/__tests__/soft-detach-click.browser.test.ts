@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { CooperationController } from "@/cooperation/controller";
 import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import type { CooperationFrames, FrameState } from "@/cooperation/types";
@@ -34,7 +34,7 @@ interface CdpEvent {
   params?: object;
 }
 
-type CdpEventListener = (source: CdpDebuggee, method: string, params: unknown) => void;
+type CdpEventListener = Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0];
 
 const stubInputClock = (cdp: ChromiumCdp) => {
   vi.spyOn(cdp, "prepareInputTimestamp").mockImplementation(async () => ({
@@ -1193,6 +1193,200 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)(
               expect(staleAfterNav).toMatchObject({ code: "not_found" });
             } finally {
               (globalThis as { chrome?: unknown }).chrome = prevChrome;
+              cdp.dispose();
+            }
+          },
+        );
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          server.close((err) => (err ? reject(err) : resolve())),
+        );
+      }
+    }, 60_000);
+
+    it("clicks a ref inside a same-origin iframe nested inside a cross-origin OOPIF after soft-detach reconnect", async () => {
+      const server = createServer((req, res) => {
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        const port = (server.address() as { port: number }).port;
+        if (req.url === "/oopif-nested") {
+          res.end(`<!doctype html>
+            <style>html,body{margin:0;padding:8px}</style>
+            <button id="nested-btn" type="button">Nested OOPIF Action</button>
+            <script>
+              window.nestedClicks = 0;
+              document.getElementById('nested-btn').addEventListener('click', () => {
+                window.nestedClicks += 1;
+              });
+            </script>`);
+          return;
+        }
+        if (req.url === "/oopif-parent") {
+          res.end(`<!doctype html>
+            <style>html,body{margin:0;padding:8px} iframe{width:320px;height:120px;border:1px solid #888;display:block}</style>
+            <iframe id="nested" src="http://localhost:${port}/oopif-nested"></iframe>`);
+          return;
+        }
+        res.end(`<!doctype html>
+          <style>body{margin:0;padding:12px} iframe{width:460px;height:220px;border:1px solid #ccc;display:block}</style>
+          <iframe id="oopif" src="http://localhost:${port}/oopif-parent"></iframe>`);
+      });
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const port = (server.address() as { port: number }).port;
+      const hostUrl = `http://127.0.0.1:${port}/`;
+
+      try {
+        const { withChrome } = await import(
+          new URL(
+            "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+            import.meta.url,
+          ).href
+        );
+        let forwardEvent: ((event: CdpEvent) => void) | undefined;
+        await withChrome(
+          {
+            executable: process.env.BSK_TEST_CHROME,
+            deviceScale: 1,
+            zoom: 1,
+            startupTimeout: 30_000,
+            onEvent: (event: CdpEvent) => forwardEvent?.(event),
+          },
+          async (send: Send) => {
+            const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+              url: hostUrl,
+            });
+            let oopifTargetId = "";
+            await expect
+              .poll(async () => {
+                const { targetInfos } = await send<{
+                  targetInfos: { targetId: string; type: string; url: string }[];
+                }>("Target.getTargets");
+                const found = targetInfos.find(
+                  (t) => t.type === "iframe" && t.url === `http://localhost:${port}/oopif-parent`,
+                );
+                if (found) oopifTargetId = found.targetId;
+                return Boolean(found);
+              })
+              .toBe(true);
+            const { sessionId: monitorOopif } = await send<{ sessionId: string }>(
+              "Target.attachToTarget",
+              { targetId: oopifTargetId, flatten: true },
+            );
+            await expect
+              .poll(async () => {
+                const r = await send<{ result: { value: boolean } }>(
+                  "Runtime.evaluate",
+                  {
+                    expression:
+                      "Boolean(document.getElementById('nested')?.contentDocument?.getElementById('nested-btn'))",
+                    returnByValue: true,
+                  },
+                  monitorOopif,
+                );
+                return r.result.value;
+              })
+              .toBe(true);
+
+            let activeRootSession = "";
+            const childSessions = new Set<string>();
+            const eventListeners = new Set<CdpEventListener>();
+            forwardEvent = (event) => {
+              if (!activeRootSession) return;
+              if (
+                event.method === "Target.attachedToTarget" &&
+                event.sessionId === activeRootSession
+              ) {
+                const sid = (event.params as { sessionId?: string } | undefined)?.sessionId;
+                if (sid) childSessions.add(sid);
+              }
+              if (event.sessionId === activeRootSession) {
+                for (const fn of [...eventListeners]) fn({ tabId: 10 }, event.method, event.params);
+              } else if (event.sessionId && childSessions.has(event.sessionId)) {
+                for (const fn of [...eventListeners])
+                  fn({ tabId: 10, sessionId: event.sessionId }, event.method, event.params);
+              }
+            };
+
+            const api: CdpDebuggerApi = {
+              attach: async () => {
+                childSessions.clear();
+                const reply = await send<{ sessionId: string }>("Target.attachToTarget", {
+                  targetId,
+                  flatten: true,
+                });
+                activeRootSession = reply.sessionId;
+              },
+              detach: async () => {
+                const prev = activeRootSession;
+                activeRootSession = "";
+                childSessions.clear();
+                if (prev) await send("Target.detachFromTarget", { sessionId: prev });
+              },
+              sendCommand: async (target, method, params) => {
+                const sid = target.sessionId ?? activeRootSession;
+                if (!sid) throw new Error("debugger detached");
+                return send(method, params, sid);
+              },
+              onEvent: {
+                addListener: (fn: CdpEventListener) => eventListeners.add(fn),
+                removeListener: (fn: CdpEventListener) => eventListeners.delete(fn),
+              } as unknown as CdpDebuggerApi["onEvent"],
+              onDetach: {
+                addListener() {},
+                removeListener() {},
+              } as unknown as CdpDebuggerApi["onDetach"],
+            };
+
+            const sessions = new SessionManager({
+              agentWindow: {
+                create: async () => ({ windowId: 100, initialTabIds: [10] }),
+                remove: async () => {},
+                ensureActiveTab: async () => 10,
+              },
+            });
+            const ctx = await sessions.start("nested-oopif-same-origin");
+            const cdp = new ChromiumCdp(api, {
+              idleDetachMs: 350,
+              canControlDialog: () => true,
+              onDocumentChanged: (tabId) => sessions.invalidateTabRefs(tabId),
+            });
+            stubInputClock(cdp);
+            const runner = sessionCdpRunner(cdp, ctx.sessionId, () => sessions.has(ctx.sessionId));
+            const tabObj = { id: 10, windowId: 100, active: true, url: hostUrl } as chrome.tabs.Tab;
+            const tabsApi = { get: async () => tabObj, query: async () => [tabObj] };
+            try {
+              const observed = await handleSnapshot(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 10 },
+                { cdp: runner, tabsApi },
+              );
+              if ("code" in observed) throw new Error(JSON.stringify(observed));
+              const nestedBtnRef = observed.text
+                .split("\n")
+                .find((l) => l.includes("Nested OOPIF Action"))
+                ?.match(/@(e\d+)/)?.[1];
+              expect(nestedBtnRef).toBeTruthy();
+
+              // Wait for idle soft-detach so reattach must re-probe documentElementBackendNodeId
+              // on the nested same-origin iframe inside the OOPIF.
+              await expect.poll(() => cdp.isAttached(10), { timeout: 3_000 }).toBe(false);
+
+              const clicked = await handleClick(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 10, ref: nestedBtnRef! },
+                { cdp: runner, tabsApi, bypassOverlay: async () => {} },
+              );
+              expect(clicked).toMatchObject({ used_ref: nestedBtnRef!, tab_id: 10 });
+
+              const clicks = await send<{ result: { value: number } }>(
+                "Runtime.evaluate",
+                {
+                  expression: "document.getElementById('nested').contentWindow.nestedClicks",
+                  returnByValue: true,
+                },
+                monitorOopif,
+              );
+              expect(clicks.result.value).toBe(1);
+            } finally {
               cdp.dispose();
             }
           },

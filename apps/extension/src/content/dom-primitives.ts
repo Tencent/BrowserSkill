@@ -1,11 +1,31 @@
 import {
-  isOverlayHostElementName,
-  OVERLAY_HOST_MARKER_ATTR,
-  OVERLAY_HOST_SELECTOR,
-} from "@/lib/overlay-bridge";
-import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+  OVERLAY_HOST_LEGACY_ATTR,
+  RECORD_PASSWORD_ATTRIBUTE,
+  sensitiveAutocomplete,
+} from "@/lib/dom-predicates";
+import { isOverlayHostElementName, OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 
 export const INTERNAL_BSK_ATTR_PREFIX = "data-bsk-";
+const FORMER_PASSWORDS_SYMBOL = Symbol.for("bsk.former_passwords");
+
+function sharedFormerPasswords(): WeakSet<Element> {
+  const scope = globalThis as unknown as Record<symbol, WeakSet<Element> | undefined>;
+  let set = scope[FORMER_PASSWORDS_SYMBOL];
+  if (!set) {
+    set = new WeakSet<Element>();
+    scope[FORMER_PASSWORDS_SYMBOL] = set;
+  }
+  return set;
+}
+
+/**
+ * Remembers an element that was previously `type="password"` in the extension's
+ * isolated world so sibling scripts (e.g. cooperation) keep masking it after
+ * recording cleanup removes the DOM attribute.
+ */
+export function rememberFormerPassword(element: Element): void {
+  sharedFormerPasswords().add(element);
+}
 
 export function primaryEventTarget(event: Event): EventTarget | null {
   return event.composedPath()[0] ?? event.target;
@@ -13,8 +33,47 @@ export function primaryEventTarget(event: Event): EventTarget | null {
 
 export function isExtensionOverlayElement(element: Element): boolean {
   return (
-    isOverlayHostElementName(element.localName) || element.hasAttribute(OVERLAY_HOST_MARKER_ATTR)
+    isOverlayHostElementName(element.localName) ||
+    element.hasAttribute(OVERLAY_HOST_MARKER_ATTR) ||
+    element.hasAttribute(OVERLAY_HOST_LEGACY_ATTR)
   );
+}
+
+const SHADOW_HOST_HTML_TAGS = new Set([
+  "article",
+  "aside",
+  "blockquote",
+  "body",
+  "div",
+  "footer",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "main",
+  "nav",
+  "p",
+  "section",
+  "span",
+]);
+
+export function canHostShadowRoot(localName: string): boolean {
+  return localName.includes("-") || SHADOW_HOST_HTML_TAGS.has(localName);
+}
+
+/**
+ * Resolves an element's open or closed `ShadowRoot` without walking ancestors.
+ * Callers must already have excluded extension overlay elements.
+ */
+export function uncheckedElementShadowRoot(element: Element): ShadowRoot | null {
+  if (element.shadowRoot) return element.shadowRoot;
+  if (!(element instanceof HTMLElement) || !canHostShadowRoot(element.localName)) {
+    return null;
+  }
+  return globalThis.chrome?.dom?.openOrClosedShadowRoot?.(element) ?? null;
 }
 
 /**
@@ -29,17 +88,10 @@ export function isExtensionOverlayNode(target: EventTarget | null): boolean {
       current = current.host;
       continue;
     }
-    if (current instanceof Element) {
-      if (isExtensionOverlayElement(current) || current.closest(OVERLAY_HOST_SELECTOR)) {
-        return true;
-      }
+    if (current instanceof Element && isExtensionOverlayElement(current)) {
+      return true;
     }
-    const root: Node = current.getRootNode();
-    if (root instanceof ShadowRoot) {
-      current = root.host;
-    } else {
-      current = current instanceof Element ? null : current.parentElement;
-    }
+    current = current.parentNode;
   }
   return false;
 }
@@ -53,12 +105,7 @@ export function isExtensionOverlayEvent(event: Event): boolean {
 
 export function openOrClosedShadowRoot(element: Element): ShadowRoot | null {
   if (isExtensionOverlayNode(element)) return null;
-  return (
-    element.shadowRoot ??
-    (element instanceof HTMLElement
-      ? (globalThis.chrome?.dom?.openOrClosedShadowRoot?.(element) ?? null)
-      : null)
-  );
+  return uncheckedElementShadowRoot(element);
 }
 
 export function resolveDeepActiveElement(
@@ -120,7 +167,22 @@ export function isInternalBskMutation(record: MutationRecord): boolean {
 export function isPasswordTypeMutation(
   record: MutationRecord,
 ): record is MutationRecord & { target: Element } {
-  return record.oldValue?.toLowerCase() === "password" && record.target instanceof Element;
+  return (
+    record.type === "attributes" &&
+    record.attributeName?.toLowerCase() === "type" &&
+    record.oldValue?.toLowerCase() === "password" &&
+    record.target instanceof Element &&
+    !isExtensionOverlayNode(record.target)
+  );
+}
+
+export function isNodeInsideShadowHost(node: Node, host: Element): boolean {
+  let root = node.getRootNode();
+  while (root instanceof ShadowRoot) {
+    if (root.host === host) return true;
+    root = root.host.getRootNode();
+  }
+  return false;
 }
 
 export function isSensitiveFormField(
@@ -131,37 +193,92 @@ export function isSensitiveFormField(
     (target instanceof HTMLInputElement && target.type.toLowerCase() === "password") ||
     target.hasAttribute(RECORD_PASSWORD_ATTRIBUTE) ||
     Boolean(formerPasswords?.has(target)) ||
+    sharedFormerPasswords().has(target) ||
     sensitiveAutocomplete(target.getAttribute("autocomplete"))
   );
 }
 
-const SUBFRAME_OWNER_SELECTOR = "iframe,frame,object,embed,fencedframe";
-const SUBFRAME_OWNER_TAGS = new Set(["iframe", "frame", "object", "embed", "fencedframe"]);
+export const SUBFRAME_OWNER_TAGS = new Set(["iframe", "frame", "object", "embed", "fencedframe"]);
 
-function subtreeHasSubframeElement(root: Element | ShadowRoot): boolean {
+const NON_OVERLAY_ELEMENT_FILTER: NodeFilter = {
+  acceptNode(node) {
+    return isExtensionOverlayElement(node as Element)
+      ? NodeFilter.FILTER_REJECT
+      : NodeFilter.FILTER_ACCEPT;
+  },
+};
+
+export function scanSubtreeForShadowRootsAndSubframes(
+  target: Node,
+  onRoot: (root: Document | ShadowRoot) => void,
+  visited = new Set<Node>(),
+): boolean {
+  if (visited.has(target) || isExtensionOverlayNode(target)) return false;
+  visited.add(target);
+  const doc = target.ownerDocument ?? document;
+  let foundSubframe = false;
+  if (target.nodeType === Node.DOCUMENT_NODE || target instanceof ShadowRoot) {
+    onRoot(target as Document | ShadowRoot);
+  } else if (target instanceof Element) {
+    if (SUBFRAME_OWNER_TAGS.has(target.localName)) foundSubframe = true;
+    const nested = uncheckedElementShadowRoot(target);
+    if (nested && scanSubtreeForShadowRootsAndSubframes(nested, onRoot, visited)) {
+      foundSubframe = true;
+    }
+  } else {
+    return false;
+  }
+  const walker = doc.createTreeWalker(target, NodeFilter.SHOW_ELEMENT, NON_OVERLAY_ELEMENT_FILTER);
+  for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const element = current as Element;
+    if (SUBFRAME_OWNER_TAGS.has(element.localName)) foundSubframe = true;
+    const nested = uncheckedElementShadowRoot(element);
+    if (nested && scanSubtreeForShadowRootsAndSubframes(nested, onRoot, visited)) {
+      foundSubframe = true;
+    }
+  }
+  return foundSubframe;
+}
+
+export function visitShadowRoots(
+  target: Node,
+  onRoot: (root: Document | ShadowRoot) => void,
+  visited = new Set<Node>(),
+): void {
+  scanSubtreeForShadowRootsAndSubframes(target, onRoot, visited);
+}
+
+function subtreeHasSubframeElement(root: Element | ShadowRoot, visited: Set<Node>): boolean {
+  if (visited.has(root)) return false;
+  visited.add(root);
+  const doc = root.ownerDocument ?? document;
   if (root instanceof Element) {
-    if (isExtensionOverlayNode(root)) return false;
+    if (isExtensionOverlayElement(root)) return false;
     if (SUBFRAME_OWNER_TAGS.has(root.localName)) return true;
-    const nestedShadow = openOrClosedShadowRoot(root);
-    if (nestedShadow && subtreeHasSubframeElement(nestedShadow)) return true;
+    const nestedShadow = uncheckedElementShadowRoot(root);
+    if (nestedShadow && subtreeHasSubframeElement(nestedShadow, visited)) return true;
   }
-  for (const match of root.querySelectorAll(SUBFRAME_OWNER_SELECTOR)) {
-    if (!isExtensionOverlayNode(match)) return true;
-  }
-  for (const element of root.querySelectorAll("*")) {
-    if (isExtensionOverlayNode(element)) continue;
-    const nestedShadow = openOrClosedShadowRoot(element);
-    if (nestedShadow && subtreeHasSubframeElement(nestedShadow)) return true;
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, NON_OVERLAY_ELEMENT_FILTER);
+  for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const element = current as Element;
+    if (SUBFRAME_OWNER_TAGS.has(element.localName)) return true;
+    const nestedShadow = uncheckedElementShadowRoot(element);
+    if (nestedShadow && subtreeHasSubframeElement(nestedShadow, visited)) return true;
   }
   return false;
 }
 
 export function hasAddedSubframeElement(records: MutationRecord[]): boolean {
+  const visited = new Set<Node>();
   for (const record of records) {
     if (record.type !== "childList" || isExtensionOverlayNode(record.target)) continue;
     for (const node of record.addedNodes) {
-      if (!(node instanceof Element)) continue;
-      if (subtreeHasSubframeElement(node)) return true;
+      if (!(node instanceof Element) || isExtensionOverlayNode(node)) continue;
+      if (subtreeHasSubframeElement(node, visited)) return true;
     }
   }
   return false;

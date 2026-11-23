@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
+import { type CdpRunner, type ChromeTabsApi, createStubCdpRunner } from "@/tools/shared";
 import { ObservationNodeIndex, type RegisteredObservation } from "../recording/observation-capture";
 import { RecordingObservationSession } from "../recording/observation-session";
 import { SettleController } from "../recording/settle-controller";
@@ -17,11 +17,13 @@ describe("SettleController", () => {
 
   it("aborts superseded capture work and lands the prior action on the next origin", async () => {
     vi.useFakeTimers();
-    const cdp: CdpRunner = {
-      send: vi.fn(async () => ({
-        result: { value: { idleMs: 1_000, readyState: "complete" } },
-      })) as unknown as CdpRunner["send"],
-    };
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: vi.fn(async (_tabId: number, method: string) => {
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+        return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
+      }) as unknown as CdpRunner["send"],
+    });
     const tabsApi: ChromeTabsApi = {
       get: vi.fn(async () => ({ id: 7, url: OBSERVATION.url }) as chrome.tabs.Tab),
       query: vi.fn(async () => []),
@@ -64,11 +66,13 @@ describe("SettleController", () => {
 
   it("does not consume a newer redirect while reading the prior landing URL", async () => {
     vi.useFakeTimers();
-    const cdp: CdpRunner = {
-      send: vi.fn(async () => ({
-        result: { value: { idleMs: 1_000, readyState: "complete" } },
-      })) as unknown as CdpRunner["send"],
-    };
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: vi.fn(async (_tabId: number, method: string) => {
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+        return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
+      }) as unknown as CdpRunner["send"],
+    });
     let resolveFirstTab!: (tab: chrome.tabs.Tab) => void;
     const firstTab = new Promise<chrome.tabs.Tab>((resolve) => {
       resolveFirstTab = resolve;
@@ -105,11 +109,11 @@ describe("SettleController", () => {
       if (method === "Page.createIsolatedWorld") return { executionContextId: 39 };
       return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
     });
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: send as unknown as CdpRunner["send"],
-      sendToFrame: sendToFrame as unknown as NonNullable<CdpRunner["sendToFrame"]>,
+      sendToFrame: sendToFrame as unknown as CdpRunner["sendToFrame"],
       hasOwnFrameTarget: (_tabId, frameId) => frameId === "oopif-frame",
-    };
+    });
     const tabsApi: ChromeTabsApi = {
       get: vi.fn(async () => ({ id: 7, url: OBSERVATION.url }) as chrome.tabs.Tab),
       query: vi.fn(async () => []),
@@ -131,7 +135,6 @@ describe("SettleController", () => {
       handle,
       "Runtime.evaluate",
       expect.objectContaining({ contextId: 39 }),
-      undefined,
     );
     expect(drafts[0]?.postStateId).toBe("s-next");
   });

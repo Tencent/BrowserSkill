@@ -384,9 +384,10 @@ describe("handleTabClose", () => {
     expect(spies.remove).not.toHaveBeenCalled();
     expect(approval).not.toHaveBeenCalled();
   });
-  it("removes a tab inside the Agent Window", async () => {
+  it("removes an agent-controlled tab inside the Agent Window", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    await sm.start("aa11");
+    const ctx = await sm.start("aa11");
+    ctx.agentCreatedTabs.add(5);
     const state: FakeTabState = {
       tabs: new Map([[5, { id: 5, windowId: 100 } as chrome.tabs.Tab]]),
       nextTabId: 50,
@@ -397,6 +398,27 @@ describe("handleTabClose", () => {
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res.tab_id).toBe(5);
     expect(spies.remove).toHaveBeenCalledWith(5);
+  });
+
+  it("refuses to close an unmanaged user-opened tab inside the Agent Window in local sessions", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const state: FakeTabState = {
+      tabs: new Map([
+        [1, { id: 1, windowId: 100, active: true } as chrome.tabs.Tab],
+        [5, { id: 5, windowId: 100, active: false } as chrome.tabs.Tab],
+      ]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const res = await handleTabClose(sm, { session_id: "aa11", tab_id: 5 }, { tabs: api });
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
+    expect(ctx.agentCreatedTabs.has(5)).toBe(false);
+    expect(spies.remove).not.toHaveBeenCalled();
   });
 
   it("rejects closing a borrowed tab — caller must tab_return first", async () => {
@@ -571,9 +593,10 @@ describe("handleTabClose browser compatibility (issue #272)", () => {
 });
 
 describe("handleTabSelect", () => {
-  it("activates a tab inside the Agent Window", async () => {
+  it("activates an agent-controlled tab inside the Agent Window", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    await sm.start("aa11");
+    const ctx = await sm.start("aa11");
+    ctx.agentCreatedTabs.add(3);
     const state: FakeTabState = {
       tabs: new Map([[3, { id: 3, windowId: 100 } as chrome.tabs.Tab]]),
       nextTabId: 50,
@@ -584,6 +607,23 @@ describe("handleTabSelect", () => {
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res).toEqual({ tab_id: 3, window_id: 100 });
     expect(spies.update).toHaveBeenCalledWith(3, { active: true });
+  });
+
+  it("refuses to select an unmanaged user-opened tab inside the Agent Window in local sessions", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const state: FakeTabState = {
+      tabs: new Map([[3, { id: 3, windowId: 100 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const res = await handleTabSelect(sm, { session_id: "aa11", tab_id: 3 }, { tabs: api });
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
+    expect(spies.update).not.toHaveBeenCalled();
   });
 
   it("rejects activating a tab in a different session's Agent Window", async () => {
@@ -1461,7 +1501,11 @@ describe("handleTabReturn", () => {
       throw new Error("simulated move failure");
     });
     const { api: windowsApi } = makeWindowsApi(state);
-    const res = await returnBorrowedTab(ctx, 7, { tabs: api, windows: windowsApi });
+    const res = await returnBorrowedTab(ctx, 7, {
+      tabs: api,
+      windows: windowsApi,
+      isAgentWindowId: (id) => sm.findByWindowId(id) !== null,
+    });
     expect(res).toMatchObject({ code: "cdp_failed" });
   });
 
@@ -1483,7 +1527,11 @@ describe("handleTabReturn", () => {
       createWindowId: 777,
     });
 
-    const res = await returnBorrowedTab(ctx, 7, { tabs: api, windows: windowsApi });
+    const res = await returnBorrowedTab(ctx, 7, {
+      tabs: api,
+      windows: windowsApi,
+      isAgentWindowId: (id) => sm.findByWindowId(id) !== null,
+    });
 
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res.toWindowId).toBe(777);
@@ -2106,4 +2154,97 @@ it("claims an unremovable tab into agentCreatedTabs when chromeTabMutationApi.cr
   } finally {
     vi.stubGlobal("chrome", prevChrome);
   }
+});
+
+it("never returns a borrowed user tab into another live session's Agent Window when original window closed", async () => {
+  const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
+  const ctxA = await sm.start("sess-a");
+  await sm.start("sess-b"); // owns Agent Window 101
+
+  const state: FakeTabState = {
+    tabs: new Map([[7, { id: 7, windowId: 100, index: 0 } as chrome.tabs.Tab]]),
+    nextTabId: 50,
+    windowsClosed: new Set([200]), // original user window 200 is closed
+  };
+  ctxA.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 0 });
+
+  const { api, spies } = makeTabMutationApi(state);
+  // Last focused window is session B's Agent Window (101), so returnBorrowedTab must skip 101 and create a fresh user window.
+  const windowsApi = {
+    get: vi.fn(async (windowId: number) => {
+      if (state.windowsClosed.has(windowId)) throw new Error("window closed");
+      return { id: windowId, type: "normal" } as chrome.windows.Window;
+    }),
+    getLastFocused: vi.fn(async () => ({ id: 101, type: "normal" }) as chrome.windows.Window),
+    create: vi.fn(async () => ({ id: 999, type: "normal" }) as chrome.windows.Window),
+    remove: vi.fn(async () => {}),
+  };
+
+  const res = await returnBorrowedTab(ctxA, 7, {
+    tabs: api,
+    windows: windowsApi,
+    isAgentWindowId: (id) => sm.findByWindowId(id) !== null,
+  });
+
+  if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+  expect(res.toWindowId).toBe(999);
+  expect(res.toWindowId).not.toBe(101);
+  expect(spies.move).toHaveBeenCalledWith(7, { windowId: 999, index: 0 });
+});
+
+it("invalidates an uncommitted borrow reservation on replaceTab so the replacement tab can be borrowed cleanly", async () => {
+  const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  await sm.start("sess-replace-borrow");
+
+  const state: FakeTabState = {
+    tabs: new Map([
+      [55, { id: 55, windowId: 200, index: 0, url: "https://example.test" } as chrome.tabs.Tab],
+    ]),
+    nextTabId: 90,
+    windowsClosed: new Set(),
+  };
+  const { api } = makeTabMutationApi(state);
+
+  let releaseApproval!: (value: boolean) => void;
+  const approvalGate = new Promise<boolean>((resolve) => {
+    releaseApproval = resolve;
+  });
+
+  const pendingBorrow = handleTabBorrow(
+    sm,
+    { session_id: "sess-replace-borrow", tab_id: 55 },
+    {
+      tabs: api,
+      approveBorrow: vi.fn(() => approvalGate),
+    },
+  );
+
+  // While approval is still pending on tab 55, Chrome replaces tab 55 -> 88.
+  state.tabs.delete(55);
+  state.tabs.set(88, {
+    id: 88,
+    windowId: 200,
+    index: 0,
+    url: "https://example.test",
+  } as chrome.tabs.Tab);
+  sm.replaceTab(88, 55);
+
+  releaseApproval(true);
+  const oldResult = await pendingBorrow;
+  expect("code" in oldResult).toBe(true);
+
+  // Replacement tab 88 must NOT be locked in borrowReservations; borrowing 88 succeeds cleanly.
+  const retryResult = await handleTabBorrow(
+    sm,
+    { session_id: "sess-replace-borrow", tab_id: 88 },
+    {
+      tabs: api,
+      approveBorrow: vi.fn(async () => true),
+    },
+  );
+  expect(retryResult).toMatchObject({
+    tab_id: 88,
+    original_window_id: 200,
+    agent_window_id: 100,
+  });
 });

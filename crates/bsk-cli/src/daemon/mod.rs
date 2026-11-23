@@ -56,8 +56,17 @@ pub async fn run(
     config: DaemonConfig,
     ipc_socket: Option<PathBuf>,
 ) -> anyhow::Result<DaemonHandle> {
-    let ws_port = config.ws_port;
-    let state = Arc::new(DaemonState::new(config));
+    run_with_state(Arc::new(DaemonState::new(config)), ipc_socket).await
+}
+
+/// Variant of [`run`] that accepts a pre-built [`DaemonState`] (e.g. so tests
+/// can isolate `intent_wal` and `audit` inside a temporary directory without
+/// touching `~/.bsk`).
+pub async fn run_with_state(
+    state: Arc<DaemonState>,
+    ipc_socket: Option<PathBuf>,
+) -> anyhow::Result<DaemonHandle> {
+    let ws_port = state.config.ws_port;
     let ws_addr = SocketAddr::new(state.config.listen_ip(), ws_port);
     let ws_handle = ws::WsServer::new(Arc::clone(&state)).bind(ws_addr).await?;
     let ipc_handle = match ipc_socket {

@@ -54,12 +54,19 @@ fn fake_session(session_id: &str, browser_id: &str) -> Session {
     }
 }
 
-async fn spawn_reaping_daemon() -> daemon::DaemonHandle {
+async fn spawn_reaping_daemon() -> (daemon::DaemonHandle, tempfile::TempDir) {
     // Tiny window so the reaper acts within the test's lifetime.
+    let temp = tempfile::tempdir().unwrap();
     let config = DaemonConfig::new(0)
         .with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal)
         .with_browser_liveness(Duration::from_millis(150), Duration::from_millis(25));
-    daemon::run(config, None).await.unwrap()
+    let handle = daemon::run_with_state(
+        std::sync::Arc::new(bsk::daemon::DaemonState::new_isolated(config, temp.path())),
+        None,
+    )
+    .await
+    .unwrap();
+    (handle, temp)
 }
 
 async fn wait_until<F: Fn() -> bool>(pred: F, within: Duration) -> bool {
@@ -75,7 +82,7 @@ async fn wait_until<F: Fn() -> bool>(pred: F, within: Duration) -> bool {
 
 #[tokio::test]
 async fn reaper_drops_silent_heartbeat_browser_and_purges_its_sessions() {
-    let handle = spawn_reaping_daemon().await;
+    let (handle, _temp) = spawn_reaping_daemon().await;
     let state = handle.state();
 
     state.browsers.insert(fake_client("hb", true, 10));
@@ -101,7 +108,7 @@ async fn reaper_drops_silent_heartbeat_browser_and_purges_its_sessions() {
 
 #[tokio::test]
 async fn reaper_leaves_legacy_browser_without_heartbeat_alone() {
-    let handle = spawn_reaping_daemon().await;
+    let (handle, _temp) = spawn_reaping_daemon().await;
     let state = handle.state();
 
     // Silent far past the window, but never heartbeated → must survive.
@@ -115,4 +122,165 @@ async fn reaper_leaves_legacy_browser_without_heartbeat_alone() {
     );
 
     handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn reaper_eviction_closes_live_ws_connection_and_settles_pending_waiters() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let (handle, _temp) = spawn_reaping_daemon().await;
+    let state = handle.state();
+
+    let mut request = format!("ws://{}/", handle.ws_addr())
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Origin",
+        "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+            .parse()
+            .unwrap(),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({
+            "id": "hs-1",
+            "method": "system.handshake",
+            "params": {
+                "client": bsk_protocol::EXTENSION_CLIENT_ID,
+                "version": "0.5.0",
+                "protocol_version": bsk::daemon::state::PROTOCOL_VERSION,
+                "instance_id": "deadpeer",
+                "label": "Silent peer",
+                "browser": { "name": "chrome", "version": "136.0" }
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let hs_reply = ws.next().await.unwrap().unwrap();
+    assert!(matches!(hs_reply, Message::Text(_)));
+
+    // Opt this connection into liveness reaping with a heartbeat, then go silent.
+    ws.send(Message::Text(
+        serde_json::json!({ "event": "system.heartbeat", "payload": {} }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        wait_until(
+            || state
+                .browsers
+                .get(&BrowserId("deadpeer".into()))
+                .is_some_and(|c| c.has_heartbeat()),
+            Duration::from_secs(2),
+        )
+        .await,
+        "heartbeat must be observed before going silent"
+    );
+
+    // Register a pending RPC waiter on the live client; eviction must wake it
+    // immediately instead of letting callers hang until timeout.
+    let client = state
+        .browsers
+        .get(&BrowserId("deadpeer".into()))
+        .expect("connected browser");
+    let waiter = client
+        .pending
+        .lock()
+        .unwrap()
+        .register("inflight-req".into())
+        .unwrap();
+    drop(client);
+
+    // Waiter settles immediately when the reaper calls `client.close()`.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("pending waiter must settle on eviction")
+            .is_err(),
+        "eviction must close pending waiters with transport closed"
+    );
+
+    // And the server-side `drive_connection` task exits and closes the real WS!
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(Message::Close(_)) | Err(_) => return true,
+                Ok(_) => {}
+            }
+        }
+        true
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        closed,
+        "reaper eviction must wake drive_connection and close the underlying WS"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn ws_shutdown_cancels_inflight_handshake_and_prevents_late_registration() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let (handle, _temp) = spawn_reaping_daemon().await;
+    let state = handle.state();
+
+    // Complete TCP + HTTP WS upgrade with a valid Origin, then pause BEFORE
+    // sending `system.handshake` so the server task is parked mid-handshake.
+    let mut request = format!("ws://{}/", handle.ws_addr())
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Origin",
+        "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .parse()
+            .unwrap(),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    // Give the server task a moment to enter the post-upgrade handshake wait.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Shut down the daemon while the socket is still mid-handshake: shutdown
+    // must abort the in-flight task promptly (well under the 5 s handshake
+    // timeout) and must not allow a late `system.handshake` to register after
+    // `WsHandle` exits.
+    let started = Instant::now();
+    let shutdown_task = tokio::spawn(async move { handle.shutdown().await });
+    let _ = ws
+        .send(Message::Text(
+            serde_json::json!({
+                "id": "late-hs",
+                "method": "system.handshake",
+                "params": {
+                    "instance_id": "latepeer",
+                    "version": "0.1.0",
+                    "protocol_version": bsk_protocol::PROTOCOL_VERSION,
+                    "browser": { "name": "Chrome", "version": "130" }
+                }
+            })
+            .to_string(),
+        ))
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), shutdown_task)
+        .await
+        .expect("daemon shutdown must cancel in-flight WS handshakes promptly")
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "shutdown waited too long for in-flight WS handshake: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        state.browsers.snapshot().is_empty(),
+        "no browser may remain registered after WsHandle shutdown returns"
+    );
 }

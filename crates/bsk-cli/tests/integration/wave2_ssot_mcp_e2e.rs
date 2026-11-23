@@ -823,6 +823,19 @@ async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
         .find(|t| t["name"] == "bsk_interact")
         .unwrap();
     assert!(
+        interact_def["inputSchema"]["properties"]["max_tokens"]["description"]
+            .as_str()
+            .is_some_and(|s| s.contains("sync_after")),
+        "bsk_interact schema must document max_tokens"
+    );
+    let plan_def = tools_arr.iter().find(|t| t["name"] == "bsk_plan").unwrap();
+    assert!(
+        plan_def["inputSchema"]["properties"]["max_tokens"]["description"]
+            .as_str()
+            .is_some_and(|s| s.contains("token")),
+        "bsk_plan schema must document max_tokens"
+    );
+    assert!(
         interact_def["inputSchema"]["properties"]["expect"]["items"]["properties"]["target"]
             ["description"]
             .as_str()
@@ -1391,6 +1404,122 @@ async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
         )
         .await;
     assert_eq!(snap_mcp_ok["tab_id"], 7);
+
+    // Issue #755: MCP bsk_interact (with sync_after/until_visible) and bsk_plan forward max_tokens,
+    // while bsk_interact rejects max_tokens without sync_after/until_visible before daemon contact.
+    let before_mcp_budget_err = ext_state.lock().unwrap().recorded.len();
+    let interact_budget_err = mcp
+        .call_err(
+            "bsk_interact",
+            json!({
+                "action": "click",
+                "scope": "agent-alpha",
+                "params": { "ref": "@e1" },
+                "context": &next_ctx,
+                "max_tokens": 150
+            }),
+        )
+        .await;
+    assert_eq!(interact_budget_err["code"], "invalid_params");
+    assert_eq!(
+        ext_state.lock().unwrap().recorded.len(),
+        before_mcp_budget_err,
+        "bsk_interact with max_tokens without sync_after must fail closed before WS dispatch"
+    );
+
+    let before_mcp_step_budget = ext_state.lock().unwrap().recorded.len();
+    let interact_budget_ok = mcp
+        .call_ok(
+            "bsk_interact",
+            json!({
+                "action": "click",
+                "scope": "agent-alpha",
+                "params": { "ref": "@e1" },
+                "context": &next_ctx,
+                "sync_after": true,
+                "max_tokens": 150
+            }),
+        )
+        .await;
+    assert_eq!(interact_budget_ok["ok"], true);
+    let post_interact_ctx = interact_budget_ok["post"]["context_id"]
+        .as_str()
+        .expect("post context_id after budgeted bsk_interact")
+        .to_owned();
+    {
+        let st = ext_state.lock().unwrap();
+        let slice = &st.recorded[before_mcp_step_budget..];
+        let click_req = slice
+            .iter()
+            .find(|r| r.method == Method::ToolClick)
+            .expect("tool.click sent");
+        assert!(
+            click_req
+                .params
+                .as_ref()
+                .unwrap()
+                .get("max_tokens")
+                .is_none()
+        );
+        let coop_req = slice
+            .iter()
+            .find(|r| r.method == Method::ToolCooperate)
+            .expect("tool.cooperate sent");
+        assert_eq!(coop_req.params.as_ref().unwrap()["max_tokens"], 150);
+    }
+
+    let before_mcp_until_budget = ext_state.lock().unwrap().recorded.len();
+    let interact_until_ok = mcp
+        .call_ok(
+            "bsk_interact",
+            json!({
+                "action": "click",
+                "scope": "agent-alpha",
+                "params": { "ref": "@e1" },
+                "context": &post_interact_ctx,
+                "until_visible": "#saved",
+                "max_tokens": 150
+            }),
+        )
+        .await;
+    assert_eq!(interact_until_ok["ok"], true);
+    let post_until_ctx = interact_until_ok["post"]["context_id"]
+        .as_str()
+        .expect("post context_id after until_visible bsk_interact")
+        .to_owned();
+    {
+        let st = ext_state.lock().unwrap();
+        let slice = &st.recorded[before_mcp_until_budget..];
+        let coop_req = slice
+            .iter()
+            .find(|r| r.method == Method::ToolCooperate)
+            .expect("tool.cooperate sent after until_visible bsk_interact");
+        assert_eq!(coop_req.params.as_ref().unwrap()["max_tokens"], 150);
+    }
+
+    let before_mcp_plan_budget = ext_state.lock().unwrap().recorded.len();
+    let plan_budget_ok = mcp
+        .call_ok(
+            "bsk_plan",
+            json!({
+                "scope": "agent-alpha",
+                "context": &post_until_ctx,
+                "steps": [{ "action": "click", "ref": "@e1" }],
+                "max_tokens": 150
+            }),
+        )
+        .await;
+    assert_eq!(plan_budget_ok["ok"], true);
+    assert_eq!(plan_budget_ok["completed"], 1);
+    {
+        let st = ext_state.lock().unwrap();
+        let slice = &st.recorded[before_mcp_plan_budget..];
+        let coop_req = slice
+            .iter()
+            .find(|r| r.method == Method::ToolCooperate)
+            .expect("tool.cooperate sent after bsk_plan");
+        assert_eq!(coop_req.params.as_ref().unwrap()["max_tokens"], 150);
+    }
 
     // Cleanly stop scoped sessions.
     let _ = mcp

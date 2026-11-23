@@ -1,4 +1,4 @@
-import { type FrameNodeHandle, isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { type FrameNodeHandle, isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type { SessionManager } from "@/session-manager/manager";
 import type { DragParams, DragPoint, DragResult, DragTarget, RpcError } from "@/transport/types";
 import { withClickOverlay } from "./click-overlay";
@@ -10,6 +10,7 @@ import { type InteractionDeps, modifiersBitfield, resolveActionTarget } from "./
 import { pointerTransactionDeps } from "./pointer-transaction";
 import {
   type CdpRunner,
+  delegateCdpRunner,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
@@ -19,21 +20,9 @@ import {
 import { pointReachesTarget } from "./target-hit";
 import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 
-async function isOutOfProcessNode(
-  cdp: CdpRunner,
-  tabId: number,
-  handle: FrameNodeHandle,
-): Promise<boolean> {
+function isOutOfProcessNode(cdp: CdpRunner, tabId: number, handle: FrameNodeHandle): boolean {
   if (!handle.frameId) return false;
-  if (cdp.hasOwnFrameTarget) {
-    return cdp.hasOwnFrameTarget(tabId, handle.frameId);
-  }
-  if (cdp.getFrameGraph) {
-    const graph = await cdp.getFrameGraph(tabId);
-    const frame = graph.frames.find((entry) => entry.frameId === handle.frameId);
-    return Boolean(frame?.target.sessionId);
-  }
-  return false;
+  return cdp.hasOwnFrameTarget(tabId, handle.frameId);
 }
 
 const validPoint = (p: DragPoint | undefined) =>
@@ -126,18 +115,19 @@ export async function handleDrag(
   };
   // Check identity even between frames of a gesture. The transaction also fences
   // late CDP continuations after the outer time boundary has retired the operation.
-  const cdp = new Proxy(inputDeps.cdp, {
-    get(target, key) {
-      if (key === "resourceCleanup") return deps.cdp.resourceCleanup ?? deps.cdp;
-      const value = Reflect.get(target, key);
-      return typeof value === "function"
-        ? (...args: unknown[]) => {
-            check();
-            return value.apply(target, args);
-          }
-        : value;
+  const cdp = delegateCdpRunner(
+    inputDeps.cdp,
+    { resourceCleanup: deps.cdp.resourceCleanup ?? deps.cdp },
+    {
+      intercept: (target, _key, value) =>
+        typeof value === "function"
+          ? (...args: unknown[]) => {
+              check();
+              return value.apply(target, args);
+            }
+          : undefined,
     },
-  }) as CdpRunner;
+  );
   let outcome: DragResult | RpcError;
   try {
     outcome = await waitBounded(
@@ -184,11 +174,11 @@ export async function handleDrag(
               y: p.y + (o?.y ?? 0),
             });
             const sourceOopif = params.source.offset
-              ? await isOutOfProcessNode(cdp, tab.tabId, source.handle)
+              ? isOutOfProcessNode(cdp, tab.tabId, source.handle)
               : false;
             const targetOopif =
               target && params.target?.offset
-                ? await isOutOfProcessNode(cdp, tab.tabId, target.handle)
+                ? isOutOfProcessNode(cdp, tab.tabId, target.handle)
                 : false;
             if (sourceOopif || targetOopif)
               return {
@@ -272,9 +262,13 @@ export async function handleDrag(
                 } finally {
                   const cleanup = deps.cdp.resourceCleanup ?? deps.cdp;
                   for (const node of target ? [source, target] : [source])
-                    await sendToFrameHandle(cleanup, node.handle, "Runtime.releaseObjectGroup", {
-                      objectGroup: group,
-                    }).catch(() => {});
+                    await sendToFrameHandle(
+                      cleanup,
+                      node.handle,
+                      "Runtime.releaseObjectGroup",
+                      { objectGroup: group },
+                      { allowReattach: false },
+                    ).catch(() => {});
                 }
                 await cdp.verifyPointerTarget?.(
                   { handle: source.handle },
@@ -403,6 +397,7 @@ export async function handleDrag(
                       target.handle,
                       "Runtime.releaseObjectGroup",
                       { objectGroup: group },
+                      { allowReattach: false },
                     ).catch(() => {});
                   }
                   await cdp.verifyPointerTarget?.(

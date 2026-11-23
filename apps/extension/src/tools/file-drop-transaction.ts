@@ -2,23 +2,18 @@
 // events are sent to the target that owns the node: root targets use top-level
 // coordinates, while OOPIF targets require coordinates local to their session.
 
-import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type { RpcError, TransferEffectState } from "@/transport/types";
 import { rpcError, transferError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
 import type { ResolvedActionTarget } from "./interaction";
 import { type CdpRunner, isRpcError, sendToFrameHandle } from "./shared";
-import { pointBelongsToTarget } from "./target-hit";
+import { pointReachesTarget } from "./target-hit";
 import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 
 const CLEANUP_TIMEOUT_MS = 1_000;
 
 type FileDropPhase = "resolve_target" | "drag_enter" | "drag_over" | "drop" | "cleanup";
-
-interface RuntimeReply {
-  result?: { value?: unknown; objectId?: string };
-  exceptionDetails?: { text?: string; exception?: { description?: string } };
-}
 
 interface DragData {
   items: [];
@@ -32,6 +27,8 @@ export interface FileDropTransactionOptions {
   files: string[];
   timeoutMs: number;
   signal?: AbortSignal;
+  /** Called immediately before dispatching the final `drop` event (commit boundary). */
+  onDropSent?: () => void;
   withOverlayHidden: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
@@ -78,19 +75,11 @@ function methodUnavailable(error: unknown): boolean {
   );
 }
 
-function runtimeError(reply: RuntimeReply, fallback: string): Error | null {
-  if (!reply.exceptionDetails) return null;
-  return new Error(
-    reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text ?? fallback,
-  );
-}
-
 export async function uploadThroughFileDrop(
   options: FileDropTransactionOptions,
 ): Promise<FileDropTransactionResult | RpcError> {
   const deadline = Date.now() + options.timeoutMs;
   const handle = options.actionTarget.handle;
-  const objectGroup = `bsk-file-drop-${crypto.randomUUID()}`;
   const dragData: DragData = {
     items: [],
     files: options.files,
@@ -129,13 +118,16 @@ export async function uploadThroughFileDrop(
     outcome = await options.withOverlayHidden(async () => {
       try {
         try {
-          const belongs = await waitBounded(
-            pointBelongsToTarget(options.cdp, { handle }, point.x, point.y, objectGroup),
+          // Verify through the full top-level target chain so parent-page modals,
+          // sticky headers, and nested frame overlays occluding an OOPIF drop
+          // target fail closed before any drag event is sent.
+          const reaches = await waitBounded(
+            pointReachesTarget(options.cdp, { handle }, geometry.actionPoint),
             deadline,
             options.signal,
             "verifying file-drop target timed out",
           );
-          if (!belongs) {
+          if (!reaches) {
             return failure(
               "permission_denied",
               "file_drop_target_unavailable",
@@ -153,7 +145,11 @@ export async function uploadThroughFileDrop(
             );
           }
           return failure(
-            error instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+            error instanceof BoundedWaitError
+              ? error.kind === "aborted"
+                ? "cancelled"
+                : "timeout"
+              : "cdp_failed",
             "file_drop_target_unavailable",
             messageOf(error),
             "none",
@@ -161,22 +157,64 @@ export async function uploadThroughFileDrop(
           );
         }
 
+        const dispatchDragStep = async (
+          type: "dragEnter" | "dragOver" | "drop",
+          timeoutMessage: string,
+          onDispatched?: () => void,
+        ) => {
+          const stepAbort = new AbortController();
+          const forward = () => stepAbort.abort();
+          options.signal?.addEventListener("abort", forward, { once: true });
+          if (options.signal?.aborted) stepAbort.abort();
+          let dispatched = false;
+          try {
+            await waitBounded(
+              sendToFrameHandle(
+                options.cdp,
+                handle,
+                "Input.dispatchDragEvent",
+                {
+                  type,
+                  x: point.x,
+                  y: point.y,
+                  data: dragData,
+                },
+                {
+                  signal: stepAbort.signal,
+                  onDispatch: () => {
+                    if (stepAbort.signal.aborted || Date.now() >= deadline) {
+                      throw new DOMException(timeoutMessage, "AbortError");
+                    }
+                    dispatched = true;
+                    onDispatched?.();
+                  },
+                },
+              ),
+              deadline,
+              options.signal,
+              timeoutMessage,
+            );
+          } catch (error) {
+            if (!dispatched) stepAbort.abort();
+            throw error;
+          } finally {
+            options.signal?.removeEventListener("abort", forward);
+          }
+        };
+
         for (const [type, phase] of [
           ["dragEnter", "drag_enter"],
           ["dragOver", "drag_over"],
         ] as const) {
           try {
-            if (type === "dragEnter") dragStarted = true;
-            await waitBounded(
-              sendToFrameHandle(options.cdp, handle, "Input.dispatchDragEvent", {
-                type,
-                x: point.x,
-                y: point.y,
-                data: dragData,
-              }),
-              deadline,
-              options.signal,
+            await dispatchDragStep(
+              type,
               `${type} timed out`,
+              type === "dragEnter"
+                ? () => {
+                    dragStarted = true;
+                  }
+                : undefined,
             );
           } catch (error) {
             const unsupported = methodUnavailable(error);
@@ -192,7 +230,9 @@ export async function uploadThroughFileDrop(
               unsupported
                 ? "unsupported"
                 : error instanceof BoundedWaitError
-                  ? "timeout"
+                  ? error.kind === "aborted"
+                    ? "cancelled"
+                    : "timeout"
                   : "cdp_failed",
               unsupported ? "upload_mechanism_unsupported" : "file_drop_failed",
               messageOf(error),
@@ -203,25 +243,32 @@ export async function uploadThroughFileDrop(
         }
 
         try {
-          dropSent = true;
-          await waitBounded(
-            sendToFrameHandle(options.cdp, handle, "Input.dispatchDragEvent", {
-              type: "drop",
-              x: point.x,
-              y: point.y,
-              data: dragData,
-            }),
-            deadline,
-            options.signal,
-            "file drop timed out",
-          );
+          await dispatchDragStep("drop", "file drop timed out", () => {
+            options.onDropSent?.();
+            dropSent = true;
+          });
           return { x: point.x, y: point.y };
         } catch (error) {
+          if (isStaleFrameHandleError(error) && !dropSent) {
+            outcome = enrichFailure(
+              rpcError("not_found", "ref_not_found", error.message),
+              "none",
+              "drop",
+            );
+            return outcome;
+          }
+          const aborted =
+            options.signal?.aborted ||
+            (error instanceof BoundedWaitError && error.kind === "aborted") ||
+            (error instanceof Error && error.name === "AbortError");
+          const timedOut =
+            (error instanceof BoundedWaitError && error.kind === "timeout") ||
+            (error instanceof Error && error.name === "TimeoutError");
           outcome = failure(
-            error instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+            aborted ? "cancelled" : timedOut ? "timeout" : "cdp_failed",
             "file_drop_failed",
             messageOf(error),
-            "unknown",
+            dropSent ? "unknown" : "none",
             "drop",
           );
           return outcome;
@@ -255,7 +302,11 @@ export async function uploadThroughFileDrop(
           "resolve_target",
         )
       : failure(
-          error instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+          error instanceof BoundedWaitError
+            ? error.kind === "aborted"
+              ? "cancelled"
+              : "timeout"
+            : "cdp_failed",
           "file_drop_target_unavailable",
           messageOf(error),
           "none",
@@ -264,27 +315,11 @@ export async function uploadThroughFileDrop(
     return outcome;
   } finally {
     try {
-      try {
-        await waitBounded(
-          sendToFrameHandle(
-            options.cdp.resourceCleanup ?? options.cdp,
-            handle,
-            "Runtime.releaseObjectGroup",
-            { objectGroup },
-          ),
-          Date.now() + CLEANUP_TIMEOUT_MS,
-          undefined,
-          "releasing file-drop object group timed out",
-        );
-      } catch {
-        cleanupFailed = true;
-      }
-
       const effect = isRpcError(outcome)
         ? (outcome.data?.effect_state as TransferEffectState | undefined)
         : "committed";
       if (effect === "unknown" || cleanupFailed) {
-        await options.cdp.detach?.(handle.tabId);
+        await options.cdp.detach?.(handle.tabId).catch(() => {});
       }
       if (cleanupFailed && isRpcError(outcome)) {
         outcome.data = { ...outcome.data, cleanup_state: "failed" };

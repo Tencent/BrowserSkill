@@ -56,15 +56,26 @@ export async function handleUpload(
   let usedSelector = address.usedSelector;
   if (mode === "drop") {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    const transaction = await uploadThroughFileDrop({
-      cdp: deps.cdp,
-      actionTarget: address,
-      files,
-      timeoutMs,
-      signal: deps.signal,
-      withOverlayHidden: (operation) =>
-        withExtensionOverlayHidden(target.tabId, operation, deps.sendToTab),
-    });
+    const transaction = await withInputReady(
+      ctx,
+      target.tabId,
+      {
+        ...deps,
+        deadline,
+        preserveWindowFocus: true,
+      },
+      (input) =>
+        uploadThroughFileDrop({
+          cdp: deps.cdp,
+          actionTarget: address,
+          files,
+          timeoutMs: Math.max(1, deadline - Date.now()),
+          signal: deps.signal,
+          onDropSent: input.markSent,
+          withOverlayHidden: (operation) =>
+            withExtensionOverlayHidden(target.tabId, operation, deps.sendToTab),
+        }),
+    );
     if (isRpcError(transaction)) return transaction;
   } else {
     const trigger = pointerTransactionDeps(deps, deps.signal);
@@ -90,8 +101,10 @@ export async function handleUpload(
       cleanupTrigger: (deadline) => trigger.cleanup(deadline),
     });
     if (isRpcError(transaction)) return transaction;
-    usedRef = transaction.click.used_ref;
-    usedSelector = transaction.click.used_selector;
+    if (transaction.click) {
+      usedRef = transaction.click.used_ref;
+      usedSelector = transaction.click.used_selector;
+    }
   }
   return {
     tab_id: target.tabId,

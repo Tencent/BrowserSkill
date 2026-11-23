@@ -3,10 +3,11 @@
 import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleNavigate, handleNavigateBack, handleNavigateForward } from "../navigation";
 import { handleRead } from "../read";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -125,7 +126,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser same-document naviga
             },
             { onDocumentChanged: (tabId) => context.refStore.invalidateTab(tabId) },
           );
-          const graph = vi.spyOn(cdp, "getFrameGraph");
+          const graph = vi.spyOn(cdp, "getFrameDocuments");
           const tab = async () => {
             const { targetInfo } = await send<{ targetInfo: { url: string } }>(
               "Target.getTargetInfo",
@@ -214,7 +215,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser same-document naviga
           onEvent: (event: CdpEvent) => {
             if (sessionId && event.sessionId === sessionId)
               for (const listener of [...listeners])
-                listener({ tabId: 4 }, event.method, event.params);
+                listener(rootEventSource(4), event.method, event.params);
           },
         },
         async (send: Send) => {
@@ -248,7 +249,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser same-document naviga
             },
           });
           await manager.start("navigation");
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: <T>(_tabId: number, method: string, params?: object) =>
               send<T>(method, params, sessionId),
             onEvent: (_tabId, listener) => {
@@ -259,7 +260,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser same-document naviga
                 },
               };
             },
-          };
+          });
           const tab = async () =>
             ({
               id: 4,

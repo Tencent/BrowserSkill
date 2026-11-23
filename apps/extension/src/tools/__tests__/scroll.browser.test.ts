@@ -1,14 +1,19 @@
 // @vitest-environment node
 // Opt in with BSK_TEST_CHROME=/path/to/chrome. Uses an isolated browser/profile.
 import { describe, expect, it } from "vitest";
-import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentGraph,
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  type FrameNodeHandle,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import { SessionManager } from "@/session-manager/manager";
 import { resolveNodeGeometry } from "../frame-geometry";
 import type { ViewportRect } from "../geometry";
 import { handleScrollTo } from "../scroll";
-import type { CdpRunner } from "../shared";
-import { isRpcError } from "../shared";
+import { type CdpRunner, createStubCdpRunner, isRpcError } from "../shared";
 import { pointBelongsToTarget } from "../target-hit";
 
 type Send = <T = Record<string, unknown>>(
@@ -54,19 +59,30 @@ async function harness(send: Send) {
   const ctx = await manager.start("aa11");
   const calls: { method: string; sessionId?: string }[] = [];
   const after = { command: (_method: string) => {} };
-  const sessionFor = (target: CdpTarget) => target.sessionId ?? rootSession;
-  const forward = async <T>(target: CdpTarget, method: string, params?: object): Promise<T> => {
-    calls.push({ method, sessionId: target.sessionId });
-    const result = await send<T>(method, params, sessionFor(target));
+  type FrameRecord = FrameDocumentInfo & { name: string; targetSession?: string };
+  let currentFrames: FrameRecord[] = [];
+  const sessionForFrame = (frameId?: string) =>
+    (frameId ? currentFrames.find((f) => f.frameId === frameId)?.targetSession : undefined) ??
+    rootSession;
+  const forward = async <T>(
+    handle: FrameDocumentHandle | FrameNodeHandle | { tabId: number; frameId?: string },
+    method: string,
+    params?: object,
+  ): Promise<T> => {
+    const targetSession = handle.frameId
+      ? currentFrames.find((f) => f.frameId === handle.frameId)?.targetSession
+      : undefined;
+    calls.push({ method, sessionId: targetSession });
+    const result = await send<T>(method, params, targetSession ?? rootSession);
     after.command(method);
     return result;
   };
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: (_tab, method, params) => forward({ tabId: 4 }, method, params),
-    sendToTarget: forward,
-  };
-  const evaluate = async <T>(expression: string, frame?: CdpFrame): Promise<T> => {
-    const session = frame ? sessionFor(frame.target) : rootSession;
+    sendToFrame: forward,
+  });
+  const evaluate = async <T>(expression: string, frame?: FrameRecord): Promise<T> => {
+    const session = frame ? sessionForFrame(frame.frameId) : rootSession;
     const world = frame
       ? await send<{ executionContextId: number }>(
           "Page.createIsolatedWorld",
@@ -90,20 +106,21 @@ async function harness(send: Send) {
     expect(reply.exceptionDetails).toBeUndefined();
     return reply.result.value;
   };
-  const rememberRef = (frame: CdpFrame, backendNodeId: number) =>
+  const rememberRef = (frame: FrameRecord, backendNodeId: number) =>
     ctx.refStore.set("e1", backendNodeId, {
       tabId: 4,
       frameId: frame.frameId,
       loaderId: frame.loaderId,
     });
-  const ref = async (frame: CdpFrame, selector = "#probe") => {
+  const ref = async (frame: FrameRecord, selector = "#probe") => {
+    const frameSession = sessionForFrame(frame.frameId);
     const { executionContextId } = await send<{ executionContextId: number }>(
       "Page.createIsolatedWorld",
       {
         frameId: frame.frameId,
         worldName: "scroll-oracle",
       },
-      sessionFor(frame.target),
+      frameSession,
     );
     const { result } = await send<{ result: { objectId: string } }>(
       "Runtime.evaluate",
@@ -111,14 +128,14 @@ async function harness(send: Send) {
         expression: `document.querySelector(${JSON.stringify(selector)})`,
         contextId: executionContextId,
       },
-      sessionFor(frame.target),
+      frameSession,
     );
     const { node } = await send<{ node: { backendNodeId: number } }>(
       "DOM.describeNode",
       { objectId: result.objectId },
-      sessionFor(frame.target),
+      frameSession,
     );
-    await send("Runtime.releaseObject", { objectId: result.objectId }, sessionFor(frame.target));
+    await send("Runtime.releaseObject", { objectId: result.objectId }, frameSession);
     rememberRef(frame, node.backendNodeId);
     return node.backendNodeId;
   };
@@ -147,12 +164,21 @@ async function harness(send: Send) {
       });
       sessions.push(sessionId);
     }
-    const frames: (CdpFrame & { name: string })[] = [];
+    const frames: FrameRecord[] = [];
     for (const session of sessions) {
       const { frameTree } = await send<{ frameTree: Tree }>("Page.getFrameTree", {}, session);
-      const target = { tabId: 4, ...(session !== rootSession ? { sessionId: session } : {}) };
+      const targetSession = session !== rootSession ? session : undefined;
       const visit = (tree: Tree, parentFrameId = tree.frame.parentId) => {
-        frames.push({ frameId: tree.frame.id, parentFrameId, target, name: tree.frame.name ?? "" });
+        frames.push({
+          handle: toFrameDocumentHandle(4, { frameId: tree.frame.id, loaderId: "" }),
+          frameId: tree.frame.id,
+          loaderId: "",
+          parentFrameId,
+          processKey: targetSession ? `oopif:${targetSession}` : "root",
+          isOutOfProcess: Boolean(targetSession),
+          ...(targetSession ? { targetSession } : {}),
+          name: tree.frame.name ?? "",
+        });
         for (const child of tree.childFrames ?? []) visit(child, tree.frame.id);
       };
       visit(frameTree);
@@ -163,12 +189,13 @@ async function harness(send: Send) {
       const owner = await send<{ backendNodeId: number }>(
         "DOM.getFrameOwner",
         { frameId: frame.frameId },
-        sessionFor(parent.target),
+        parent.targetSession ?? rootSession,
       );
-      frame.ownerBackendNodeId = owner.backendNodeId;
+      (frame as { ownerBackendNodeId?: number }).ownerBackendNodeId = owner.backendNodeId;
     }
-    const graph: CdpFrameGraph = { rootFrameId: frames[0].frameId, frames };
-    cdp.getFrameGraph = async () => graph;
+    currentFrames = frames;
+    const graph: FrameDocumentGraph = { rootFrameId: frames[0].frameId, frames };
+    cdp.getFrameDocuments = async () => graph;
     return frames;
   };
   return { cdp, send, rootSession, evaluate, ref, rememberRef, scroll, loadFrames, calls, after };
@@ -336,7 +363,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser scroll-to", () => {
           expect(isRpcError(geometry)).toBe(false);
           if (isRpcError(geometry)) throw new Error(geometry.message);
           await pointerTargetValidator(h.cdp)({ handle }, geometry.actionPoint);
-          if (frame.target.sessionId) {
+          if (frame.targetSession) {
             await h.evaluate(
               "window.frameCover=document.createElement('div');frameCover.style='position:fixed;inset:0;z-index:99999;background:white';document.body.append(frameCover)",
             );

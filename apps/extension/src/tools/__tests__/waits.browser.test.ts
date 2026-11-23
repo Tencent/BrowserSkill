@@ -1,9 +1,10 @@
 // @vitest-environment node
 // Each run owns its Chromium profile; no user's browser is accessed.
 import { describe, expect, it } from "vitest";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import type { WaitForElementResult } from "@/transport/types";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { handleWaitForElement } from "../waits";
 
 type Send = <T = Record<string, unknown>>(
@@ -41,9 +42,9 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser element waits", () =
               targetId,
               flatten: true,
             });
-            const cdp: CdpRunner = {
+            const cdp: CdpRunner = createStubCdpRunner({
               send: (_tabId, method, params) => send(method, params, sessionId),
-            };
+            });
             const tab = { id: 4, windowId: 100, active: !background } as chrome.tabs.Tab;
             const deps = { cdp, tabsApi: { get: async () => tab, query: async () => [tab] } };
             const evaluate = async <T>(expression: string) => {
@@ -145,14 +146,14 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser element waits", () =
             await evaluate(
               `document.body.insertAdjacentHTML('beforeend', '<div id="race-mask">Loading</div>')`,
             );
-            const removalCdp: CdpRunner = {
+            const removalCdp: CdpRunner = createStubCdpRunner({
               async send<T>(tabId: number, method: string, params?: object): Promise<T> {
                 if (method === "DOM.describeNode") {
                   await evaluate(`document.querySelector('#race-mask')?.remove()`);
                 }
                 return cdp.send<T>(tabId, method, params);
               },
-            };
+            });
             expect(
               await handleWaitForElement(
                 manager,
@@ -221,6 +222,127 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser element waits", () =
           }
         } finally {
           await manager.stop(ctx.sessionId);
+        }
+      },
+    );
+  }, 30_000);
+
+  it("treats an element inside a hidden iframe as not visible until the iframe is shown", async () => {
+    const { withChrome } = await import(
+      new URL(
+        "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+        import.meta.url,
+      ).href
+    );
+    await withChrome(
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
+      async (send: Send) => {
+        const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+          url: "about:blank",
+        });
+        let sessionId = "";
+        const api: CdpDebuggerApi = {
+          attach: async () => {
+            const reply = await send<{ sessionId: string }>("Target.attachToTarget", {
+              targetId,
+              flatten: true,
+            });
+            sessionId = reply.sessionId;
+          },
+          detach: async () => {
+            if (sessionId) await send("Target.detachFromTarget", { sessionId });
+            sessionId = "";
+          },
+          sendCommand: async (target, method, params) =>
+            send(method, params, target.sessionId ?? sessionId),
+          onEvent: {
+            addListener() {},
+            removeListener() {},
+          } as unknown as CdpDebuggerApi["onEvent"],
+          onDetach: {
+            addListener() {},
+            removeListener() {},
+          } as unknown as CdpDebuggerApi["onDetach"],
+        };
+        const cdp = new ChromiumCdp(api);
+        const manager = new SessionManager({
+          agentWindow: {
+            create: async () => ({ windowId: 100, initialTabIds: [] }),
+            remove: async () => {},
+            ensureActiveTab: async () => 4,
+          },
+        });
+        const ctx = await manager.start("hidden-iframe-wait");
+        const tab = { id: 4, windowId: 100, active: true, url: "about:blank" } as chrome.tabs.Tab;
+        const deps = { cdp, tabsApi: { get: async () => tab, query: async () => [tab] } };
+        try {
+          await cdp.send(4, "Runtime.evaluate", {
+            expression: `
+              document.body.innerHTML = '<iframe id="hidden-box" style="display:none;width:200px;height:100px" srcdoc="<button id=&quot;inner&quot; style=&quot;width:120px;height:40px&quot;>Inner</button>"></iframe>';
+            `,
+          });
+          await expect
+            .poll(async () => {
+              const r = await cdp.send<{ result: { value: boolean } }>(4, "Runtime.evaluate", {
+                expression:
+                  "Boolean(document.getElementById('hidden-box')?.contentDocument?.getElementById('inner'))",
+                returnByValue: true,
+              });
+              return r.result.value;
+            })
+            .toBe(true);
+
+          const graph = await cdp.getFrameDocuments(4);
+          const child = graph.frames.find((f) => f.parentFrameId === graph.rootFrameId)!;
+          const doc = await cdp.send<{ root: { nodeId: number } }>(4, "DOM.getDocument", {
+            depth: -1,
+            pierce: true,
+          });
+          // Locate #inner via Runtime in the child document and bind its ref.
+          const evalChild = await cdp.send<{ result: { objectId?: string } }>(
+            4,
+            "Runtime.evaluate",
+            {
+              expression:
+                "document.getElementById('hidden-box').contentDocument.getElementById('inner')",
+            },
+          );
+          const { node } = await cdp.send<{ node: { backendNodeId: number } }>(
+            4,
+            "DOM.describeNode",
+            { objectId: evalChild.result.objectId },
+          );
+          expect(doc.root.nodeId).toBeGreaterThan(0);
+          ctx.refStore.set("e1", node.backendNodeId, {
+            tabId: 4,
+            frameId: child.frameId,
+            loaderId: child.loaderId,
+          });
+
+          // While iframe is display:none, #inner must NOT be reported visible.
+          expect(
+            await handleWaitForElement(
+              manager,
+              { session_id: ctx.sessionId, ref: "@e1", state: "visible", timeout_ms: 200 },
+              deps,
+            ),
+          ).toMatchObject({ satisfied: false, attached: true, visible: false });
+
+          // Reveal the iframe asynchronously and confirm wait_for_element satisfies.
+          await cdp.send(4, "Runtime.evaluate", {
+            expression:
+              "setTimeout(() => { document.getElementById('hidden-box').style.display = 'block'; }, 80)",
+          });
+          expect(
+            await handleWaitForElement(
+              manager,
+              { session_id: ctx.sessionId, ref: "@e1", state: "visible", timeout_ms: 3_000 },
+              deps,
+            ),
+          ).toMatchObject({ satisfied: true, attached: true, visible: true });
+        } finally {
+          await manager.stop(ctx.sessionId);
+          await cdp.detach(4);
         }
       },
     );

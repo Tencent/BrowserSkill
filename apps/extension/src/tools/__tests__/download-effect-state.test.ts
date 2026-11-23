@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { captureBrowserDownload, type DownloadsApi } from "../download-capture";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 describe("download trigger effect state", () => {
   it.each(["returned", "thrown"])("distinguishes pre/post-dispatch %s failures", async (kind) => {
@@ -14,7 +14,10 @@ describe("download trigger effect state", () => {
         cancel: vi.fn(async () => {}),
         removeFile: vi.fn(async () => {}),
       };
-      const cdp: CdpRunner = { send: vi.fn(), onEvent: () => ({ dispose: vi.fn() }) };
+      const cdp: CdpRunner = createStubCdpRunner({
+        send: vi.fn(),
+        onEvent: () => ({ dispose: vi.fn() }),
+      });
       const result = await captureBrowserDownload({
         cdp,
         downloads,

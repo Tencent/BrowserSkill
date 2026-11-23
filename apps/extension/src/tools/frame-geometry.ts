@@ -1,16 +1,15 @@
 import {
-  type CdpFrame,
-  type FrameDocumentHandle,
   type FrameNodeHandle,
   isStaleFrameHandleError,
+  rootProcessBoundary,
   StaleFrameHandleError,
-  toFrameDocumentHandle,
-} from "@/browser-driver/frame-graph";
+} from "@/browser-driver/frame-handles";
 import type { RpcError } from "@/transport/types";
 import { nodeContentRegion, scrollNodeIntoView } from "./element-geometry";
 import { rpcError } from "./errors";
 import {
   clipPolygon,
+  type GeometryProjection,
   type Point,
   type Polygon,
   polygonArea,
@@ -19,11 +18,12 @@ import {
   type Region,
   rectPolygon,
   regionBounds,
+  unprojectPoint,
   type ViewportRect,
 } from "./geometry";
 import type { CssViewport } from "./geometry/coordinate-types";
 import { cssViewport, GeometryContext } from "./geometry/frame-context";
-import { type CdpRunner, cdpRunnerForFrame, cdpRunnerForTarget, isRpcError } from "./shared";
+import { type CdpRunner, cdpRunnerForFrame, isRpcError } from "./shared";
 
 export type NodeAddress = FrameNodeHandle;
 
@@ -42,15 +42,6 @@ function geometryError(message: string): RpcError {
   return { code: "cdp_failed", message };
 }
 
-function frameRunner(
-  cdp: CdpRunner,
-  handle: FrameDocumentHandle | FrameNodeHandle,
-  resolvedFrame?: CdpFrame,
-): CdpRunner {
-  if (cdp.sendToFrame || !resolvedFrame) return cdpRunnerForFrame(cdp, handle);
-  return cdpRunnerForTarget(cdp, resolvedFrame.target);
-}
-
 async function scrollFrameOwners(
   cdp: CdpRunner,
   tabId: number,
@@ -65,7 +56,7 @@ async function scrollFrameOwners(
       return geometryError(`could not resolve frame owner for ${child.frameId}`);
     }
     const error = await scrollNodeIntoView(
-      frameRunner(cdp, toFrameDocumentHandle(tabId, parent), parent),
+      cdpRunnerForFrame(cdp, parent.handle),
       tabId,
       child.ownerBackendNodeId,
     );
@@ -94,7 +85,7 @@ async function scrollElementWithContext(
     const error = await scrollFrameOwners(cdp, tabId, context, handle.frameId);
     if (error) return error;
   }
-  return scrollNodeIntoView(frameRunner(cdp, handle, frame), tabId, handle.backendNodeId);
+  return scrollNodeIntoView(cdpRunnerForFrame(cdp, handle), tabId, handle.backendNodeId);
 }
 
 export async function scrollElementAndFramesIntoView(
@@ -111,6 +102,11 @@ export async function scrollElementAndFramesIntoView(
     }
     return geometryError(error instanceof Error ? error.message : String(error));
   }
+}
+
+function cleanProjectedCoord(value: number): number {
+  const snapped = Math.round(value * 1e6) / 1e6;
+  return Math.abs(value - snapped) < 1e-9 ? snapped : value;
 }
 
 function largestRegion(regions: Region): Polygon | null {
@@ -165,41 +161,22 @@ export async function resolveNodeGeometry(
 
     // Only topology was read above. Begin live measurements after scrolling.
     const localRegion = await nodeContentRegion(
-      frameRunner(cdp, address, frame),
+      cdpRunnerForFrame(cdp, address),
       tabId,
       address.backendNodeId,
     );
     if (isRpcError(localRegion)) return localRegion;
 
-    const isOopifTarget = Boolean(frame?.target.sessionId);
+    const isOopifTarget = Boolean(frame?.isOutOfProcess);
     let topVisibleRegions: Region;
-    let targetActionPoint: Point | null = null;
+    let projection: GeometryProjection | null = null;
     if (address.frameId && graph && frame) {
-      const projection = await context.targetProjection(address.frameId);
+      projection = await context.targetProjection(address.frameId);
       if (!projection)
         return geometryError(`could not resolve frame geometry for ${address.frameId}`);
       topVisibleRegions = projectRegionToViewport(localRegion, projection);
-      if (isOopifTarget) {
-        const localViewport = await context.viewport(frame.target);
-        if (!localViewport) return geometryError("could not resolve target viewport geometry");
-        const localVisibleRegions = localRegion
-          .map((polygon) =>
-            clipPolygon(
-              polygon,
-              rectPolygon({
-                x: 0,
-                y: 0,
-                w: localViewport.width,
-                h: localViewport.height,
-              }),
-            ),
-          )
-          .filter((polygon) => polygon.length >= 3);
-        const localActionRegion = largestRegion(localVisibleRegions);
-        targetActionPoint = localActionRegion ? polygonCentroid(localActionRegion) : null;
-      }
     } else {
-      const viewport = await context.viewport({ tabId });
+      const viewport = await context.viewport(rootProcessBoundary(tabId));
       if (!viewport) return geometryError("could not resolve top viewport geometry");
       topVisibleRegions = localRegion
         .map((polygon) =>
@@ -212,18 +189,37 @@ export async function resolveNodeGeometry(
     const actionRegion = largestRegion(topVisibleRegions);
     const actionPoint = actionRegion ? polygonCentroid(actionRegion) : null;
     if (!topBounds || !actionPoint) {
-      return { code: "permission_denied", message: "element not visible" };
+      return rpcError("permission_denied", "element_not_visible", "element not visible");
     }
-    if (isOopifTarget && !targetActionPoint) {
-      return { code: "permission_denied", message: "element not visible in its target" };
+    // Derive the OOPIF-local point by unprojecting the already top/ancestor-clipped
+    // actionPoint back through every target boundary, so parent viewport clips and
+    // nested iframe clips are preserved consistently with pointReachesTarget.
+    let targetActionPoint: Point = actionPoint;
+    if (isOopifTarget) {
+      let local: Point | null = projection ? actionPoint : null;
+      if (projection) {
+        for (let index = projection.edges.length - 1; index >= 0 && local; index--) {
+          local = unprojectPoint(local, projection.edges[index]);
+        }
+      }
+      if (!local) {
+        return rpcError(
+          "permission_denied",
+          "element_not_visible",
+          "element not visible in its target",
+        );
+      }
+      targetActionPoint = {
+        x: cleanProjectedCoord(local.x),
+        y: cleanProjectedCoord(local.y),
+      };
     }
-    targetActionPoint ??= actionPoint;
     return {
       topVisibleRegions,
       topBounds,
       actionPoint,
       targetActionPoint,
-      topViewport: cssViewport(await context.layoutMetrics({ tabId })),
+      topViewport: cssViewport(await context.topLayoutMetrics(rootProcessBoundary(tabId))),
     };
   } catch (error) {
     if (isStaleFrameHandleError(error)) {
