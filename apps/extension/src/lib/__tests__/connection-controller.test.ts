@@ -208,7 +208,9 @@ describe("ConnectionController split-brain recovery", () => {
 
     // teardown disconnects once; the orphaned late connection is dropped too,
     // so the transport must not be left connected without a handshake.
-    await vi.waitFor(() => expect(transport.disconnect.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() =>
+      expect(transport.disconnect.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
   });
 });
 
