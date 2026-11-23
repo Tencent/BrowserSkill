@@ -145,12 +145,72 @@ function makeMockTransport(initialState: ConnectionState = "disconnected") {
       state = next;
       for (const h of stateHandlers) h(next);
     },
+    setStateSilently(next: ConnectionState) {
+      // Mirrors a socket that reached OPEN without notifying the controller,
+      // e.g. a handshake that completed while teardown was running.
+      state = next;
+    },
     emitMessage(frame: ProtocolFrame) {
       for (const handler of messageHandlers) handler(frame);
     },
   };
   return transport as typeof transport & Transport;
 }
+
+describe("ConnectionController split-brain recovery", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("recycles a socket that connected while no handshake owned it", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, false);
+    transport.disconnect.mockClear();
+    transport.connect.mockClear();
+
+    // Physical link is up, controller is disconnected and owns no handshake.
+    transport.setStateSilently("connected");
+    await controller.setConnectionEnabled(true);
+    await vi.waitFor(() => expect(transport.disconnect).toHaveBeenCalledTimes(1));
+
+    // After recycling it must try a fresh connection rather than sit silent.
+    await vi.waitFor(() => expect(transport.connect).toHaveBeenCalled());
+    expect(controller.snapshot().state).not.toBe("disconnected");
+  });
+
+  it("does not recycle a connected transport the controller is using", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true);
+    transport.disconnect.mockClear();
+
+    controller.requestConnect();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(transport.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("drops a late connected event that arrives during teardown", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true);
+    transport.disconnect.mockClear();
+
+    const teardown = controller.reconfigureTransport("new-config", () => {});
+    transport.emitState("connected");
+    await teardown;
+
+    // teardown disconnects once; the orphaned late connection is dropped too,
+    // so the transport must not be left connected without a handshake.
+    await vi.waitFor(() => expect(transport.disconnect.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+});
 
 describe("ConnectionController connectionEnabled", () => {
   beforeEach(() => {

@@ -676,6 +676,12 @@ export default defineBackground(() => {
   startKeepalive({
     transport,
     requestConnect: () => controller.requestConnect(),
+    // A live socket without a completed handshake still needs a retry: the
+    // transport reports "connected" while the controller is "disconnected".
+    isConnected: () => {
+      const { state } = controller.snapshot();
+      return state === "connected" || state === "version_skew";
+    },
     onConnectedTick: () => {
       const { state } = controller.snapshot();
       if (state === "connected" || state === "version_skew") {
@@ -705,10 +711,18 @@ export default defineBackground(() => {
   }
 
   void (async () => {
+    // A transient storage failure at cold start must not abort this IIFE:
+    // controller.attach() below would never run and `ready` would stay false.
     const [connectionEnabled, , auditEnabled] = await Promise.all([
-      getConnectionEnabled(),
+      getConnectionEnabled().catch((err) => {
+        console.warn("[browser-skill] connection preference unavailable", err);
+        return true;
+      }),
       daemonPort.ready,
-      getAuditEnabled(),
+      getAuditEnabled().catch((err) => {
+        console.warn("[browser-skill] audit preference unavailable", err);
+        return false;
+      }),
     ]);
     await cdp
       .reconcileOrphanedAttachments((tabId) => sessions.findControllingSession(tabId) !== null)
@@ -836,6 +850,11 @@ export default defineBackground(() => {
       post({ kind: "snapshot", data: { ...snap, sessionCount: sessions.list().length } });
     });
     popupSnapshotRefreshers.add(postSnapshot);
+    // Opening the popup is an explicit "is it alive?" action; try a reconnect
+    // now instead of waiting up to 30s for the next alarm tick.
+    if (controller.isConnectionEnabled && !controller.snapshot().daemonUpgradeRequired) {
+      controller.requestConnect();
+    }
     connection.onMessage.addListener((raw: unknown) => {
       const msg = raw as PopupOutbound;
       if (msg && typeof msg === "object" && "kind" in msg) {
