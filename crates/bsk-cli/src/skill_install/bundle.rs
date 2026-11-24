@@ -128,6 +128,23 @@ pub(super) fn resource_path(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub(super) fn is_symlinked_resource(root: &Path, name: &str) -> Result<bool> {
+    if !valid_path(name) {
+        return Ok(false);
+    }
+    let mut path = root.to_path_buf();
+    for part in name.split('/') {
+        path.push(part);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn file_hash(root: &Path, name: &str) -> Result<Option<String>> {
     let path = resource_path(root, name)?;
     match fs::read(&path) {
