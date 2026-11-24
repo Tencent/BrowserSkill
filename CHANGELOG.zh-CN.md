@@ -100,6 +100,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
   （[#594](https://github.com/Tencent/BrowserSkill/issues/594)）。
 - 修复录制模式下点击可交互 `<label>`（含带 `cursor: pointer` 的复选框/单选框标签触发的 `detail: 1` 可信转发点击）时将 `<label>` 与目标控件重复录为两次点击导致回放反复切换的问题，同时保留普通 `<label>` 激活在目标控件上的单次点击记录（#645）。
 - `bsk` 人类可读错误输出现在会打印扩展在证据拒绝时已附带的 `observed_change` / `observed_changes` 诊断，指出发生变化的 part、节点、字段与前后值以及变更计数，不再只显示笼统的“页面内容已变化”；JSON 与 MCP 载荷保持不变（[#540](https://github.com/Tencent/BrowserSkill/issues/540)）。
+- 增强扩展断连自愈与保活恢复：为 WebSocket `CONNECTING` 阶段增加 10 秒超时以便半开连接自动退避重连，MV3 Service Worker 唤醒时先查询再创建 `chrome.alarms` 避免不断重置 30 秒保活周期并以控制器握手状态替代原始套接字状态判断在线，自动回收物理连接与控制器状态脑裂（含 `teardown` 期间迟到连接），为冷启动存储读取补充异常兜底并在打开扩展弹窗时立即触发重连，同时让守护进程 `drive_connection` 在浏览器已被驱逐后仍兜底清理残留会话（[#395](https://github.com/Tencent/BrowserSkill/issues/395)）。
 
 ### 移除
 

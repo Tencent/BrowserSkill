@@ -194,6 +194,15 @@ determines which versions can connect.
   counters instead of only the generic "the action's observed content changed"
   sentence; JSON and MCP payloads are unchanged
   ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
+- Hardened extension reconnect recovery across stuck connects, MV3 keepalive
+  alarms, and daemon disconnect cleanup: bounded physical WebSocket `CONNECTING`
+  attempts to 10 seconds so stalled upgrades retry, avoided resetting existing
+  30s `chrome.alarms` on Service Worker wakeups and checked controller handshake
+  liveness instead of raw socket state, recycled physical/controller split-brain
+  sockets (including late connects during teardown), guarded cold-start storage
+  reads and triggered immediate reconnect on popup open, and ensured daemon
+  `drive_connection` purges leftover sessions even after prior browser eviction
+  ([#395](https://github.com/Tencent/BrowserSkill/issues/395)).
 
 ### Removed
 
