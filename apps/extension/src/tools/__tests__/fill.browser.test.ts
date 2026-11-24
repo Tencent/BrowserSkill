@@ -1006,6 +1006,63 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
     30_000,
   );
 
+  it.each([
+    true,
+    false,
+  ])("fills an empty ProseMirror editor with a noneditable placeholder (clear=%s)", async (clearBefore) => {
+    const value = "第一段正文。";
+    await withFillBrowser(
+      {
+        background: false,
+        markup:
+          guard +
+          '<div id="target" class="ProseMirror" contenteditable="true" style="white-space:pre-wrap"></div>',
+      },
+      async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`(() => {
+            const editor = document.querySelector('#target');
+            const placeholder = () => {
+              if (editor.textContent === '') editor.innerHTML = '<p><span class="syl-placeholder ProseMirror-widget" contenteditable="false" style="position:absolute;user-select:none;pointer-events:none">请输入正文</span><img class="ProseMirror-separator" alt=""><br class="ProseMirror-trailingBreak"></p>';
+            };
+            placeholder();
+            editor.addEventListener('input', () => {
+              placeholder();
+              const widget = editor.querySelector('.ProseMirror-widget');
+              if (widget && editor.textContent !== widget.textContent) {
+                widget.remove();
+                editor.querySelector('.ProseMirror-separator')?.remove();
+                editor.querySelector('.ProseMirror-trailingBreak')?.remove();
+              }
+            });
+            document.addEventListener('selectionchange', () => {
+              const selection = document.getSelection();
+              if (selection?.isCollapsed && selection.anchorNode === editor &&
+                  selection.anchorOffset === editor.childNodes.length &&
+                  editor.querySelector('.ProseMirror-widget'))
+                selection.collapse(editor.firstChild, 1);
+            });
+          })()`);
+        h.afterCommand(async (method, params) => {
+          const script = params as {
+            functionDeclaration?: string;
+            arguments?: { value: unknown }[];
+          };
+          if (
+            method === "Runtime.callFunctionOn" &&
+            script.functionDeclaration?.startsWith("function(before, placeCaret") &&
+            script.arguments?.[1].value === true
+          )
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        });
+        expect(await h.fill(value, clearBefore)).toMatchObject({ value_length: value.length });
+        expect(await h.evaluate("document.querySelector('#target').innerText")).toBe(value);
+        expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+        expect(h.calls.filter((method) => method === "Input.insertText")).toHaveLength(1);
+      },
+    );
+  }, 30_000);
+
   it("replaces a draft after selection synchronization in an empty rich-text paragraph", async () => {
     const value = "A long message for the editor. ".repeat(40);
     await withFillBrowser(
@@ -1052,8 +1109,15 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
   it.each([
     ["text in the middle", "<p>old</p>", "editor.firstChild.firstChild", "1"],
     ["before an image", '<p>old<img alt=""></p>', "editor.firstChild.firstChild", "3"],
+    [
+      "before a document image carrying the separator class",
+      '<p><img class="ProseMirror-separator" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt=""></p>',
+      "editor.firstChild",
+      "0",
+    ],
     ["inside an image", '<p>old<img alt=""></p>', "editor.querySelector('img')", "0"],
     ["before two line breaks", "<p>old<br><br></p>", "editor.firstChild.firstChild", "3"],
+    ["before empty line breaks", "<p><br><br></p>", "editor.firstChild", "0"],
     ["before another block", "<p>old</p><p><br></p>", "editor.firstChild.firstChild", "3"],
     ["before a separate break", "<p>old</p><br>", "editor.firstChild.firstChild", "3"],
     [
@@ -1076,7 +1140,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
           background: false,
           markup:
             guard +
-            `<div id="target" contenteditable="true" style="white-space:pre-wrap">${content}</div>`,
+            `<div id="target" class="ProseMirror" contenteditable="true" style="white-space:pre-wrap">${content}</div>`,
         },
         async (h) => {
           await h.ref("document.querySelector('#target')");
