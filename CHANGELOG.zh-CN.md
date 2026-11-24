@@ -34,6 +34,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 ### 修复
 
 - `bsk download` 不再在另一会话正在下载时立即失败：等待浏览器级 `chrome.downloads` 槽位的时间被计入调用方自身的 `--timeout` 预算（预留回复余量），等不到时返回带 `waited_ms` 的 `session_busy`，调用方取消时返回 `cancelled` 而非“浏览器忙”，等待耗时从采集预算中扣除；同一会话重复发起下载仍立即失败（[#519](https://github.com/Tencent/BrowserSkill/issues/519)）。
+- `bsk press --hold-ms` 现在会在命令自身的 `--timeout` 到期时停止按住并返回 `timeout`，不再在超过截止时间后仍以成功载荷返回；按键仍会释放，`bsk drag --hold-ms` 原本已是此行为。
 - 在 Windows 上，`daemon stop`、daemon 状态检查、更新后的等待和残留清理不再把 CLI 无权打开的运行中进程（例如从管理员终端启动的进程）当作已退出。
 - 为 Chrome debugger attach 增加 10 秒上限；未响应时返回明确错误，并在允许重试前隔离并回滚迟到的 attach 完成（#452）。
 - 加固守护进程 WebSocket 生命周期、审计存储容错、`tool.debug` 动态副作用策略、自动更新交接及文件传输/运维可靠性：

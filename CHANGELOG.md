@@ -51,6 +51,7 @@ determines which versions can connect.
 ### Fixed
 
 - `bsk download` now queues behind another session's in-flight download instead of refusing at once: the browser-global `chrome.downloads` slot is waited for inside the caller's own `--timeout` (with a reply margin), a caller that never gets it reports `session_busy` with `waited_ms`, an aborted caller reports `cancelled` instead of a busy browser, and the wait is deducted from the capture budget; a second download for the session that already holds the slot still fails immediately ([#519](https://github.com/Tencent/BrowserSkill/issues/519)).
+- `bsk press --hold-ms` now stops holding at the command's own `--timeout` and reports `timeout` instead of answering after the full hold with a success payload that arrived past the deadline; the key is still released, and `bsk drag --hold-ms` already behaved this way.
 - On Windows, `daemon stop`, daemon status checks, the post-update wait and
   leftover cleanup no longer treat a running process the CLI cannot open, such as
   one started from an elevated terminal, as exited.
