@@ -50,6 +50,7 @@ determines which versions can connect.
 
 ### Fixed
 
+- `bsk press --hold-ms` now stops holding at the command's own `--timeout` and reports `timeout` instead of answering after the full hold with a success payload that arrived past the deadline; the key is still released, and `bsk drag --hold-ms` already behaved this way.
 - On Windows, `daemon stop`, daemon status checks, the post-update wait and
   leftover cleanup no longer treat a running process the CLI cannot open, such as
   one started from an elevated terminal, as exited.
