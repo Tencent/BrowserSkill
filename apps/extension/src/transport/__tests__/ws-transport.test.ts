@@ -478,3 +478,72 @@ it("treats socket close during async unpaired authenticate resolution as normal 
   await t.disconnect();
   vi.useRealTimers();
 });
+
+describe("WSTransport physical connect timeout", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeTransport(connectTimeoutMs: number): WSTransport {
+    return new WSTransport({
+      url: DEFAULT_DAEMON_WS_URL,
+      reconnect: { connectTimeoutMs, initialDelayMs: 5, maxDelayMs: 5 },
+      webSocketFactory: (url: string) => new FakeSocket(url) as unknown as WebSocket,
+    });
+  }
+
+  it("drops a socket stuck in CONNECTING and retries", async () => {
+    const t = makeTransport(10);
+    void t.connect().catch(() => {});
+
+    const stuck = lastSocket();
+    expect(stuck.readyState).toBe(0);
+    expect(t.state).toBe("connecting");
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(stuck.closeCalls).toBe(1);
+    expect(t.state).toBe("disconnected");
+
+    await vi.advanceTimersByTimeAsync(5);
+    expect(FakeSocket.instances).toHaveLength(2);
+
+    lastSocket().open();
+    await Promise.resolve();
+    expect(t.state).toBe("connected");
+    await t.disconnect();
+  });
+
+  it("leaves a socket that opens in time untouched", async () => {
+    const t = makeTransport(10);
+    const pending = t.connect();
+
+    await vi.advanceTimersByTimeAsync(5);
+    const socket = lastSocket();
+    socket.open();
+    await pending;
+    expect(t.state).toBe("connected");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(socket.closeCalls).toBe(0);
+    expect(FakeSocket.instances).toHaveLength(1);
+    await t.disconnect();
+  });
+
+  it("clears the connect timer on disconnect", async () => {
+    const t = makeTransport(10);
+    void t.connect().catch(() => {});
+    const socket = lastSocket();
+
+    await t.disconnect();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(socket.closeCalls).toBe(1);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+});

@@ -4,12 +4,21 @@ import { isProtocolFrame } from "./types";
 
 const DEFAULT_INITIAL_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 5_000;
+// A socket can sit in CONNECTING forever when the daemon never finishes the
+// HTTP upgrade (sleep/wake, half-open proxy). Without a bound the transport
+// stays "connecting", callers skip reconnects, and the extension is silent.
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 
 export type WebSocketFactory = (url: string) => WebSocket;
 
 export interface ReconnectOptions {
   initialDelayMs?: number;
   maxDelayMs?: number;
+  /**
+   * Upper bound on the physical handshake. A socket still in CONNECTING when
+   * it expires is closed so the normal backoff reconnect can run.
+   */
+  connectTimeoutMs?: number;
 }
 
 export interface WSTransportOptions {
@@ -53,12 +62,14 @@ export class WSTransport implements Transport {
   private authBackoffUntil = 0;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
+  private readonly connectTimeoutMs: number;
 
   private socket: WebSocket | null = null;
   private currentState: ConnectionState = "disconnected";
   private explicitlyClosed = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private socketGeneration = 0;
   private connectingPromise: Promise<void> | null = null;
   private resolveConnect: ((value: void) => void) | null = null;
@@ -74,6 +85,7 @@ export class WSTransport implements Transport {
     this.factory = options.webSocketFactory ?? ((url: string) => new WebSocket(url));
     this.initialDelayMs = options.reconnect?.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS;
     this.maxDelayMs = options.reconnect?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+    this.connectTimeoutMs = options.reconnect?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   }
 
   get state(): ConnectionState {
@@ -124,6 +136,7 @@ export class WSTransport implements Transport {
   async disconnect(): Promise<void> {
     this.explicitlyClosed = true;
     this.resetAuthenticationBackoff();
+    this.clearConnectTimer();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -202,8 +215,10 @@ export class WSTransport implements Transport {
     this.setState("connecting");
     const generation = ++this.socketGeneration;
     this.socket = socket;
+    this.startConnectTimer(socket, generation);
 
     socket.addEventListener("open", () => {
+      this.clearConnectTimer();
       if (!this.isCurrentSocket(socket, generation)) return;
       const connected = () => {
         if (!this.isCurrentSocket(socket, generation)) return;
@@ -300,6 +315,7 @@ export class WSTransport implements Transport {
   }
 
   private handleClose(socket: WebSocket, generation: number, _ev: CloseLikeEvent): void {
+    this.clearConnectTimer();
     if (!this.isCurrentSocket(socket, generation)) return;
     // Let the authenticator observe close and settle its failure before
     // reconnecting. Its total timeout bounds an unresponsive hook.
@@ -328,6 +344,28 @@ export class WSTransport implements Transport {
         console.debug("[WSTransport] reconnect attempt failed", err);
       });
     }, delay);
+  }
+
+  private startConnectTimer(socket: WebSocket, generation: number): void {
+    this.clearConnectTimer();
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = null;
+      if (!this.isCurrentSocket(socket, generation)) return;
+      if (socket.readyState === 1 /* OPEN */) return;
+      // Still CONNECTING (or already CLOSING): drop the socket and let the
+      // regular close path schedule the next attempt.
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+      this.handleClose(socket, generation, {});
+    }, this.connectTimeoutMs);
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer) clearTimeout(this.connectTimer);
+    this.connectTimer = null;
   }
 
   private endAuthentication(): void {

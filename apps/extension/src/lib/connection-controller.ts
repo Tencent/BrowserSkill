@@ -143,7 +143,20 @@ export class ConnectionController {
         }
         return;
       }
-      if (!this.connectionEnabled || this.transition) return;
+      if (!this.connectionEnabled) return;
+      if (this.transition) {
+        // The socket reached OPEN while teardown was still running. teardown
+        // ends on "disconnected" and its requestConnect() then short-circuits
+        // on the live transport, leaving a connection nobody handshakes.
+        if (state === "connected") {
+          void Promise.resolve()
+            .then(() => {
+              if (this.transition) return this.disconnectTransport();
+            })
+            .catch((err) => this.reportError(err));
+        }
+        return;
+      }
       if (state === "connected") {
         this.hasConnected = true;
         this.startHandshake(browser);
@@ -199,8 +212,19 @@ export class ConnectionController {
       void this.teardown(false);
       return;
     }
-    if (this.handshakeRetryTimer || !this.transport || this.transport.state !== "disconnected")
+    if (!this.transport || this.handshakeRetryTimer) return;
+    if (
+      this.transport.state === "connected" &&
+      this.currentState === "disconnected" &&
+      !this.handshakeAbort &&
+      !this.daemonUpgradeRequired
+    ) {
+      // Physical/controller split brain: the socket is open but no handshake
+      // owns it, and the transport refuses to connect again until it closes.
+      void this.teardown(false);
       return;
+    }
+    if (this.transport.state !== "disconnected") return;
     const generation = this.connectionGeneration;
     // Never hold the lifecycle operation open while an unreachable endpoint is
     // retrying: disabling or changing its configuration must remain possible.
