@@ -419,6 +419,12 @@ impl SessionLog {
             .as_ref()
             .and_then(|data| data["dispatched"].as_bool())
             == Some(false)
+            || (*method == Method::ToolClick
+                && error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data["press_sent"].as_bool())
+                    == Some(false))
         {
             return;
         }
@@ -1032,5 +1038,41 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn unpressed_click_and_undispatched_actions_do_not_record_uncertain_steps() {
+        let logs = RunLogs::default();
+        let unpressed = RpcError {
+            code: ErrorCode::PermissionDenied,
+            message: "covered before press".into(),
+            data: Some(json!({
+                "reason": "target_covered",
+                "effect_state": "unknown",
+                "press_sent": false
+            })),
+        };
+        let undispatched = RpcError {
+            code: ErrorCode::CdpFailed,
+            message: "clock unavailable before wheel".into(),
+            data: Some(json!({
+                "reason": "input_clock_unavailable",
+                "effect_state": "unknown",
+                "dispatched": false
+            })),
+        };
+        logs.record(
+            |_| true,
+            &Method::ToolClick,
+            &json!({"session_id": "s", "ref": "@e1"}),
+            &ResponseBody::Err(unpressed),
+        );
+        logs.record(
+            |_| true,
+            &Method::ToolWheel,
+            &json!({"session_id": "s", "delta_y": 300}),
+            &ResponseBody::Err(undispatched),
+        );
+        assert!(logs.read("s").steps.is_empty());
     }
 }

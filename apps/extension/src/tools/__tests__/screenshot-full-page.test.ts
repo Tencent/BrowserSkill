@@ -8,7 +8,20 @@ import { handleFullPageScreenshot } from "../screenshot-full-page";
 import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 vi.mock("@/long-screenshot/page-client", () => ({
-  createPageClient: () => ({ documentId: "document-one", prepare: async () => {}, page: vi.fn() }),
+  createPageClient: (
+    _tabId: number,
+    _id: string,
+    _signal: AbortSignal,
+    _checkTab: () => Promise<void>,
+    onSend?: (command: { action: string }) => void,
+  ) => ({
+    documentId: "document-one",
+    prepare: async () => {},
+    page: vi.fn(async (command: { action: string }) => {
+      onSend?.(command);
+      return {};
+    }),
+  }),
 }));
 vi.mock("@/long-screenshot/capture", () => ({ capturePage: vi.fn(async () => {}) }));
 vi.mock("@/long-screenshot/tiles", () => ({
@@ -56,7 +69,12 @@ async function setup() {
       onEvent?.(rootEventSource(7), "Page.screencastFrame", { sessionId: 1 });
       return {} as T;
     }
-    if (method === "Page.stopScreencast" || method === "Page.screencastFrameAck") return {} as T;
+    if (
+      method === "Page.stopScreencast" ||
+      method === "Page.screencastFrameAck" ||
+      method === "Emulation.setFocusEmulationEnabled"
+    )
+      return {} as T;
     if (method === "Page.getFrameTree") return {} as T;
     if (method === "Page.captureScreenshot") return { data: "cG5n" } as T;
     throw new Error(`Unexpected CDP call: ${method}`);
@@ -587,5 +605,83 @@ describe("full-page scope and diagnostics", () => {
     });
     expect(exportPng).not.toHaveBeenCalled();
     expect(deps.exports.discard).toHaveBeenCalledOnce();
+  });
+
+  it("enables and releases temporary focus emulation only for non-minimized unowned tabs", async () => {
+    // Minimized window: never enables focus emulation and reports effect_state: none on pre-begin page_hidden.
+    const minimized = await setupCapture();
+    (chrome as unknown as { windows: unknown }).windows = {
+      get: vi.fn(async () => ({ id: 100, focused: false, state: "minimized" })),
+    };
+    const { ScreenshotError } = await import("@/long-screenshot/types");
+    vi.mocked(capturePage).mockImplementationOnce(async () => {
+      throw new ScreenshotError("interrupted", "page_hidden");
+    });
+    expect(
+      await handleFullPageScreenshot(minimized.manager, { session_id: "one" }, minimized.deps),
+    ).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "page_hidden", effect_state: "none" },
+    });
+    expect(
+      minimized.deps.cdp.send.mock.calls.filter(
+        ([, method]) => method === "Emulation.setFocusEmulationEnabled",
+      ),
+    ).toEqual([]);
+
+    // Normal unfocused/occluded window without persistent lease: enables then disables focus emulation.
+    const occluded = await setupCapture();
+    (chrome as unknown as { windows: unknown }).windows = {
+      get: vi.fn(async () => ({ id: 100, focused: false, state: "normal" })),
+    };
+    expect(
+      await handleFullPageScreenshot(occluded.manager, { session_id: "one" }, occluded.deps),
+    ).toMatchObject({ format: "png" });
+    expect(
+      occluded.deps.cdp.send.mock.calls
+        .filter(([, method]) => method === "Emulation.setFocusEmulationEnabled")
+        .map(([, , params]) => params),
+    ).toEqual([{ enabled: true }, { enabled: false }]);
+    await occluded.deps.exports.dispose();
+
+    // Persistent background lease: never toggles focus emulation.
+    const owned = await setupCapture();
+    owned.deps.cdp.ownsBackgroundExecution = vi.fn(() => true);
+    expect(
+      await handleFullPageScreenshot(owned.manager, { session_id: "one" }, owned.deps),
+    ).toMatchObject({ format: "png" });
+    expect(
+      owned.deps.cdp.send.mock.calls.filter(
+        ([, method]) => method === "Emulation.setFocusEmulationEnabled",
+      ),
+    ).toEqual([]);
+    await owned.deps.exports.dispose();
+  });
+
+  it("reports effect_state: unknown when capture fails after begin is sent or succeeds", async () => {
+    const { manager, deps } = await setupCapture();
+    const { ScreenshotError } = await import("@/long-screenshot/types");
+    vi.mocked(capturePage).mockImplementationOnce(async (d) => {
+      d.prepared?.();
+      d.progress("capturing", 50, 2);
+      throw new ScreenshotError("interrupted", "page_hidden");
+    });
+    expect(await handleFullPageScreenshot(manager, { session_id: "one" }, deps)).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "page_hidden", effect_state: "unknown", frames: 2, progress: 50 },
+    });
+
+    // A lost message-port reply (`unavailable`) AFTER `begin` was sent must stay `unknown`.
+    const lostReply = await setupCapture();
+    vi.mocked(capturePage).mockImplementationOnce(async (d) => {
+      await d.page({ action: "begin", label: "Capturing", cancelLabel: "Cancel" });
+      throw new ScreenshotError("unavailable");
+    });
+    expect(
+      await handleFullPageScreenshot(lostReply.manager, { session_id: "one" }, lostReply.deps),
+    ).toMatchObject({
+      code: "unsupported",
+      data: { effect_state: "unknown" },
+    });
   });
 });

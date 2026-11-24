@@ -35,6 +35,8 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- 修复默认人机共驾模式下后台未选中标签页与被遮挡非聚焦窗口（如 macOS `--no-focus` Agent 窗口）执行 `bsk screenshot --full-page` 报 `page_hidden` 的问题：在 `guardedRunner` 剥离持久后台执行租约的场景下，`handleFullPageScreenshot` 现为非最小化且未持有持久租约的标签页临时启用 `Emulation.setFocusEmulationEnabled` 并在完成后有界释放（清理失败时通过 `detach` 围栏隔离），同时 `ChromiumCdp` 会保护活跃持久租约（如视频录制）不被临时释放误关，显式最小化窗口仍按预期以 `page_hidden` 拒绝。
+- 修复派发前与变更前拒绝跨扩展及 Rust CLI/守护进程误报 `effect_state: "unknown"` 的问题：`CooperationController` 不再仅因临时 `Emulation.setFocusEmulationEnabled` 将 `sent` 置为 `true`，对在原生输入开始前（且未执行 `DOM.focus`）被拒绝的 `wheel`/`drag`/`press`/`download`/`upload` 统一附带 `dispatched: false`，并在取消分支保留焦点清理失败产生的 `unknown` 回执；`handleFullPageScreenshot` 将 `begin` 发送标记精确收口至 `sendMessage` 边界，对未触发页面变更的拒绝（如最小化窗口 `page_hidden`、`busy` 或发送前失败）返回 `effect_state: "none"`；Rust 侧 `plan`、`recipe::runner` 与 `run_log` 同步对齐 `intent_wal`，一致识别 `dispatched: false` 与 `tool.click` 的 `press_sent: false`。
 - 修复 `bsk window resize` 在窗口尺寸被浏览器或窗口管理器钳制时误报守护进程协议错误的问题（[#692](https://github.com/Tencent/BrowserSkill/issues/692)）：窗口已按允许的最大尺寸完成调整时，CLI 现在报告尺寸被钳制，而非“protocol error communicating with bsk daemon”。失败仍返回退出码 2，仅修正了错误文案；MCP 提示指向 `bsk_inspect(action='observe')` 以确认实际窗口尺寸。
 - `bsk download` 不再在另一会话正在下载时立即失败：等待浏览器级 `chrome.downloads` 槽位的时间被计入调用方自身的 `--timeout` 预算（预留回复余量），等不到时返回带 `waited_ms` 的 `session_busy`，调用方取消时返回 `cancelled` 而非“浏览器忙”，等待耗时从采集预算中扣除；同一会话重复发起下载仍立即失败（[#519](https://github.com/Tencent/BrowserSkill/issues/519)）。
 - `bsk press --hold-ms` 现在会在命令自身的 `--timeout` 到期时停止按住并返回 `timeout`，不再在超过截止时间后仍以成功载荷返回；按键仍会释放，`bsk drag --hold-ms` 原本已是此行为。
