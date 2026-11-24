@@ -128,7 +128,9 @@ Before the fixes, eight newly added cases reproduced these failures. Afterward:
 
 Build the CLI, then build the extension with
 `BSK_DAEMON_WS_URL=ws://127.0.0.1:52923`. Set `BSK_TEST_CHROME` to a Chromium executable
-and run `pnpm eval:browser:dynamic-read`. `BSK_DYNAMIC_OCEAN=1` includes the real site;
+and run `pnpm eval:browser:dynamic-read`. For Chromium builds that support loading unpacked
+extensions at startup but return “Method not available” for `Extensions.loadUnpacked`, set
+`BSK_TEST_LOAD_CDP=0`. `BSK_DYNAMIC_OCEAN=1` includes the real site;
 BSK_DYNAMIC_ARTIFACTS chooses a new evidence directory. The runner owns cleanup
 and tests the same CLI's plan by default; BSK_DYNAMIC_PLAN_CLI can override it.
 The standard cooperation runner separately exercises native human/lifecycle cases.
