@@ -35,6 +35,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- `bsk extract` 现在会按页面 CSS `text-transform` 输出下拉框选中项的文本，报告用户实际看到的标签（`PAID`）而不是原始选项文本（`paid`）；表格单元格与 `input`/`textarea` 值此前已按此处理。
 - 修复 `bsk window resize` 在窗口尺寸被浏览器或窗口管理器钳制时误报守护进程协议错误的问题（[#692](https://github.com/Tencent/BrowserSkill/issues/692)）：窗口已按允许的最大尺寸完成调整时，CLI 现在报告尺寸被钳制，而非“protocol error communicating with bsk daemon”。失败仍返回退出码 2，仅修正了错误文案；MCP 提示指向 `bsk_inspect(action='observe')` 以确认实际窗口尺寸。
 - `bsk download` 不再在另一会话正在下载时立即失败：等待浏览器级 `chrome.downloads` 槽位的时间被计入调用方自身的 `--timeout` 预算（预留回复余量），等不到时返回带 `waited_ms` 的 `session_busy`，调用方取消时返回 `cancelled` 而非“浏览器忙”，等待耗时从采集预算中扣除；同一会话重复发起下载仍立即失败（[#519](https://github.com/Tencent/BrowserSkill/issues/519)）。
 - `bsk press --hold-ms` 现在会在命令自身的 `--timeout` 到期时停止按住并返回 `timeout`，不再在超过截止时间后仍以成功载荷返回；按键仍会释放，`bsk drag --hold-ms` 原本已是此行为。
