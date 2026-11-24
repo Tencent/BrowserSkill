@@ -77,6 +77,19 @@ export async function pointBelongsToTarget(
         // CDP may resolve ::before/::after as CSSPseudoElement, not Node.
         // Native input belongs to its originating element, including descendants.
         const origin = hit instanceof Node ? hit : hit?.element;
+        if (
+          this instanceof HTMLInputElement &&
+          (this.type === "checkbox" || this.type === "radio") &&
+          origin instanceof Node
+        ) {
+          if (this.labels && Array.from(this.labels).some((label) => label.contains(origin))) {
+            return true;
+          }
+          const controlWrapper = this.closest?.(
+            ".mdc-checkbox, .mat-mdc-checkbox, .mdc-radio, .mat-mdc-radio",
+          );
+          if (controlWrapper?.contains(origin)) return true;
+        }
         for (let node = origin; node instanceof Node; ) {
           if (node === this) return true;
           if (this.contains?.(node)) return true;
