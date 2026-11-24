@@ -13,6 +13,11 @@ test("summarize accepts an unexpanded report wildcard", async (t) => {
     await writeFile(join(cwd, name), JSON.stringify({ results: [{ adapter: "bsk-direct" }] }));
   }
   const cli = fileURLToPath(new URL("../cli.mjs", import.meta.url));
-  const rows = JSON.parse(execFileSync(process.execPath, [cli, "summarize", "*.json", "--json"], { cwd, encoding: "utf8" }));
+  const rows = JSON.parse(
+    execFileSync(process.execPath, [cli, "summarize", "*.json", "--json"], {
+      cwd,
+      encoding: "utf8",
+    }),
+  );
   assert.equal(rows[0].runs, 2);
 });
