@@ -46,6 +46,43 @@ fn daemon_self_exits_after_idle_timeout() {
 }
 
 #[test]
+fn daemon_self_exits_after_env_idle_timeout() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("bsk");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let out = Command::new(bsk_bin())
+        .env("BSK_HOME", &home)
+        .env("BSK_AUTO_UPDATE", "off")
+        .env("BSK_UPDATE_MANIFEST_URL", "http://127.0.0.1:1/disabled")
+        .env("BSK_DAEMON_IDLE", "400ms")
+        .env_remove("BSK_SESSION_IDLE")
+        .env("RUST_LOG", "warn")
+        .args(["daemon", "start", "--port", "0"])
+        .output()
+        .expect("spawn bsk daemon start with BSK_DAEMON_IDLE");
+    assert!(
+        out.status.success(),
+        "daemon start failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let info_path = home.join("daemon.json");
+    let info: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&info_path).unwrap()).unwrap();
+    let pid = info["pid"].as_u64().expect("pid number") as i32;
+
+    assert!(
+        wait_for_pid_exit(pid, Duration::from_secs(5)),
+        "daemon should self-exit within 5s of starting with BSK_DAEMON_IDLE=400ms"
+    );
+    assert!(
+        !info_path.exists(),
+        "daemon.json should be removed after env-configured idle exit"
+    );
+}
+
+#[test]
 fn daemon_stays_alive_while_ipc_connection_is_open() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("bsk");

@@ -25,6 +25,11 @@ determines which versions can connect.
   default) so background Agent Windows can start directly in the minimized state
   without flashing a normal window frame on screen, while keeping explicit
   foreground sessions (`--focus`) and action recording visible ([#649](https://github.com/Tencent/BrowserSkill/issues/649)).
+- Added `BSK_SESSION_IDLE` and `BSK_DAEMON_IDLE` environment variable fallbacks
+  for configuring session and local daemon idle timeouts across automatic
+  startup, `bsk daemon start`, `bsk daemon restart`, and `bsk update` restarts
+  (CLI flags always take precedence, empty values are ignored, and
+  `BSK_DAEMON_IDLE` is ignored in `--mode server`) ([#456](https://github.com/Tencent/BrowserSkill/issues/456)).
 
 ### Changed
 

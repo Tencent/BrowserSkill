@@ -5,6 +5,8 @@ pub(crate) static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new
 #[path = "process_env/browser_wait.rs"]
 #[cfg(unix)]
 mod browser_wait;
+#[path = "process_env/idle_env.rs"]
+mod idle_env;
 #[path = "process_env/info_roundtrip.rs"]
 mod info_roundtrip;
 #[path = "process_env/lockfile.rs"]
