@@ -1104,6 +1104,16 @@ pub fn reason_info_for_error(
             ),
             base.exit_code,
         ),
+        (ErrorCode::ProtocolError, RpcErrorReason::WindowResizeConstrained) => info(
+            "window resize was constrained by the browser or window manager",
+            Some(
+                "the window was resized to the largest size the OS work area allows; inspect the actual window size and retry with dimensions inside the work area",
+            ),
+            Some(
+                "the window was resized to the largest size the OS work area allows; call bsk_inspect(action='observe') to confirm the actual window size and retry with dimensions inside the work area",
+            ),
+            base.exit_code,
+        ),
         (
             _,
             RpcErrorReason::ReadParamsInvalid
@@ -1319,6 +1329,31 @@ mod tests {
             "expected geometry-specific hint"
         );
         assert!(!info.summary.contains("sandbox"));
+    }
+
+    #[test]
+    fn window_resize_constrained_no_longer_reports_a_protocol_error() {
+        let data =
+            serde_json::json!({ "reason": RpcErrorReason::WindowResizeConstrained.as_str() });
+        let info = info_for_error(ErrorCode::ProtocolError, Some(&data));
+        assert_eq!(
+            info.summary,
+            "window resize was constrained by the browser or window manager"
+        );
+        assert!(
+            info.hint
+                .unwrap()
+                .contains("largest size the OS work area allows")
+        );
+        assert!(
+            info.mcp_hint
+                .unwrap()
+                .contains("bsk_inspect(action='observe')")
+        );
+        // Still a failure: the exit code stays in the ProtocolError
+        // bucket (2) and the daemon is no longer implicated.
+        assert_eq!(info.exit_code, 2);
+        assert!(!info.summary.contains("protocol error"));
     }
 
     #[test]
