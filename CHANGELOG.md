@@ -188,6 +188,12 @@ determines which versions can connect.
   `<label>` (including trusted `detail: 1` pointer clicks on checkbox/radio labels)
   instead of recording two clicks that toggle the control twice on replay, while
   keeping plain `<label>` activations recorded on their target control (#645).
+- `bsk` human error output now prints the structured `observed_change` /
+  `observed_changes` diagnosis the extension already attaches to evidence
+  refusals, naming the part, node, field and before/after values plus the change
+  counters instead of only the generic "the action's observed content changed"
+  sentence; JSON and MCP payloads are unchanged
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
 
 ### Removed
 

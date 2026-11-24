@@ -99,6 +99,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 - 录制 contenteditable 编辑器时保留用户输入的换行，多行编辑按原样重放，不再被合并成一行
   （[#594](https://github.com/Tencent/BrowserSkill/issues/594)）。
 - 修复录制模式下点击可交互 `<label>`（含带 `cursor: pointer` 的复选框/单选框标签触发的 `detail: 1` 可信转发点击）时将 `<label>` 与目标控件重复录为两次点击导致回放反复切换的问题，同时保留普通 `<label>` 激活在目标控件上的单次点击记录（#645）。
+- `bsk` 人类可读错误输出现在会打印扩展在证据拒绝时已附带的 `observed_change` / `observed_changes` 诊断，指出发生变化的 part、节点、字段与前后值以及变更计数，不再只显示笼统的“页面内容已变化”；JSON 与 MCP 载荷保持不变（[#540](https://github.com/Tencent/BrowserSkill/issues/540)）。
 
 ### 移除
 
