@@ -11,7 +11,8 @@ use bsk_protocol::system::{
     SessionListResult, SessionRunLogParams, StatusParams,
 };
 use bsk_protocol::tools::{
-    TransferBeginParams, TransferChunkParams, TransferIdParams, TransferReadParams,
+    SessionStopResult, TransferBeginParams, TransferChunkParams, TransferIdParams,
+    TransferReadParams,
 };
 use bsk_protocol::{ErrorCode, Method, ResponseBody, RpcError, RpcId};
 use serde::de::DeserializeOwned;
@@ -33,8 +34,10 @@ use super::tool_pipeline::invalid_params;
 pub(super) const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 /// Upper bound on `wait_for_browser_ms` accepted over IPC.
 const MAX_BROWSER_WAIT: Duration = Duration::from_secs(60);
-// `session.stop` fast-fails while another tool is active; this budget
-// only needs to cover the stop RPC itself and IPC scheduling grace.
+// `session.stop` no longer fast-fails while another tool is active: an
+// explicit stop cancels the running tool and retries once (issue #185),
+// so this budget covers the stop RPC itself, the bounded interrupt
+// wait, and IPC scheduling grace.
 pub(super) const DEFAULT_SESSION_STOP_TIMEOUT: Duration =
     Duration::from_secs(DEFAULT_TOOL_TIMEOUT.as_secs() + DEFAULT_RPC_TIMEOUT.as_secs() + 5);
 
@@ -517,19 +520,106 @@ async fn finish_record_session(
     stop_one_session(state, session_id, None).await
 }
 
+/// How long an explicit `session.stop` waits for a cancelled
+/// in-flight tool to release the slot (issue #185). A cancelled
+/// worker is bounded by the 2s `CANCEL_CLEANUP_TIMEOUT` before it
+/// releases the slot, so 3s covers cleanup plus scheduling slack;
+/// past that the stop still fails with `SessionBusy` instead of
+/// hanging behind a wedged extension.
+const STOP_INTERRUPT_WAIT: Duration = Duration::from_secs(3);
+/// Poll interval while waiting for the slot to drain after cancelling.
+const STOP_INTERRUPT_POLL: Duration = Duration::from_millis(25);
+
+/// Explicit `session.stop` / `session.stop_all` only: when the slot is
+/// held by a running tool, cancel that tool and retry the stop once
+/// instead of failing with `session already has an unfinished command`
+/// (issue #185). A stop that arrives while a command is stuck no longer
+/// forces a daemon restart: the running tool is interrupted through the
+/// same cancel path as `session.user_interrupt`, and the worker releases
+/// the slot once its bounded cleanup finishes (or times out).
+///
+/// The idle reaper and start-request cleanup keep calling
+/// `stop_session_with_reason` directly and retain the old fail-fast
+/// behaviour.
+async fn stop_session_interrupting(
+    state: &Arc<DaemonState>,
+    session_id: &SessionId,
+    reason: &'static str,
+    timeout_dur: Duration,
+    cancel: Option<AbortToken>,
+) -> Result<SessionStopResult, StopSessionError> {
+    match state
+        .stop_session_with_reason(session_id, reason, timeout_dur, cancel.clone())
+        .await
+    {
+        Err(StopSessionError::SessionBusy) => {}
+        other => return other,
+    }
+    // Only interrupt when a tool actually holds the slot. A busy
+    // verdict with an idle slot means `session_start` is in flight
+    // (the `starting` guard in `send_session_stop`); cancelling tools
+    // cannot help there and must not race the start.
+    let tool_running = matches!(
+        state.tool_queues.activity(session_id),
+        Ok(activity) if activity.state == "running"
+    );
+    if !tool_running {
+        return Err(StopSessionError::SessionBusy);
+    }
+    interrupt_running_tool(state, session_id).await;
+    state
+        .stop_session_with_reason(session_id, reason, timeout_dur, cancel)
+        .await
+}
+
+/// Cancel every in-flight tool for `session_id` — the same mechanism
+/// as `session.user_interrupt` — and wait, bounded, for the worker to
+/// release the slot. The cancelled tool's caller observes
+/// `UserAborted`, which is the honest verdict for a tool interrupted
+/// by an explicit stop.
+async fn interrupt_running_tool(state: &Arc<DaemonState>, session_id: &SessionId) {
+    let snapshots = state.tool_inflight.cancel_session(session_id);
+    for snap in snapshots {
+        if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
+            && let Err(err) =
+                super::cancel_forward::forward_cancel_to_browser(state, &browser_id, &ws_rpc_id)
+        {
+            tracing::warn!(
+                %browser_id,
+                %ws_rpc_id,
+                %err,
+                "session.stop interrupt: failed to forward cancel to extension"
+            );
+        }
+    }
+    let deadline = tokio::time::Instant::now() + STOP_INTERRUPT_WAIT;
+    loop {
+        // The session may already be gone (teardown raced us); treat
+        // that as drained — the retry then reports `NotFound`.
+        let drained = match state.tool_queues.activity(session_id) {
+            Ok(activity) => activity.state != "running",
+            Err(_) => true,
+        };
+        if drained || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(STOP_INTERRUPT_POLL).await;
+    }
+}
+
 async fn stop_one_session(
     state: &Arc<DaemonState>,
     session_id: &SessionId,
     cancel: Option<AbortToken>,
 ) -> SessionStopReply {
-    match state
-        .stop_session_with_reason(
-            session_id,
-            bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
-            DEFAULT_SESSION_STOP_TIMEOUT,
-            cancel,
-        )
-        .await
+    match stop_session_interrupting(
+        state,
+        session_id,
+        bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+        DEFAULT_SESSION_STOP_TIMEOUT,
+        cancel,
+    )
+    .await
     {
         Ok(stop) => Ok(CliSessionStopResult {
             stopped: vec![session_id.0.clone()],
@@ -617,14 +707,14 @@ async fn handle_session_stop_all(
                 data: None,
             });
         }
-        match state
-            .stop_session_with_reason(
-                &id,
-                bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
-                DEFAULT_SESSION_STOP_TIMEOUT,
-                cancel.clone(),
-            )
-            .await
+        match stop_session_interrupting(
+            state,
+            &id,
+            bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+            DEFAULT_SESSION_STOP_TIMEOUT,
+            cancel.clone(),
+        )
+        .await
         {
             Ok(stop) => {
                 stopped.push(id.0);
@@ -890,5 +980,132 @@ pub(super) async fn handle_transfer_release(
             message: format!("transfer.release worker failed: {join_err}"),
             data: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod stop_interrupt_tests {
+    //! Regression tests for issue #185: an explicit `session.stop`
+    //! must interrupt a running tool instead of failing with
+    //! `SessionBusy` and forcing a daemon restart.
+
+    use super::*;
+    use crate::daemon::browsers::{self, BrowserClient, BrowserId, BrowserSink, Liveness, Pending};
+    use crate::daemon::sessions::{Session, SessionId};
+    use crate::daemon::start::DaemonConfig;
+    use bsk_protocol::Frame;
+    use tokio::sync::mpsc;
+
+    fn harness() -> (Arc<DaemonState>, SessionId, mpsc::UnboundedReceiver<Frame>) {
+        let state = Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let client = Arc::new(BrowserClient {
+            id: BrowserId("browser".into()),
+            browser_name: "chrome".into(),
+            browser_version: "1".into(),
+            extension_version: "0.1.0".into(),
+            extension_protocol_version: "2.0".into(),
+            label: String::new(),
+            sink: BrowserSink { tx },
+            pending: std::sync::Mutex::new(Pending::default()),
+            generation: browsers::next_browser_generation(),
+            connected_at_ms: 0,
+            version_skew: false,
+            liveness: Liveness::default(),
+        });
+        state.browsers.insert(Arc::clone(&client));
+        let sid = SessionId("s-stop".into());
+        state.sessions.insert(Session {
+            controller: None,
+            id: sid.clone(),
+            browser_id: BrowserId("browser".into()),
+            agent_window_id: Some(1),
+            created_at_ms: 1,
+            interaction: None,
+        });
+        state.tool_queues.spawn(sid.clone());
+        (state, sid, rx)
+    }
+
+    fn stop_reason() -> &'static str {
+        bsk_protocol::RpcErrorReason::SessionStopped.as_str()
+    }
+
+    #[tokio::test]
+    async fn explicit_stop_cancels_running_tool_and_retries() {
+        let (state, sid, _rx) = harness();
+        state.tool_queues.force_busy_for_tests(&sid, true);
+        let guard = state
+            .tool_inflight
+            .register("cli-1".into(), sid.clone())
+            .expect("register inflight entry");
+        let entry = guard.entry();
+        // The slot drains 1s in — after the first attempt's 100ms
+        // admission grace has expired, as a cancelled worker would
+        // release it once its bounded cleanup finishes.
+        let releaser = Arc::clone(&state);
+        let sid_clone = sid.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            releaser.tool_queues.force_busy_for_tests(&sid_clone, false);
+        });
+        let outcome =
+            stop_session_interrupting(&state, &sid, stop_reason(), Duration::from_secs(1), None)
+                .await;
+        assert!(
+            entry.is_cancelled(),
+            "stop must cancel the running tool before retrying"
+        );
+        // The retry actually dispatched the stop: with no extension
+        // answer it times out instead of failing fast with SessionBusy.
+        assert!(
+            matches!(outcome, Err(StopSessionError::Timeout)),
+            "retry must reach the extension; got {outcome:?}"
+        );
+        // The failed stop reopens the queue; the session is left running.
+        assert!(state.tool_queues.is_accepting(&sid));
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn stop_without_running_tool_does_not_cancel_inflight() {
+        let (state, sid, _rx) = harness();
+        let guard = state
+            .tool_inflight
+            .register("cli-2".into(), sid.clone())
+            .expect("register inflight entry");
+        let entry = guard.entry();
+        let outcome =
+            stop_session_interrupting(&state, &sid, stop_reason(), Duration::from_secs(1), None)
+                .await;
+        assert!(
+            !entry.is_cancelled(),
+            "nothing running: stop must not cancel unrelated inflight entries"
+        );
+        assert!(matches!(outcome, Err(StopSessionError::Timeout)));
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn stop_still_fails_when_slot_never_drains() {
+        let (state, sid, _rx) = harness();
+        state.tool_queues.force_busy_for_tests(&sid, true);
+        let guard = state
+            .tool_inflight
+            .register("cli-3".into(), sid.clone())
+            .expect("register inflight entry");
+        let entry = guard.entry();
+        let outcome =
+            stop_session_interrupting(&state, &sid, stop_reason(), Duration::from_secs(1), None)
+                .await;
+        assert!(
+            entry.is_cancelled(),
+            "stop must still attempt the cancel even when the slot never drains"
+        );
+        assert!(
+            matches!(outcome, Err(StopSessionError::SessionBusy)),
+            "a wedged slot must still fail with SessionBusy; got {outcome:?}"
+        );
+        drop(guard);
     }
 }

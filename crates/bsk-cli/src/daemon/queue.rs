@@ -69,6 +69,29 @@ pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 /// bounded so a wedged extension cannot pin the session forever.
 pub const CANCEL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long session-queue admission waits for a just-finishing job to
+/// release the slot before rejecting with `SessionBusy` (issue #185).
+///
+/// The worker releases the slot *before* delivering the result
+/// ([`run_worker`]), so a strictly-serial caller can still observe
+/// `busy == true` for the scheduling instant in between and be refused
+/// with `session already has an unfinished command`, even though the
+/// previous command already succeeded. Admission therefore waits out
+/// that drain instead of failing immediately. The wait only ever runs
+/// on the would-be-rejected path — a free slot is taken immediately —
+/// and it never admits a second concurrent command: the slot is still
+/// taken exactly once, under the state lock. A genuinely busy session
+/// still fails with `SessionBusy` once the grace expires.
+///
+/// Kept at 100ms on purpose: the integration test
+/// `concurrent_same_session_dispatch_returns_session_busy_immediately`
+/// pins that a genuinely-busy dispatch fast-fails within 200ms, so the
+/// grace must stay well inside that budget.
+pub const SESSION_BUSY_GRACE: Duration = Duration::from_millis(100);
+
+/// Poll interval while waiting out [`SESSION_BUSY_GRACE`].
+const SESSION_BUSY_POLL: Duration = Duration::from_millis(25);
+
 /// Job submitted into a session queue. Carries everything the worker
 /// needs to forward one RPC and one oneshot to deliver the answer.
 pub struct ToolJob {
@@ -235,6 +258,14 @@ fn clear_busy(state: &Mutex<QueueState>) {
     guard.active = None;
 }
 
+/// Outcome of `try_acquire_slot`.
+enum AcquireOutcome {
+    /// The slot was taken; the caller owns the dispatch.
+    Acquired(mpsc::Sender<ToolJob>, Arc<Mutex<QueueState>>),
+    /// The slot is held by another job.
+    Busy,
+}
+
 #[derive(Debug)]
 struct QueueEntry {
     sender: mpsc::Sender<ToolJob>,
@@ -295,7 +326,7 @@ impl ToolQueueRegistry {
     }
 
     #[cfg(test)]
-    fn force_busy_for_tests(&self, sid: &SessionId, busy: bool) {
+    pub(crate) fn force_busy_for_tests(&self, sid: &SessionId, busy: bool) {
         let guard = self.queues.lock().expect("tool queue registry poisoned");
         let entry = guard.get(sid).expect("queue must exist");
         entry.state.lock().expect("queue state poisoned").busy = busy;
@@ -426,29 +457,24 @@ impl ToolQueueRegistry {
         timeout: Duration,
         inflight: Option<Arc<ToolInflightEntry>>,
     ) -> Result<Value, DispatchError> {
+        // The slot is taken exactly once, under the state lock; when
+        // it is held by a job that has just finished, admission waits
+        // up to `SESSION_BUSY_GRACE` for the drain instead of refusing
+        // a strictly-serial caller with `SessionBusy` (issue #185).
+        // The wait runs in `wait_slot_free`, outside any lock, so the
+        // worker can clear `busy` while we wait.
         let (sender, state) = {
-            let guard = self.queues.lock().expect("tool queue registry poisoned");
-            let Some(entry) = guard.get(sid) else {
-                return Err(self.session_missing(sid));
-            };
-            if !entry.accepting {
-                return Err(DispatchError::SessionStopping);
+            let mut waited = false;
+            loop {
+                match self.try_acquire_slot(sid, &method, inflight.as_ref(), false)? {
+                    AcquireOutcome::Acquired(sender, state) => break (sender, state),
+                    AcquireOutcome::Busy if !waited => {
+                        waited = true;
+                        self.wait_slot_free(sid).await;
+                    }
+                    AcquireOutcome::Busy => return Err(DispatchError::SessionBusy),
+                }
             }
-            let mut queue_state = entry.state.lock().expect("queue state poisoned");
-            if queue_state.busy {
-                return Err(DispatchError::SessionBusy);
-            }
-            queue_state.busy = true;
-            queue_state.active = Some(DebugActivity {
-                state: "running".into(),
-                command_id: inflight.as_ref().map(|entry| entry.cli_rpc_id.clone()),
-                method: Some(method.wire_name().to_owned()),
-                started_at: Some(epoch_ms()),
-                elapsed_ms: Some(0),
-                wait_complete: None,
-                wait_timed_out: None,
-            });
-            (entry.sender.clone(), Arc::clone(&entry.state))
         };
         self.sessions.touch(sid);
         let outcome = dispatch_with_sender(
@@ -466,9 +492,10 @@ impl ToolQueueRegistry {
         )
         .await;
         // A long-running request may outlive the idle threshold. Touching
-        // after completion prevents the reaper from immediately closing it;
-        // while it is running, session.stop observes SessionBusy and retries
-        // on a later sweep rather than interrupting the tool.
+        // after completion prevents the reaper from immediately closing it.
+        // While it is running, an explicit session.stop cancels the tool
+        // and retries once (issue #185); the idle reaper still observes
+        // SessionBusy and retries on a later sweep instead.
         self.sessions.touch(sid);
         outcome.map_err(|error| error.with_session_end_reason(inflight.as_deref()))
     }
@@ -594,21 +621,21 @@ impl ToolQueueRegistry {
         timeout: Duration,
         cancel: Option<AbortToken>,
     ) -> Result<Value, DispatchError> {
+        // Same just-finished drain as `dispatch_with_context`: a stop
+        // issued right after a tool succeeded must not be refused for
+        // a slot that is already releasing (issue #185).
         let (sender, state) = {
-            let mut guard = self.queues.lock().expect("tool queue registry poisoned");
-            let Some(entry) = guard.get_mut(sid) else {
-                return Err(self.session_missing(sid));
-            };
-            if !entry.accepting {
-                return Err(DispatchError::SessionStopping);
+            let mut waited = false;
+            loop {
+                match self.try_acquire_slot(sid, &method, None, true)? {
+                    AcquireOutcome::Acquired(sender, state) => break (sender, state),
+                    AcquireOutcome::Busy if !waited => {
+                        waited = true;
+                        self.wait_slot_free(sid).await;
+                    }
+                    AcquireOutcome::Busy => return Err(DispatchError::SessionBusy),
+                }
             }
-            let mut queue_state = entry.state.lock().expect("queue state poisoned");
-            if queue_state.busy {
-                return Err(DispatchError::SessionBusy);
-            }
-            queue_state.busy = true;
-            entry.accepting = false;
-            (entry.sender.clone(), Arc::clone(&entry.state))
         };
         dispatch_with_sender(
             sender,
@@ -624,6 +651,77 @@ impl ToolQueueRegistry {
             timeout,
         )
         .await
+    }
+
+    /// Take the per-session serial slot for one dispatch, or report
+    /// it busy. Synchronous on purpose: the queue and state locks it
+    /// takes are `std::sync::Mutex` guards, which must never be held
+    /// across an `.await` (that would make the dispatch future
+    /// `!Send`). Callers that want to wait out a just-finishing job
+    /// call this again after [`ToolQueueRegistry::wait_slot_free`].
+    ///
+    /// `closing` marks a `session.stop` acquisition: the queue stops
+    /// accepting new jobs once the slot is taken, so teardown cannot
+    /// race an in-flight tool.
+    fn try_acquire_slot(
+        &self,
+        sid: &SessionId,
+        method: &Method,
+        inflight: Option<&Arc<ToolInflightEntry>>,
+        closing: bool,
+    ) -> Result<AcquireOutcome, DispatchError> {
+        let mut guard = self.queues.lock().expect("tool queue registry poisoned");
+        let Some(entry) = guard.get_mut(sid) else {
+            return Err(self.session_missing(sid));
+        };
+        if !entry.accepting {
+            return Err(DispatchError::SessionStopping);
+        }
+        let mut queue_state = entry.state.lock().expect("queue state poisoned");
+        if queue_state.busy {
+            return Ok(AcquireOutcome::Busy);
+        }
+        queue_state.busy = true;
+        if closing {
+            entry.accepting = false;
+        } else {
+            queue_state.active = Some(DebugActivity {
+                state: "running".into(),
+                command_id: inflight.map(|entry| entry.cli_rpc_id.clone()),
+                method: Some(method.wire_name().to_owned()),
+                started_at: Some(epoch_ms()),
+                elapsed_ms: Some(0),
+                wait_complete: None,
+                wait_timed_out: None,
+            });
+        }
+        Ok(AcquireOutcome::Acquired(
+            entry.sender.clone(),
+            Arc::clone(&entry.state),
+        ))
+    }
+
+    /// Wait up to [`SESSION_BUSY_GRACE`] for the slot to drain (issue
+    /// #185). Returns once the slot is free, the queue is gone, or the
+    /// grace expires; the caller re-checks everything under lock, so
+    /// this only ever observes state, never decides an outcome. Holds
+    /// no lock while sleeping, so the worker can clear `busy` (and
+    /// `remove` / `spawn` can proceed) during the wait.
+    async fn wait_slot_free(&self, sid: &SessionId) {
+        let deadline = tokio::time::Instant::now() + SESSION_BUSY_GRACE;
+        loop {
+            let free = {
+                let guard = self.queues.lock().expect("tool queue registry poisoned");
+                match guard.get(sid) {
+                    None => true,
+                    Some(entry) => !entry.state.lock().expect("queue state poisoned").busy,
+                }
+            };
+            if free || tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(SESSION_BUSY_POLL).await;
+        }
     }
 }
 
@@ -2236,5 +2334,110 @@ mod action_timeout_tests {
                 assert_eq!(data["phase"], phase);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod session_busy_grace_tests {
+    //! Regression tests for the issue #185 admission grace: a
+    //! strictly-serial caller must not be refused with `SessionBusy`
+    //! in the instant after the previous job finished, while a
+    //! genuinely busy session must still fail fast (after the grace).
+
+    use super::*;
+    use crate::daemon::browsers::BrowserRegistry;
+    use crate::daemon::sessions::{SessionId, SessionRegistry};
+    use bsk_protocol::Method;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn registry() -> Arc<ToolQueueRegistry> {
+        let browsers = Arc::new(BrowserRegistry::new());
+        let sessions = Arc::new(SessionRegistry::new());
+        Arc::new(ToolQueueRegistry::new(browsers, sessions))
+    }
+
+    fn release_after(queues: &Arc<ToolQueueRegistry>, sid: &SessionId, after: Duration) {
+        let releaser = Arc::clone(queues);
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            releaser.force_busy_for_tests(&sid, false);
+        });
+    }
+
+    #[tokio::test]
+    async fn dispatch_waits_for_just_finished_slot() {
+        let queues = registry();
+        let sid = SessionId("s-grace".into());
+        queues.spawn(sid.clone());
+        queues.force_busy_for_tests(&sid, true);
+        release_after(&queues, &sid, Duration::from_millis(50));
+        let outcome = queues
+            .dispatch(
+                &sid,
+                Method::ToolTabList,
+                json!({ "session_id": "s-grace" }),
+                Duration::from_secs(1),
+                None,
+            )
+            .await;
+        assert!(
+            !matches!(outcome, Err(DispatchError::SessionBusy)),
+            "admission must wait for the just-finished slot; got {outcome:?}"
+        );
+        // No session row exists, so the admitted dispatch fails in
+        // the worker with NotFound rather than reaching a browser.
+        assert!(matches!(outcome, Err(DispatchError::Rpc(_))));
+    }
+
+    #[tokio::test]
+    async fn dispatch_still_rejects_a_genuinely_busy_session() {
+        let queues = registry();
+        let sid = SessionId("s-stuck".into());
+        queues.spawn(sid.clone());
+        queues.force_busy_for_tests(&sid, true);
+        let start = Instant::now();
+        let outcome = queues
+            .dispatch(
+                &sid,
+                Method::ToolTabList,
+                json!({ "session_id": "s-stuck" }),
+                Duration::from_secs(1),
+                None,
+            )
+            .await;
+        assert!(matches!(outcome, Err(DispatchError::SessionBusy)));
+        assert!(
+            start.elapsed() >= Duration::from_millis(80),
+            "a genuinely busy slot must wait out the grace before failing; elapsed {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_dispatch_waits_for_just_finished_slot() {
+        let queues = registry();
+        let sid = SessionId("s-stop-grace".into());
+        queues.spawn(sid.clone());
+        queues.force_busy_for_tests(&sid, true);
+        release_after(&queues, &sid, Duration::from_millis(50));
+        let outcome = queues
+            .dispatch_after_closing(
+                &sid,
+                Method::ToolSessionStop,
+                json!({ "session_id": "s-stop-grace" }),
+                Duration::from_secs(1),
+                None,
+            )
+            .await;
+        assert!(
+            !matches!(outcome, Err(DispatchError::SessionBusy)),
+            "session.stop admission must wait for the just-finished slot; got {outcome:?}"
+        );
+        // No session row exists, so the admitted stop fails in the
+        // worker with NotFound rather than reaching a browser.
+        assert!(matches!(outcome, Err(DispatchError::Rpc(_))));
     }
 }
