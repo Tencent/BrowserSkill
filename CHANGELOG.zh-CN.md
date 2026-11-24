@@ -7,6 +7,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 新增
 
+- 发版评测可汇总同一候选构建和测试计划的独立轮次，报告实际 `pass@k`、`pass^k` 和不稳定的场景。
 - **MCP 100% 能力对齐**：新增 `bsk_ledger`、`bsk_debug`、`bsk_video` 与 `bsk_record` 一等工具，补齐现有工具全量 CLI 参数与动作（`session open/stop --all`、`sync` 等待/过滤、`wait_ms`、`view`、`screenshot`/`extract` 输出导出、`read` `context` 透传、`upload`/`download`、`tab_borrow`、完整 `emulate` 与 `operation_await` 文件保存），并通过请求级 `ClientContext` 统一 CLI 与 MCP 传输上下文。
 - **编译期 `MethodSpec` 与 `RpcErrorReason` 全栈单一事实源**：为全部 77 个 RPC 方法建立无通配兜底的 `MethodSpec` 元数据并生成 TS 消费端，同时补齐并全栈枚举化 `RpcErrorReason` 及 CLI/MCP 双通道恢复提示（`cli_hint` / `mcp_hint`）。
 - DeepSeek Harness（`dsh`）成为原生 skill 安装目标，支持通过 `bsk install-skill --harness dsh`
@@ -15,6 +16,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
   同步支持与 `bsk session start` 一致的 `agent_name`、`project` 与 `controller_color`
   控制方身份标识（#731）。
 - 在扩展弹窗“自动化设置”中新增 **最小化打开 Agent 窗口** 开关（`bsk_interaction_preferences.openAgentWindowMinimized`，默认关闭），开启后新建的后台 Agent 窗口直接以最小化状态启动而不在屏幕上闪出白框，显式前台打开的会话（`--focus`）与操作录制仍保持正常显示（[#649](https://github.com/Tencent/BrowserSkill/issues/649)）。
+- 新增 `BSK_SESSION_IDLE` 与 `BSK_DAEMON_IDLE` 环境变量支持，可在自动启动、`bsk daemon start`、`bsk daemon restart` 及 `bsk update` 重启时配置会话和本地守护进程空闲超时（显式 CLI 参数始终优先，空白值自动忽略，`--mode server` 模式下忽略 `BSK_DAEMON_IDLE`）（[#456](https://github.com/Tencent/BrowserSkill/issues/456)）。
 
 ### 变更
 
@@ -33,6 +35,8 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- `bsk download` 不再在另一会话正在下载时立即失败：等待浏览器级 `chrome.downloads` 槽位的时间被计入调用方自身的 `--timeout` 预算（预留回复余量），等不到时返回带 `waited_ms` 的 `session_busy`，调用方取消时返回 `cancelled` 而非“浏览器忙”，等待耗时从采集预算中扣除；同一会话重复发起下载仍立即失败（[#519](https://github.com/Tencent/BrowserSkill/issues/519)）。
+- `bsk press --hold-ms` 现在会在命令自身的 `--timeout` 到期时停止按住并返回 `timeout`，不再在超过截止时间后仍以成功载荷返回；按键仍会释放，`bsk drag --hold-ms` 原本已是此行为。
 - 在 Windows 上，`daemon stop`、daemon 状态检查、更新后的等待和残留清理不再把 CLI 无权打开的运行中进程（例如从管理员终端启动的进程）当作已退出。
 - 为 Chrome debugger attach 增加 10 秒上限；未响应时返回明确错误，并在允许重试前隔离并回滚迟到的 attach 完成（#452）。
 - 加固守护进程 WebSocket 生命周期、审计存储容错、`tool.debug` 动态副作用策略、自动更新交接及文件传输/运维可靠性：
@@ -95,6 +99,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 - 录制 contenteditable 编辑器时保留用户输入的换行，多行编辑按原样重放，不再被合并成一行
   （[#594](https://github.com/Tencent/BrowserSkill/issues/594)）。
 - 修复录制模式下点击可交互 `<label>`（含带 `cursor: pointer` 的复选框/单选框标签触发的 `detail: 1` 可信转发点击）时将 `<label>` 与目标控件重复录为两次点击导致回放反复切换的问题，同时保留普通 `<label>` 激活在目标控件上的单次点击记录（#645）。
+- `bsk` 人类可读错误输出现在会打印扩展在证据拒绝时已附带的 `observed_change` / `observed_changes` 诊断，指出发生变化的 part、节点、字段与前后值以及变更计数，不再只显示笼统的“页面内容已变化”；JSON 与 MCP 载荷保持不变（[#540](https://github.com/Tencent/BrowserSkill/issues/540)）。
 
 ### 移除
 

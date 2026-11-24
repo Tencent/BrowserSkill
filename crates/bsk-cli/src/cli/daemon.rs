@@ -12,6 +12,10 @@ pub const DEFAULT_WS_PORT: u16 = bsk_protocol::DEFAULT_DAEMON_PORT;
 pub const DEFAULT_DAEMON_IDLE: Duration = Duration::from_secs(10 * 60);
 /// Default session idle timeout (5 minutes per design §5).
 pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(5 * 60);
+/// Environment variable configuring the session idle timeout.
+pub const SESSION_IDLE_ENV: &str = "BSK_SESSION_IDLE";
+/// Environment variable configuring the local daemon idle timeout.
+pub const DAEMON_IDLE_ENV: &str = "BSK_DAEMON_IDLE";
 
 #[derive(Debug, Subcommand)]
 pub enum DaemonCmd {
@@ -110,11 +114,11 @@ pub struct StartArgs {
     #[arg(long)]
     pub foreground: bool,
 
-    /// Session idle timeout, e.g. `5m`, `30s`. Default 5 minutes.
+    /// Session idle timeout, e.g. `5m`, `30s`. Default 5 minutes. Configurable via `BSK_SESSION_IDLE`.
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     pub session_idle: Option<Duration>,
 
-    /// Daemon idle timeout, e.g. `10m`, `2s`. Default 10 minutes.
+    /// Daemon idle timeout, e.g. `10m`, `2s`. Default 10 minutes. Configurable via `BSK_DAEMON_IDLE`.
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     pub daemon_idle: Option<Duration>,
 }
@@ -169,6 +173,43 @@ impl StartArgs {
     pub fn resolved_daemon_idle(&self) -> Duration {
         self.daemon_idle.unwrap_or(DEFAULT_DAEMON_IDLE)
     }
+
+    /// Return a copy with unset idle timeouts populated from
+    /// [`SESSION_IDLE_ENV`] and (in local mode) [`DAEMON_IDLE_ENV`].
+    ///
+    /// Explicit CLI flags always take precedence, and empty/whitespace-only
+    /// environment values are treated as unset. Non-empty malformed values
+    /// return an error before starting or stopping a daemon.
+    pub fn with_env_idle(&self) -> anyhow::Result<Self> {
+        self.with_env_idle_from(
+            std::env::var(SESSION_IDLE_ENV).ok().as_deref(),
+            std::env::var(DAEMON_IDLE_ENV).ok().as_deref(),
+        )
+    }
+
+    pub fn with_env_idle_from(
+        &self,
+        session_env: Option<&str>,
+        daemon_env: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let mut next = self.clone();
+        if next.session_idle.is_none() {
+            next.session_idle = parse_env_idle(SESSION_IDLE_ENV, session_env)?;
+        }
+        if next.mode == DaemonMode::Local && next.daemon_idle.is_none() {
+            next.daemon_idle = parse_env_idle(DAEMON_IDLE_ENV, daemon_env)?;
+        }
+        Ok(next)
+    }
+}
+
+fn parse_env_idle(var_name: &str, raw: Option<&str>) -> anyhow::Result<Option<Duration>> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    parse_duration(raw)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("invalid {var_name}: {e}"))
 }
 
 /// Parse short human durations (`5s`, `30m`, `2h`, `750ms`).
@@ -204,6 +245,7 @@ pub fn dispatch(cmd: DaemonCmd) -> anyhow::Result<()> {
         DaemonCmd::Stop => daemon::start::run_stop(),
         DaemonCmd::Restart(args) => {
             args.server_config()?;
+            args.with_env_idle()?;
             daemon::start::run_stop().map_err(|e| e.context("restart failed during stop phase"))?;
             daemon::start::run_start(args)
         }
@@ -422,5 +464,62 @@ mod tests {
     fn parse_duration_rejects_bad_unit() {
         assert!(parse_duration("10x").is_err());
         assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn with_env_idle_resolves_unset_fields_and_preserves_cli_precedence() {
+        let resolved = StartArgs::default()
+            .with_env_idle_from(Some("15m"), Some("45m"))
+            .unwrap();
+        assert_eq!(resolved.session_idle, Some(Duration::from_secs(15 * 60)));
+        assert_eq!(resolved.daemon_idle, Some(Duration::from_secs(45 * 60)));
+        assert_eq!(
+            resolved.resolved_session_idle(),
+            Duration::from_secs(15 * 60)
+        );
+        assert_eq!(
+            resolved.resolved_daemon_idle(),
+            Duration::from_secs(45 * 60)
+        );
+
+        let explicit = StartArgs {
+            session_idle: Some(Duration::from_secs(120)),
+            daemon_idle: Some(Duration::from_secs(300)),
+            ..Default::default()
+        }
+        .with_env_idle_from(Some("invalid"), Some("invalid"))
+        .unwrap();
+        assert_eq!(explicit.session_idle, Some(Duration::from_secs(120)));
+        assert_eq!(explicit.daemon_idle, Some(Duration::from_secs(300)));
+
+        let blank = StartArgs::default()
+            .with_env_idle_from(Some("   "), Some(""))
+            .unwrap();
+        assert!(blank.session_idle.is_none());
+        assert!(blank.daemon_idle.is_none());
+    }
+
+    #[test]
+    fn with_env_idle_rejects_malformed_values_and_ignores_daemon_idle_in_server_mode() {
+        let err = StartArgs::default()
+            .with_env_idle_from(Some("bogus"), None)
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid BSK_SESSION_IDLE"));
+
+        let err = StartArgs::default()
+            .with_env_idle_from(None, Some("10weeks"))
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid BSK_DAEMON_IDLE"));
+
+        let server = StartArgs {
+            mode: DaemonMode::Server,
+            public_url: Some("wss://browser.example/extension".into()),
+            ..Default::default()
+        }
+        .with_env_idle_from(Some("20m"), Some("40m"))
+        .unwrap();
+        assert_eq!(server.session_idle, Some(Duration::from_secs(20 * 60)));
+        assert!(server.daemon_idle.is_none());
+        assert!(server.server_config().unwrap().is_some());
     }
 }

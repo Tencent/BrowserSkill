@@ -142,15 +142,19 @@ impl From<&StartArgs> for DaemonConfig {
 
 /// `bsk daemon start` entrypoint.
 pub fn run_start(args: StartArgs) -> Result<()> {
-    let mut cfg = DaemonConfig::from(&args);
-    cfg.server = args.server_config()?;
+    let server = args.server_config()?;
 
-    if args.foreground || cfg.server.is_some() {
+    if args.foreground || server.is_some() {
+        let effective = args.with_env_idle()?;
+        let mut cfg = DaemonConfig::from(&effective);
+        cfg.server = server;
         return run_foreground(cfg);
     }
 
     // Detached child mode (set by parent before spawn).
     if is_daemonized_child() {
+        let effective = args.with_env_idle()?;
+        let mut cfg = DaemonConfig::from(&effective);
         detach_stdio()?;
         cfg.detached = true;
         cfg.replaces = replaced_daemon();
@@ -203,10 +207,11 @@ pub(crate) fn start_owned(
     args: &StartArgs,
     version: &str,
 ) -> Result<daemon_info::DaemonInfo> {
-    let mut child = spawn_detached_at(exe, args, None)?;
+    let effective = args.with_env_idle()?;
+    let mut child = spawn_detached_at(exe, &effective, None)?;
     let pid = child.id();
     let expected = handover::Expected {
-        port: Some(args.resolved_port()).filter(|port| *port != 0),
+        port: Some(effective.resolved_port()).filter(|port| *port != 0),
         version,
     };
     let daemon = handover::wait_until_serving(&mut child, pid, handover::HANDOVER_TIMEOUT, || {
@@ -231,12 +236,13 @@ fn start_background_at(
     args: &StartArgs,
     deadline: Instant,
 ) -> Result<(daemon_info::DaemonInfo, String)> {
+    let effective = args.with_env_idle()?;
     anyhow::ensure!(
         Instant::now() < deadline,
         "daemon startup deadline exceeded"
     );
-    let child = spawn_detached_at(exe, args, None)?;
-    wait_for_background(child, args, deadline)
+    let child = spawn_detached_at(exe, &effective, None)?;
+    wait_for_background(child, &effective, deadline)
 }
 
 fn wait_for_background(

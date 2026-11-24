@@ -432,6 +432,7 @@ pub fn render(err: &CliError, format: Format) -> ExitCode {
 /// ```text
 ///   error: <centralised summary>
 ///   <extras (caller-controlled)>
+///   observed: <structured evidence difference, when the refusal carries one>
 ///   hint: <centralised hint>
 ///   details: <raw daemon message, when it adds context>
 /// ```
@@ -482,6 +483,7 @@ pub fn render_with_extras(
             {
                 let _ = writeln!(out, "(failed to render extras: {e})");
             }
+            write_observed_change(&mut out, err);
             if let Some(h) = hint {
                 let _ = writeln!(out, "hint: {h}");
             }
@@ -523,6 +525,7 @@ pub(crate) fn render_human_to_string(err: &CliError, extras: Option<&dyn RenderE
     {
         let _ = writeln!(buf, "(failed to render extras: {e})");
     }
+    write_observed_change(&mut buf, err);
     if let Some(h) = hint {
         let _ = writeln!(buf, "hint: {h}");
     }
@@ -531,6 +534,18 @@ pub(crate) fn render_human_to_string(err: &CliError, extras: Option<&dyn RenderE
         let _ = writeln!(buf, "details: {raw}");
     }
     String::from_utf8(buf).unwrap_or_default()
+}
+
+/// Write the `observed:` line for an evidence refusal that carries the
+/// extension's structured diagnosis (`data.observed_change` /
+/// `data.observed_changes`). JSON and MCP callers already receive those fields;
+/// human output used to show only the generic refusal sentence.
+fn write_observed_change(out: &mut dyn std::io::Write, err: &CliError) {
+    if let Some(data) = err.data()
+        && let Some(line) = render_error::observed_change_line(data)
+    {
+        let _ = writeln!(out, "{line}");
+    }
 }
 
 #[cfg(test)]
@@ -873,6 +888,61 @@ mod tests {
             serde_json::from_str(&json_error_string(&error, 1, hint)).unwrap();
         assert_eq!(rendered["data"]["expected"], "$12");
         assert_eq!(rendered["data"]["effect_state"], "none");
+    }
+
+    #[test]
+    fn human_evidence_refusal_names_the_observed_difference() {
+        let err = CliError::from_rpc(RpcError {
+            code: ErrorCode::PermissionDenied,
+            message: "The action's observed content changed; synchronize and replan".into(),
+            data: Some(serde_json::json!({
+                "reason": "cooperation_sync_required",
+                "effect_state": "none",
+                "observed_change": {
+                    "part": "media",
+                    "change": "changed",
+                    "scope": "form",
+                    "phase": "decision",
+                    "role": "slider",
+                    "name": "Preview progress",
+                    "field": "value",
+                    "before": "12%",
+                    "after": "13%"
+                },
+                "observed_changes": {"changed": 2, "added": 0, "removed": 1}
+            })),
+        });
+        let human = render_human_to_string(&err, None);
+        assert!(
+            human.contains(
+                "observed: part=media change=changed scope=form phase=decision role=\"slider\" \
+                 name=\"Preview progress\" field=\"value\" before=\"12%\" after=\"13%\" \
+                 (changed=2 added=0 removed=1)"
+            ),
+            "{human}"
+        );
+        assert!(human.contains("hint:"));
+        assert!(human.contains("details: The action's observed content changed"));
+        // The diagnosis is printed before the hint so it is not buried.
+        assert!(human.find("observed:").unwrap() < human.find("hint:").unwrap());
+        // JSON callers keep receiving the raw structured fields.
+        let json = mcp_json_error_value(&err);
+        assert_eq!(json["data"]["observed_change"]["field"], "value");
+        assert_eq!(json["data"]["observed_changes"]["changed"], 2);
+    }
+
+    #[test]
+    fn human_errors_without_evidence_diagnosis_stay_concise() {
+        let err = CliError::from_rpc(RpcError {
+            code: ErrorCode::PermissionDenied,
+            message: "The action's observed content changed; synchronize and replan".into(),
+            data: Some(serde_json::json!({
+                "reason": "cooperation_sync_required",
+                "effect_state": "none"
+            })),
+        });
+        let human = render_human_to_string(&err, None);
+        assert!(!human.contains("observed:"), "{human}");
     }
 }
 

@@ -61,6 +61,56 @@ const fn info(
     }
 }
 
+/// Longest quoted value kept on the `observed:` diagnostic line, so a derived
+/// name from a whole subtree cannot flood the human error output.
+const OBSERVED_VALUE_LIMIT: usize = 160;
+
+/// One-line human diagnostic for the structured difference an evidence refusal
+/// carries as `data.observed_change` / `data.observed_changes`. JSON and MCP
+/// callers already receive those fields; the human renderer prints this line so
+/// the agent can see which part, node or field changed instead of only the
+/// generic "observed content changed" sentence.
+pub fn observed_change_line(data: &serde_json::Value) -> Option<String> {
+    let change = data.get("observed_change")?.as_object()?;
+    let mut fields = Vec::new();
+    for key in ["part", "change", "scope", "phase"] {
+        if let Some(value) = change.get(key).and_then(serde_json::Value::as_str) {
+            fields.push(format!("{key}={value}"));
+        }
+    }
+    for key in ["role", "name", "field", "before", "after"] {
+        if let Some(value) = change.get(key).and_then(serde_json::Value::as_str)
+            && !value.is_empty()
+        {
+            fields.push(format!("{key}={}", quote_observed(value)));
+        }
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    let mut line = format!("observed: {}", fields.join(" "));
+    if let Some(summary) = data.get("observed_changes") {
+        let mut counts = Vec::new();
+        for key in ["changed", "added", "removed"] {
+            if let Some(count) = summary.get(key).and_then(serde_json::Value::as_u64) {
+                counts.push(format!("{key}={count}"));
+            }
+        }
+        if !counts.is_empty() {
+            line.push_str(&format!(" ({})", counts.join(" ")));
+        }
+    }
+    Some(line)
+}
+
+fn quote_observed(value: &str) -> String {
+    let mut shown: String = value.chars().take(OBSERVED_VALUE_LIMIT).collect();
+    if value.chars().count() > OBSERVED_VALUE_LIMIT {
+        shown.push('…');
+    }
+    serde_json::to_string(&shown).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 /// Look up the rendering info for a given error code.
 pub fn info_for(code: ErrorCode) -> RenderInfo {
     match code {
@@ -2002,5 +2052,52 @@ mod tests {
             assert!(!info.hint.unwrap().contains("cooperate wait"));
             assert_ne!(info.exit_code, 0);
         }
+    }
+
+    #[test]
+    fn observed_change_line_names_the_first_difference() {
+        let data = serde_json::json!({
+            "reason": "cooperation_sync_required",
+            "observed_change": {
+                "part": "region",
+                "change": "changed",
+                "scope": "dialog",
+                "phase": "preparation",
+                "role": "StaticText",
+                "name": "6/30",
+                "field": "text",
+                "before": "6/30",
+                "after": "5/30"
+            },
+            "observed_changes": {"changed": 3, "added": 1, "removed": 0}
+        });
+        assert_eq!(
+            observed_change_line(&data).unwrap(),
+            "observed: part=region change=changed scope=dialog phase=preparation \
+             role=\"StaticText\" name=\"6/30\" field=\"text\" before=\"6/30\" after=\"5/30\" \
+             (changed=3 added=1 removed=0)"
+        );
+    }
+
+    #[test]
+    fn observed_change_line_omits_absent_fields_and_elides_long_values() {
+        assert!(
+            observed_change_line(&serde_json::json!({"reason": "cooperation_sync_required"}))
+                .is_none()
+        );
+        assert!(observed_change_line(&serde_json::json!({"observed_change": {}})).is_none());
+        assert!(
+            observed_change_line(&serde_json::json!({"observed_change": {"part": "scope"}}))
+                .unwrap()
+                .starts_with("observed: part=scope")
+        );
+
+        let long_name = "x".repeat(400);
+        let line = observed_change_line(&serde_json::json!({
+            "observed_change": {"part": "target", "change": "changed", "name": long_name}
+        }))
+        .unwrap();
+        assert!(line.contains('…'), "{line}");
+        assert!(line.chars().count() < 250, "{line}");
     }
 }
