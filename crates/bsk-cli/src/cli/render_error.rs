@@ -1137,6 +1137,7 @@ pub fn reason_info_for_error(
             | RpcErrorReason::PreviewBusy
             | RpcErrorReason::AgentWindowScope
             | RpcErrorReason::WindowResizeInactiveTab
+            | RpcErrorReason::WindowResizeConstrained
             | RpcErrorReason::WindowResizeUnconfirmed
             | RpcErrorReason::WindowResizeViewportUnchanged
             | RpcErrorReason::RendererReadTimeout
@@ -1339,14 +1340,16 @@ mod tests {
             info.summary,
             "window resize was constrained by the browser or window manager"
         );
-        assert!(info
-            .hint
-            .unwrap()
-            .contains("largest size the OS work area allows"));
-        assert!(info
-            .mcp_hint
-            .unwrap()
-            .contains("bsk_inspect(action='observe')"));
+        assert!(
+            info.hint
+                .unwrap()
+                .contains("largest size the OS work area allows")
+        );
+        assert!(
+            info.mcp_hint
+                .unwrap()
+                .contains("bsk_inspect(action='observe')")
+        );
         // Still a failure: the exit code stays in the ProtocolError
         // bucket (2) and the daemon is no longer implicated.
         assert_eq!(info.exit_code, 2);
