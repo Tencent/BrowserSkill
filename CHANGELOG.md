@@ -50,6 +50,11 @@ determines which versions can connect.
 
 ### Fixed
 
+- `bsk press --hold-ms` now stops holding at the command's own `--timeout` and reports `timeout` instead of answering after the full hold with a success payload that arrived past the deadline; the key is still released, and `bsk drag --hold-ms` already behaved this way.
+- On Windows, `daemon stop`, daemon status checks, the post-update wait and
+  leftover cleanup no longer treat a running process the CLI cannot open, such as
+  one started from an elevated terminal, as exited.
+- Bounded Chrome debugger attachment waits to 10 seconds, returned a clear error when an attach does not answer, and fenced late attach completions so they are detached before a retry (#452).
 - Hardened daemon WebSocket lifecycle, audit resilience, dynamic `tool.debug` mutation policy, auto-update handover, and file-transfer/operational hygiene:
   - Added an explicit `Pending` close/cancellation token (`BrowserClient::close()`) and listener-wide shutdown `AbortToken` + task drain wired into `run_accept_loop`, `drive_connection`, `spawn_browser_liveness_reaper`, reconnect eviction, and WS accept-loop shutdown (preventing in-flight handshakes from registering after `WsHandle` exits) alongside TCP keepalive (`SO_KEEPALIVE` / Unix keepalive timers), bounded WS write timeouts, and periodic server-side WS Pings so evicted or half-open browser sockets immediately wake pending waiters and release Tokio tasks, file descriptors, and 64-connection semaphore permits; replaced per-connection 1 Hz `remote-authorization.json` disk polling with a single shared metadata-cached gateway monitor that parks when idle and eliminated redundant double JSON deserialization on every inbound WS frame.
   - Made the remote gateway `TcpListener::accept()` loop log and back off on transient errors (breaking only on fatal socket errors or shutdown, matching sibling listeners) and wired `WsHandle.task` exit monitoring into `daemon/start.rs` so the daemon never lingers as a zombie if its WS listener terminates.
@@ -169,6 +174,13 @@ determines which versions can connect.
   rules to visible non-sensitive `<input>` and `<textarea>` values while preserving browser
   UA `text-transform: none` defaults and byte-budget accounting (follow-up to
   [#613](https://github.com/Tencent/BrowserSkill/pull/613)).
+- Recording a contenteditable editor keeps the line breaks the person typed, so a
+  multi-line edit replays with its lines instead of collapsing into one
+  ([#594](https://github.com/Tencent/BrowserSkill/issues/594)).
+- Recording deduplicates synthetic control clicks forwarded by clicking a clickable
+  `<label>` (including trusted `detail: 1` pointer clicks on checkbox/radio labels)
+  instead of recording two clicks that toggle the control twice on replay, while
+  keeping plain `<label>` activations recorded on their target control (#645).
 - `bsk` human error output now prints the structured `observed_change` /
   `observed_changes` diagnosis the extension already attaches to evidence
   refusals, naming the part, node, field and before/after values plus the change

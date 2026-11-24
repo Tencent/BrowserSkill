@@ -2200,7 +2200,14 @@ export async function handlePress(
           cancelled = throwIfAborted(deps.signal) !== null;
         }
         if (!cancelled && params.hold_ms && params.hold_ms > 0) {
-          await sleep(params.hold_ms, deps.signal);
+          // `--timeout` bounds the whole command: a hold that outlives it reports
+          // the deadline instead of answering later with success (as drag does).
+          await waitBounded(
+            sleep(params.hold_ms, deps.signal),
+            deadline,
+            deps.signal,
+            "press hold timed out",
+          );
           if (throwIfAborted(deps.signal)) {
             // Still send keyUp so the page doesn't think the key is stuck
             // down — best-effort.

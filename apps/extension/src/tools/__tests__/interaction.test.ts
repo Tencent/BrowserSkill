@@ -2537,6 +2537,27 @@ describe("handlePress", () => {
     expect(elapsed).toBeGreaterThanOrEqual(40); // generous lower bound
   });
 
+  it("stops holding at the command deadline instead of reporting success late", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const start = Date.now();
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Enter", hold_ms: 5_000, timeout_ms: 150 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    const elapsed = Date.now() - start;
+    // A hold that outlives `--timeout` must not answer 5s later with success.
+    expect(res).toMatchObject({ code: "timeout" });
+    expect(elapsed).toBeLessThan(2_000);
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Input.dispatchKeyEvent")
+        .map((c) => (c.params as { type?: string }).type),
+    ).toEqual(["keyDown", "keyUp"]);
+  }, 8_000);
+
   it("returns cancelled after hold_ms abort while still sending keyUp", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
