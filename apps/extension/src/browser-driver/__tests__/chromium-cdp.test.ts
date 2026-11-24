@@ -2017,6 +2017,35 @@ it("detaches on failed policy release even when a passive reader remains", async
   cdp.dispose();
 });
 
+it("keeps an active backgroundExecution lease intact when ad-hoc focus teardown sends enabled: false", async () => {
+  const { api } = fakeApi();
+  const cdp = new ChromiumCdp(api);
+  await cdp.acquireBackgroundExecution("video", 4);
+  vi.mocked(api.sendCommand).mockClear();
+
+  const dispatched = vi.fn();
+  await cdp.send(4, "Emulation.setFocusEmulationEnabled", { enabled: false });
+  await cdp.sendToFrame(
+    { tabId: 4, frameId: "", loaderId: "" },
+    "Emulation.setFocusEmulationEnabled",
+    { enabled: false },
+    { onDispatch: dispatched },
+  );
+  expect(dispatched).toHaveBeenCalledOnce();
+  expect(api.sendCommand).not.toHaveBeenCalledWith(
+    { tabId: 4 },
+    "Emulation.setFocusEmulationEnabled",
+    { enabled: false },
+  );
+
+  // Releasing the persistent lease itself still disables focus emulation cleanly.
+  await cdp.releaseSessionTab("video", 4);
+  expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 4 }, "Emulation.setFocusEmulationEnabled", {
+    enabled: false,
+  });
+  cdp.dispose();
+});
+
 describe("bounded debugger cleanup", () => {
   it("bounds a stuck attach and rolls back a late success before retrying", async () => {
     vi.useFakeTimers();

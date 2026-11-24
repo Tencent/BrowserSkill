@@ -1057,6 +1057,15 @@ export class ChromiumCdp {
     signal?.throwIfAborted();
     await this.waitForAttach(tabId, signal);
     signal?.throwIfAborted();
+    // Do not let an ad-hoc focus-emulation teardown (e.g. from guarded input or
+    // full-page screenshot) disable a tab's active persistent lease (e.g. video).
+    if (
+      method === "Emulation.setFocusEmulationEnabled" &&
+      (params as { enabled?: boolean } | undefined)?.enabled === false &&
+      this.backgroundExecution.hasAny(tabId)
+    ) {
+      return {} as T;
+    }
     try {
       const result = await this.command(
         { tabId },
@@ -1179,6 +1188,14 @@ export class ChromiumCdp {
 
     // Root shorthand (`frameId === ""` and `loaderId === ""`) routes directly to `{ tabId }`.
     if (!handle.frameId && !handle.loaderId) {
+      if (
+        method === "Emulation.setFocusEmulationEnabled" &&
+        (params as { enabled?: boolean } | undefined)?.enabled === false &&
+        this.backgroundExecution.hasAny(tabId)
+      ) {
+        guard?.onDispatch?.();
+        return {} as T;
+      }
       if (guard) {
         return this.sendGuarded<T>({ tabId }, method, params, guard);
       }

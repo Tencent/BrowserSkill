@@ -1,5 +1,6 @@
 import type { VomScene } from "@browser-skill/vom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NativeInputClockError } from "@/browser-driver/native-input-clock";
 import { SessionManager } from "@/session-manager/manager";
 import { scrollNodeIntoView } from "@/tools/element-geometry";
 import { handleSelect, resolveActionTarget } from "@/tools/interaction";
@@ -1221,6 +1222,154 @@ describe("whether a click was pressed", () => {
     })) as { data: Record<string, unknown> };
     expect(result.data.effect_state).toBe("unknown");
     expect(result.data).not.toHaveProperty("press_sent");
+    expect(result.data).not.toHaveProperty("dispatched");
+  });
+
+  it("marks wheel, drag, unfocused press, download and upload as dispatched: false when refused before native input", async () => {
+    for (const method of [
+      "tool.wheel",
+      "tool.drag",
+      "tool.press",
+      "tool.download",
+      "tool.upload",
+    ] as const) {
+      const f = await fixture();
+      const result = (await f.run(
+        method === "tool.drag"
+          ? { source: { ref: "e1" }, target: { ref: "e2" } }
+          : method === "tool.press"
+            ? { key: "PageDown", observation_id: f.first.observation_id }
+            : method === "tool.wheel"
+              ? { ref: "e1", delta_y: 400 }
+              : { ref: "e1" },
+        method,
+        async (runner) => {
+          await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+          throw covered();
+        },
+      )) as { data: Record<string, unknown> };
+      expect(result.data).toMatchObject({
+        reason: "target_covered",
+        effect_state: "unknown",
+        dispatched: false,
+      });
+      expect(result.data).not.toHaveProperty("press_sent");
+    }
+  });
+
+  it("omits dispatched: false once native input starts or DOM.focus runs on press", async () => {
+    const fWheel = await fixture();
+    const afterWheel = (await fWheel.run(
+      { ref: "e1", delta_y: 400 },
+      "tool.wheel",
+      async (runner) => {
+        await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+        await runner.send(7, "Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: 10,
+          y: 20,
+          deltaX: 0,
+          deltaY: 400,
+        });
+        throw covered();
+      },
+    )) as { data: Record<string, unknown> };
+    expect(afterWheel.data.effect_state).toBe("unknown");
+    expect(afterWheel.data).not.toHaveProperty("dispatched");
+
+    const fPressFocus = await fixture();
+    const afterFocus = (await fPressFocus.run(
+      { ref: "e1", key: "Enter" },
+      "tool.press",
+      async (runner) => {
+        await runner.send(7, "DOM.focus", { backendNodeId: 4 });
+        throw covered();
+      },
+    )) as { data: Record<string, unknown> };
+    expect(afterFocus.data.effect_state).toBe("unknown");
+    expect(afterFocus.data).not.toHaveProperty("dispatched");
+  });
+
+  it("treats focus-emulation-only preparation failures as effect_state: none", async () => {
+    const f = await fixture();
+    const result = (await f.run({ ref: "e1", delta_y: 400 }, "tool.wheel", async (runner) => {
+      await runner.send(7, "Emulation.setFocusEmulationEnabled", { enabled: true });
+      try {
+        throw covered();
+      } finally {
+        await runner.send(7, "Emulation.setFocusEmulationEnabled", { enabled: false });
+      }
+    })) as { data: Record<string, unknown> };
+    expect(result.data).toMatchObject({
+      reason: "target_covered",
+      effect_state: "none",
+    });
+    expect(result.data).not.toHaveProperty("dispatched");
+  });
+
+  it("marks wheel input_clock_unavailable after mouseMoved as dispatched: false", async () => {
+    const f = await fixture();
+    f.cdp.prepareInputTimestamp = async () => {
+      throw new NativeInputClockError("native input clock unavailable");
+    };
+    const result = (await f.run({ ref: "e1", delta_y: 400 }, "tool.wheel", async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x: 10,
+        y: 20,
+        deltaX: 0,
+        deltaY: 400,
+      });
+      return { tab_id: 7 };
+    })) as { data: Record<string, unknown> };
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        reason: "input_clock_unavailable",
+        effect_state: "unknown",
+        dispatched: false,
+      },
+    });
+  });
+
+  it("preserves effect_state: none when full-page screenshot rejects before begin mutates the page", async () => {
+    const f = await fixture("strict");
+    const result = await f.run({}, "tool.screenshot_full_page", async (runner) => {
+      try {
+        await runner.runBrowserMutation?.(async () => {
+          throw new Error("page_hidden");
+        });
+      } catch {
+        return {
+          code: "cdp_failed",
+          message: "Full-page screenshot stopped because the page became hidden",
+          data: { reason: "page_hidden", effect_state: "none", frames: 0 },
+        };
+      }
+      return { tab_id: 7 };
+    });
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "page_hidden", effect_state: "none", frames: 0 },
+    });
+  });
+
+  it("preserves effect_state: unknown on cancellation when focus-emulation cleanup fails", async () => {
+    const f = await fixture("strict");
+    const result = await f.run({}, "tool.screenshot_full_page", async (runner) => {
+      await runner.send(7, "Emulation.setFocusEmulationEnabled", { enabled: true });
+      f.abort.abort();
+      return {
+        code: "cancelled",
+        message: "Full-page screenshot cancelled; no image was saved",
+        data: { effect_state: "unknown" },
+      };
+    });
+    expect(result).toMatchObject({
+      code: "cancelled",
+      data: { effect_state: "unknown", phase: "execution" },
+    });
   });
 });
 

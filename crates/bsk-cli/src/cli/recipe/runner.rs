@@ -893,9 +893,11 @@ where
             return Stop::handoff("budget_exceeded", at);
         }
         // A busy session refused it before it reached the browser. A click reported as
-        // unknown only because it scrolled first was never pressed, and says so.
+        // unknown only because it scrolled first was never pressed, and says so; other
+        // native-input actions report `dispatched: false` before native input starts.
         let effect = if reason == bsk_protocol::RpcErrorReason::SessionBusy.as_str()
             || data["press_sent"] == false
+            || data["dispatched"] == false
         {
             "none"
         } else {
@@ -1671,6 +1673,27 @@ mod tests {
         let outcome = page.run(&recipe);
         assert_eq!(outcome.status, "uncertain");
         assert_eq!(page.inputs().len(), 3);
+
+        // Native-input actions that report `dispatched: false` before input begins are also retryable.
+        let mut page = Fake::new(&[PAGE, PAGE, RESULT]);
+        let mut attempts = 0;
+        page.on_input = Box::new(move |method, _| {
+            if *method == Method::ToolClick {
+                attempts += 1;
+                if attempts == 1 {
+                    return Err(CliError::from_rpc(RpcError {
+                        code: ErrorCode::PermissionDenied,
+                        message: "moved".into(),
+                        data: Some(json!({"reason":"target_moved","effect_state":"unknown",
+                            "dispatched":false})),
+                    }));
+                }
+            }
+            Ok(json!({"tab_id":7}))
+        });
+        let outcome = page.run(&recipe);
+        assert_eq!(outcome.status, "completed", "{}", outcome.reply);
+        assert_eq!(page.inputs().len(), 4);
     }
 
     #[test]
