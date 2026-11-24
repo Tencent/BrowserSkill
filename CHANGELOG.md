@@ -11,6 +11,7 @@ determines which versions can connect.
 
 ### Added
 
+- Release benchmarks now report empirical `pass@k`, `pass^k`, and flaky cases across independent runs of the same candidate and test plan.
 - **MCP 100% parity**: Added `bsk_ledger`, `bsk_debug`, `bsk_video`, and `bsk_record` first-class tools alongside full CLI parity on existing tools (`session open/stop --all`, `sync` waits/filters, `wait_ms`, `view`, full-page `screenshot` / `extract` `--out`/`--overwrite`/`--format`/`--csv-safe`, `read` `context`, `upload`/`download`, `tab_borrow`, full `emulate`, and `operation_await --out/--overwrite`), unified behind request-scoped `ClientContext`.
 - **Compile-time `MethodSpec` & `RpcErrorReason` SSOT**: Defined exhaustive `bsk_protocol::method::MethodSpec` metadata across all 77 RPC methods (exported to TypeScript `transport/generated/`) and exhaustive `RpcErrorReason` variants with dual CLI/MCP recovery hints (`cli_hint` / `mcp_hint`).
 - DeepSeek Harness (`dsh`) is now a first-class skill installation target via
@@ -24,6 +25,11 @@ determines which versions can connect.
   default) so background Agent Windows can start directly in the minimized state
   without flashing a normal window frame on screen, while keeping explicit
   foreground sessions (`--focus`) and action recording visible ([#649](https://github.com/Tencent/BrowserSkill/issues/649)).
+- Added `BSK_SESSION_IDLE` and `BSK_DAEMON_IDLE` environment variable fallbacks
+  for configuring session and local daemon idle timeouts across automatic
+  startup, `bsk daemon start`, `bsk daemon restart`, and `bsk update` restarts
+  (CLI flags always take precedence, empty values are ignored, and
+  `BSK_DAEMON_IDLE` is ignored in `--mode server`) ([#456](https://github.com/Tencent/BrowserSkill/issues/456)).
 
 ### Changed
 
@@ -51,6 +57,12 @@ determines which versions can connect.
 ### Fixed
 
 - Fixed `bsk window resize` reporting a constrained resize as a daemon protocol error ([#692](https://github.com/Tencent/BrowserSkill/issues/692)): when the browser or window manager clamps the requested size, the CLI now reports that the resize was constrained and the window was resized to the largest size the OS work area allows, instead of "protocol error communicating with bsk daemon". The resize still fails with exit code 2; only the error rendering changed, and the MCP hint points at `bsk_inspect(action='observe')` to confirm the actual window size.
+- `bsk download` now queues behind another session's in-flight download instead of refusing at once: the browser-global `chrome.downloads` slot is waited for inside the caller's own `--timeout` (with a reply margin), a caller that never gets it reports `session_busy` with `waited_ms`, an aborted caller reports `cancelled` instead of a busy browser, and the wait is deducted from the capture budget; a second download for the session that already holds the slot still fails immediately ([#519](https://github.com/Tencent/BrowserSkill/issues/519)).
+- `bsk press --hold-ms` now stops holding at the command's own `--timeout` and reports `timeout` instead of answering after the full hold with a success payload that arrived past the deadline; the key is still released, and `bsk drag --hold-ms` already behaved this way.
+- On Windows, `daemon stop`, daemon status checks, the post-update wait and
+  leftover cleanup no longer treat a running process the CLI cannot open, such as
+  one started from an elevated terminal, as exited.
+- Bounded Chrome debugger attachment waits to 10 seconds, returned a clear error when an attach does not answer, and fenced late attach completions so they are detached before a retry (#452).
 - Hardened daemon WebSocket lifecycle, audit resilience, dynamic `tool.debug` mutation policy, auto-update handover, and file-transfer/operational hygiene:
   - Added an explicit `Pending` close/cancellation token (`BrowserClient::close()`) and listener-wide shutdown `AbortToken` + task drain wired into `run_accept_loop`, `drive_connection`, `spawn_browser_liveness_reaper`, reconnect eviction, and WS accept-loop shutdown (preventing in-flight handshakes from registering after `WsHandle` exits) alongside TCP keepalive (`SO_KEEPALIVE` / Unix keepalive timers), bounded WS write timeouts, and periodic server-side WS Pings so evicted or half-open browser sockets immediately wake pending waiters and release Tokio tasks, file descriptors, and 64-connection semaphore permits; replaced per-connection 1 Hz `remote-authorization.json` disk polling with a single shared metadata-cached gateway monitor that parks when idle and eliminated redundant double JSON deserialization on every inbound WS frame.
   - Made the remote gateway `TcpListener::accept()` loop log and back off on transient errors (breaking only on fatal socket errors or shutdown, matching sibling listeners) and wired `WsHandle.task` exit monitoring into `daemon/start.rs` so the daemon never lingers as a zombie if its WS listener terminates.
@@ -170,6 +182,19 @@ determines which versions can connect.
   rules to visible non-sensitive `<input>` and `<textarea>` values while preserving browser
   UA `text-transform: none` defaults and byte-budget accounting (follow-up to
   [#613](https://github.com/Tencent/BrowserSkill/pull/613)).
+- Recording a contenteditable editor keeps the line breaks the person typed, so a
+  multi-line edit replays with its lines instead of collapsing into one
+  ([#594](https://github.com/Tencent/BrowserSkill/issues/594)).
+- Recording deduplicates synthetic control clicks forwarded by clicking a clickable
+  `<label>` (including trusted `detail: 1` pointer clicks on checkbox/radio labels)
+  instead of recording two clicks that toggle the control twice on replay, while
+  keeping plain `<label>` activations recorded on their target control (#645).
+- `bsk` human error output now prints the structured `observed_change` /
+  `observed_changes` diagnosis the extension already attaches to evidence
+  refusals, naming the part, node, field and before/after values plus the change
+  counters instead of only the generic "the action's observed content changed"
+  sentence; JSON and MCP payloads are unchanged
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
 
 ### Removed
 

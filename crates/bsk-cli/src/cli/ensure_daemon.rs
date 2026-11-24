@@ -5,8 +5,8 @@
 //! 1. Verify the daemon over IPC and return its discovery info.
 //! 2. Only if no endpoint is listening and auto-start is enabled, spawn
 //!    the daemon directly through the shared background startup path,
-//!    inheriting `BSK_HOME` if set, and poll for verified IPC readiness until
-//!    [`SPAWN_DEADLINE`] elapses.
+//!    inheriting `BSK_HOME`, `BSK_SESSION_IDLE`, and `BSK_DAEMON_IDLE` if set,
+//!    and poll for verified IPC readiness until [`SPAWN_DEADLINE`] elapses.
 //! 3. If polling times out, return an error with hints.
 
 use std::path::{Path, PathBuf};
@@ -130,7 +130,8 @@ pub(crate) fn ensure_daemon_with_protocol() -> Result<(DaemonInfo, String)> {
     // `start_background` waits via `probe::wait_for_ready`, which records the
     // winning daemon's `status.ipc_envelope` and returns its live `protocol_version`
     // even if a concurrent starter won `daemon.lock`.
-    start_background(&StartArgs::default(), deadline).context("automatic daemon startup failed")
+    let args = StartArgs::default().with_env_idle()?;
+    start_background(&args, deadline).context("automatic daemon startup failed")
 }
 
 #[cfg(test)]
