@@ -658,6 +658,30 @@ it("prioritizes a human key even when its text matches a pending native insertio
   expect(read()).toMatchObject({ human: 1, editing: true });
 });
 
+it("does not treat an unmatched keyless command key as human before a native insertion", () => {
+  // Background tabs throttle the 0ms attribution timer, so the keyup left by a
+  // CDP focus flush would otherwise still mark the next insertText as human.
+  document.body.innerHTML = "<input>";
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  target.focus();
+  for (const type of ["keydown", "keyup"]) {
+    const key = new KeyboardEvent(type, { bubbles: true, key: "" });
+    Object.defineProperty(key, "isTrusted", { value: true });
+    target.dispatchEvent(key);
+  }
+  read(COOPERATION_ARM, "first", { type: "beforeinput", text: "x", id: "agent" });
+  edit(target, "x");
+  expect(read()).toMatchObject({ human: 0, editing: false });
+  // A real keystroke still transfers control.
+  const key = new KeyboardEvent("keydown", { bubbles: true, key: "y" });
+  Object.defineProperty(key, "isTrusted", { value: true });
+  target.dispatchEvent(key);
+  edit(target, "xy");
+  expect(read()).toMatchObject({ human: 1, editing: true });
+});
+
 it("recognizes editing events retargeted from a closed shadow input", () => {
   document.body.innerHTML = '<div id="host"></div>';
   const host = document.querySelector<HTMLElement>("#host")!;
