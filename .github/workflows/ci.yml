@@ -395,7 +395,9 @@ jobs:
       - name: Run geometry, scroll, wheel, focus, select and button-recording regressions
         run: >-
           node scripts/run-browser-tests.mjs
+          src/content/__tests__/record-capture.browser.test.ts
           src/content/__tests__/record-input-buttons.browser.test.ts
+          src/content/__tests__/record-editor-value.browser.test.ts
           src/tools/__tests__/record-password-redaction.browser.test.ts
           src/tools/__tests__/focus.browser.test.ts
           src/tools/__tests__/scroll.browser.test.ts
