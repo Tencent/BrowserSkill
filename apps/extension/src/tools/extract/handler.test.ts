@@ -280,11 +280,17 @@ describe("extraction lifecycle", () => {
       },
     });
 
-    // When both root and child frames match the same selector, extract rejects ambiguity cleanly.
+    // A selector is scoped to the main document, so a root match wins over a
+    // child-frame match instead of reporting an ambiguous target.
     rootMatches = true;
-    const ambiguous = await h.run({ action: "table", selector: "#orders-shadow-table" });
-    expect(ambiguous).toMatchObject({
-      data: { reason: "extract_target_ambiguous" },
+    const rootPreferred = await h.run({ action: "table", selector: "#orders-shadow-table" });
+    expect(rootPreferred).toMatchObject({
+      kind: "table",
+      source: {
+        frame_id: "root",
+        frame_url: "https://example.test/",
+        selector: "#orders-shadow-table",
+      },
     });
   });
 });

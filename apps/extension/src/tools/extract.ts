@@ -348,6 +348,10 @@ export async function handleExtract(
         const normalized = normalizeExtract(raw, options, tab.tabId, source);
         if (options.action !== "discover") {
           if (output) {
+            // --selector is documented as the main document's container. A main
+            // document match therefore wins over child-frame matches; only
+            // competing child frames stay ambiguous.
+            if (outputIdentity?.frameId === root.frameId) break;
             throw new ExtractionFailure(
               "extract_target_ambiguous",
               "The selector matched containers in multiple frames; use discover or a ref",
