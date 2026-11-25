@@ -11,7 +11,7 @@ determines which versions can connect.
 
 ### Added
 
-- `bsk open` now accepts `--wait-until <load|domcontentloaded|networkidle|commit>` (defaulting to `load`), matching `bsk navigate` so heavy SPAs do not wait for a full `load` timeout before syncing.
+- `bsk open` (and MCP `bsk_session` `action: "open"`) now accepts `--wait-until` / `wait_until` (`load|domcontentloaded|networkidle|commit`, defaulting to `load`), matching `bsk navigate` so heavy SPAs do not wait for a full `load` timeout before syncing.
 
 - Release benchmarks now report empirical `pass@k`, `pass^k`, and flaky cases across independent runs of the same candidate and test plan.
 - **MCP 100% parity**: Added `bsk_ledger`, `bsk_debug`, `bsk_video`, and `bsk_record` first-class tools alongside full CLI parity on existing tools (`session open/stop --all`, `sync` waits/filters, `wait_ms`, `view`, full-page `screenshot` / `extract` `--out`/`--overwrite`/`--format`/`--csv-safe`, `read` `context`, `upload`/`download`, `tab_borrow`, full `emulate`, and `operation_await --out/--overwrite`), unified behind request-scoped `ClientContext`.

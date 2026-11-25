@@ -7,7 +7,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 新增
 
-- `bsk open` 新增 `--wait-until <load|domcontentloaded|networkidle|commit>` 参数（默认仍为 `load`），与 `bsk navigate` 对齐，避免重型 SPA 在首次打开同步前反复干等整页 `load` 超时。
+- `bsk open`（及 MCP `bsk_session` 的 `action: "open"`）新增 `--wait-until` / `wait_until`（`load|domcontentloaded|networkidle|commit`，默认仍为 `load`）参数，与 `bsk navigate` 对齐，避免重型 SPA 在首次打开同步前反复干等整页 `load` 超时。
 
 - 发版评测可汇总同一候选构建和测试计划的独立轮次，报告实际 `pass@k`、`pass^k` 和不稳定的场景。
 - **MCP 100% 能力对齐**：新增 `bsk_ledger`、`bsk_debug`、`bsk_video` 与 `bsk_record` 一等工具，补齐现有工具全量 CLI 参数与动作（`session open/stop --all`、`sync` 等待/过滤、`wait_ms`、`view`、`screenshot`/`extract` 输出导出、`read` `context` 透传、`upload`/`download`、`tab_borrow`、完整 `emulate` 与 `operation_await` 文件保存），并通过请求级 `ClientContext` 统一 CLI 与 MCP 传输上下文。
