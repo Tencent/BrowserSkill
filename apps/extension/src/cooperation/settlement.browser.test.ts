@@ -1128,7 +1128,14 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             expect(shot.exitCode, JSON.stringify(shot)).toBe(0);
 
             // `bsk record start` / `stop` succeeds on a page whose hidden cross-origin
-            // `accounts-rec.test/session-tools/refresh` OOPIF has already wedged before `armTab`.
+            // `accounts-rec.test/session-tools/refresh` OOPIF wedges via a timer. Timer
+            // throttling of hidden cross-origin frames makes the wedge moment drift, so
+            // it may land before or after `armTab`; both orders must pass. When it lands
+            // first, record start drains five sequential ~3 s bounded waits (overlay
+            // bypass, record-frame injection, child #startFrame, cooperation arm,
+            // observation read), measured at 15.5-16.8 s on unchanged `main` (#832), so
+            // these bounds sit above that ceiling (pinned by
+            // settlement-record-bounds.test.ts).
             const traceDir = path.join(directory, "record-trace");
             const recordStart = Date.now();
             const recordProc = spawn(
@@ -1158,10 +1165,10 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
                     return false;
                   }
                 },
-                { timeout: 15000 },
+                { timeout: 30000 },
               )
               .toBe(true);
-            expect(Date.now() - recordStart).toBeLessThan(13000);
+            expect(Date.now() - recordStart).toBeLessThan(25000);
             const recStopped = await runCli("record", "stop", "--output", traceDir);
             expect(recStopped.exitCode, JSON.stringify(recStopped)).toBe(0);
             const [recExitCode] = await recExited;
