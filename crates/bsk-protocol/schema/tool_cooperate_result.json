@@ -1,7 +1,792 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "allOf": [
-    true
+  "anyOf": [
+    {
+      "$ref": "#/definitions/CooperateSyncResult"
+    },
+    {
+      "$ref": "#/definitions/CooperateStatusResult"
+    }
   ],
-  "title": "AnyValue"
+  "definitions": {
+    "ControlPolicy": {
+      "oneOf": [
+        {
+          "enum": [
+            "strict",
+            "target"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "auto",
+          "description": "Keep the negotiated policy, or choose target when the session is unconfigured.",
+          "type": "string"
+        }
+      ]
+    },
+    "CooperateActivity": {
+      "properties": {
+        "at": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "attribution": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CooperateActivityAttribution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "document": {
+          "type": "string"
+        },
+        "frame_id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "label": {
+          "type": "string"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sequence",
+        "type",
+        "label",
+        "frame_id",
+        "document",
+        "cursor"
+      ],
+      "type": "object"
+    },
+    "CooperateActivityAttribution": {
+      "properties": {
+        "event_time": {
+          "format": "double",
+          "type": "number"
+        },
+        "event_timestamp": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "expected_event_time": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CooperateEventTimeWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_time": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "expected_type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_time",
+        "expected_type"
+      ],
+      "type": "object"
+    },
+    "CooperateBaselineReason": {
+      "enum": [
+        "no_previous_observation",
+        "frame_replaced",
+        "fields_incomplete",
+        "refs_replaced",
+        "media_changed",
+        "token_budget_changed",
+        "structure_changed",
+        "focus_changed",
+        "no_held_text",
+        "document_replaced",
+        "multiple_frames",
+        "human_activity",
+        "fields_changed",
+        "text_log_gap",
+        "unlogged_activity",
+        "text_outside_observation",
+        "text_ambiguous",
+        "text_names_other_content",
+        "text_cut_by_truncation",
+        "token_budget_shift"
+      ],
+      "type": "string"
+    },
+    "CooperateChangeKind": {
+      "enum": [
+        "text",
+        "media_progress"
+      ],
+      "type": "string"
+    },
+    "CooperateDeltaChange": {
+      "properties": {
+        "frame_id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CooperateChangeKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "lines": {
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "previous_value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "frame_id",
+        "label",
+        "value"
+      ],
+      "type": "object"
+    },
+    "CooperateEventTimeWindow": {
+      "properties": {
+        "earliest": {
+          "format": "double",
+          "type": "number"
+        },
+        "latest": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "earliest",
+        "latest"
+      ],
+      "type": "object"
+    },
+    "CooperateFrameGap": {
+      "properties": {
+        "frame_id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/definitions/CooperateFrameGapReason"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "frame_id",
+        "url",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "CooperateFrameGapReason": {
+      "enum": [
+        "load_error",
+        "inactive_document",
+        "hidden_frame"
+      ],
+      "type": "string"
+    },
+    "CooperateLinePatch": {
+      "properties": {
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "previous": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "line",
+        "previous",
+        "text"
+      ],
+      "type": "object"
+    },
+    "CooperateMode": {
+      "enum": [
+        "ready",
+        "human",
+        "held",
+        "yielding",
+        "syncing",
+        "acting",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "CooperateObservationPatch": {
+      "properties": {
+        "lines": {
+          "items": {
+            "$ref": "#/definitions/CooperateLinePatch"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "lines"
+      ],
+      "type": "object"
+    },
+    "CooperateStatusResult": {
+      "properties": {
+        "activity": {
+          "items": {
+            "$ref": "#/definitions/CooperateActivity"
+          },
+          "type": "array"
+        },
+        "control_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ControlPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "frame_gaps": {
+          "items": {
+            "$ref": "#/definitions/CooperateFrameGap"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/definitions/CooperateView"
+        },
+        "stopped": {
+          "type": "boolean"
+        },
+        "tab_id": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tab_id",
+        "stopped",
+        "activity",
+        "state",
+        "ready",
+        "control_policy"
+      ],
+      "type": "object"
+    },
+    "CooperateSyncResult": {
+      "oneOf": [
+        {
+          "properties": {
+            "activity": {
+              "items": {
+                "$ref": "#/definitions/CooperateActivity"
+              },
+              "type": "array"
+            },
+            "baseline_reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CooperateBaselineReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "context_id": {
+              "type": "string"
+            },
+            "control_policy": {
+              "$ref": "#/definitions/ControlPolicy"
+            },
+            "frame_gaps": {
+              "items": {
+                "$ref": "#/definitions/CooperateFrameGap"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "history_complete": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "baseline",
+              "type": "string"
+            },
+            "observation": {
+              "$ref": "#/definitions/SnapshotResult"
+            },
+            "observation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/definitions/CooperateView"
+            },
+            "tab_id": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "tab_id",
+            "context_id",
+            "control_policy",
+            "observation",
+            "activity",
+            "history_complete",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "activity": {
+              "items": {
+                "$ref": "#/definitions/CooperateActivity"
+              },
+              "type": "array"
+            },
+            "baseline_reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CooperateBaselineReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "changes": {
+              "items": {
+                "$ref": "#/definitions/CooperateDeltaChange"
+              },
+              "type": "array"
+            },
+            "context_id": {
+              "type": "string"
+            },
+            "control_policy": {
+              "$ref": "#/definitions/ControlPolicy"
+            },
+            "frame_gaps": {
+              "items": {
+                "$ref": "#/definitions/CooperateFrameGap"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "history_complete": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "unchanged",
+              "type": "string"
+            },
+            "observation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "observation_patch": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CooperateObservationPatch"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "previous_context_id": {
+              "type": "string"
+            },
+            "previous_observation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/definitions/CooperateView"
+            },
+            "tab_id": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "tab_id",
+            "context_id",
+            "control_policy",
+            "previous_context_id",
+            "changes",
+            "activity",
+            "history_complete",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "activity": {
+              "items": {
+                "$ref": "#/definitions/CooperateActivity"
+              },
+              "type": "array"
+            },
+            "baseline_reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CooperateBaselineReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "changes": {
+              "items": {
+                "$ref": "#/definitions/CooperateDeltaChange"
+              },
+              "type": "array"
+            },
+            "context_id": {
+              "type": "string"
+            },
+            "control_policy": {
+              "$ref": "#/definitions/ControlPolicy"
+            },
+            "frame_gaps": {
+              "items": {
+                "$ref": "#/definitions/CooperateFrameGap"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "history_complete": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "delta",
+              "type": "string"
+            },
+            "observation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "observation_patch": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CooperateObservationPatch"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "previous_context_id": {
+              "type": "string"
+            },
+            "previous_observation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/definitions/CooperateView"
+            },
+            "tab_id": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "tab_id",
+            "context_id",
+            "control_policy",
+            "previous_context_id",
+            "changes",
+            "activity",
+            "history_complete",
+            "state"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CooperateTargetPoint": {
+      "properties": {
+        "expires": {
+          "format": "double",
+          "type": "number"
+        },
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "expires"
+      ],
+      "type": "object"
+    },
+    "CooperateView": {
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "editing": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/definitions/CooperateMode"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CooperateTargetPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "mode",
+        "editing"
+      ],
+      "type": "object"
+    },
+    "JavaScriptDialogHandledAction": {
+      "description": "How the extension resolved the dialog so CDP could continue.",
+      "enum": [
+        "accepted",
+        "dismissed"
+      ],
+      "type": "string"
+    },
+    "JavaScriptDialogInfo": {
+      "description": "One observed + handled JavaScript dialog during a tool call.",
+      "properties": {
+        "default_prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handled": {
+          "$ref": "#/definitions/JavaScriptDialogHandledAction"
+        },
+        "has_browser_handler": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "sequence": {
+          "description": "Monotonic per-tab sequence for ordering within a session.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tab_id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "type": {
+          "$ref": "#/definitions/JavaScriptDialogType"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "tab_id",
+        "type",
+        "message",
+        "handled",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "JavaScriptDialogType": {
+      "description": "Native JS dialog kind reported by CDP.",
+      "enum": [
+        "alert",
+        "confirm",
+        "prompt",
+        "beforeunload"
+      ],
+      "type": "string"
+    },
+    "SnapshotResult": {
+      "properties": {
+        "dialogs": {
+          "items": {
+            "$ref": "#/definitions/JavaScriptDialogInfo"
+          },
+          "type": "array"
+        },
+        "observation_id": {
+          "description": "Token identifying the current ref map; pass to drag to reject stale refs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref_count": {
+          "description": "Number of `@e<N>` refs registered for this session by this\nsnapshot. Equivalent to the size of the new ref-store map.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tab_id": {
+          "description": "Tab the snapshot was actually computed for (after resolving the\noptional `tab_id` default).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "text": {
+          "description": "Indented aria-snapshot text. Refs are rendered as `@e<N>` so the\nagent can copy them into subsequent `tool.click` / `tool.fill`\nselectors.",
+          "type": "string"
+        },
+        "truncated": {
+          "default": false,
+          "description": "Whether the rendered tree was truncated because of `max_depth` /\n`max_tokens`. Agents may re-run with looser caps.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "ref_count",
+        "tab_id",
+        "truncated"
+      ],
+      "type": "object"
+    }
+  },
+  "title": "CooperateResult"
 }

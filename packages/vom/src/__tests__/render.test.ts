@@ -127,7 +127,7 @@ describe("renderVom single-layer page", () => {
     { checked: false, marker: " [unchecked]" },
     { checked: "mixed" as const, marker: " [mixed]" },
     { checked: undefined, marker: "" },
-  ])("renders checkbox state separately from its value: %j", ({ checked, marker }) => {
+  ])("renders checkbox state separately from explicit values: %j", ({ checked, marker }) => {
     const out = renderVom(
       scene([
         node({
@@ -137,13 +137,53 @@ describe("renderVom single-layer page", () => {
           role: "checkbox",
           name: "Subscribe",
           checked,
-          value: "on",
+          value: "weekly",
+          attrs: { value: "weekly" },
           rect: { x: 0, y: 0, w: 20, h: 20 },
         }),
       ]),
     );
-    expect(out.text).toContain('@e1 checkbox "Subscribe"' + marker + ' ="on"');
+    expect(out.text).toContain('@e1 checkbox "Subscribe"' + marker + ' ="weekly"');
     expect(out.refs).toHaveLength(1);
+  });
+
+  it("omits synthetic default ='on' on checkboxes without an explicit value attribute (including when redacted)", () => {
+    const unchecked = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          tag: "input",
+          role: "checkbox",
+          name: "Accept terms",
+          checked: false,
+          value: "on",
+          inputState: "empty",
+          rect: { x: 0, y: 0, w: 20, h: 20 },
+        }),
+      ]),
+    );
+    expect(unchecked.text).toContain('@e1 checkbox "Accept terms" [unchecked]');
+    expect(unchecked.text).not.toContain('="on"');
+
+    const redacted = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          tag: "input",
+          role: "checkbox",
+          name: "Accept terms",
+          checked: true,
+          value: "on",
+          inputState: "filled",
+          rect: { x: 0, y: 0, w: 20, h: 20 },
+        }),
+      ]),
+      { redactValues: true },
+    );
+    expect(redacted.text).toContain('@e1 checkbox "Accept terms" [checked]');
+    expect(redacted.text).not.toContain('="•••"');
   });
   it.each([100, 600, 2000])("bounds sibling-context reads for %i repeated actions", (count) => {
     let nameReads = 0;
@@ -916,6 +956,36 @@ describe("renderVom single-layer page", () => {
       ].join("\n"),
     );
     expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it("propagates trigger frameId onto active scope header and body rows in prepareObservationRender", () => {
+    const prepared = prepareObservationRender({
+      ...scene([
+        node({ id: 1, role: "RootWebArea", name: "Host", frameId: "main" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "tab",
+          name: "Child Tab",
+          tag: "button",
+          frameId: "oopif-1",
+        }),
+      ]),
+      activeScopeBlocks: [
+        {
+          triggerId: 2,
+          label: "Child Tab",
+          lines: ["OOPIF panel line 1", "OOPIF panel line 2"],
+        },
+      ],
+    });
+    const rows = Array.from({ [Symbol.iterator]: () => prepared.rows });
+    const scopeHeader = rows.find((row) => row.text.includes("[§ active: Child Tab]"));
+    const scopeLine1 = rows.find((row) => row.text.includes("OOPIF panel line 1"));
+    const scopeLine2 = rows.find((row) => row.text.includes("OOPIF panel line 2"));
+    expect(scopeHeader?.frameId).toBe("oopif-1");
+    expect(scopeLine1?.frameId).toBe("oopif-1");
+    expect(scopeLine2?.frameId).toBe("oopif-1");
   });
 
   it("does not render redundant children inside named ref controls", () => {
@@ -2137,6 +2207,512 @@ describe("selection evidence", () => {
       expect(chromeAxTable.text).toContain('      row "检查项编号 | 审计等级"');
       expect(chromeAxTable.text).toContain('      row "CHK-101 | 常规"');
       expect(chromeAxTable.text).toContain('      row "CHK-102 | 提示"');
+    });
+
+    it("emits independent @eN rows for expanded nested menuitem descendants while keeping collapsed menus and native <select> folded", () => {
+      const collapsedNodes = [
+        node({ id: 1, parentId: null, tag: "ul", role: "menubar" }),
+        node({
+          id: 2,
+          parentId: 1,
+          backendNodeId: 102,
+          tag: "li",
+          role: "menuitem",
+          name: "Overview",
+        }),
+        node({
+          id: 3,
+          parentId: 1,
+          backendNodeId: 103,
+          tag: "li",
+          role: "menuitem",
+          name: "Workspace",
+        }),
+        node({ id: 4, parentId: null, tag: "ul", role: "menu" }),
+        node({
+          id: 5,
+          parentId: 4,
+          backendNodeId: 105,
+          tag: "li",
+          role: "menuitem",
+          name: "Members",
+          cursor: "pointer",
+        }),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 106,
+          tag: "li",
+          role: "menuitem",
+          name: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 60,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          text: "Advanced ▸",
+          clickable: true,
+          cursor: "pointer",
+        }),
+        node({
+          id: 7,
+          parentId: 60,
+          tag: "span",
+          role: "generic",
+          text: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 8,
+          parentId: 60,
+          tag: "i",
+          role: "img",
+          name: "chevron-right",
+          cursor: "pointer",
+        }),
+      ];
+      const collapsed = renderVom(scene(collapsedNodes));
+      expect(collapsed.refs.map((r) => [r.ref, r.name])).toEqual([
+        ["e1", "Overview"],
+        ["e2", "Workspace"],
+        ["e3", "Members"],
+        ["e4", "Advanced"],
+      ]);
+      expect(collapsed.text).not.toContain("Audit export");
+      expect(collapsed.text).not.toContain("Report history");
+      expect(collapsed.text).not.toContain("chevron-right");
+
+      const expandedScene = scene([
+        ...collapsedNodes.slice(0, 5),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 106,
+          tag: "li",
+          role: "menuitem",
+          name: "Advanced Audit export Report history",
+          cursor: "pointer",
+        }),
+        node({
+          id: 60,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          text: "Advanced ▸",
+          clickable: true,
+          cursor: "pointer",
+        }),
+        node({
+          id: 7,
+          parentId: 60,
+          tag: "span",
+          role: "generic",
+          text: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 8,
+          parentId: 60,
+          tag: "i",
+          role: "img",
+          name: "chevron-right",
+          cursor: "pointer",
+        }),
+        node({
+          id: 9,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          position: "absolute",
+          cursor: "pointer",
+        }),
+        node({ id: 10, parentId: 9, tag: "ul", role: "none", cursor: "pointer" }),
+        node({
+          id: 11,
+          parentId: 10,
+          backendNodeId: 111,
+          tag: "li",
+          role: "menuitem",
+          name: "Audit export",
+          cursor: "pointer",
+        }),
+        node({
+          id: 12,
+          parentId: 11,
+          tag: "span",
+          role: "generic",
+          text: "Audit export",
+          cursor: "pointer",
+        }),
+        node({
+          id: 13,
+          parentId: 10,
+          backendNodeId: 113,
+          tag: "li",
+          role: "menuitem",
+          name: "Report history CSV archive",
+          cursor: "pointer",
+        }),
+        node({
+          id: 14,
+          parentId: 13,
+          tag: "span",
+          role: "generic",
+          text: "Report history",
+          cursor: "pointer",
+        }),
+        node({
+          id: 15,
+          parentId: 13,
+          backendNodeId: 115,
+          tag: "li",
+          role: "menuitem",
+          name: "CSV archive",
+          cursor: "pointer",
+        }),
+      ]);
+
+      const full = renderVom(expandedScene);
+      expect(full.text.split("\n")).toEqual([
+        "@vom 1",
+        "@view 1280x720",
+        "@layers 1 focus=L1",
+        "L1 page",
+        '  @e1 menuitem "Overview"',
+        '  @e2 menuitem "Workspace"',
+        '  @e3 menuitem "Members"',
+        '  @e4 menuitem "Advanced Audit export Report history"',
+        '    @e5 menuitem "Audit export"',
+        '    @e6 menuitem "Report history CSV archive"',
+        '      @e7 menuitem "CSV archive"',
+      ]);
+      expect(coreRefs(full.refs)).toEqual([
+        { ref: "e1", backendNodeId: 102 },
+        { ref: "e2", backendNodeId: 103 },
+        { ref: "e3", backendNodeId: 105 },
+        { ref: "e4", backendNodeId: 106 },
+        { ref: "e5", backendNodeId: 111 },
+        { ref: "e6", backendNodeId: 113 },
+        { ref: "e7", backendNodeId: 115 },
+      ]);
+
+      const prepared = prepareObservationRender(expandedScene);
+      const obsRows = Array.from({ [Symbol.iterator]: () => prepared.rows });
+      expect([...prepared.headers, ...obsRows.map((row) => row.text)].join("\n")).toBe(full.text);
+      expect(obsRows.filter((row) => row.ref).map((row) => [row.ref!.ref, row.ref!.name])).toEqual([
+        ["e1", "Overview"],
+        ["e2", "Workspace"],
+        ["e3", "Members"],
+        ["e4", "Advanced Audit export Report history"],
+        ["e5", "Audit export"],
+        ["e6", "Report history CSV archive"],
+        ["e7", "CSV archive"],
+      ]);
+
+      // Isomorphic siblings: custom ARIA combobox / named button keep nested interactive refs,
+      // whereas native single-select <select> keeps options folded inline without child @eN rows.
+      const siblings = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 201,
+            tag: "div",
+            role: "combobox",
+            name: "Filter status",
+            attrs: { "aria-expanded": "true" },
+          }),
+          node({ id: 2, parentId: 1, tag: "span", role: "StaticText", name: "Filter status" }),
+          node({ id: 3, parentId: 1, tag: "div", role: "listbox", referenceable: false }),
+          node({
+            id: 4,
+            parentId: 3,
+            backendNodeId: 204,
+            tag: "div",
+            role: "option",
+            name: "Active",
+          }),
+          node({
+            id: 40,
+            parentId: 4,
+            tag: "i",
+            role: "img",
+            name: "check-badge",
+          }),
+          node({
+            id: 41,
+            parentId: 4,
+            tag: "span",
+            role: "StaticText",
+            name: "Default filter",
+          }),
+          node({
+            id: 5,
+            parentId: 3,
+            backendNodeId: 205,
+            tag: "div",
+            role: "option",
+            name: "Archived",
+          }),
+          node({
+            id: 6,
+            backendNodeId: 206,
+            tag: "select",
+            role: "combobox",
+            name: "Region",
+            value: "cn",
+          }),
+          node({
+            id: 7,
+            parentId: 6,
+            backendNodeId: 207,
+            tag: "option",
+            role: "option",
+            name: "China",
+            attrs: { value: "cn", selected: "" },
+          }),
+          node({
+            id: 8,
+            parentId: 6,
+            backendNodeId: 208,
+            tag: "option",
+            role: "option",
+            name: "US",
+            attrs: { value: "us" },
+          }),
+          node({ id: 9, backendNodeId: 209, tag: "div", role: "button", name: "Order #88 Remove" }),
+          node({ id: 10, parentId: 9, tag: "span", role: "StaticText", name: "Order #88" }),
+          node({
+            id: 11,
+            parentId: 9,
+            backendNodeId: 211,
+            tag: "button",
+            role: "button",
+            name: "Remove",
+          }),
+          // React 18 root event-delegated custom dropdown: clickable is false on items,
+          // trigger has cursor: pointer + inline skin, popup crosses position: absolute.
+          node({
+            id: 12,
+            backendNodeId: 212,
+            tag: "div",
+            role: "combobox",
+            name: "报表类型",
+            cursor: "pointer",
+            attrs: { "aria-expanded": "true" },
+          }),
+          node({
+            id: 13,
+            parentId: 12,
+            tag: "span",
+            role: "generic",
+            text: "全部报表",
+            cursor: "pointer",
+          }),
+          node({
+            id: 14,
+            parentId: 12,
+            tag: "div",
+            role: "generic",
+            position: "absolute",
+            cursor: "default",
+          }),
+          node({
+            id: 15,
+            parentId: 14,
+            backendNodeId: 215,
+            tag: "div",
+            role: "generic",
+            text: "导出报表",
+            cursor: "pointer",
+          }),
+          node({
+            id: 16,
+            parentId: 14,
+            backendNodeId: 216,
+            tag: "div",
+            role: "generic",
+            text: "历史记录",
+            cursor: "pointer",
+          }),
+        ]),
+      );
+      expect(siblings.text.split("\n")).toEqual([
+        "@vom 1",
+        "@view 1280x720",
+        "@layers 1 focus=L1",
+        "L1 page",
+        '  @e1 combobox "Filter status" [custom-dropdown: expanded]',
+        '    @e2 option "Active"',
+        '    @e3 option "Archived"',
+        '  @e4 combobox "Region" ="cn" [options: cn="China"* | us="US"]',
+        '  @e5 button "Order #88 Remove"',
+        '    @e6 button "Remove"',
+        '  @e7 combobox "报表类型" [custom-dropdown: expanded]',
+        '    @e8 button "导出报表"',
+        '    @e9 button "历史记录"',
+      ]);
+
+      // Deeply nested cursor: pointer wrappers under a semantic control stay O(N).
+      const deepCount = 10_000;
+      const deepNodes = [
+        node({
+          id: 1,
+          backendNodeId: 301,
+          tag: "div",
+          role: "combobox",
+          name: "Deep picker",
+          cursor: "pointer",
+          attrs: { "aria-expanded": "true" },
+        }),
+      ];
+      for (let i = 0; i < deepCount; i += 1) {
+        deepNodes.push(
+          node({
+            id: i + 2,
+            parentId: i + 1,
+            tag: "div",
+            role: "generic",
+            cursor: "pointer",
+            ...(i === 0 ? { position: "absolute" } : {}),
+          }),
+        );
+      }
+      deepNodes.push(
+        node({
+          id: deepCount + 2,
+          parentId: deepCount + 1,
+          backendNodeId: 399,
+          tag: "div",
+          role: "generic",
+          text: "Deep delegated option",
+          cursor: "pointer",
+        }),
+      );
+      const t0 = performance.now();
+      const deepOut = renderVom(scene(deepNodes));
+      expect(performance.now() - t0).toBeLessThan(1_000);
+      expect(coreRefs(deepOut.refs)).toEqual([
+        { ref: "e1", backendNodeId: 301 },
+        { ref: "e2", backendNodeId: 399 },
+      ]);
+    });
+
+    it("budgets the L2 occlusion footer line in renderDoubleLayer, preserves generic Chinese headings, and renders popup tags without duplication", () => {
+      // 1. Two-layer modal scene: maxTokens budget includes the `L2 page — occluded by L1` footer.
+      const modalNodes: VomNode[] = [
+        node({ id: 1, tag: "main", role: "main", rect: { x: 0, y: 0, w: 1280, h: 720 } }),
+        ...Array.from({ length: 12 }, (_, idx) =>
+          node({
+            id: 10 + idx,
+            parentId: 1,
+            backendNodeId: 100 + idx,
+            tag: "button",
+            role: "button",
+            name: `Background action item ${idx + 1}`,
+            rect: { x: 10, y: idx * 40, w: 200, h: 32 },
+          }),
+        ),
+        node({
+          id: 50,
+          tag: "div",
+          role: "dialog",
+          name: "Confirm action",
+          modal: true,
+          position: "fixed",
+          paintOrder: 10,
+          rect: { x: 200, y: 100, w: 600, h: 400 },
+        }),
+        ...Array.from({ length: 8 }, (_, idx) =>
+          node({
+            id: 60 + idx,
+            parentId: 50,
+            backendNodeId: 200 + idx,
+            tag: "button",
+            role: "button",
+            name: `Modal option button ${idx + 1} with detailed description`,
+            paintOrder: 10,
+            rect: { x: 220, y: 120 + idx * 36, w: 300, h: 30 },
+          }),
+        ),
+      ];
+      for (const budget of [45, 65, 90, 120]) {
+        const out = renderVom(scene(modalNodes), { maxTokens: budget });
+        // Estimate matches render.ts estimateVomTokens (~chars / 3.5 per line); ensure L2 footer never pushes output unboundedly past budget.
+        const bodyLines = out.text.split("\n").filter((line) => !line.startsWith("[truncated:"));
+        const approxTokens = bodyLines.reduce(
+          (sum, line) => sum + Math.max(1, Math.ceil((line.length + 1) / 3.5)),
+          0,
+        );
+        expect(approxTokens).toBeLessThanOrEqual(budget);
+      }
+
+      // 2. Generic Chinese headings ("欢迎", "联系方式") are preserved as section context rather than suppressed by benchmark filters.
+      const headingScene = scene([
+        node({ id: 1, tag: "section", role: "region" }),
+        node({ id: 2, parentId: 1, tag: "h2", role: "heading", name: "欢迎" }),
+        node({
+          id: 3,
+          parentId: 1,
+          backendNodeId: 11,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+        node({ id: 4, tag: "section", role: "region" }),
+        node({ id: 5, parentId: 4, tag: "h2", role: "heading", name: "联系方式" }),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 12,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+      ]);
+      const headingOut = renderVom(headingScene);
+      expect(headingOut.text).toContain("[ctx: 欢迎]");
+      expect(headingOut.text).toContain("[ctx: 联系方式]");
+
+      // 3. Popup state tags: custom combobox gets `[custom-dropdown: expanded]` without `[expanded]` inside quotes;
+      //    popup buttons/menuitems emit post-quote `[expanded]` / `[has-submenu]`.
+      const popupOut = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 21,
+            tag: "div",
+            role: "combobox",
+            name: "Filter",
+            expanded: true,
+            hasPopup: "listbox",
+            attrs: { "aria-expanded": "true", "aria-haspopup": "listbox" },
+          }),
+          node({
+            id: 2,
+            backendNodeId: 22,
+            tag: "button",
+            role: "button",
+            name: "Products",
+            expanded: true,
+            hasPopup: "menu",
+          }),
+          node({
+            id: 3,
+            backendNodeId: 23,
+            tag: "div",
+            role: "menuitem",
+            name: "Export",
+            expanded: false,
+            hasPopup: "menu",
+          }),
+        ]),
+      );
+      expect(popupOut.text).toContain('@e1 combobox "Filter" [custom-dropdown: expanded]');
+      expect(popupOut.text).not.toContain('"Filter [expanded]"');
+      expect(popupOut.text).toContain('@e2 button "Products" [expanded]');
+      expect(popupOut.text).toContain('@e3 menuitem "Export" [has-submenu]');
     });
   });
 });

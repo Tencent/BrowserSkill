@@ -9,11 +9,29 @@ use bsk_protocol::{
     tools::{ControlPolicy, CooperateAction, CooperateParams},
 };
 use clap::{Args, ValueEnum};
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 pub(crate) mod presentation;
 pub(crate) mod saved_reply;
 pub(crate) mod settle;
+
+pub(crate) fn cooperate_ipc_timeout(timeout_ms: Option<u64>) -> Duration {
+    timeout_ms.map_or(TOOL_IPC_TIMEOUT, |ms| {
+        TOOL_IPC_TIMEOUT.max(Duration::from_millis(ms).saturating_add(Duration::from_secs(25)))
+    })
+}
+
+pub(crate) fn cooperate_rpc_ipc_timeout(method: &Method, req_val: &serde_json::Value) -> Duration {
+    if *method == Method::ToolCooperate {
+        cooperate_ipc_timeout(
+            req_val
+                .get("timeout_ms")
+                .and_then(serde_json::Value::as_u64),
+        )
+    } else {
+        TOOL_IPC_TIMEOUT
+    }
+}
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum Action {
@@ -23,7 +41,7 @@ pub enum Action {
     Wait,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Policy {
     Auto,
     Strict,
@@ -82,7 +100,11 @@ pub struct CooperateArgs {
     pub settle: bool,
 }
 
-pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: CooperateArgs,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     if args.policy.is_some() && !matches!(args.action, Action::Sync | Action::Enable) {
         return Err(CliError::Local(anyhow::anyhow!(
             "--policy requires cooperate sync or enable"
@@ -111,10 +133,7 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
         .as_ref()
         .map(|path| saved_reply::SavedReply::prepare(path))
         .transpose()?;
-    if matches!(control_policy, Some(ControlPolicy::Target)) {
-        business_rpc::set_target_policy_requested();
-    }
-    business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     let params = CooperateParams {
         control_policy,
@@ -129,33 +148,68 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
         timeout_ms: args.timeout_ms,
         max_tokens: args.max_tokens,
     };
+    let need_scope_meta = session.trim().is_empty();
+    let mut resolved_session: Option<String> = None;
     let mut reply: serde_json::Value = if args.settle {
-        settle::run(|action| {
+        let budget = args.timeout_ms.map(Duration::from_millis);
+        settle::run_bounded(budget, |action, rem| {
+            let rem_ms = rem.map(|d| d.as_nanos().div_ceil(1_000_000) as u64);
             let mut current = params.clone();
+            current.action = action;
             if matches!(action, CooperateAction::Wait) {
                 current.control_policy = None;
-                current.timeout_ms = Some(args.timeout_ms.unwrap_or(1000));
+                current.timeout_ms = Some(rem_ms.unwrap_or(1000).min(25_000));
+            } else if let Some(ms) = rem_ms {
+                current.timeout_ms = Some(ms.min(25_000));
             }
-            current.action = action;
-            business_rpc::call(
+            let meta = crate::ipc_client::IpcRequestMeta {
+                return_scope_meta: need_scope_meta
+                    && matches!(
+                        current.action,
+                        CooperateAction::Sync | CooperateAction::Enable
+                    ),
+                ..Default::default()
+            };
+            let ipc_timeout = cooperate_ipc_timeout(current.timeout_ms);
+            let (val, resp_meta) = op_ctx.call_envelope(
                 daemon.sock_path.clone(),
                 "cooperate",
                 Method::ToolCooperate,
                 Some(current),
-                TOOL_IPC_TIMEOUT,
-            )
+                meta,
+                ipc_timeout,
+            )?;
+            if let Some(sm) = resp_meta.scope_meta {
+                resolved_session = Some(sm.session_id);
+            }
+            Ok(val)
         })?
     } else {
-        business_rpc::call(
+        let meta = crate::ipc_client::IpcRequestMeta {
+            return_scope_meta: need_scope_meta
+                && matches!(
+                    params.action,
+                    CooperateAction::Sync | CooperateAction::Enable
+                ),
+            ..Default::default()
+        };
+        let ipc_timeout = cooperate_ipc_timeout(params.timeout_ms);
+        let (val, resp_meta) = op_ctx.call_envelope(
             daemon.sock_path,
             "cooperate",
             Method::ToolCooperate,
             Some(params),
-            TOOL_IPC_TIMEOUT,
-        )?
+            meta,
+            ipc_timeout,
+        )?;
+        if let Some(sm) = resp_meta.scope_meta {
+            resolved_session = Some(sm.session_id);
+        }
+        val
     };
     verify_policy(&reply, control_policy)?;
-    super::observation_view::attach(&mut reply, &session, baseline.as_ref());
+    let effective_session = resolved_session.as_deref().unwrap_or(&session);
+    super::observation_view::attach(&mut reply, effective_session, baseline.as_ref());
     if let Some(saved) = saved {
         saved.finish(&reply)?;
         super::observation_view::omit_saved_merge(&mut reply);
@@ -193,8 +247,8 @@ pub(crate) fn verify_policy(
     if reply.get("context_id").is_some() && !acknowledged {
         return Err(CliError::from_rpc(bsk_protocol::RpcError {
             code: bsk_protocol::ErrorCode::Unsupported,
-            message: "Control policy was not acknowledged; update the CLI, restart its daemon and update the extension. With a current CLI and an older extension, pass --policy strict on every sync/enable and step to retain legacy behavior; expect conditions still require protocol 1.8".into(),
-            data: Some(serde_json::json!({"reason":"unsupported_feature", "phase":"negotiate", "effect_state":"none", "required_protocol":"1.8", "requested_policy":policy})),
+            message: "Control policy was not acknowledged; update the CLI, restart its daemon, and update the extension. Control policy and expect conditions require protocol 2.0+".into(),
+            data: Some(serde_json::json!({"reason":"unsupported_feature", "phase":"negotiate", "effect_state":"none", "required_protocol": bsk_protocol::catalog::MIN_COMPATIBLE_PROTOCOL, "requested_policy":policy})),
         }));
     }
     Ok(())
@@ -254,7 +308,7 @@ mod tests {
                 .unwrap()
                 .cooperate;
         assert!(
-            dispatch(args, Format::Json)
+            dispatch(args, &business_rpc::ClientContext::default(), Format::Json)
                 .unwrap_err()
                 .to_string()
                 .contains("require cooperate sync")
@@ -276,7 +330,7 @@ mod tests {
         ])
         .unwrap()
         .cooperate;
-        assert!(dispatch(args, Format::Json).is_err());
+        assert!(dispatch(args, &business_rpc::ClientContext::default(), Format::Json).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous evidence");
     }
     #[test]
@@ -319,7 +373,7 @@ mod tests {
                 .unwrap()
                 .cooperate;
         assert!(
-            dispatch(args, Format::Json)
+            dispatch(args, &business_rpc::ClientContext::default(), Format::Json)
                 .unwrap_err()
                 .to_string()
                 .contains("--policy requires")

@@ -1,5 +1,9 @@
-import type { VomNode, VomSelectOption } from "@browser-skill/vom";
-import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+import { VOM_DERIVED_NAME_CAP, type VomNode, type VomSelectOption } from "@browser-skill/vom";
+import {
+  INTERACTIVE_ARIA_ROLES,
+  RECORD_PASSWORD_ATTRIBUTE,
+  sensitiveAutocomplete,
+} from "@/lib/dom-predicates";
 import type { NodeFacts } from "../facts";
 import {
   MAX_ROW_ANCHOR_CHARS,
@@ -27,25 +31,7 @@ import { frameBackendKey } from "./types";
 const FORM_TAGS = new Set(["input", "textarea", "select"]);
 const NATIVE_CONTROL_TAGS = new Set(["button", "input", "select", "textarea"]);
 const TEXT_AX_ROLES = new Set(["statictext", "inlinetextbox", "labeltext", "text"]);
-const INTERACTIVE_ROLES = new Set([
-  "button",
-  "checkbox",
-  "combobox",
-  "link",
-  "listbox",
-  "menuitem",
-  "menuitemcheckbox",
-  "menuitemradio",
-  "option",
-  "radio",
-  "searchbox",
-  "slider",
-  "spinbutton",
-  "switch",
-  "tab",
-  "textbox",
-  "treeitem",
-]);
+const INTERACTIVE_ROLES = INTERACTIVE_ARIA_ROLES;
 const SENSITIVE_INPUT_TYPES = new Set([
   "password",
   "credit-card",
@@ -178,11 +164,79 @@ function sensitive(node: SemanticGraphNode, axProps: ExtractedAxProps | undefine
   return SENSITIVE_INPUT_TYPES.has(axProps?.inputType ?? "");
 }
 
+function selectInputStateFromDom(
+  node: SemanticGraphNode,
+  sourceValue: string | undefined,
+  graph: SemanticGraph,
+  indexes: ResolveIndexes,
+): VomNode["inputState"] | undefined {
+  const options: Array<{
+    value: string;
+    selected: boolean;
+    defaultSelected: boolean;
+    disabled: boolean;
+  }> = [];
+  const visit = (childIds: readonly SemanticNodeId[] | undefined, groupDisabled = false): void => {
+    if (!childIds) return;
+    for (const childId of childIds) {
+      const child = graph.nodes.get(childId);
+      if (!child || child.excluded) continue;
+      const cTag = child.dom?.tag.toLowerCase() ?? "";
+      const cAttrs = child.dom?.attrs ?? {};
+      if (cTag === "optgroup") {
+        visit(
+          indexes.domChildren.get(childId),
+          groupDisabled || Object.prototype.hasOwnProperty.call(cAttrs, "disabled"),
+        );
+        continue;
+      }
+      if (cTag !== "option") continue;
+      const value = Object.prototype.hasOwnProperty.call(cAttrs, "value")
+        ? cAttrs.value
+        : (clean(child.dom?.textContent) ?? "");
+      const defaultSelected = Object.prototype.hasOwnProperty.call(cAttrs, "selected");
+      const selected =
+        child.dom?.checked !== undefined
+          ? child.dom.checked
+          : sourceValue !== undefined
+            ? value === sourceValue
+            : defaultSelected;
+      options.push({
+        value,
+        selected,
+        defaultSelected,
+        disabled: groupDisabled || Object.prototype.hasOwnProperty.call(cAttrs, "disabled"),
+      });
+    }
+  };
+  visit(indexes.domChildren.get(node.id));
+  if (options.length === 0) return undefined;
+  const multiple = Object.prototype.hasOwnProperty.call(node.dom?.attrs ?? {}, "multiple");
+  if (multiple) {
+    const selectedCount = options.filter((opt) => opt.selected).length;
+    if (selectedCount === 0) return "empty";
+    return options.every((opt) => opt.selected === opt.defaultSelected) ? "default" : "filled";
+  }
+  const selectedOpt = options.find((opt) => opt.selected);
+  if (!selectedOpt || selectedOpt.value === "") return "empty";
+  let defaultOpt: (typeof options)[number] | undefined;
+  for (const opt of options) {
+    if (opt.defaultSelected) defaultOpt = opt;
+  }
+  const size = Number.parseInt(node.dom?.attrs.size ?? "", 10);
+  if (!defaultOpt && !(Number.isFinite(size) && size > 1)) {
+    defaultOpt = options.find((opt) => !opt.disabled) ?? options[0];
+  }
+  return defaultOpt && selectedOpt === defaultOpt ? "default" : "filled";
+}
+
 function inputState(
   node: SemanticGraphNode,
   role: string | undefined,
   value: string | undefined,
   isSensitive: boolean,
+  graph?: SemanticGraph,
+  indexes?: ResolveIndexes,
 ): VomNode["inputState"] {
   if (node.dom?.formState) {
     return isSensitive && node.dom.formState === "default" ? "filled" : node.dom.formState;
@@ -190,6 +244,10 @@ function inputState(
   const tag = node.dom?.tag.toLowerCase() ?? "";
   if (!FORM_TAGS.has(tag) && !["textbox", "searchbox"].includes(role ?? "")) return undefined;
   if (isSensitive) return value ? "filled" : "empty";
+  if (tag === "select" && graph && indexes) {
+    const selectState = selectInputStateFromDom(node, value, graph, indexes);
+    if (selectState) return selectState;
+  }
   if (node.dom?.formValue !== undefined) {
     if (node.dom.formValue === "") return "empty";
     return node.dom.formValue === (node.dom.formDefaultValue ?? "") ? "default" : "filled";
@@ -245,6 +303,7 @@ interface ResolveIndexes {
   hasExcludedAxTextDescendant: (nodeId: SemanticNodeId) => boolean;
   hasNativeDescendant: (nodeId: SemanticNodeId) => boolean;
   isOrInsideNative: (nodeId: SemanticNodeId) => boolean;
+  inNegativeStackingContext: (nodeId: SemanticNodeId) => boolean;
   selfOrEnclosingLabel: (nodeId: SemanticNodeId) => SemanticNodeId | undefined;
 }
 
@@ -354,10 +413,11 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
         joinedLength += (parts.length > 0 ? 1 : 0) + childText.length;
         parts.push(childText);
       }
-      if (joinedLength >= 240) break;
+      if (joinedLength >= VOM_DERIVED_NAME_CAP) break;
     }
     resolvingText.delete(nodeId);
-    const result = parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, 240));
+    const result =
+      parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, VOM_DERIVED_NAME_CAP));
     textMemo.set(nodeId, result);
     return result;
   };
@@ -395,9 +455,11 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
         joinedLength += (parts.length > 0 ? 1 : 0) + childText.length;
         parts.push(childText);
       }
-      if (joinedLength >= 240) break;
+      if (joinedLength >= VOM_DERIVED_NAME_CAP) break;
     }
-    return complete(parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, 240)));
+    return complete(
+      parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, VOM_DERIVED_NAME_CAP)),
+    );
   };
 
   const excludedAxSubtreeMemo = new Map<SemanticNodeId, boolean>();
@@ -495,6 +557,33 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     return value;
   };
 
+  const negativeStackingMemo = new Map<SemanticNodeId, boolean>();
+  const visitingNegativeStacking = new Set<SemanticNodeId>();
+  const inNegativeStackingContext = (nodeId: SemanticNodeId): boolean => {
+    const cached = negativeStackingMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (visitingNegativeStacking.has(nodeId)) return false;
+    visitingNegativeStacking.add(nodeId);
+    const node = graph.nodes.get(nodeId);
+    let value = false;
+    if (node) {
+      const ownNegative =
+        node.dom !== undefined &&
+        node.dom.position !== "static" &&
+        node.dom.zIndex !== undefined &&
+        node.dom.zIndex < 0;
+      if (ownNegative) {
+        value = true;
+      } else if (node.domParentId) {
+        const parent = graph.nodes.get(node.domParentId);
+        value = parent?.frameId === node.frameId && inNegativeStackingContext(node.domParentId);
+      }
+    }
+    visitingNegativeStacking.delete(nodeId);
+    negativeStackingMemo.set(nodeId, value);
+    return value;
+  };
+
   const enclosingLabelMemo = new Map<SemanticNodeId, SemanticNodeId | undefined>();
   const visitingLabel = new Set<SemanticNodeId>();
   const selfOrEnclosingLabel = (nodeId: SemanticNodeId): SemanticNodeId | undefined => {
@@ -527,6 +616,7 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     hasExcludedAxTextDescendant,
     hasNativeDescendant,
     isOrInsideNative,
+    inNegativeStackingContext,
     selfOrEnclosingLabel,
   };
 }
@@ -607,11 +697,11 @@ function resolvedName(
   node: SemanticGraphNode,
   role: string | undefined,
   tag: string,
-  axProps: ExtractedAxProps | undefined,
   graph: SemanticGraph,
   indexes: ResolveIndexes,
   supplementalNames: ReadonlyMap<string, string>,
   identifierFallback: boolean,
+  isSensitive: boolean,
 ): string | undefined {
   const attrs = node.dom?.attrs ?? EMPTY_ATTRS;
   const axIgnored = node.ax?.ignored === true;
@@ -624,8 +714,10 @@ function resolvedName(
     nativeLabelText(node, indexes) ??
     clean(attrs.title) ??
     clean(attrs.alt) ??
-    (axIgnored ? undefined : indexes.axText(node.id)) ??
-    indexes.domText(node.id);
+    // Sensitive controls must never derive their name from inner StaticText/DOM
+    // content, which holds the revealed plaintext value on unlabelled inputs.
+    (isSensitive || axIgnored ? undefined : indexes.axText(node.id)) ??
+    (isSensitive ? undefined : indexes.domText(node.id));
   if (name === undefined) {
     const formControl = FORM_TAGS.has(tag);
     if (formControl) {
@@ -649,10 +741,6 @@ function resolvedName(
         name = stableIdentifierName(attrs);
       }
     }
-  }
-  const hasPopup = axProps?.hasPopup;
-  if (name && hasPopup && hasPopup !== "false") {
-    name = axProps?.expanded === "true" ? `${name} [expanded]` : `${name} [has-submenu]`;
   }
   if (!name && role?.toLowerCase() === "iframe") return clean(attrs.id);
   return name;
@@ -992,12 +1080,15 @@ export function resolveSemanticGraph(
   options: {
     supplementalNames?: ReadonlyMap<string, string>;
     identifierFallback?: boolean;
+    /** Mask editable AX-only controls lacking DOM attribute evidence (recording fallback). */
+    redactUnverifiedAxValues?: boolean;
   } = {},
 ): ResolvedSemanticGraph {
   const indexes = buildIndexes(graph);
   const resolveRowAnchor = createRowAnchorResolver(graph, indexes);
   const supplementalNames = options.supplementalNames ?? new Map<string, string>();
   const identifierFallback = options.identifierFallback ?? true;
+  const redactUnverifiedAxValues = options.redactUnverifiedAxValues ?? false;
   const nodes = new Map<SemanticNodeId, ResolvedSemanticNode>();
   for (const node of graph.nodes.values()) {
     const axProps = extractAxProps(node.ax);
@@ -1005,17 +1096,21 @@ export function resolveSemanticGraph(
     const roleResolution = resolvedRole(node);
     const role = roleResolution.value;
     const tag = node.dom?.tag.toLowerCase() ?? "";
+    const isSensitive =
+      sensitive(node, axProps) ||
+      (redactUnverifiedAxValues &&
+        node.dom === undefined &&
+        ["textbox", "searchbox", "combobox"].includes(role?.toLowerCase() ?? ""));
     const name = resolvedName(
       node,
       role,
       tag,
-      axProps,
       graph,
       indexes,
       supplementalNames,
       identifierFallback,
+      isSensitive,
     );
-    const isSensitive = sensitive(node, axProps);
     const sourceValue = node.dom?.formValue ?? axValue(node.ax?.value);
     const value = isSensitive ? undefined : sourceValue;
     const checked = checkedState(node, role, axProps);
@@ -1027,7 +1122,8 @@ export function resolveSemanticGraph(
     const inForm = node.dom?.inForm;
     const nearby = nearbyText(node, indexes);
     const placeholder = clean(node.dom?.formPlaceholder ?? attrs.placeholder);
-    const textContent = NON_TEXT_CONTAINER_TAGS.has(tag) ? undefined : clean(node.dom?.textContent);
+    const textContent =
+      isSensitive || NON_TEXT_CONTAINER_TAGS.has(tag) ? undefined : clean(node.dom?.textContent);
     const selectInfo =
       tag === "select" && !isSensitive
         ? extractSelectOptions(node, sourceValue, graph, indexes)
@@ -1042,10 +1138,17 @@ export function resolveSemanticGraph(
         node.dom?.clickable === true ||
         node.dom?.cursor === "pointer");
     const rowAnchor = mayBeReferenced ? resolveRowAnchor(node) : undefined;
+    const resolvedZIndex =
+      node.dom?.zIndex !== undefined && node.dom.zIndex < 0
+        ? node.dom.zIndex
+        : node.dom && node.dom.position !== "static" && indexes.inNegativeStackingContext(node.id)
+          ? -1
+          : node.dom?.zIndex;
     const vom: ResolvedSemanticNode["vom"] = {
       tag,
       rect: node.dom?.rect ?? null,
       paintOrder: node.dom?.paintOrder ?? 0,
+      ...(resolvedZIndex !== undefined ? { zIndex: resolvedZIndex } : {}),
       position: node.dom?.position || "static",
       pointerEvents: node.dom?.pointerEvents || "auto",
       ...(node.dom?.cursor ? { cursor: node.dom.cursor } : {}),
@@ -1067,7 +1170,7 @@ export function resolveSemanticGraph(
           }
         : {}),
       ...(rowAnchor ? { rowAnchor } : {}),
-      inputState: inputState(node, role, sourceValue, isSensitive),
+      inputState: inputState(node, role, sourceValue, isSensitive, graph, indexes),
       sensitive: isSensitive,
       // An available AX result is authoritative, including ignored/nonmodal nodes.
       modal: node.ax
@@ -1084,7 +1187,31 @@ export function resolveSemanticGraph(
     };
     const selected = axIgnored ? undefined : axProps?.selected;
     const expanded = axIgnored ? undefined : axProps?.expanded;
+    const hasPopup = axIgnored ? undefined : axProps?.hasPopup;
     const controls = axIgnored ? undefined : axProps?.controls;
+    const ariaHasPopup = clean(attrs["aria-haspopup"])?.toLowerCase();
+    const ariaExpanded = clean(attrs["aria-expanded"])?.toLowerCase();
+    if (
+      (hasPopup !== undefined && hasPopup !== "false") ||
+      (hasPopup === undefined && ariaHasPopup !== undefined && ariaHasPopup !== "false")
+    ) {
+      vom.hasPopup = true;
+    }
+    const expandedBool =
+      expanded === "true"
+        ? true
+        : expanded === "false"
+          ? false
+          : expanded === undefined
+            ? ariaExpanded === "true"
+              ? true
+              : ariaExpanded === "false"
+                ? false
+                : undefined
+            : undefined;
+    if (expandedBool !== undefined) {
+      vom.expanded = expandedBool;
+    }
     if ((selected === "true" || selected === "false") && !vom.attrs?.["aria-selected"]) {
       vom.attrs = { ...(vom.attrs ?? {}), "aria-selected": selected };
     }

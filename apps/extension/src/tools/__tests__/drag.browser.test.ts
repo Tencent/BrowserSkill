@@ -2,16 +2,22 @@
 
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  type FrameNodeHandle,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import { SessionManager } from "@/session-manager/manager";
 import type { DragParams } from "@/transport/types";
 import { handleDrag } from "../drag";
 import { handleClick, handleHover } from "../interaction";
 import { handleObserve } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -33,7 +39,7 @@ const { rangeMarkup, rangeScript } = await import(
 let send: Send;
 let close: () => void;
 let run: Promise<void>;
-if (process.env.BSK_DRAG_CHROME) {
+if (process.env.BSK_TEST_CHROME) {
   beforeAll(async () => {
     const { withChrome } = await import(
       new URL(
@@ -45,7 +51,7 @@ if (process.env.BSK_DRAG_CHROME) {
       done = Promise.withResolvers<void>();
     close = done.resolve;
     run = withChrome(
-      { executable: process.env.BSK_DRAG_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (s: Send) => {
         ready.resolve(s);
         await done.promise;
@@ -101,20 +107,20 @@ async function harness(targetId: string, background: boolean) {
   const ctx = await manager.start("aa11");
   let hook: Hook = () => {};
   const calls: { method: string; params?: Record<string, unknown> }[] = [];
-  const forward = async <T>(target: CdpTarget, method: string, params?: object): Promise<T> => {
+  const forward = async <T>(
+    _handle: FrameDocumentHandle | FrameNodeHandle | { tabId: number },
+    method: string,
+    params?: object,
+  ): Promise<T> => {
     calls.push({ method, params: params as Record<string, unknown> });
-    const result = await send<T>(method, params, target.sessionId ?? sessionId);
+    const result = await send<T>(method, params, sessionId);
     await hook(method, params as Record<string, unknown>);
     return result;
   };
-  const cdp: CdpRunner = {
-    send: (_tab, method, params) => forward({ tabId: 4 }, method, params),
-    sendToTarget: forward,
-  };
   const frames = async () => {
-    type Tree = { frame: { id: string; name?: string }; childFrames?: Tree[] };
+    type Tree = { frame: { id: string; loaderId?: string; name?: string }; childFrames?: Tree[] };
     const { frameTree } = await send<{ frameTree: Tree }>("Page.getFrameTree", {}, sessionId);
-    const result: CdpFrame[] = [];
+    const result: FrameDocumentInfo[] = [];
     const visit = async (tree: Tree, parentFrameId?: string) => {
       const owner = parentFrameId
         ? await send<{ backendNodeId: number }>(
@@ -123,18 +129,26 @@ async function harness(targetId: string, background: boolean) {
             sessionId,
           )
         : undefined;
+      const loaderId = tree.frame.loaderId ?? "";
       result.push({
+        handle: toFrameDocumentHandle(4, { frameId: tree.frame.id, loaderId }),
         frameId: tree.frame.id,
+        loaderId,
         parentFrameId,
-        target: { tabId: 4 },
         ownerBackendNodeId: owner?.backendNodeId,
+        processKey: "root",
+        isOutOfProcess: false,
       });
       for (const child of tree.childFrames ?? []) await visit(child, tree.frame.id);
     };
     await visit(frameTree);
     return { rootFrameId: frameTree.frame.id, frames: result };
   };
-  cdp.getFrameGraph = frames;
+  const cdp: CdpRunner = createStubCdpRunner({
+    send: (_tab, method, params) => forward({ tabId: 4 }, method, params),
+    sendToFrame: forward,
+    getFrameDocuments: frames,
+  });
   cdp.verifyPointerTarget = pointerTargetValidator(cdp);
   const deps = {
     cdp,
@@ -190,16 +204,20 @@ async function dndKitBundle() {
   if (!libraryBundle) {
     const result = await build({
       entryPoints: [
-        new URL(
-          "../../../../../evals/browser/cases/regression/drag-interactions/libraries.tsx",
-          import.meta.url,
-        ).pathname,
+        // `URL.pathname` keeps the leading slash on Windows (`/D:/...`), which
+        // esbuild cannot resolve. `fileURLToPath` yields the real path.
+        fileURLToPath(
+          new URL(
+            "../../../../../evals/browser/cases/regression/drag-interactions/libraries.tsx",
+            import.meta.url,
+          ),
+        ),
       ],
       bundle: true,
       write: false,
       format: "iife",
       platform: "browser",
-      nodePaths: [new URL("../../../node_modules", import.meta.url).pathname],
+      nodePaths: [fileURLToPath(new URL("../../../node_modules", import.meta.url))],
       define: { "process.env.NODE_ENV": '"production"' },
     });
     libraryBundle = result.outputFiles[0].text;
@@ -207,7 +225,7 @@ async function dndKitBundle() {
   return libraryBundle;
 }
 const ok = (result: unknown) => expect(result, JSON.stringify(result)).not.toHaveProperty("code");
-describe.skipIf(!process.env.BSK_DRAG_CHROME)("real browser drag", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser drag", () => {
   it.each(["mouse", "pointer", "hold"])("moves %s with real input and releases", async (id) => {
     await withPage(async (h) => {
       ok(
@@ -641,7 +659,7 @@ describe.skipIf(!process.env.BSK_DRAG_CHROME)("real browser drag", () => {
     }, true));
 });
 
-describe.skipIf(!process.env.BSK_DRAG_CHROME)("click-move-click range selection", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("click-move-click range selection", () => {
   const setup = (h: Awaited<ReturnType<typeof harness>>) =>
     h.evaluate(`document.body.innerHTML=${JSON.stringify(rangeMarkup)};${rangeScript}`);
   const params = {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
+import { type CdpRunner, type ChromeTabsApi, createStubCdpRunner } from "@/tools/shared";
 import { ObservationNodeIndex, type RegisteredObservation } from "../recording/observation-capture";
 import { RecordingObservationSession } from "../recording/observation-session";
 import { SettleController } from "../recording/settle-controller";
@@ -17,11 +17,13 @@ describe("SettleController", () => {
 
   it("aborts superseded capture work and lands the prior action on the next origin", async () => {
     vi.useFakeTimers();
-    const cdp: CdpRunner = {
-      send: vi.fn(async () => ({
-        result: { value: { idleMs: 1_000, readyState: "complete" } },
-      })) as unknown as CdpRunner["send"],
-    };
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: vi.fn(async (_tabId: number, method: string) => {
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+        return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
+      }) as unknown as CdpRunner["send"],
+    });
     const tabsApi: ChromeTabsApi = {
       get: vi.fn(async () => ({ id: 7, url: OBSERVATION.url }) as chrome.tabs.Tab),
       query: vi.fn(async () => []),
@@ -64,11 +66,13 @@ describe("SettleController", () => {
 
   it("does not consume a newer redirect while reading the prior landing URL", async () => {
     vi.useFakeTimers();
-    const cdp: CdpRunner = {
-      send: vi.fn(async () => ({
-        result: { value: { idleMs: 1_000, readyState: "complete" } },
-      })) as unknown as CdpRunner["send"],
-    };
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: vi.fn(async (_tabId: number, method: string) => {
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+        return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
+      }) as unknown as CdpRunner["send"],
+    });
     let resolveFirstTab!: (tab: chrome.tabs.Tab) => void;
     const firstTab = new Promise<chrome.tabs.Tab>((resolve) => {
       resolveFirstTab = resolve;
@@ -101,14 +105,15 @@ describe("SettleController", () => {
   it("settles an action in its own OOPIF document scope", async () => {
     vi.useFakeTimers();
     const send = vi.fn();
-    const sendToTarget = vi.fn(async (_target, method: string) => {
+    const sendToFrame = vi.fn(async (_handle, method: string) => {
       if (method === "Page.createIsolatedWorld") return { executionContextId: 39 };
       return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
     });
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: send as unknown as CdpRunner["send"],
-      sendToTarget: sendToTarget as unknown as NonNullable<CdpRunner["sendToTarget"]>,
-    };
+      sendToFrame: sendToFrame as unknown as CdpRunner["sendToFrame"],
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "oopif-frame",
+    });
     const tabsApi: ChromeTabsApi = {
       get: vi.fn(async () => ({ id: 7, url: OBSERVATION.url }) as chrome.tabs.Tab),
       query: vi.fn(async () => []),
@@ -119,15 +124,15 @@ describe("SettleController", () => {
       { op: "click", captureTarget: { tag: "button", name: "Inside frame" } },
     ];
     const controller = new SettleController({ session, cdp, tabsApi, tabId: 7 });
-    const target = { tabId: 7, sessionId: "oopif-session" };
+    const handle = { tabId: 7, frameId: "oopif-frame", loaderId: "oopif-loader" };
 
-    controller.schedule(drafts, 0, { target, frameId: "oopif-frame" });
+    controller.schedule(drafts, 0, { tabId: 7, handle });
     await vi.advanceTimersByTimeAsync(180);
     await controller.flush();
 
     expect(send).not.toHaveBeenCalled();
-    expect(sendToTarget).toHaveBeenCalledWith(
-      target,
+    expect(sendToFrame).toHaveBeenCalledWith(
+      handle,
       "Runtime.evaluate",
       expect.objectContaining({ contextId: 39 }),
     );

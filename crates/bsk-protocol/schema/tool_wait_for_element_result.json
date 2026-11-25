@@ -122,6 +122,8 @@
   "required": [
     "tab_id",
     "satisfied",
+    "attached",
+    "visible",
     "elapsed_ms"
   ],
   "title": "WaitForElementResult",

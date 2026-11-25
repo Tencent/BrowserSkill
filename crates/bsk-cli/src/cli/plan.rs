@@ -5,14 +5,14 @@
 //! the target and `expect` immediately before every input. It is not a transaction:
 //! the first step that does not complete ends the plan, and nothing is retried.
 use super::{
-    GlobalFlags, TOOL_IPC_TIMEOUT, business_rpc, cooperate, ensure_daemon,
+    GlobalFlags, business_rpc, cooperate, ensure_daemon,
     error::{CliError, Format},
-    step,
+    orchestration, step,
 };
 use anyhow::{Context, ensure};
 use bsk_protocol::{
     ErrorCode, Method,
-    tools::{TARGET_CONTROL_PROTOCOL, WaitForElementParams, parse_expectations},
+    tools::{WaitForElementParams, parse_expectations},
 };
 use clap::{Args, ValueEnum};
 use serde_json::{Map, Value, json};
@@ -58,12 +58,15 @@ pub struct PlanArgs {
     /// fields (ref/selector/value/values/key/etc.) and optional `expect`.
     #[arg(long)]
     pub steps: String,
-    /// Known main-document CSS selector that should become visible after the last step.
+    /// Known CSS selector (main document and accessible iframes) that should become visible after the last step.
     #[arg(long)]
     pub until_visible: Option<String>,
     /// Readiness budget in milliseconds, independent of the steps' timeouts.
     #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u32).range(1..=25000))]
     pub wait_timeout_ms: u32,
+    /// Token budget for the post-plan VOM observation. Keep the same budget across syncs, steps, and plans to preserve cache reuse.
+    #[arg(long = "max-tokens")]
+    pub max_tokens: Option<u32>,
     /// Save the unfiltered combined result, atomically, without overwriting.
     #[arg(long)]
     pub save_full: Option<PathBuf>,
@@ -99,6 +102,8 @@ pub(crate) struct Plan {
     pub(crate) steps: Vec<Step>,
     pub(crate) until_visible: Option<String>,
     pub(crate) wait_timeout_ms: u32,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) hydrate_cache: bool,
     pub(crate) budget: Duration,
 }
 
@@ -143,19 +148,30 @@ impl Plan {
             steps,
             until_visible: None,
             wait_timeout_ms: DEFAULT_WAIT_MS as u32,
+            max_tokens: None,
+            hydrate_cache: true,
             budget: BUDGET,
         })
     }
 
-    fn request(&self, step: &Step, tab: Option<i64>) -> Value {
+    fn request_pinned(
+        &self,
+        step: &Step,
+        session: Option<&str>,
+        tab: Option<i64>,
+        context: Option<&str>,
+    ) -> Value {
         let mut params = step.params.clone();
+        if let Some(sid) = session.filter(|s| !s.trim().is_empty()) {
+            params["session_id"] = sid.into();
+        }
         if let Some(tab) = tab {
             params["tab_id"] = tab.into();
         }
         if !step.wait
-            && let Some(context) = &self.context
+            && let Some(context) = context
         {
-            params["context_id"] = context.as_str().into();
+            params["context_id"] = context.into();
         }
         if step.strict
             && let Some(observation) = &self.observation
@@ -195,13 +211,14 @@ fn prepare_step(session: &str, step: &Value) -> anyhow::Result<Step> {
         let conditions = parse_expectations(&expect.to_string()).map_err(anyhow::Error::msg)?;
         params["expect"] = serde_json::to_value(conditions)?;
     }
+    let timeout = orchestration::tool_ipc_timeout(&method, &params);
     Ok(Step {
         action,
         method,
         params,
         strict,
         wait: false,
-        timeout: TOOL_IPC_TIMEOUT,
+        timeout,
     })
 }
 
@@ -223,13 +240,14 @@ fn wait_step(
         .or_insert_with(|| Value::from("visible"));
     let params = step::typed::<WaitForElementParams>(&Value::Object(fields))?;
     step::target(&params, true)?;
+    let timeout = orchestration::tool_ipc_timeout(&Method::ToolWaitForElement, &params);
     Ok(Step {
         action,
         method: Method::ToolWaitForElement,
         params,
         strict: false,
         wait: true,
-        timeout: Duration::from_millis(timeout_ms + 5000),
+        timeout,
     })
 }
 
@@ -250,6 +268,7 @@ fn is_strict(kind: step::Action, params: &Value) -> bool {
 fn effect_state(error: &CliError) -> Value {
     let data = error.data();
     match data {
+        Some(data) if data["dispatched"] == false => "none".into(),
         Some(data) if data["effect_state"].is_string() => data["effect_state"].clone(),
         Some(data) if data["reason"] == "cancelled_before_dispatch" => "none".into(),
         // Without evidence that nothing was sent, the caller must not assume so.
@@ -284,8 +303,25 @@ pub(crate) fn run(
     plan: &Plan,
     mut call: impl FnMut(Method, Value, Duration) -> Result<Value, CliError>,
 ) -> (Value, u8) {
+    run_with_meta(plan, |method, params, timeout, _| {
+        call(method, params, timeout).map(|val| (val, None))
+    })
+}
+
+pub(crate) fn run_with_meta(
+    plan: &Plan,
+    mut call: impl FnMut(
+        Method,
+        Value,
+        Duration,
+        bool,
+    ) -> Result<(Value, Option<crate::ipc_client::ScopeResultMeta>), CliError>,
+) -> (Value, u8) {
     let start = Instant::now();
-    // Pin every request to the plan's tab; never follow a human's active tab.
+    // Pin every request to the plan's resolved session, tab, and context; never follow
+    // a human's active tab or re-resolve an implicit context mid-batch.
+    let mut pinned_session = (!plan.session.trim().is_empty()).then(|| plan.session.clone());
+    let mut pinned_context = plan.context.clone();
     let mut tab = plan.tab_id;
     let mut completed = 0;
     let mut notes = Vec::new();
@@ -302,8 +338,31 @@ pub(crate) fn run(
             ));
             break;
         }
-        match call(step.method.clone(), plan.request(step, tab), step.timeout) {
-            Ok(receipt) => {
+        let want_meta = pinned_session.is_none()
+            || (!step.wait
+                && (pinned_context.is_none()
+                    || pinned_context
+                        .as_deref()
+                        .is_some_and(|c| crate::daemon::scopes::is_short_alias(c, 'c'))));
+        let req = plan.request_pinned(
+            step,
+            pinned_session.as_deref(),
+            tab,
+            pinned_context.as_deref(),
+        );
+        match call(step.method.clone(), req, step.timeout, want_meta) {
+            Ok((receipt, scope_meta)) => {
+                if let Some(sm) = scope_meta {
+                    if !sm.session_id.is_empty() {
+                        pinned_session = Some(sm.session_id);
+                    }
+                    tab = tab.or(sm.tab_id);
+                    if !step.wait
+                        && let Some(ctx) = sm.short_ctx.filter(|s| !s.is_empty())
+                    {
+                        pinned_context = Some(ctx);
+                    }
+                }
                 tab = tab.or(receipt["tab_id"].as_i64());
                 if step.wait && receipt["satisfied"] != true {
                     exit = 1;
@@ -339,25 +398,32 @@ pub(crate) fn run(
         reply["stopped"] = stop;
         reply["not_run"] = (index + 1..not_run).collect::<Vec<_>>().into();
     }
-    if finished
-        && let Some(selector) = &plan.until_visible
-        && step::await_ready(
-            &plan.session,
+    let final_session = pinned_session.as_deref().unwrap_or(&plan.session);
+    if finished && let Some(selector) = &plan.until_visible {
+        let mut plain_call = |method: Method, params: Value, timeout: Duration| {
+            call(method, params, timeout, false).map(|(val, _)| val)
+        };
+        if step::await_ready(
+            final_session,
             tab,
             selector,
             plan.wait_timeout_ms,
             &mut reply,
             &mut exit,
-            &mut call,
-        )
-    {
-        read_after = false;
+            &mut plain_call,
+        ) {
+            read_after = false;
+        }
     }
     if read_after {
-        step::post_sync(
-            &plan.session,
-            cooperate::Policy::Auto,
-            tab,
+        step::post_sync_with_meta(
+            step::PostSyncOptions {
+                session: final_session,
+                policy: cooperate::Policy::Auto,
+                tab,
+                max_tokens: plan.max_tokens,
+                hydrate_cache: plan.hydrate_cache,
+            },
             &mut reply,
             &mut exit,
             &mut call,
@@ -368,13 +434,9 @@ pub(crate) fn run(
     (reply, exit)
 }
 
-/// A plan reuses one context across actions, which only target control allows.
+/// Validate daemon protocol compatibility before running a plan.
 pub(crate) fn check_protocol(protocol: &str) -> anyhow::Result<()> {
-    ensure!(
-        bsk_protocol::tools::supports_target_control(protocol),
-        "plan requires daemon protocol {TARGET_CONTROL_PROTOCOL} or a later compatible 1.x version; update the CLI and restart its daemon"
-    );
-    Ok(())
+    business_rpc::check_daemon_protocol(protocol)
 }
 
 fn prepare(args: &PlanArgs, flags: &GlobalFlags) -> anyhow::Result<Plan> {
@@ -393,10 +455,17 @@ fn prepare(args: &PlanArgs, flags: &GlobalFlags) -> anyhow::Result<Plan> {
     plan.tab_id = args.tab_id;
     plan.until_visible = args.until_visible.clone();
     plan.wait_timeout_ms = args.wait_timeout_ms;
+    plan.max_tokens = args.max_tokens;
+    plan.hydrate_cache = args.baseline.is_none();
     Ok(plan)
 }
 
-pub fn dispatch(args: PlanArgs, flags: &GlobalFlags, _format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: PlanArgs,
+    flags: &GlobalFlags,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     let plan = prepare(&args, flags).map_err(CliError::invalid_params)?;
     let session = args.session.as_deref().unwrap_or_default();
     let output = step::Output::prepare(
@@ -406,20 +475,36 @@ pub fn dispatch(args: PlanArgs, flags: &GlobalFlags, _format: Format) -> Result<
         &args.match_text,
         args.context_lines,
     )?;
-    business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx
+        .with_scope(args.scope.as_deref())
+        .without_action_metadata();
     let (daemon, protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
         .context("ensure daemon is running")?;
     check_protocol(&protocol)?;
-    let (reply, exit) = run(&plan, |method, params, timeout| {
-        business_rpc::call(
+    let mut resolved_session: Option<String> = None;
+    let (reply, exit) = run_with_meta(&plan, |method, params, timeout, want_meta| {
+        let meta = crate::ipc_client::IpcRequestMeta {
+            return_scope_meta: want_meta,
+            ..Default::default()
+        };
+        let (val, resp_meta) = op_ctx.call_envelope(
             daemon.sock_path.clone(),
             "plan",
             method,
             Some(params),
+            meta,
             timeout,
-        )
+        )?;
+        if let Some(ref sm) = resp_meta.scope_meta
+            && !sm.session_id.is_empty()
+        {
+            resolved_session = Some(sm.session_id.clone());
+        }
+        Ok((val, resp_meta.scope_meta))
     });
-    output.finish(reply, exit)
+    output
+        .with_resolved_session(resolved_session.as_deref())
+        .finish(reply, exit)
 }
 
 #[cfg(test)]
@@ -781,5 +866,19 @@ mod tests {
         let untargeted = json!([{"action":"press","key":"Tab"}]);
         let error = Plan::prepare("s".into(), &untargeted, Some("c".into()), None).unwrap_err();
         assert!(error.to_string().contains("observation_id"));
+    }
+
+    #[test]
+    fn dispatched_false_overrides_generic_unknown_effect_state() {
+        let err = CliError::from_rpc(RpcError {
+            code: ErrorCode::CdpFailed,
+            message: "clock unavailable".into(),
+            data: Some(json!({
+                "reason": "input_clock_unavailable",
+                "effect_state": "unknown",
+                "dispatched": false
+            })),
+        });
+        assert_eq!(effect_state(&err), json!("none"));
     }
 }

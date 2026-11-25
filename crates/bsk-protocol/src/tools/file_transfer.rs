@@ -7,6 +7,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::ActionExpectation;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct UploadFile {
     pub transfer_id: String,
@@ -30,6 +32,7 @@ impl UploadMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UploadParams {
     pub session_id: String,
     #[serde(
@@ -48,6 +51,28 @@ pub struct UploadParams {
     pub mode: UploadMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u32>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -61,6 +86,7 @@ pub struct UploadResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DownloadParams {
     pub session_id: String,
     #[serde(
@@ -83,6 +109,28 @@ pub struct DownloadParams {
     /// it only for early cancellation; daemon import remains the final check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_byte_size: Option<u64>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -107,6 +155,7 @@ pub struct DownloadResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TransferBeginParams {
     pub session_id: String,
     pub name: String,
@@ -120,10 +169,20 @@ pub struct TransferBeginResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TransferChunkParams {
     pub transfer_id: String,
     pub offset: u64,
     pub data_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransferReadParams {
+    pub transfer_id: String,
+    pub offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -136,6 +195,7 @@ pub struct TransferChunkResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TransferIdParams {
     pub transfer_id: String,
 }
@@ -169,6 +229,10 @@ mod tests {
             }],
             mode: UploadMode::Input,
             timeout_ms: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         })
         .unwrap();
         assert_eq!(value["ref"], "@e3");
@@ -190,6 +254,10 @@ mod tests {
             }],
             mode: UploadMode::Drop,
             timeout_ms: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         })
         .unwrap();
         assert_eq!(value["mode"], "drop");
@@ -205,6 +273,10 @@ mod tests {
             timeout_ms: None,
             browser_relative_dir: None,
             max_byte_size: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         })
         .unwrap();
         assert!(value.get("browser_relative_dir").is_none());

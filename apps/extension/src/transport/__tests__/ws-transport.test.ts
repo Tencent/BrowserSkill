@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_DAEMON_WS_URL } from "../generated/methods";
 import type { ConnectionState, ProtocolFrame } from "../types";
 import { WSTransport } from "../ws-transport";
 
@@ -79,12 +80,12 @@ describe("WSTransport", () => {
 
   it("constructs a WebSocket against the configured URL when connect() is called", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const connectPromise = t.connect();
     expect(FakeSocket.instances.length).toBe(1);
-    expect(lastSocket().url).toBe("ws://127.0.0.1:52800");
+    expect(lastSocket().url).toBe(DEFAULT_DAEMON_WS_URL);
     lastSocket().open();
     await connectPromise;
     expect(t.state).toBe("connected");
@@ -93,7 +94,7 @@ describe("WSTransport", () => {
   it("emits connection state transitions disconnected → connecting → connected", async () => {
     const transitions: ConnectionState[] = [];
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     t.onConnectionStateChange((s) => transitions.push(s));
@@ -136,7 +137,7 @@ describe("WSTransport", () => {
 
   it("serialises outbound frames as JSON when the socket is open", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const p = t.connect();
@@ -148,7 +149,7 @@ describe("WSTransport", () => {
 
   it("replaces lone surrogates so the daemon's strict JSON parser accepts the frame", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const p = t.connect();
@@ -169,7 +170,7 @@ describe("WSTransport", () => {
   it("invokes onMessage for inbound JSON frames", async () => {
     const handler = vi.fn();
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     t.onMessage(handler);
@@ -182,7 +183,7 @@ describe("WSTransport", () => {
 
   it("disconnect() closes the socket and stops reconnecting", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const p = t.connect();
@@ -198,7 +199,7 @@ describe("WSTransport", () => {
 
   it("backs off exponentially across consecutive failed reconnects (1s, 2s, 4s, …, capped at 5s)", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const states: ConnectionState[] = [];
@@ -233,7 +234,7 @@ describe("WSTransport", () => {
 
   it("resets the backoff counter after a successful (re)connect", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const p = t.connect();
@@ -259,7 +260,7 @@ describe("WSTransport", () => {
 
   it("cancels pending backoff and ignores delayed events from a replaced socket", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const initial = t.connect();
@@ -288,7 +289,7 @@ describe("WSTransport", () => {
   it("ignores malformed inbound messages (non-JSON) without throwing", async () => {
     const handler = vi.fn();
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     t.onMessage(handler);
@@ -307,7 +308,7 @@ describe("WSTransport", () => {
   it("disposes handlers via Disposable returned from onMessage", async () => {
     const handler = vi.fn();
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
     const disp = t.onMessage(handler);
@@ -324,10 +325,10 @@ describe("WSTransport", () => {
 
   it("setUrl returns false for the same URL and uses the new URL on the next connect", async () => {
     const t = new WSTransport({
-      url: "ws://127.0.0.1:52800",
+      url: DEFAULT_DAEMON_WS_URL,
       webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
     });
-    expect(t.setUrl("ws://127.0.0.1:52800")).toBe(false);
+    expect(t.setUrl(DEFAULT_DAEMON_WS_URL)).toBe(false);
     expect(t.setUrl("ws://127.0.0.1:53200")).toBe(true);
 
     const p = t.connect();
@@ -344,7 +345,7 @@ it("authenticates before connected, rejects early sends, and closes a second fin
     complete = resolve;
   });
   const t = new WSTransport({
-    url: "ws://127.0.0.1:52800",
+    url: DEFAULT_DAEMON_WS_URL,
     authenticate: () => gate,
     webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
   });
@@ -373,7 +374,7 @@ it("auth failures back off for 30 seconds and explicit retry resets the delay", 
   vi.useFakeTimers();
   const authenticate = vi.fn().mockRejectedValue(new Error("server_unverified"));
   const t = new WSTransport({
-    url: "ws://127.0.0.1:52800",
+    url: DEFAULT_DAEMON_WS_URL,
     authenticate,
     webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
   });
@@ -392,4 +393,157 @@ it("auth failures back off for 30 seconds and explicit retry resets the delay", 
   expect(t.state).toBe("connected");
   await t.disconnect();
   vi.useRealTimers();
+});
+
+it("resets auth backoff on setUrl() and disconnect()", async () => {
+  vi.useFakeTimers();
+  FakeSocket.instances = [];
+  const authenticate = vi.fn().mockRejectedValue(new Error("server_unverified"));
+  const t = new WSTransport({
+    url: DEFAULT_DAEMON_WS_URL,
+    authenticate,
+    webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+  });
+
+  // 1) Trigger local auth backoff, then switch URL via setUrl(): must connect immediately.
+  const first = t.connect();
+  lastSocket().open();
+  await expect(first).rejects.toThrow("server_unverified");
+  await expect(t.connect()).rejects.toThrow("backoff");
+
+  expect(t.setUrl("wss://gateway.example/api/v1/local-browser/extension")).toBe(true);
+  authenticate.mockResolvedValue(undefined);
+  const switched = t.connect();
+  expect(lastSocket().url).toBe("wss://gateway.example/api/v1/local-browser/extension");
+  lastSocket().open();
+  await switched;
+  expect(t.state).toBe("connected");
+
+  // 2) Trigger auth backoff again, then disconnect(): next connect() must not stay locked out.
+  authenticate.mockRejectedValueOnce(new Error("server_unverified"));
+  lastSocket().serverClose();
+  await vi.advanceTimersByTimeAsync(1_000);
+  lastSocket().open();
+  await vi.waitFor(() => expect(authenticate).toHaveBeenCalledTimes(3));
+  await expect(t.connect()).rejects.toThrow("backoff");
+
+  await t.disconnect();
+  authenticate.mockResolvedValue(undefined);
+  const resumed = t.connect();
+  lastSocket().open();
+  await resumed;
+  expect(t.state).toBe("connected");
+  await t.disconnect();
+  vi.useRealTimers();
+});
+
+it("treats socket close during async unpaired authenticate resolution as normal reconnect, not auth failure backoff", async () => {
+  vi.useFakeTimers();
+  FakeSocket.instances = [];
+  let finishAuth!: () => void;
+  const authGate = new Promise<void>((resolve) => {
+    finishAuth = resolve;
+  });
+  const onAuthenticationError = vi.fn();
+  const authenticate = vi.fn(() => authGate);
+  const t = new WSTransport({
+    url: DEFAULT_DAEMON_WS_URL,
+    authenticate,
+    onAuthenticationError,
+    webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+  });
+
+  const pending = t.connect();
+  const first = lastSocket();
+  first.open();
+  expect(authenticate).toHaveBeenCalledOnce();
+
+  // Daemon closes the socket while unpaired authenticate() is still awaiting IndexedDB readLocalState().
+  first.serverClose(1006);
+  // Async read finishes and resolves without error (unpaired skip path).
+  finishAuth();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // Must NOT fire onAuthenticationError or enter 30s local_auth_backoff; normal 1s reconnect applies.
+  expect(onAuthenticationError).not.toHaveBeenCalled();
+  expect(FakeSocket.instances).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(FakeSocket.instances).toHaveLength(2);
+
+  authenticate.mockResolvedValue(undefined);
+  lastSocket().open();
+  await pending;
+  expect(t.state).toBe("connected");
+  await t.disconnect();
+  vi.useRealTimers();
+});
+
+describe("WSTransport physical connect timeout", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    FakeSocket.instances = [];
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeTransport(connectTimeoutMs: number): WSTransport {
+    return new WSTransport({
+      url: DEFAULT_DAEMON_WS_URL,
+      reconnect: { connectTimeoutMs, initialDelayMs: 5, maxDelayMs: 5 },
+      webSocketFactory: (url: string) => new FakeSocket(url) as unknown as WebSocket,
+    });
+  }
+
+  it("drops a socket stuck in CONNECTING and retries", async () => {
+    const t = makeTransport(10);
+    void t.connect().catch(() => {});
+
+    const stuck = lastSocket();
+    expect(stuck.readyState).toBe(0);
+    expect(t.state).toBe("connecting");
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(stuck.closeCalls).toBe(1);
+    expect(t.state).toBe("disconnected");
+
+    await vi.advanceTimersByTimeAsync(5);
+    expect(FakeSocket.instances).toHaveLength(2);
+
+    lastSocket().open();
+    await Promise.resolve();
+    expect(t.state).toBe("connected");
+    await t.disconnect();
+  });
+
+  it("leaves a socket that opens in time untouched", async () => {
+    const t = makeTransport(10);
+    const pending = t.connect();
+
+    await vi.advanceTimersByTimeAsync(5);
+    const socket = lastSocket();
+    socket.open();
+    await pending;
+    expect(t.state).toBe("connected");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(socket.closeCalls).toBe(0);
+    expect(FakeSocket.instances).toHaveLength(1);
+    await t.disconnect();
+  });
+
+  it("clears the connect timer on disconnect", async () => {
+    const t = makeTransport(10);
+    void t.connect().catch(() => {});
+    const socket = lastSocket();
+
+    await t.disconnect();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(socket.closeCalls).toBe(1);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
 });

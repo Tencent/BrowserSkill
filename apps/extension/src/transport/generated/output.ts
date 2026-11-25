@@ -7,9 +7,35 @@
 export type ExpectationField = "text" | "value" | "checked" | "attribute" | "exists";
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "AnyValue".
+ * via the `definition` "AuditRequestResult".
  */
-export type AnyValue = unknown;
+export type AuditRequestResult =
+  | {
+      directory: string;
+      enabled: boolean;
+      error: string | null;
+      retention_days: number;
+      runs: AuditRun[];
+      total: number;
+    }
+  | {
+      error: string | null;
+      events: AuditEvent[];
+      pending_operations: string[];
+      run: AuditRun;
+      total: number;
+    }
+  | {
+      directory: string;
+      enabled: boolean;
+      retention_days: number;
+    }
+  | {
+      deleted: boolean;
+    }
+  | {
+      opened: boolean;
+    };
 /**
  * How the extension resolved the dialog so CDP could continue.
  *
@@ -60,6 +86,131 @@ export type ControlPolicy = ("strict" | "target") | "auto";
  * via the `definition` "CooperateAction".
  */
 export type CooperateAction = "enable" | "status" | "sync" | "wait";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateBaselineReason".
+ */
+export type CooperateBaselineReason =
+  | "no_previous_observation"
+  | "frame_replaced"
+  | "fields_incomplete"
+  | "refs_replaced"
+  | "media_changed"
+  | "token_budget_changed"
+  | "structure_changed"
+  | "focus_changed"
+  | "no_held_text"
+  | "document_replaced"
+  | "multiple_frames"
+  | "human_activity"
+  | "fields_changed"
+  | "text_log_gap"
+  | "unlogged_activity"
+  | "text_outside_observation"
+  | "text_ambiguous"
+  | "text_names_other_content"
+  | "text_cut_by_truncation"
+  | "token_budget_shift";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateChangeKind".
+ */
+export type CooperateChangeKind = "text" | "media_progress";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateFrameGapReason".
+ */
+export type CooperateFrameGapReason = "load_error" | "inactive_document" | "hidden_frame";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateMode".
+ */
+export type CooperateMode =
+  "ready" | "human" | "held" | "yielding" | "syncing" | "acting" | "unavailable";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateResult".
+ */
+export type CooperateResult = CooperateSyncResult | CooperateStatusResult;
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateSyncResult".
+ */
+export type CooperateSyncResult =
+  | {
+      activity: CooperateActivity[];
+      baseline_reason?: CooperateBaselineReason;
+      context_id: string;
+      control_policy: ControlPolicy;
+      frame_gaps?: CooperateFrameGap[];
+      history_complete: boolean;
+      kind: "baseline";
+      observation: SnapshotResult;
+      observation_id?: string;
+      state: CooperateView;
+      tab_id: number;
+    }
+  | {
+      activity: CooperateActivity[];
+      baseline_reason?: CooperateBaselineReason;
+      changes: CooperateDeltaChange[];
+      context_id: string;
+      control_policy: ControlPolicy;
+      frame_gaps?: CooperateFrameGap[];
+      history_complete: boolean;
+      kind: "unchanged";
+      observation_id?: string;
+      observation_patch?: CooperateObservationPatch;
+      previous_context_id: string;
+      previous_observation_id?: string;
+      state: CooperateView;
+      tab_id: number;
+    }
+  | {
+      activity: CooperateActivity[];
+      baseline_reason?: CooperateBaselineReason;
+      changes: CooperateDeltaChange[];
+      context_id: string;
+      control_policy: ControlPolicy;
+      frame_gaps?: CooperateFrameGap[];
+      history_complete: boolean;
+      kind: "delta";
+      observation_id?: string;
+      observation_patch?: CooperateObservationPatch;
+      previous_context_id: string;
+      previous_observation_id?: string;
+      state: CooperateView;
+      tab_id: number;
+    };
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "RequestHelpPolicy".
+ */
+export type RequestHelpPolicy = "enabled" | "disabled";
+/**
+ * Stable daemon/extension error codes (§4.5).
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ErrorCode".
+ */
+export type ErrorCode =
+  | (
+      | "unknown_method"
+      | "unsupported"
+      | "invalid_params"
+      | "not_found"
+      | "permission_denied"
+      | "timeout"
+      | "cdp_failed"
+      | "protocol_error"
+      | "cancelled"
+      | "user_aborted"
+      | "version_too_old"
+      | "multiple_browsers_online"
+      | "no_browser_connected"
+      | "pairing_required"
+    )
+  | "dialog_pending";
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "DebugAction".
@@ -162,29 +313,60 @@ export type DragMode = "press-move-release" | "click-move-click";
  */
 export type ElementState = "visible" | "hidden" | "attached" | "detached";
 /**
- * Stable daemon/extension error codes (§4.5).
- *
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "ErrorCode".
+ * via the `definition` "EventFrame".
  */
-export type ErrorCode =
-  | (
-      | "unknown_method"
-      | "unsupported"
-      | "invalid_params"
-      | "not_found"
-      | "permission_denied"
-      | "timeout"
-      | "cdp_failed"
-      | "protocol_error"
-      | "cancelled"
-      | "user_aborted"
-      | "version_too_old"
-      | "multiple_browsers_online"
-      | "no_browser_connected"
-      | "pairing_required"
-    )
-  | "dialog_pending";
+export type EventFrame =
+  | {
+      event: "audit.context";
+      payload: AuditContextEvent;
+    }
+  | {
+      event: "dialog.changed";
+      payload: DialogChangedEvent;
+    }
+  | {
+      event: "system.heartbeat";
+      payload: EmptyEventPayload;
+    }
+  | {
+      event: "session.activity";
+      payload: SessionActivityEvent;
+    }
+  | {
+      event: "session.window_closed";
+      payload: SessionWindowClosedEvent;
+    }
+  | {
+      event: "session.ended";
+      payload: SessionEndedEvent;
+    }
+  | {
+      event: "session.user_interrupt";
+      payload: SessionUserInterruptEvent;
+    }
+  | {
+      event: "session.interaction_changed";
+      payload: SessionInteractionChangedEvent;
+    }
+  | {
+      event: "browser.disconnected";
+      payload: EmptyEventPayload;
+    }
+  | {
+      event: "browser.connected";
+      payload: EmptyEventPayload;
+    };
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionWindowClosedReason".
+ */
+export type SessionWindowClosedReason = "user_closed_window";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionEndedReason".
+ */
+export type SessionEndedReason = "user_moved_tab";
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "EventKind".
@@ -260,9 +442,177 @@ export type HelpOutcome =
   "continued" | "cancelled" | "timed_out" | "completed" | "navigated" | "disabled";
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "RequestHelpPolicy".
+ * via the `definition` "IntentState".
  */
-export type RequestHelpPolicy = "enabled" | "disabled";
+export type IntentState = "DISPATCHED" | "SETTLED" | "UNKNOWN" | "RECONCILED";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LedgerRequestResult".
+ */
+export type LedgerRequestResult = LedgerStatusReply | LedgerResolveReply;
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "PairedDeviceSummary".
+ */
+export type PairedDeviceSummary =
+  | {
+      activated_at: string | null;
+      browser_id: string | null;
+      device_id: string;
+      expires_at: string | null;
+      gen: number;
+      kind: "local";
+      label: string;
+      status: PairedDeviceStatus;
+    }
+  | {
+      browser_id: string;
+      device_id: string;
+      expires_at: string;
+      kind: "remote";
+      label: string;
+    };
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "PairedDeviceStatus".
+ */
+export type PairedDeviceStatus = "unactivated" | "active" | "revoked";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthDevicesResult".
+ */
+export type LocalAuthDevicesResult = PairedDeviceSummary[];
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthMode".
+ */
+export type LocalAuthMode = "warn" | "required" | "trust_local";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LoggedStep".
+ */
+export type LoggedStep =
+  | {
+      dropped_query: boolean;
+      kind: "navigate";
+      origin: string | null;
+      path: string | null;
+    }
+  | {
+      action: string;
+      element: string;
+      /**
+       * The observation this ref first appeared in.
+       */
+      first_seen: number;
+      /**
+       * The first heading of the page it acted on.
+       */
+      heading?: string;
+      key?: string;
+      kind: "action";
+      modifiers?: KeyModifier[];
+      sensitive: boolean;
+      target: LoggedTarget;
+      /**
+       * How many option values a select chose, never which.
+       */
+      values?: number;
+    }
+  | {
+      kind: "wait";
+    }
+  | {
+      kind: "skipped";
+      method: string;
+      reason: string;
+    }
+  | {
+      kind: "uncertain";
+      method: string;
+    };
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "Method".
+ */
+export type Method =
+  | "tool.cooperate"
+  | "local_auth.pair"
+  | "local_auth.devices"
+  | "local_auth.revoke"
+  | "local_auth.rotate"
+  | "local_auth.set_mode"
+  | "audit.request"
+  | "ledger.request"
+  | "system.handshake"
+  | "system.ping"
+  | "system.status"
+  | "session.start"
+  | "session.start_tracked"
+  | "session.request"
+  | "session.stop"
+  | "session.stop_all"
+  | "session.list"
+  | "session.run_log"
+  | "browser.list"
+  | "tool.session_start"
+  | "tool.session_stop"
+  | "tool.window_resize"
+  | "tool.emulate"
+  | "tool.tab_list"
+  | "tool.tab_create"
+  | "tool.tab_close"
+  | "tool.tab_borrow"
+  | "tool.tab_return"
+  | "tool.tab_select"
+  | "tool.navigate"
+  | "tool.navigate_back"
+  | "tool.navigate_forward"
+  | "tool.reload"
+  | "tool.click"
+  | "tool.hover"
+  | "tool.drag"
+  | "tool.wheel"
+  | "tool.scroll_to"
+  | "tool.focus"
+  | "tool.blur"
+  | "tool.fill"
+  | "tool.press"
+  | "tool.select"
+  | "tool.upload"
+  | "tool.download"
+  | "tool.snapshot"
+  | "tool.observe"
+  | "tool.get_html"
+  | "tool.read"
+  | "tool.extract"
+  | "tool.screenshot"
+  | "tool.screenshot_full_page"
+  | "tool.screenshot_read"
+  | "tool.screenshot_release"
+  | "tool.console"
+  | "tool.debug"
+  | "tool.network"
+  | "tool.evaluate"
+  | "tool.dialog_status"
+  | "tool.dialog_accept"
+  | "tool.dialog_dismiss"
+  | "tool.operation_await"
+  | "tool.operation_cancel"
+  | "tool.wait_for_navigation"
+  | "tool.wait_for_element"
+  | "tool.wait_ms"
+  | "tool.request_help"
+  | "tool.record_start"
+  | "tool.record_stop"
+  | "tool.record_await"
+  | "tool.video"
+  | "transfer.begin"
+  | "transfer.chunk"
+  | "transfer.finish"
+  | "transfer.read"
+  | "transfer.release"
+  | "cancel";
 /**
  * Page-lifecycle checkpoint a navigation should wait on.
  *
@@ -289,10 +639,29 @@ export type NavigationCause =
  */
 export type NetworkEntryKind = "response" | "failure";
 /**
+ * Retained or still-running status returned by `tool.operation_await`.
+ *
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "RecordedTrace".
+ * via the `definition` "OperationAwaitResult".
  */
-export type RecordedTrace = TraceV3 | TraceV2;
+export type OperationAwaitResult =
+  | {
+      method: Method;
+      operation_id: string;
+      result: unknown;
+      state: "completed";
+    }
+  | {
+      error: RpcError;
+      method: Method;
+      operation_id: string;
+      state: "failed";
+    }
+  | {
+      method: Method;
+      operation_id: string;
+      state: "running";
+    };
 /**
  * One recorded user action — discriminated union by `op`.
  *
@@ -390,83 +759,6 @@ export type StepV3 =
  * via the `definition` "StopReason".
  */
 export type StopReason = "user_finish" | "cli_stop";
-/**
- * One recorded user action — discriminated union by `op` (v2).
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "StepV2".
- */
-export type StepV2 =
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "navigate";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      to: string;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "click";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      target: TargetDescriptorV2;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "hover";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      target: TargetDescriptorV2;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "fill";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      redacted?: boolean;
-      target: TargetDescriptorV2;
-      value: string;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "select";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      selection: SelectedOptionV2[];
-      target: TargetDescriptorV2;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      key: string;
-      modifiers?: KeyModifier[];
-      op: "press";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      target?: TargetDescriptorV2;
-    };
-/**
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "RecordedStep".
- */
-export type RecordedStep = StepV3 | StepV2;
 /**
  * Stable `RpcError.data.reason` values shared across extension emitters and CLI renderers.
  *
@@ -579,12 +871,52 @@ export type RpcErrorReason =
   | "download_path_mismatch"
   | "transfer_outcome_unknown"
   | "transfer_timeout"
-  | "cleanup_failed";
+  | "cleanup_failed"
+  | "session_busy"
+  | "session_idle_timeout"
+  | "session_window_closed"
+  | "browser_disconnected"
+  | "no_active_session"
+  | "ambiguous_implicit_session"
+  | "session_stopped"
+  | "scope_browser_conflict"
+  | "scope_incognito_conflict"
+  | "record_start_page_unreachable"
+  | "unsupported_feature"
+  | "local_pairing_required"
+  | "local_file_error"
+  | "extension_unresponsive"
+  | "extension_disconnected"
+  | "extension_reconnected"
+  | "cancel_cleanup_timeout"
+  | "cancelled_before_dispatch"
+  | "cancelled"
+  | "cli_parse_error"
+  | "dialog_pending";
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "ScreenshotScope".
  */
 export type ScreenshotScope = "follow" | "current";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionRequestAction".
+ */
+export type SessionRequestAction = "status" | "prepare" | "cancel" | "claim";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionRequestState".
+ */
+export type SessionRequestState =
+  | "prepared"
+  | "starting"
+  | "ready"
+  | "active"
+  | "cancelling"
+  | "closed"
+  | "cleanup_failed"
+  | "failed"
+  | "unknown";
 /**
  * View scope for [`TabListParams`] (§6 sandbox table).
  *
@@ -602,6 +934,12 @@ export type TabScope = "user" | "agent" | "all";
  * via the `definition` "UploadMode".
  */
 export type UploadMode = "input" | "drop";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "VideoAction".
+ */
+export type VideoAction =
+  "start" | "capabilities" | "list" | "status" | "stop" | "read" | "discard" | "exported";
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "VideoCompleteness".
@@ -707,11 +1045,16 @@ export type WaitForNavigationReached =
 export interface ProtocolTypes {
   ActionExpectation: ActionExpectation;
   ActionMetadata: ActionMetadata;
-  AnyValue: AnyValue;
+  AuditContextEvent: AuditContextEvent;
+  AuditEvent: AuditEvent;
+  AuditRequestParams: AuditRequestParams;
+  AuditRequestResult: AuditRequestResult;
+  AuditRun: AuditRun;
   BlurParams: BlurParams;
   BlurResult: BlurResult;
   BorrowConfirmationPolicy: BorrowConfirmationPolicy;
   BrowserListParams: BrowserListParams;
+  BrowserListResult: BrowserListResult;
   BrowserPeerInfo: BrowserPeerInfo;
   BrowserStatusEntry: BrowserStatusEntry;
   CancelParams: CancelParams;
@@ -726,7 +1069,30 @@ export interface ProtocolTypes {
   ControlPolicy: ControlPolicy;
   ControllerInfo: ControllerInfo;
   CooperateAction: CooperateAction;
+  CooperateActivity: CooperateActivity;
+  CooperateActivityAttribution: CooperateActivityAttribution;
+  CooperateBaselineReason: CooperateBaselineReason;
+  CooperateChangeKind: CooperateChangeKind;
+  CooperateDeltaChange: CooperateDeltaChange;
+  CooperateEventTimeWindow: CooperateEventTimeWindow;
+  CooperateFrameGap: CooperateFrameGap;
+  CooperateFrameGapReason: CooperateFrameGapReason;
+  CooperateLinePatch: CooperateLinePatch;
+  CooperateMode: CooperateMode;
+  CooperateObservationPatch: CooperateObservationPatch;
   CooperateParams: CooperateParams;
+  CooperateResult: CooperateResult;
+  CooperateStatusResult: CooperateStatusResult;
+  CooperateSyncResult: CooperateSyncResult;
+  CooperateTargetPoint: CooperateTargetPoint;
+  CooperateView: CooperateView;
+  DaemonSessionStartParams: DaemonSessionStartParams;
+  DaemonSessionStartResult: DaemonSessionStartResult;
+  DaemonSessionStartTrackedParams: DaemonSessionStartTrackedParams;
+  DaemonSessionStopAllParams: DaemonSessionStopAllParams;
+  DaemonSessionStopFailure: DaemonSessionStopFailure;
+  DaemonSessionStopParams: DaemonSessionStopParams;
+  DaemonSessionStopResult: DaemonSessionStopResult;
   DebugAction: DebugAction;
   DebugActivity: DebugActivity;
   DebugAnalysis: DebugAnalysis;
@@ -768,6 +1134,7 @@ export interface ProtocolTypes {
   DebugTextChanges: DebugTextChanges;
   DebugValue: DebugValue;
   DebugVisibility: DebugVisibility;
+  DialogChangedEvent: DialogChangedEvent;
   DialogHandleParams: DialogHandleParams;
   DialogHandleResult: DialogHandleResult;
   DialogStatusParams: DialogStatusParams;
@@ -781,6 +1148,7 @@ export interface ProtocolTypes {
   DragResult: DragResult;
   DragTarget: DragTarget;
   ElementState: ElementState;
+  EmptyEventPayload: EmptyEventPayload;
   EmulateOverrides: EmulateOverrides;
   EmulateParams: EmulateParams;
   EmulateResult: EmulateResult;
@@ -788,6 +1156,7 @@ export interface ProtocolTypes {
   EvaluateError: EvaluateError;
   EvaluateParams: EvaluateParams;
   EvaluateResult: EvaluateResult;
+  EventFrame: EventFrame;
   EventKind: EventKind;
   ExpectationField: ExpectationField;
   ExpectedValue: ExpectedValue;
@@ -824,12 +1193,32 @@ export interface ProtocolTypes {
   HoverParams: HoverParams;
   HoverProbeReport: HoverProbeReport;
   HoverResult: HoverResult;
+  IntentState: IntentState;
   InteractionPolicy: InteractionPolicy;
   JavaScriptDialogHandledAction: JavaScriptDialogHandledAction;
   JavaScriptDialogInfo: JavaScriptDialogInfo;
   JavaScriptDialogType: JavaScriptDialogType;
   KeyModifier: KeyModifier;
+  LedgerEntry: LedgerEntry;
+  LedgerRequestParams: LedgerRequestParams;
+  LedgerRequestResult: LedgerRequestResult;
+  LedgerResolveReply: LedgerResolveReply;
+  LedgerStatusReply: LedgerStatusReply;
+  LocalAuthDevicesParams: LocalAuthDevicesParams;
+  LocalAuthDevicesResult: LocalAuthDevicesResult;
+  LocalAuthMode: LocalAuthMode;
+  LocalAuthPairParams: LocalAuthPairParams;
+  LocalAuthPairResult: LocalAuthPairResult;
+  LocalAuthRevokeParams: LocalAuthRevokeParams;
+  LocalAuthRevokeResult: LocalAuthRevokeResult;
+  LocalAuthRotateParams: LocalAuthRotateParams;
+  LocalAuthRotateResult: LocalAuthRotateResult;
+  LocalAuthSetModeParams: LocalAuthSetModeParams;
+  LocalAuthSetModeResult: LocalAuthSetModeResult;
   LocalAuthStatus: LocalAuthStatus;
+  LoggedStep: LoggedStep;
+  LoggedTarget: LoggedTarget;
+  Method: Method;
   MouseButton: MouseButton;
   NavigateBackParams: NavigateBackParams;
   NavigateBackResult: NavigateBackResult;
@@ -845,8 +1234,10 @@ export interface ProtocolTypes {
   ObserveDebug: ObserveDebug;
   ObserveParams: ObserveParams;
   ObserveResult: ObserveResult;
+  OperationAwaitResult: OperationAwaitResult;
   OperationParams: OperationParams;
-  PageRefV2: PageRefV2;
+  PairedDeviceStatus: PairedDeviceStatus;
+  PairedDeviceSummary: PairedDeviceSummary;
   PendingJavaScriptDialog: PendingJavaScriptDialog;
   PingParams: PingParams;
   PingResult: PingResult;
@@ -862,8 +1253,6 @@ export interface ProtocolTypes {
   RecordStartResult: RecordStartResult;
   RecordStopParams: RecordStopParams;
   RecordStopResult: RecordStopResult;
-  RecordedStep: RecordedStep;
-  RecordedTrace: RecordedTrace;
   RecorderInfo: RecorderInfo;
   ReloadParams: ReloadParams;
   ReloadResult: ReloadResult;
@@ -874,6 +1263,7 @@ export interface ProtocolTypes {
   ReturnFailure: ReturnFailure;
   RpcError: RpcError;
   RpcErrorReason: RpcErrorReason;
+  RunLog: RunLog;
   ScreenshotFullPageParams: ScreenshotFullPageParams;
   ScreenshotFullPageResult: ScreenshotFullPageResult;
   ScreenshotParams: ScreenshotParams;
@@ -887,20 +1277,31 @@ export interface ProtocolTypes {
   ScrollToResult: ScrollToResult;
   SelectParams: SelectParams;
   SelectResult: SelectResult;
-  SelectedOptionV2: SelectedOptionV2;
   SelectedOptionV3: SelectedOptionV3;
+  SessionActivityEvent: SessionActivityEvent;
+  SessionEndedEvent: SessionEndedEvent;
+  SessionEndedReason: SessionEndedReason;
+  SessionInteractionChangedEvent: SessionInteractionChangedEvent;
+  SessionListParams: SessionListParams;
+  SessionListResult: SessionListResult;
+  SessionRequestAction: SessionRequestAction;
+  SessionRequestParams: SessionRequestParams;
+  SessionRequestResult: SessionRequestResult;
+  SessionRequestState: SessionRequestState;
+  SessionRunLogParams: SessionRunLogParams;
   SessionStartParams: SessionStartParams;
   SessionStartResult: SessionStartResult;
   SessionStatusEntry: SessionStatusEntry;
   SessionStopOutcome: SessionStopOutcome;
   SessionStopParams: SessionStopParams;
+  SessionUserInterruptEvent: SessionUserInterruptEvent;
+  SessionWindowClosedEvent: SessionWindowClosedEvent;
+  SessionWindowClosedReason: SessionWindowClosedReason;
   SnapshotParams: SnapshotParams;
   SnapshotResult: SnapshotResult;
   StatusParams: StatusParams;
   StatusResult: StatusResult;
-  StepEffectV2: StepEffectV2;
   StepResultV3: StepResultV3;
-  StepV2: StepV2;
   StepV3: StepV3;
   StopReason: StopReason;
   SurfaceProbeDebug: SurfaceProbeDebug;
@@ -919,12 +1320,18 @@ export interface ProtocolTypes {
   TabScope: TabScope;
   TabSelectParams: TabSelectParams;
   TabSelectResult: TabSelectResult;
-  TargetDescriptorV2: TargetDescriptorV2;
   TargetDescriptorV3: TargetDescriptorV3;
   TraceEntry: TraceEntry;
   TraceStateV3: TraceStateV3;
-  TraceV2: TraceV2;
   TraceV3: TraceV3;
+  TransferBeginParams: TransferBeginParams;
+  TransferBeginResult: TransferBeginResult;
+  TransferChunkParams: TransferChunkParams;
+  TransferChunkResult: TransferChunkResult;
+  TransferIdParams: TransferIdParams;
+  TransferReadParams: TransferReadParams;
+  TransferReadyResult: TransferReadyResult;
+  TransferReleaseResult: TransferReleaseResult;
   UnpairedAttempt: UnpairedAttempt;
   UploadFile: UploadFile;
   UploadMode: UploadMode;
@@ -933,6 +1340,7 @@ export interface ProtocolTypes {
   UserAgentBrandVersion: UserAgentBrandVersion;
   UserAgentMetadata: UserAgentMetadata;
   VersionSkewEntry: VersionSkewEntry;
+  VideoAction: VideoAction;
   VideoCompleteness: VideoCompleteness;
   VideoGrant: VideoGrant;
   VideoParams: VideoParams;
@@ -1011,6 +1419,59 @@ export interface ActionMetadata {
    * Strict-policy drag instead accepts its legacy ref-map observation token.
    */
   observation_id?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "AuditContextEvent".
+ */
+export interface AuditContextEvent {
+  operation_id: string;
+  tab_id?: number;
+  target?: string;
+  url?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "AuditEvent".
+ */
+export interface AuditEvent {
+  at: number;
+  data: unknown;
+  kind: string;
+  operation_id?: string;
+}
+/**
+ * Inbound WS request from extension UI (`audit.request`).
+ * Extra fields (such as untrusted `browser_id`) are ignored by the daemon,
+ * which always scopes queries to the authenticated WS peer identity.
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "AuditRequestParams".
+ */
+export interface AuditRequestParams {
+  action: string;
+  enabled?: boolean;
+  id?: string;
+  limit?: number;
+  offset?: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "AuditRun".
+ */
+export interface AuditRun {
+  browser_id: string;
+  errors: number;
+  id: string;
+  name: string | null;
+  operations: number;
+  partial: boolean;
+  recorded_at: number;
+  session_id: string;
+  site: string | null;
+  started_at: number;
+  status: string;
+  updated_at: number;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -1109,12 +1570,13 @@ export interface BrowserListParams {
   wait_for_browser_ms?: number;
 }
 /**
+ * `browser.list` response payload.
+ *
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "BrowserPeerInfo".
+ * via the `definition` "BrowserListResult".
  */
-export interface BrowserPeerInfo {
-  name: string;
-  version: string;
+export interface BrowserListResult {
+  browsers: BrowserStatusEntry[];
 }
 /**
  * Snapshot of a single connected extension (extension client view).
@@ -1154,6 +1616,14 @@ export interface BrowserStatusEntry {
    * daemon's (same major, minor drift). Connection is still allowed.
    */
   version_skew: boolean;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "BrowserPeerInfo".
+ */
+export interface BrowserPeerInfo {
+  name: string;
+  version: string;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -1278,6 +1748,10 @@ export interface ConsoleStackFrame {
  */
 export interface ConsoleParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Include structured stack frames. Defaults to false.
    */
   include_stack?: boolean;
@@ -1325,18 +1799,256 @@ export interface ControllerInfo {
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateActivity".
+ */
+export interface CooperateActivity {
+  at?: number;
+  attribution?: CooperateActivityAttribution;
+  context?: string;
+  cursor: number;
+  document: string;
+  frame_id: number;
+  label: string;
+  sequence: number;
+  target_id?: string;
+  type: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateActivityAttribution".
+ */
+export interface CooperateActivityAttribution {
+  event_time: number;
+  event_timestamp?: number;
+  expected_event_time?: CooperateEventTimeWindow;
+  expected_time?: number;
+  expected_type: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateEventTimeWindow".
+ */
+export interface CooperateEventTimeWindow {
+  earliest: number;
+  latest: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateDeltaChange".
+ */
+export interface CooperateDeltaChange {
+  frame_id: number;
+  id?: string;
+  kind?: CooperateChangeKind;
+  label: string;
+  lines?: number[];
+  previous_value?: string;
+  value: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateFrameGap".
+ */
+export interface CooperateFrameGap {
+  frame_id: number;
+  reason: CooperateFrameGapReason;
+  url: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateLinePatch".
+ */
+export interface CooperateLinePatch {
+  line: number;
+  previous: string;
+  text: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateObservationPatch".
+ */
+export interface CooperateObservationPatch {
+  lines: CooperateLinePatch[];
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "CooperateParams".
  */
 export interface CooperateParams {
   action: CooperateAction;
   /**
-   * Omitted by legacy callers. A negotiated policy remains fixed for the session.
+   * A negotiated policy remains fixed for the session.
    */
   control_policy?: ControlPolicy;
   max_tokens?: number;
   session_id: string;
   tab_id?: number;
   timeout_ms?: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SnapshotResult".
+ */
+export interface SnapshotResult {
+  dialogs?: JavaScriptDialogInfo[];
+  /**
+   * Token identifying the current ref map; pass to drag to reject stale refs.
+   */
+  observation_id?: string;
+  /**
+   * Number of `@e<N>` refs registered for this session by this
+   * snapshot. Equivalent to the size of the new ref-store map.
+   */
+  ref_count: number;
+  /**
+   * Tab the snapshot was actually computed for (after resolving the
+   * optional `tab_id` default).
+   */
+  tab_id: number;
+  /**
+   * Indented aria-snapshot text. Refs are rendered as `@e<N>` so the
+   * agent can copy them into subsequent `tool.click` / `tool.fill`
+   * selectors.
+   */
+  text: string;
+  /**
+   * Whether the rendered tree was truncated because of `max_depth` /
+   * `max_tokens`. Agents may re-run with looser caps.
+   */
+  truncated: boolean;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateView".
+ */
+export interface CooperateView {
+  detail?: string;
+  editing: boolean;
+  mode: CooperateMode;
+  revision: number;
+  target?: CooperateTargetPoint;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateTargetPoint".
+ */
+export interface CooperateTargetPoint {
+  expires: number;
+  x: number;
+  y: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "CooperateStatusResult".
+ */
+export interface CooperateStatusResult {
+  activity: CooperateActivity[];
+  control_policy: ControlPolicy | null;
+  frame_gaps?: CooperateFrameGap[];
+  ready: boolean;
+  state: CooperateView;
+  stopped: boolean;
+  tab_id: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DaemonSessionStartParams".
+ */
+export interface DaemonSessionStartParams {
+  browser_instance_id?: string;
+  controller?: ControllerInfo;
+  focused?: boolean;
+  height?: number;
+  incognito?: boolean;
+  /**
+   * Null placeholder tolerated when callers share a payload builder with
+   * `session.start_tracked`; non-null values require `session.start_tracked`.
+   */
+  request_id?: string;
+  task_name?: string;
+  /**
+   * Deprecated legacy CLI override accepted and ignored so browser policy governs.
+   */
+  unattended?: boolean;
+  width?: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DaemonSessionStartResult".
+ */
+export interface DaemonSessionStartResult {
+  agent_window_id?: number;
+  browser_instance_id: string;
+  interaction?: InteractionPolicy;
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "InteractionPolicy".
+ */
+export interface InteractionPolicy {
+  borrow_confirmation: BorrowConfirmationPolicy;
+  request_help: RequestHelpPolicy;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DaemonSessionStartTrackedParams".
+ */
+export interface DaemonSessionStartTrackedParams {
+  browser_instance_id?: string;
+  controller?: ControllerInfo;
+  focused?: boolean;
+  height?: number;
+  incognito?: boolean;
+  request_id: string;
+  task_name?: string;
+  /**
+   * Deprecated legacy CLI override accepted and ignored so browser policy governs.
+   */
+  unattended?: boolean;
+  width?: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DaemonSessionStopAllParams".
+ */
+export interface DaemonSessionStopAllParams {}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DaemonSessionStopFailure".
+ */
+export interface DaemonSessionStopFailure {
+  code: ErrorCode;
+  message: string;
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DaemonSessionStopParams".
+ */
+export interface DaemonSessionStopParams {
+  all: boolean;
+  recording: boolean;
+  session_id?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DaemonSessionStopResult".
+ */
+export interface DaemonSessionStopResult {
+  failed?: DaemonSessionStopFailure[];
+  return_failures?: ReturnFailure[];
+  returned_tab_ids?: number[];
+  stopped: string[];
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ReturnFailure".
+ */
+export interface ReturnFailure {
+  code: ErrorCode;
+  message: string;
+  tab_id: number;
 }
 /**
  * Daemon-owned execution status. Waiting observes completion; it never resends a command.
@@ -1926,6 +2638,30 @@ export interface DebugResult {
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DialogChangedEvent".
+ */
+export interface DialogChangedEvent {
+  dialog: PendingJavaScriptDialog | null;
+  operation_id?: string;
+  session_id: string;
+  tab_id?: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "PendingJavaScriptDialog".
+ */
+export interface PendingJavaScriptDialog {
+  decision_deadline: number;
+  default_prompt?: string;
+  id: string;
+  message: string;
+  sequence: number;
+  tab_id: number;
+  type: JavaScriptDialogType;
+  url?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "DialogHandleParams".
  */
 export interface DialogHandleParams {
@@ -1956,20 +2692,6 @@ export interface DialogStatusParams {
 export interface DialogStatusResult {
   dialogs: PendingJavaScriptDialog[];
   session_id: string;
-}
-/**
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "PendingJavaScriptDialog".
- */
-export interface PendingJavaScriptDialog {
-  decision_deadline: number;
-  default_prompt?: string;
-  id: string;
-  message: string;
-  sequence: number;
-  tab_id: number;
-  type: JavaScriptDialogType;
-  url?: string;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -2128,6 +2850,11 @@ export interface DragResult {
   tab_id: number;
   target: DragPoint;
 }
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "EmptyEventPayload".
+ */
+export interface EmptyEventPayload {}
 /**
  * Concrete emulation overrides for one tab. Field presence drives the
  * extension: only the overrides whose fields are set are touched, so a
@@ -2373,6 +3100,47 @@ export interface EvaluateResult {
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionActivityEvent".
+ */
+export interface SessionActivityEvent {
+  idle_protected: boolean;
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionWindowClosedEvent".
+ */
+export interface SessionWindowClosedEvent {
+  reason?: SessionWindowClosedReason;
+  return_failures?: ReturnFailure[];
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionEndedEvent".
+ */
+export interface SessionEndedEvent {
+  reason: SessionEndedReason;
+  session_id: string;
+  tab_id: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionUserInterruptEvent".
+ */
+export interface SessionUserInterruptEvent {
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionInteractionChangedEvent".
+ */
+export interface SessionInteractionChangedEvent {
+  interaction: InteractionPolicy;
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "ExtractColumn".
  */
 export interface ExtractColumn {
@@ -2411,6 +3179,10 @@ export interface ExtractField {
  */
 export interface ExtractParams {
   action: ExtractAction;
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   fields?: ExtractField[];
   item_selector?: string;
   max_bytes?: number;
@@ -2633,6 +3405,10 @@ export interface FocusResult {
  */
 export interface GetHtmlParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Truncate the HTML to at most this many bytes. Optional;
    * extension applies a sensible default (`524288` = 512 KiB) when
    * omitted.
@@ -2843,11 +3619,109 @@ export interface HoverResult {
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "InteractionPolicy".
+ * via the `definition` "LedgerEntry".
  */
-export interface InteractionPolicy {
-  borrow_confirmation: BorrowConfirmationPolicy;
-  request_help: RequestHelpPolicy;
+export interface LedgerEntry {
+  dispatched_at: string;
+  method: string;
+  operation_id: string;
+  reconciled_by?: string;
+  session_id: string;
+  state: IntentState;
+  tab_id?: number;
+  target_summary: string;
+  updated_at: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LedgerRequestParams".
+ */
+export interface LedgerRequestParams {
+  action: string;
+  operation_id?: string;
+  session_id?: string;
+  tab_id?: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LedgerStatusReply".
+ */
+export interface LedgerStatusReply {
+  frozen: boolean;
+  pending_unknown: LedgerEntry[];
+  recent: LedgerEntry[];
+  session_id?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LedgerResolveReply".
+ */
+export interface LedgerResolveReply {
+  resolved: LedgerEntry[];
+  resolved_count: number;
+  session_id?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthDevicesParams".
+ */
+export interface LocalAuthDevicesParams {}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthPairParams".
+ */
+export interface LocalAuthPairParams {
+  replace?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthPairResult".
+ */
+export interface LocalAuthPairResult {
+  link: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthRevokeParams".
+ */
+export interface LocalAuthRevokeParams {
+  all: boolean;
+  device_id?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthRevokeResult".
+ */
+export interface LocalAuthRevokeResult {
+  revoked: boolean;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthRotateParams".
+ */
+export interface LocalAuthRotateParams {
+  device_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthRotateResult".
+ */
+export interface LocalAuthRotateResult {
+  rotate_on_next_connection: boolean;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthSetModeParams".
+ */
+export interface LocalAuthSetModeParams {
+  mode: LocalAuthMode;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthSetModeResult".
+ */
+export interface LocalAuthSetModeResult {
+  local_auth: LocalAuthMode;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -2865,6 +3739,17 @@ export interface LocalAuthStatus {
 export interface UnpairedAttempt {
   at: string;
   extension_version: string | null;
+}
+/**
+ * Stable element description shared between recipe VOM matching and `session.run_log`.
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LoggedTarget".
+ */
+export interface LoggedTarget {
+  ctx?: string;
+  name: string;
+  role: string;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -3064,6 +3949,10 @@ export interface NetworkEntry {
  */
 export interface NetworkParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Maximum number of entries to return. Extension applies safe defaults and caps.
    */
   limit?: number;
@@ -3232,6 +4121,17 @@ export interface ObserveResult {
   truncated: boolean;
 }
 /**
+ * Wire-format JSON-RPC error object carried inside [`crate::frame::ResponseFrame`].
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "RpcError".
+ */
+export interface RpcError {
+  code: ErrorCode;
+  data?: unknown;
+  message: string;
+}
+/**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "OperationParams".
  */
@@ -3239,17 +4139,6 @@ export interface OperationParams {
   operation_id: string;
   session_id: string;
   wait_ms?: number;
-}
-/**
- * Page context dictionary entry — referenced by steps via `page` id.
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "PageRefV2".
- */
-export interface PageRefV2 {
-  id: string;
-  title?: string;
-  url: string;
 }
 /**
  * `system.ping` request payload. Empty (the response carries `pong`).
@@ -3417,7 +4306,7 @@ export interface RecordAwaitParams {
  * via the `definition` "RecordAwaitResult".
  */
 export interface RecordAwaitResult {
-  trace: RecordedTrace;
+  trace: TraceV3;
 }
 /**
  * Wire trace returned by `tool.record_stop` / `await`.
@@ -3498,65 +4387,6 @@ export interface SelectedOptionV3 {
   value: string;
 }
 /**
- * Persisted user-action trace exported by legacy `tool.record_stop` / `await`.
- *
- * Unknown extension fields are ignored so older traces remain readable.
- * `states[]` and a numeric `version` are reserved for Trace v3 / `RecordedTrace`
- * classification — serde still ignores them, but the JSON Schema rejects them.
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "TraceV2".
- */
-export interface TraceV2 {
-  entry: TraceEntry;
-  pages: PageRefV2[];
-  purpose?: string;
-  /**
-   * RFC 3339 timestamp when recording stopped.
-   */
-  recorded_at: string;
-  started_at?: string;
-  steps: StepV2[];
-}
-/**
- * Observed navigation after a step (objective fact only).
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "StepEffectV2".
- */
-export interface StepEffectV2 {
-  /**
-   * Reference into `pages[]` for the destination page.
-   */
-  navigated_to: string;
-}
-/**
- * Stable semantic handle for an interacted element (v2).
- *
- * `name` and `nearby_label` are **untrusted page text**.
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "TargetDescriptorV2".
- */
-export interface TargetDescriptorV2 {
-  name?: string;
-  name_attr?: string;
-  nearby_label?: string;
-  placeholder?: string;
-  role?: string;
-  tag: string;
-}
-/**
- * One selected option (`select` op).
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "SelectedOptionV2".
- */
-export interface SelectedOptionV2 {
-  label?: string;
-  value: string;
-}
-/**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "RecordStartParams".
  */
@@ -3565,15 +4395,7 @@ export interface RecordStartParams {
   purpose?: string;
   redact_values?: boolean;
   session_id: string;
-  /**
-   * Client can decode the v3 `switch_tab` step variant.
-   */
-  supports_tab_switch_steps?: boolean;
   tab_id?: number;
-  /**
-   * Desired trace export format. Omitted means v2; `3` requests v3.
-   */
-  trace_version?: number;
   url?: string;
 }
 /**
@@ -3596,7 +4418,7 @@ export interface RecordStopParams {
  * via the `definition` "RecordStopResult".
  */
 export interface RecordStopResult {
-  trace: RecordedTrace;
+  trace: TraceV3;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -3711,23 +4533,16 @@ export interface ResolvedTarget {
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "ReturnFailure".
+ * via the `definition` "RunLog".
  */
-export interface ReturnFailure {
-  code: ErrorCode;
-  message: string;
-  tab_id: number;
-}
-/**
- * Wire-format JSON-RPC error object carried inside [`crate::frame::ResponseFrame`].
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "RpcError".
- */
-export interface RpcError {
-  code: ErrorCode;
-  data?: unknown;
-  message: string;
+export interface RunLog {
+  borrowed_tabs: number[];
+  observations: number;
+  steps: LoggedStep[];
+  /**
+   * Steps were dropped after the bound.
+   */
+  truncated: boolean;
 }
 /**
  * Scroll the session's active web page from top to bottom. PNG bytes are
@@ -3801,6 +4616,10 @@ export interface ScreenshotFullPageResult {
  * via the `definition` "ScreenshotParams".
  */
 export interface ScreenshotParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   /**
    * Optional `@e<N>` ref allocated by the last `tool.snapshot`.
    * Accepts both `"e3"` and `"@e3"`.
@@ -4031,6 +4850,60 @@ export interface SelectResult {
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionListParams".
+ */
+export interface SessionListParams {}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionListResult".
+ */
+export interface SessionListResult {
+  sessions: SessionStatusEntry[];
+}
+/**
+ * Snapshot of a single live session.
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionStatusEntry".
+ */
+export interface SessionStatusEntry {
+  agent_window_id?: number;
+  browser_instance_id: string;
+  controller?: ControllerInfo;
+  /**
+   * Unix epoch milliseconds.
+   */
+  created_at_ms: number;
+  interaction?: InteractionPolicy;
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionRequestParams".
+ */
+export interface SessionRequestParams {
+  action?: SessionRequestAction;
+  request_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionRequestResult".
+ */
+export interface SessionRequestResult {
+  cleanup_error?: string;
+  request_id: string;
+  session: SessionStatusEntry | null;
+  state: SessionRequestState;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "SessionRunLogParams".
+ */
+export interface SessionRunLogParams {
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "SessionStartParams".
  */
 export interface SessionStartParams {
@@ -4067,23 +4940,6 @@ export interface SessionStartResult {
   interaction?: InteractionPolicy;
 }
 /**
- * Snapshot of a single live session.
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "SessionStatusEntry".
- */
-export interface SessionStatusEntry {
-  agent_window_id?: number;
-  browser_instance_id: string;
-  controller?: ControllerInfo;
-  /**
-   * Unix epoch milliseconds.
-   */
-  created_at_ms: number;
-  interaction?: InteractionPolicy;
-  session_id: string;
-}
-/**
  * Full extension response, including whether a window was left with the user.
  *
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -4111,6 +4967,10 @@ export interface SessionStopParams {
  */
 export interface SnapshotParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Cap the depth of the rendered tree (defense against very deep
    * pages). Implementation-defined default; agents typically use
    * `Some(16)` for "browse and read" prompts.
@@ -4127,38 +4987,6 @@ export interface SnapshotParams {
    * active tab.
    */
   tab_id?: number;
-}
-/**
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "SnapshotResult".
- */
-export interface SnapshotResult {
-  dialogs?: JavaScriptDialogInfo[];
-  /**
-   * Token identifying the current ref map; pass to drag to reject stale refs.
-   */
-  observation_id?: string;
-  /**
-   * Number of `@e<N>` refs registered for this session by this
-   * snapshot. Equivalent to the size of the new ref-store map.
-   */
-  ref_count: number;
-  /**
-   * Tab the snapshot was actually computed for (after resolving the
-   * optional `tab_id` default).
-   */
-  tab_id: number;
-  /**
-   * Indented aria-snapshot text. Refs are rendered as `@e<N>` so the
-   * agent can copy them into subsequent `tool.click` / `tool.fill`
-   * selectors.
-   */
-  text: string;
-  /**
-   * Whether the rendered tree was truncated because of `max_depth` /
-   * `max_tokens`. Agents may re-run with looser caps.
-   */
-  truncated: boolean;
 }
 /**
  * `system.status` request payload.
@@ -4189,6 +5017,13 @@ export interface StatusResult {
    * Semver of the daemon binary (`env!("CARGO_PKG_VERSION")`).
    */
   daemon_version: string;
+  /**
+   * True when the daemon's local IPC listener supports the out-of-band
+   * `IpcEnvelope` (`meta` header) in addition to legacy `"2.0"` `_`-prefixed
+   * scope fields. Omitted when false so pre-envelope `"2.0"` daemons
+   * deserialize as `false` without bumping `PROTOCOL_VERSION`.
+   */
+  ipc_envelope?: boolean;
   local_auth?: LocalAuthStatus;
   /**
    * Daemon process id.
@@ -4448,6 +5283,72 @@ export interface TabSelectResult {
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "TransferBeginParams".
+ */
+export interface TransferBeginParams {
+  byte_size: number;
+  name: string;
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "TransferBeginResult".
+ */
+export interface TransferBeginResult {
+  chunk_size: number;
+  transfer_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "TransferChunkParams".
+ */
+export interface TransferChunkParams {
+  data_base64: string;
+  offset: number;
+  transfer_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "TransferChunkResult".
+ */
+export interface TransferChunkResult {
+  data_base64?: string;
+  eof: boolean;
+  next_offset: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "TransferIdParams".
+ */
+export interface TransferIdParams {
+  transfer_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "TransferReadParams".
+ */
+export interface TransferReadParams {
+  data_base64?: string;
+  offset: number;
+  transfer_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "TransferReadyResult".
+ */
+export interface TransferReadyResult {
+  byte_size: number;
+  transfer_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "TransferReleaseResult".
+ */
+export interface TransferReleaseResult {
+  released: boolean;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "UploadFile".
  */
 export interface UploadFile {
@@ -4556,6 +5457,10 @@ export interface VideoReadResult {
  */
 export interface WaitForElementParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Polling interval, shortened near the deadline to allow a final probe.
    * Defaults to 100ms; values outside 16..=2000ms are rejected.
    */
@@ -4616,6 +5521,10 @@ export interface WaitForElementResult {
  * via the `definition` "WaitForNavigationParams".
  */
 export interface WaitForNavigationParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   session_id: string;
   /**
    * Target tab. Defaults to the Agent Window's currently active tab.

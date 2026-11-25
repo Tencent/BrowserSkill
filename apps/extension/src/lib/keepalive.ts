@@ -28,6 +28,8 @@ export const KEEPALIVE_PERIOD_MIN = 0.5; // 30s, the smallest Chrome accepts.
 /** Subset of `chrome.alarms` we actually use; lets vitest inject a fake. */
 export interface AlarmsApi {
   create(name: string, info: { periodInMinutes: number }): void;
+  /** Present when the platform can report an existing alarm (chrome.alarms.get). */
+  get?(name: string): Promise<{ name: string } | undefined>;
   clear(name: string, cb?: (wasCleared: boolean) => void): void;
   onAlarm: {
     addListener(cb: (alarm: { name: string }) => void): void;
@@ -40,6 +42,7 @@ function defaultAlarms(): AlarmsApi | null {
   if (!chrome.alarms?.create || !chrome.alarms?.onAlarm) return null;
   return {
     create: (name, info) => chrome.alarms.create(name, info),
+    get: (name) => chrome.alarms.get(name),
     clear: (name, cb) => {
       void chrome.alarms.clear(name).then((wasCleared) => cb?.(wasCleared));
     },
@@ -56,6 +59,14 @@ export interface KeepaliveOptions {
   shouldConnect?: () => boolean;
   /** Let the connection owner coordinate cleanup and retry policy. */
   requestConnect?: () => void | Promise<void>;
+  /**
+   * Liveness as seen by the connection owner. The transport can be physically
+   * `connected` while the controller has not completed its handshake, and
+   * ticking "connected" there would never retry the handshake.
+   */
+  isConnected?: () => boolean;
+  /** Optional liveness callback invoked on alarm ticks when already connected. */
+  onConnectedTick?: () => void;
   alarms?: AlarmsApi;
   /** Override the alarm name (tests). */
   alarmName?: string;
@@ -82,7 +93,13 @@ export function startKeepalive(options: KeepaliveOptions): KeepaliveHandle {
 
   const tick = async () => {
     if (options.shouldConnect && !options.shouldConnect()) return;
-    if (options.transport.state === "connected") return;
+    const connected = options.isConnected
+      ? options.isConnected()
+      : options.transport.state === "connected";
+    if (connected) {
+      options.onConnectedTick?.();
+      return;
+    }
     try {
       if (options.requestConnect) await options.requestConnect();
       else await options.transport.connect();
@@ -105,10 +122,29 @@ export function startKeepalive(options: KeepaliveOptions): KeepaliveHandle {
     void tick();
   };
   alarms.onAlarm.addListener(handler);
-  alarms.create(name, { periodInMinutes: period });
+
+  // Re-creating an existing alarm restarts its period. The SW wakes for every
+  // browser event and re-runs this module, so an unconditional create can push
+  // the next fire out indefinitely.
+  let disposed = false;
+  const createAlarm = () => {
+    if (disposed) return;
+    alarms.create(name, { periodInMinutes: period });
+  };
+  if (alarms.get) {
+    void alarms
+      .get(name)
+      .then((existing) => {
+        if (!existing) createAlarm();
+      })
+      .catch(createAlarm);
+  } else {
+    createAlarm();
+  }
 
   return {
     dispose: () => {
+      disposed = true;
       alarms.onAlarm.removeListener(handler);
       alarms.clear(name);
     },

@@ -6,12 +6,19 @@ import {
   CdpReadTimeoutError,
   READ_TIMEOUT_MS,
 } from "@/browser-driver/command-deadline";
-import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
-import { cdpTargetKey } from "@/browser-driver/frame-graph";
+import {
+  createFrameDocumentInfo,
+  type FrameDocumentHandle,
+  type FrameDocumentInfo,
+  type FrameNodeHandle,
+  frameProcessBoundary,
+  rootProcessBoundary,
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import { OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 import { RefStore } from "@/session-manager/ref-store";
 import { captureVomObservation } from "../../observation";
-import type { CdpRunner } from "../../shared";
+import { type CdpDispatchGuard, type CdpRunner, createStubCdpRunner } from "../../shared";
 import {
   ACCESSIBILITY_LEASE_TTL_MS,
   AccessibilityLease,
@@ -24,9 +31,30 @@ import { deduplicateVisualCandidates } from "../visual-dedup";
 import { discoverVisualCandidates } from "../visual-discovery";
 import { publishObservationPage } from "../visual-observation";
 
+interface FixtureFrameSpec {
+  frameId: string;
+  parentFrameId?: string;
+  ownerBackendNodeId?: number;
+  processKey?: string;
+  url?: string;
+}
+
+function makeFrame(spec: FixtureFrameSpec): FrameDocumentInfo {
+  const processKey = spec.processKey ?? "root";
+  return createFrameDocumentInfo({
+    tabId: 4,
+    frameId: spec.frameId,
+    parentFrameId: spec.parentFrameId,
+    ownerBackendNodeId: spec.ownerBackendNodeId,
+    url: spec.url,
+    processKey,
+    isOutOfProcess: processKey !== "root",
+  });
+}
+
 function fixture(
   options: {
-    frames?: CdpFrame[];
+    frames?: FixtureFrameSpec[];
     canvas?: boolean;
     form?: boolean;
     after?: Record<string, { element?: number; missing?: boolean; unreadable?: boolean }>;
@@ -37,40 +65,48 @@ function fixture(
     overlay?: string;
   } = {},
 ) {
-  const frames = options.frames ?? [
-    { frameId: "main", target: { tabId: 4 } },
-    {
-      frameId: "same",
-      parentFrameId: "main",
-      ownerBackendNodeId: 3,
-      target: { tabId: 4 },
-    },
-    {
-      frameId: "nested",
-      parentFrameId: "same",
-      ownerBackendNodeId: 13,
-      target: { tabId: 4 },
-    },
-    {
-      frameId: "remote",
-      parentFrameId: "main",
-      ownerBackendNodeId: 4,
-      target: { tabId: 4, sessionId: "remote" },
-    },
-  ];
+  const frames: FrameDocumentInfo[] = (
+    options.frames ?? [
+      { frameId: "main" },
+      { frameId: "same", parentFrameId: "main", ownerBackendNodeId: 3 },
+      { frameId: "nested", parentFrameId: "same", ownerBackendNodeId: 13 },
+      {
+        frameId: "remote",
+        parentFrameId: "main",
+        ownerBackendNodeId: 4,
+        processKey: "oopif:remote",
+      },
+    ]
+  ).map(makeFrame);
+  const processForHandle = (handle: FrameDocumentHandle | FrameNodeHandle): string => {
+    if (!handle.frameId) return "root";
+    return frames.find((f) => f.frameId === handle.frameId)?.processKey ?? "root";
+  };
   const elements = new Map(
-    frames.map((frame, i) => [frame.frameId, frame.target.sessionId ? 1 : i * 10 + 1]),
+    frames.map((frame, i) => [frame.frameId, frame.isOutOfProcess ? 1 : i * 10 + 1]),
   );
   const contexts = new Map(frames.map((frame, i) => [i + 1, frame.frameId]));
-  const logs: Array<{ target: CdpTarget; method: string; params: Record<string, unknown> }> = [];
+  const logs: Array<{
+    processKey: string;
+    handle: FrameDocumentHandle | FrameNodeHandle;
+    method: string;
+    params: Record<string, unknown>;
+    guard?: CdpDispatchGuard;
+  }> = [];
   let snapshots = 0;
-  const targetCount = new Set(frames.map((frame) => cdpTargetKey(frame.target))).size;
-  const send = vi.fn(
-    async <T>(target: CdpTarget, method: string, params: object = {}): Promise<T> => {
-      logs.push({ target, method, params: params as Record<string, unknown> });
+  const targetCount = new Set(frames.map((frame) => frame.processKey)).size;
+  const sendToFrame = vi.fn(
+    async <T>(
+      handle: FrameDocumentHandle | FrameNodeHandle,
+      method: string,
+      params: object = {},
+      guard?: CdpDispatchGuard,
+    ): Promise<T> => {
+      const processKey = processForHandle(handle);
+      logs.push({ processKey, handle, method, params: params as Record<string, unknown>, guard });
       const args = params as Record<string, string | number>;
-      if (options.fail === `${target.sessionId ?? "main"}:${method}`)
-        throw new Error("fixture failure");
+      const failKey = processKey === "root" ? "main" : processKey.replace(/^oopif:/, "");
+      if (options.fail === `${failKey}:${method}`) throw new Error("fixture failure");
       let result: unknown = {};
       if (method === "Page.createIsolatedWorld")
         result = {
@@ -99,7 +135,7 @@ function fixture(
             deepSerializedValue: {
               type: "array",
               value: frames
-                .filter((frame) => cdpTargetKey(frame.target) === cdpTargetKey(target))
+                .filter((frame) => frame.processKey === processKey)
                 .map((frame) => ({
                   type: "array",
                   value: [
@@ -152,16 +188,12 @@ function fixture(
           ],
           documents: frames
             .filter(
-              (frame) =>
-                cdpTargetKey(frame.target) === cdpTargetKey(target) &&
-                frame.frameId !== options.omitDocument,
+              (frame) => frame.processKey === processKey && frame.frameId !== options.omitDocument,
             )
             .map((frame) => {
               const element = elements.get(frame.frameId)!;
               const localFrames = frames.filter(
-                (f) =>
-                  cdpTargetKey(f.target) === cdpTargetKey(target) &&
-                  f.frameId !== options.omitDocument,
+                (f) => f.processKey === processKey && f.frameId !== options.omitDocument,
               );
               const children = localFrames.filter((f) => f.parentFrameId === frame.frameId);
 
@@ -206,8 +238,8 @@ function fixture(
                     requested.map(
                       (name) =>
                         [
-                          7, 8, 8, 5, 6, 13, 14, 15, 10, 16, 16, 5, 5, 8, 8, 9, 10, 6, 10, 10, 10,
-                          10, 10, 8, 10, 5, 12, 11,
+                          7, 8, 8, 5, 6, 13, 14, 15, 10, 16, 16, 5, 5, 8, 8, 8, 9, 10, 6, 10, 10,
+                          10, 10, 10, 8, 10, 5, 12, 11,
                         ][VISUAL_STYLES.indexOf(name as (typeof VISUAL_STYLES)[number])],
                     ),
                   ),
@@ -233,19 +265,27 @@ function fixture(
       return result as T;
     },
   );
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     getAttachmentId: () =>
       options.missingIdentity
         ? undefined
         : options.attachmentChanged && snapshots === targetCount
           ? "new-attachment"
           : "attachment",
-    getFrameGraph: async () => ({ rootFrameId: frames[0].frameId, frames }),
-    send: (tabId, method, params) =>
-      (send as NonNullable<CdpRunner["sendToTarget"]>)({ tabId }, method, params),
-    sendToTarget: send as NonNullable<CdpRunner["sendToTarget"]>,
-  };
-  return { cdp, logs, elements };
+    getFrameDocuments: async () => ({ rootFrameId: frames[0].frameId, frames }),
+    getMainFrameHandle: async () => frames[0].handle,
+    hasOwnFrameTarget: (_tabId, frameId) =>
+      frames.some((f) => f.frameId === frameId && f.isOutOfProcess),
+    send: (<T = unknown>(tabId: number, method: string, params?: object, signal?: AbortSignal) =>
+      sendToFrame(
+        toRootFrameHandle(tabId),
+        method,
+        params,
+        signal ? { signal } : undefined,
+      ) as Promise<T>) as CdpRunner["send"],
+    sendToFrame: sendToFrame as CdpRunner["sendToFrame"],
+  });
+  return { cdp, logs, elements, frames, processForHandle };
 }
 
 function pendingLayoutFixture(options: Parameters<typeof fixture>[0] = {}) {
@@ -254,7 +294,7 @@ function pendingLayoutFixture(options: Parameters<typeof fixture>[0] = {}) {
   vi.spyOn(console, "debug").mockImplementation(() => {});
   const f = fixture(options);
   const gate = new CdpReadGate();
-  const original = f.cdp.sendToTarget!;
+  const original = f.cdp.sendToFrame;
   const attempted: string[] = [];
   let entered!: () => void;
   const layoutStarted = new Promise<void>((resolve) => {
@@ -264,17 +304,19 @@ function pendingLayoutFixture(options: Parameters<typeof fixture>[0] = {}) {
   const pending = new Promise<object>((resolve) => {
     finish = resolve;
   });
-  f.cdp.sendToTarget = (target, method, params) => {
+  f.cdp.sendToFrame = (handle, method, params, guard) => {
+    const processKey = f.processForHandle(handle);
     attempted.push(method);
-    return gate.run(target, method, () => {
-      if (method === "Page.getLayoutMetrics" && !target.sessionId) {
+    return gate.run({ tabId: handle.tabId, processKey }, method, () => {
+      if (method === "Page.getLayoutMetrics" && processKey === "root") {
         entered();
         return pending as never;
       }
-      return original(target, method, params);
+      return original(handle, method, params, guard);
     });
   };
-  f.cdp.send = (tabId, method, params) => f.cdp.sendToTarget!({ tabId }, method, params);
+  f.cdp.send = (tabId, method, params, signal) =>
+    f.cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
   return { ...f, gate, attempted, layoutStarted, finish };
 }
 
@@ -398,33 +440,35 @@ describe("captureObservationFacts", () => {
   it("isolates an ancestor session timeout encountered while projecting a nested OOPIF", async () => {
     const f = fixture({
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
+        { frameId: "main" },
         {
           frameId: "outer",
           parentFrameId: "main",
           ownerBackendNodeId: 4,
-          target: { tabId: 4, sessionId: "outer" },
+          processKey: "oopif:outer",
         },
         {
           frameId: "inner",
           parentFrameId: "outer",
           ownerBackendNodeId: 2,
-          target: { tabId: 4, sessionId: "inner" },
+          processKey: "oopif:inner",
         },
       ],
     });
-    const original = f.cdp.sendToTarget!;
-    f.cdp.sendToTarget = async (target, method, params) => {
-      if (target.sessionId === "outer" && method === "DOM.getBoxModel")
-        throw new CdpReadTimeoutError(method, 4, CAPTURE_READ_TIMEOUT_MS, "outer");
-      return original(target, method, params);
+    const original = f.cdp.sendToFrame;
+    f.cdp.sendToFrame = async (handle, method, params, guard) => {
+      if (f.processForHandle(handle) === "oopif:outer" && method === "DOM.getBoxModel")
+        throw new CdpReadTimeoutError(method, 4, CAPTURE_READ_TIMEOUT_MS, "oopif:outer");
+      return original(handle, method, params, guard);
     };
-    f.cdp.send = (tabId, method, params) => f.cdp.sendToTarget!({ tabId }, method, params);
+    f.cdp.send = (tabId, method, params, signal) =>
+      f.cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     const facts = await captureObservationFacts(f.cdp, 4);
     expect(facts.documents.map((document) => document.frame.frameId)).toEqual(["main"]);
     expect(facts.issues).toContainEqual(
       expect.objectContaining({
-        target: { tabId: 4, sessionId: "outer" },
+        tabId: 4,
+        processKey: "oopif:outer",
         reason: "capture-unavailable",
       }),
     );
@@ -434,17 +478,18 @@ describe("captureObservationFacts", () => {
     "Accessibility.getFullAXTree",
   ])("keeps healthy documents after a child %s timeout without fallback reads", async (method) => {
     const f = fixture();
-    const original = f.cdp.sendToTarget!;
+    const original = f.cdp.sendToFrame;
     const attempted: string[] = [];
-    f.cdp.sendToTarget = async (target, name, params) => {
-      if (target.sessionId === "remote") {
+    f.cdp.sendToFrame = async (handle, name, params, guard) => {
+      if (f.processForHandle(handle) === "oopif:remote") {
         attempted.push(name);
         if (name === method)
-          throw new CdpReadTimeoutError(name, 4, CAPTURE_READ_TIMEOUT_MS, "remote");
+          throw new CdpReadTimeoutError(name, 4, CAPTURE_READ_TIMEOUT_MS, "oopif:remote");
       }
-      return original(target, name, params);
+      return original(handle, name, params, guard);
     };
-    f.cdp.send = (tabId, name, params) => f.cdp.sendToTarget!({ tabId }, name, params);
+    f.cdp.send = (tabId, name, params, signal) =>
+      f.cdp.sendToFrame(toRootFrameHandle(tabId), name, params, signal ? { signal } : undefined);
     const facts = await captureObservationFacts(f.cdp, 4);
     expect(facts.documents.map((document) => document.frame.frameId)).toEqual([
       "main",
@@ -453,7 +498,8 @@ describe("captureObservationFacts", () => {
     ]);
     expect(facts.issues).toContainEqual(
       expect.objectContaining({
-        target: { tabId: 4, sessionId: "remote" },
+        tabId: 4,
+        processKey: "oopif:remote",
         reason: "capture-unavailable",
       }),
     );
@@ -463,34 +509,43 @@ describe("captureObservationFacts", () => {
 
   it("reports omitted frame-tree subtrees without recapturing them", async () => {
     const f = fixture();
-    const graph = await f.cdp.getFrameGraph!(4);
+    const graph = await f.cdp.getFrameDocuments(4);
     const remote = graph.frames.find((frame) => frame.frameId === "remote")!;
-    f.cdp.getFrameGraph = async () => ({
+    f.cdp.getFrameDocuments = async () => ({
       ...graph,
       frames: graph.frames.filter((frame) => frame !== remote),
-      unavailableFrames: [remote],
+      unavailableFrames: [
+        {
+          frameId: remote.frameId,
+          parentFrameId: remote.parentFrameId,
+          url: remote.url,
+          processKey: remote.processKey,
+          isOutOfProcess: remote.isOutOfProcess,
+        },
+      ],
     });
     const facts = await captureObservationFacts(f.cdp, 4);
     expect(facts.documents.some((document) => document.frame.frameId === "remote")).toBe(false);
     expect(facts.issues).toContainEqual({
-      target: remote.target,
+      tabId: remote.handle.tabId,
+      processKey: remote.processKey,
       frameId: "remote",
       stage: "dom",
       reason: "capture-unavailable",
     });
-    expect(f.logs.some((call) => call.target.sessionId === "remote")).toBe(false);
+    expect(f.logs.some((call) => call.processKey === "oopif:remote")).toBe(false);
   });
   it("normalizes snapshot-owned root scroll instead of mixing in stale CSS scroll", async () => {
-    const { cdp } = fixture({ frames: [{ frameId: "main", target: { tabId: 4 } }] });
-    const original = cdp.sendToTarget!;
-    cdp.sendToTarget = async (target, method, params) => {
+    const { cdp } = fixture({ frames: [{ frameId: "main" }] });
+    const original = cdp.sendToFrame;
+    cdp.sendToFrame = async (handle, method, params, guard) => {
       if (method === "Page.getLayoutMetrics")
         return {
           visualViewport: { clientWidth: 2000 },
           cssVisualViewport: { clientWidth: 1000, scale: 1 },
           cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 999, pageY: 999 },
         } as never;
-      const reply = await original(target, method, params);
+      const reply = await original(handle, method, params, guard);
       if (method === "DOMSnapshot.captureSnapshot") {
         const doc = (reply as SnapshotReply).documents![0];
         doc.scrollOffsetX = 40;
@@ -499,7 +554,8 @@ describe("captureObservationFacts", () => {
       }
       return reply as never;
     };
-    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    cdp.send = (tabId, method, params, signal) =>
+      cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     const facts = await captureObservationFacts(cdp, 4);
     expect(facts.documents[0].domNodes.find((node) => node.backendNodeId === 2)).toMatchObject({
       localRect: { x: 80, y: 300, w: 120, h: 40 },
@@ -567,8 +623,8 @@ describe("captureObservationFacts", () => {
 
   it("validates newly discovered snapshot documents without a pre-snapshot identity read", async () => {
     const { cdp, logs } = fixture();
-    const graph = await cdp.getFrameGraph!(4);
-    cdp.getFrameGraph = async () => ({ ...graph, frames: graph.frames.slice(0, 1) });
+    const graph = await cdp.getFrameDocuments(4);
+    cdp.getFrameDocuments = async () => ({ ...graph, frames: graph.frames.slice(0, 1) });
     const facts = await captureObservationFacts(cdp, 4);
     expect(facts.documents.map((doc) => doc.frame.frameId)).toEqual(["main", "same", "nested"]);
     expect(facts.documents.every((doc) => doc.identity)).toBe(true);
@@ -579,11 +635,12 @@ describe("captureObservationFacts", () => {
   });
 
   it("rejects a snapshot root that no longer matches the current frame root", async () => {
-    const { cdp } = fixture();
-    const original = cdp.sendToTarget!;
-    cdp.sendToTarget = async (target, method, params) => {
-      const result = await original(target, method, params);
-      if (method === "DOMSnapshot.captureSnapshot" && !target.sessionId) {
+    const f = fixture();
+    const { cdp } = f;
+    const original = cdp.sendToFrame;
+    cdp.sendToFrame = async (handle, method, params, guard) => {
+      const result = await original(handle, method, params, guard);
+      if (method === "DOMSnapshot.captureSnapshot" && f.processForHandle(handle) === "root") {
         const snapshot = result as {
           documents: { frameId: string; nodes: { backendNodeId: number[] } }[];
         };
@@ -591,34 +648,37 @@ describe("captureObservationFacts", () => {
       }
       return result as never;
     };
-    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    cdp.send = (tabId, method, params, signal) =>
+      cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     await expect(captureObservationFacts(cdp, 4)).rejects.toThrow("document identity");
   });
 
   it("starts after-identity reads only after every target finishes and propagates cancellation during identity cleanup", async () => {
-    const { cdp, logs } = fixture();
+    const f = fixture();
+    const { cdp, logs } = f;
     const controller = new AbortController();
-    const original = cdp.sendToTarget!;
+    const original = cdp.sendToFrame;
     let identityCleanup = 0;
-    cdp.sendToTarget = async (target, method, params) => {
+    cdp.sendToFrame = async (handle, method, params, guard) => {
       if (method === "Page.createIsolatedWorld") {
         expect(logs.filter((call) => call.method === "Accessibility.getFullAXTree")).toHaveLength(
           4,
         );
       }
-      const result = await original(target, method, params);
+      const result = await original(handle, method, params, guard);
       if (
         method === "Runtime.releaseObjectGroup" &&
         String((params as { objectGroup?: string })?.objectGroup).startsWith(
           "bsk-document-identity-",
         ) &&
-        target.sessionId === "remote"
+        f.processForHandle(handle) === "oopif:remote"
       ) {
         if (++identityCleanup === 1) controller.abort();
       }
       return result as never;
     };
-    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    cdp.send = (tabId, method, params, signal) =>
+      cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     await expect(captureObservationFacts(cdp, 4, controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     });
@@ -628,17 +688,16 @@ describe("captureObservationFacts", () => {
   it.each([
     1, 10, 100,
   ])("bounds identity reads for %i same-target documents after snapshot and AX collection", async (count) => {
-    const frames: CdpFrame[] = Array.from({ length: count }, (_, i) => ({
+    const frames: FixtureFrameSpec[] = Array.from({ length: count }, (_, i) => ({
       frameId: `frame-${i}`,
-      target: { tabId: 4 },
       ...(i ? { parentFrameId: "frame-0", ownerBackendNodeId: 90000 + i } : {}),
     }));
     const { cdp, logs } = fixture({ frames });
-    const original = cdp.sendToTarget!;
+    const original = cdp.sendToFrame;
     let active = 0;
     let peak = 0;
     let released = 0;
-    cdp.sendToTarget = async (target, method, params) => {
+    cdp.sendToFrame = async (handle, method, params, guard) => {
       if (method === "Page.createIsolatedWorld") {
         peak = Math.max(peak, ++active);
         await new Promise((resolve) => setTimeout(resolve, 1));
@@ -652,7 +711,7 @@ describe("captureObservationFacts", () => {
           count,
         );
       }
-      const result = await original(target, method, params);
+      const result = await original(handle, method, params, guard);
       if (
         method === "Runtime.releaseObjectGroup" &&
         String((params as { objectGroup?: string })?.objectGroup).startsWith(
@@ -664,7 +723,8 @@ describe("captureObservationFacts", () => {
       }
       return result as never;
     };
-    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    cdp.send = (tabId, method, params, signal) =>
+      cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     const facts = await captureObservationFacts(cdp, 4);
     expect(facts.documents.every((doc) => doc.identity)).toBe(true);
     expect(peak).toBe(Math.min(count, 4));
@@ -681,13 +741,12 @@ describe("captureObservationFacts", () => {
   });
 
   it("joins identity cleanup on cancellation without starting queued frames", async () => {
-    const frames: CdpFrame[] = Array.from({ length: 5 }, (_, i) => ({
+    const frames: FixtureFrameSpec[] = Array.from({ length: 5 }, (_, i) => ({
       frameId: `frame-${i}`,
-      target: { tabId: 4 },
       ...(i ? { parentFrameId: "frame-0", ownerBackendNodeId: 90000 + i } : {}),
     }));
     const { cdp, logs } = fixture({ frames });
-    const original = cdp.sendToTarget!;
+    const original = cdp.sendToFrame;
     const controller = new AbortController();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -698,8 +757,8 @@ describe("captureObservationFacts", () => {
       ready = resolve;
     });
     let held = 0;
-    cdp.sendToTarget = async (target, method, params) => {
-      const result = await original(target, method, params);
+    cdp.sendToFrame = async (handle, method, params, guard) => {
+      const result = await original(handle, method, params, guard);
       if (
         method === "Runtime.releaseObjectGroup" &&
         String((params as { objectGroup?: string })?.objectGroup).startsWith(
@@ -711,7 +770,8 @@ describe("captureObservationFacts", () => {
       }
       return result as never;
     };
-    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    cdp.send = (tabId, method, params, signal) =>
+      cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     let settled = false;
     const pending = captureObservationFacts(cdp, 4, controller.signal).finally(() => {
       settled = true;
@@ -755,7 +815,11 @@ describe("captureObservationFacts", () => {
       expect.objectContaining({ frameId: "same", stage: "dom", reason: "capture-unavailable" }),
     );
     expect(facts.issues).toContainEqual(
-      expect.objectContaining({ target: { tabId: 4, sessionId: "remote" }, stage: "dom" }),
+      expect.objectContaining({
+        tabId: 4,
+        processKey: "oopif:remote",
+        stage: "dom",
+      }),
     );
   });
 
@@ -788,26 +852,28 @@ describe("captureObservationFacts", () => {
     "cancel",
     "worker-abort",
   ] as const)("joins target cleanup and stops claiming targets after %s", async (mode) => {
-    const frames = Array.from({ length: 5 }, (_, i) => ({
+    const frames: FixtureFrameSpec[] = Array.from({ length: 5 }, (_, i) => ({
       frameId: `f${i}`,
-      target: { tabId: 4, ...(i ? { sessionId: `s${i}` } : {}) },
+      ...(i ? { processKey: `oopif:s${i}` } : {}),
     }));
-    const { cdp } = fixture({ frames });
-    const original = cdp.sendToTarget!;
+    const f = fixture({ frames });
+    const { cdp } = f;
+    const original = cdp.sendToFrame;
     const pending = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
     const calls: Array<{ target: string; method: string }> = [];
     let release: (() => void) | undefined;
     let released = false;
-    const send: NonNullable<CdpRunner["sendToTarget"]> = async <T>(
-      target: CdpTarget,
+    const sendToFrame: CdpRunner["sendToFrame"] = async <T>(
+      handle: FrameDocumentHandle | FrameNodeHandle,
       method: string,
       params?: object,
+      guard?: CdpDispatchGuard,
     ) => {
-      calls.push({ target: target.sessionId ?? "main", method });
-      if (method === "DOMSnapshot.captureSnapshot" && target.sessionId) {
-        await new Promise<void>((resolve, reject) =>
-          pending.set(target.sessionId!, { resolve, reject }),
-        );
+      const processKey = f.processForHandle(handle);
+      const shortKey = processKey === "root" ? "main" : processKey.replace(/^oopif:/, "");
+      calls.push({ target: shortKey, method });
+      if (method === "DOMSnapshot.captureSnapshot" && processKey !== "root") {
+        await new Promise<void>((resolve, reject) => pending.set(shortKey, { resolve, reject }));
       }
       if (method === "Runtime.releaseObjectGroup") {
         await new Promise<void>((resolve) => {
@@ -815,13 +881,14 @@ describe("captureObservationFacts", () => {
         });
         released = true;
       }
-      const result = await original<T>(target, method, params);
-      if (method === "DOMSnapshot.captureSnapshot" && !target.sessionId)
+      const result = await original<T>(handle, method, params, guard);
+      if (method === "DOMSnapshot.captureSnapshot" && processKey === "root")
         (result as { strings: string[] }).strings[2] = "input";
       return result;
     };
-    cdp.sendToTarget = send;
-    cdp.send = (tabId, method, params) => send({ tabId }, method, params);
+    cdp.sendToFrame = sendToFrame;
+    cdp.send = (tabId, method, params, signal) =>
+      sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     const controller = new AbortController();
     let settled = false;
     const capture = captureObservationFacts(cdp, 4, controller.signal);
@@ -839,8 +906,6 @@ describe("captureObservationFacts", () => {
       expect(release).toBeDefined();
     });
     if (mode === "cancel") controller.abort();
-    // Cancellation may race with an ordinary transport rejection. Without an
-    // external signal, an escaping AbortError still terminates the worker pool.
     pending
       .get("s1")!
       .reject(
@@ -862,8 +927,6 @@ describe("captureObservationFacts", () => {
           ),
         ).toBe(true);
     });
-    // Allow worker rejection and the outer promise chain to run while cleanup
-    // is deliberately held. The old fail-fast pool settles here.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(settled).toBe(false);
     expect(released).toBe(false);
@@ -881,26 +944,27 @@ describe("captureObservationFacts", () => {
   });
 
   it("bounds collection across many targets and stops scheduling after cancellation", async () => {
-    const frames = Array.from({ length: 12 }, (_, i) => ({
+    const frames: FixtureFrameSpec[] = Array.from({ length: 12 }, (_, i) => ({
       frameId: `f${i}`,
-      target: { tabId: 4, ...(i ? { sessionId: `s${i}` } : {}) },
+      ...(i ? { processKey: `oopif:s${i}` } : {}),
     }));
     const { cdp } = fixture({ frames });
     let active = 0,
       peak = 0;
-    const original = cdp.sendToTarget!;
-    const send: NonNullable<CdpRunner["sendToTarget"]> = async (target, method, params) => {
+    const original = cdp.sendToFrame;
+    const sendToFrame: CdpRunner["sendToFrame"] = async (handle, method, params, guard) => {
       active++;
       peak = Math.max(peak, active);
       try {
         await new Promise((resolve) => setTimeout(resolve, 1));
-        return await original(target, method, params);
+        return await original(handle, method, params, guard);
       } finally {
         active--;
       }
     };
-    cdp.sendToTarget = send;
-    cdp.send = (tabId, method, params) => send({ tabId }, method, params);
+    cdp.sendToFrame = sendToFrame;
+    cdp.send = (tabId, method, params, signal) =>
+      sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     await captureObservationFacts(cdp, 4);
     // This fixture has no frame edges, so no concurrent owner requests.
     expect(peak).toBeLessThanOrEqual(4);
@@ -948,63 +1012,82 @@ function childSnapshot(frameId: string, backendNodeId: number) {
 
 describe("OOPIF capture", () => {
   it("captures and positions multiple OOPIF documents missing from the root snapshot", async () => {
-    const sendToTarget = vi.fn(async (target, method) => {
-      if (method === "Runtime.evaluate") return { result: { value: { width: 300, height: 200 } } };
+    const rootSend = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      if (
+        method === "Accessibility.enable" ||
+        method === "DOMSnapshot.enable" ||
+        method === "Accessibility.disable"
+      )
+        return {};
+      if (method === "DOMSnapshot.captureSnapshot") return childSnapshot("main", 1);
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "DOM.getBoxModel") {
+        const backendNodeId = (params as { backendNodeId?: number })?.backendNodeId;
+        const x = backendNodeId === 10 ? 50 : 500;
+        return { model: { content: [x, 100, x + 300, 100, x + 300, 300, x, 300] } };
+      }
       if (method === "Page.getLayoutMetrics") {
         return {
           visualViewport: { clientWidth: 1000 },
           cssVisualViewport: { clientWidth: 1000, scale: 1 },
-          cssLayoutViewport: { clientWidth: 300, clientHeight: 200, pageX: 0, pageY: 0 },
+          cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
         };
       }
-      if (method === "DOMSnapshot.enable" || method === "Accessibility.enable") return {};
-      if (method === "DOMSnapshot.captureSnapshot") {
-        return target.sessionId === "left-session"
-          ? childSnapshot("left", 101)
-          : childSnapshot("right", 201);
-      }
-      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
-      throw new Error(`unexpected ${method}`);
+      if (method === "Runtime.evaluate") return { result: { value: { width: 300, height: 200 } } };
+      if (method === "Runtime.releaseObjectGroup" || method === "Runtime.releaseObject") return {};
+      if (method === "DOM.resolveNode") return { object: { objectId: "iframe-owner" } };
+      if (method === "Runtime.callFunctionOn")
+        return { result: { value: { width: 300, height: 200 } } };
+      throw new Error(`unexpected root ${method}`);
     });
-    const cdp: CdpRunner = {
-      send: vi.fn(async (_tabId, method, params) => {
-        if (method === "Accessibility.enable" || method === "DOMSnapshot.enable") return {};
-        if (method === "DOMSnapshot.captureSnapshot") return childSnapshot("main", 1);
-        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
-        if (method === "DOM.getBoxModel") {
-          const backendNodeId = (params as { backendNodeId?: number })?.backendNodeId;
-          const x = backendNodeId === 10 ? 50 : 500;
-          return { model: { content: [x, 100, x + 300, 100, x + 300, 300, x, 300] } };
-        }
+    const sendToFrame = vi.fn(
+      async (handle: FrameDocumentHandle | FrameNodeHandle, method: string, params?: object) => {
+        if (!handle.frameId || handle.frameId === "main")
+          return rootSend(handle.tabId, method, params);
+        if (method === "Runtime.evaluate")
+          return { result: { value: { width: 300, height: 200 } } };
+        if (method === "Runtime.releaseObjectGroup" || method === "Accessibility.disable")
+          return {};
         if (method === "Page.getLayoutMetrics") {
           return {
             visualViewport: { clientWidth: 1000 },
             cssVisualViewport: { clientWidth: 1000, scale: 1 },
-            cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
+            cssLayoutViewport: { clientWidth: 300, clientHeight: 200, pageX: 0, pageY: 0 },
           };
         }
-        throw new Error(`unexpected root ${method}`);
-      }) as CdpRunner["send"],
-      sendToTarget: sendToTarget as unknown as NonNullable<CdpRunner["sendToTarget"]>,
-      getFrameGraph: vi.fn(async () => ({
+        if (method === "DOMSnapshot.enable" || method === "Accessibility.enable") return {};
+        if (method === "DOMSnapshot.captureSnapshot") {
+          return handle.frameId === "left"
+            ? childSnapshot("left", 101)
+            : childSnapshot("right", 201);
+        }
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        throw new Error(`unexpected ${method}`);
+      },
+    );
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: rootSend as CdpRunner["send"],
+      sendToFrame: sendToFrame as unknown as CdpRunner["sendToFrame"],
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "left" || frameId === "right",
+      getFrameDocuments: vi.fn(async () => ({
         rootFrameId: "main",
         frames: [
-          { frameId: "main", target: { tabId: 4 } },
-          {
+          makeFrame({ frameId: "main" }),
+          makeFrame({
             frameId: "left",
             parentFrameId: "main",
             ownerBackendNodeId: 10,
-            target: { tabId: 4, sessionId: "left-session" },
-          },
-          {
+            processKey: "oopif:left",
+          }),
+          makeFrame({
             frameId: "right",
             parentFrameId: "main",
             ownerBackendNodeId: 20,
-            target: { tabId: 4, sessionId: "right-session" },
-          },
+            processKey: "oopif:right",
+          }),
         ],
       })),
-    };
+    });
 
     const { documents: trees } = semanticCapture(await captureObservationFacts(cdp, 4));
 
@@ -1057,7 +1140,11 @@ describe("OOPIF capture", () => {
         nested.documents[0],
       ],
     };
-    const reply = async (_target: unknown, method: string) => {
+    const reply = async (target: unknown, method: string) => {
+      const isRoot =
+        typeof target === "number" ||
+        !(target as FrameDocumentHandle).frameId ||
+        (target as FrameDocumentHandle).frameId === "main";
       if (method === "Page.getLayoutMetrics")
         return {
           visualViewport: { clientWidth: 1000 },
@@ -1065,34 +1152,38 @@ describe("OOPIF capture", () => {
           cssLayoutViewport: { clientWidth: 300, clientHeight: 200 },
         };
       if (method === "DOMSnapshot.captureSnapshot")
-        return typeof _target === "number" ? childSnapshot("main", 11) : snapshot;
+        return isRoot ? childSnapshot("main", 11) : snapshot;
       if (method === "DOM.getBoxModel")
         return { model: { content: [50, 100, 350, 100, 350, 300, 50, 300] } };
-      if (method === "DOM.resolveNode") throw new Error("nested owner replaced");
+      if (method === "DOM.resolveNode" && !isRoot) throw new Error("nested owner replaced");
+      if (method === "DOM.resolveNode") return { object: { objectId: "root-owner" } };
+      if (method === "Runtime.callFunctionOn")
+        return { result: { value: { width: 300, height: 200 } } };
       return {};
     };
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(reply) as CdpRunner["send"],
-      sendToTarget: vi.fn(reply) as NonNullable<CdpRunner["sendToTarget"]>,
-      getFrameGraph: vi.fn(async () => ({
+      sendToFrame: vi.fn(reply) as unknown as CdpRunner["sendToFrame"],
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "child" || frameId === "nested",
+      getFrameDocuments: vi.fn(async () => ({
         rootFrameId: "main",
         frames: [
-          { frameId: "main", target: { tabId: 4 } },
-          {
+          makeFrame({ frameId: "main" }),
+          makeFrame({
             frameId: "nested",
             parentFrameId: "child",
             ownerBackendNodeId: 101,
-            target: { tabId: 4, sessionId: "child-session" },
-          },
-          {
+            processKey: "oopif:child",
+          }),
+          makeFrame({
             frameId: "child",
             parentFrameId: "main",
             ownerBackendNodeId: 10,
-            target: { tabId: 4, sessionId: "child-session" },
-          },
+            processKey: "oopif:child",
+          }),
         ],
       })),
-    };
+    });
     const captured = await captureObservationFacts(cdp, 4);
     expect(
       captured.issues
@@ -1101,7 +1192,17 @@ describe("OOPIF capture", () => {
     ).toEqual([
       {
         status: "unavailable",
-        source: { target: { tabId: 4, sessionId: "child-session" }, frameId: "nested" },
+        source: {
+          process: frameProcessBoundary(
+            makeFrame({
+              frameId: "child",
+              parentFrameId: "main",
+              ownerBackendNodeId: 10,
+              processKey: "oopif:child",
+            }),
+          ),
+          frameId: "nested",
+        },
         ownerBackendNodeId: 101,
       },
     ]);
@@ -1114,24 +1215,40 @@ describe("OOPIF capture", () => {
   });
 
   it("keeps OOPIF semantics when viewport projection is unavailable", async () => {
-    const cdp: CdpRunner = {
-      send: vi.fn(async (_tabId, method) => {
-        if (method === "Accessibility.enable" || method === "DOMSnapshot.enable") return {};
-        if (method === "DOMSnapshot.captureSnapshot") return childSnapshot("main", 1);
-        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
-        if (method === "DOM.getBoxModel") throw new Error("owner geometry unavailable");
-        if (method === "Page.getLayoutMetrics") {
-          return {
-            visualViewport: { clientWidth: 1000 },
-            cssVisualViewport: { clientWidth: 1000, scale: 1 },
-            cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
-          };
-        }
-        throw new Error(`unexpected root ${method}`);
-      }) as CdpRunner["send"],
-      sendToTarget: vi.fn(async (_target, method) => {
+    const rootSend = vi.fn(async (_tabId: number, method: string) => {
+      if (
+        method === "Accessibility.enable" ||
+        method === "DOMSnapshot.enable" ||
+        method === "Accessibility.disable" ||
+        method === "Runtime.releaseObjectGroup"
+      )
+        return {};
+      if (method === "DOMSnapshot.captureSnapshot") return childSnapshot("main", 1);
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "DOM.getBoxModel") throw new Error("owner geometry unavailable");
+      if (method === "Runtime.evaluate") return {};
+      if (method === "Page.getLayoutMetrics") {
+        return {
+          visualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000, scale: 1 },
+          cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
+        };
+      }
+      throw new Error(`unexpected root ${method}`);
+    });
+    const cdp: CdpRunner = createStubCdpRunner({
+      send: rootSend as CdpRunner["send"],
+      sendToFrame: vi.fn(async (handle: FrameDocumentHandle | FrameNodeHandle, method: string) => {
+        if (!handle.frameId || handle.frameId === "main") return rootSend(handle.tabId, method);
         if (method === "Page.getLayoutMetrics") throw new Error("viewport unavailable");
-        if (method === "DOMSnapshot.enable" || method === "Accessibility.enable") return {};
+        if (
+          method === "DOMSnapshot.enable" ||
+          method === "Accessibility.enable" ||
+          method === "Accessibility.disable" ||
+          method === "Runtime.releaseObjectGroup" ||
+          method === "Runtime.evaluate"
+        )
+          return {};
         if (method === "DOMSnapshot.captureSnapshot") return childSnapshot("child", 101);
         if (method === "Accessibility.getFullAXTree") {
           return {
@@ -1146,20 +1263,21 @@ describe("OOPIF capture", () => {
           };
         }
         throw new Error(`unexpected ${method}`);
-      }) as unknown as NonNullable<CdpRunner["sendToTarget"]>,
-      getFrameGraph: vi.fn(async () => ({
+      }) as unknown as CdpRunner["sendToFrame"],
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "child",
+      getFrameDocuments: vi.fn(async () => ({
         rootFrameId: "main",
         frames: [
-          { frameId: "main", target: { tabId: 4 } },
-          {
+          makeFrame({ frameId: "main" }),
+          makeFrame({
             frameId: "child",
             parentFrameId: "main",
             ownerBackendNodeId: 10,
-            target: { tabId: 4, sessionId: "child-session" },
-          },
+            processKey: "oopif:child",
+          }),
         ],
       })),
-    };
+    });
 
     const { documents } = semanticCapture(await captureObservationFacts(cdp, 4));
     const childDocument = documents.find((document) => document.frameId === "child");
@@ -1226,9 +1344,10 @@ function siblingCaptureFixture(
       active--;
     }
   });
+  const cdp = createStubCdpRunner({ send: send as CdpRunner["send"] });
   return {
     snapshot,
-    cdp: { send: send as CdpRunner["send"] },
+    cdp,
     send,
     peak: () => peak,
     active: () => active,
@@ -1248,18 +1367,17 @@ describe("snapshot document provenance", () => {
     const f = siblingCaptureFixture();
     const cdp: CdpRunner = {
       ...f.cdp,
-      getFrameGraph: async () => ({
+      getFrameDocuments: async () => ({
         rootFrameId: mode === "new-root" ? "old-root" : "frame-0",
         frames: [
-          { frameId: mode === "new-root" ? "old-root" : "frame-0", target: { tabId: 4 } },
+          makeFrame({ frameId: mode === "new-root" ? "old-root" : "frame-0" }),
           ...(mode === "stale-owner"
             ? [
-                {
+                makeFrame({
                   frameId: "frame-1",
                   parentFrameId: "frame-0",
                   ownerBackendNodeId: 999,
-                  target: { tabId: 4 },
-                },
+                }),
               ]
             : []),
         ],
@@ -1298,9 +1416,9 @@ describe("snapshot document provenance", () => {
     const facts = await captureObservationFacts(
       {
         ...f.cdp,
-        getFrameGraph: async () => ({
+        getFrameDocuments: async () => ({
           rootFrameId: "frame-0",
-          frames: [{ frameId: "frame-0", target: { tabId: 4 }, url: "https://old.test/" }],
+          frames: [makeFrame({ frameId: "frame-0", url: "https://old.test/" })],
         }),
       },
       4,
@@ -1322,26 +1440,37 @@ describe("snapshot document provenance", () => {
     const f = siblingCaptureFixture();
     const cdp: CdpRunner = {
       ...f.cdp,
-      getFrameGraph: async () => ({
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "frame-1",
+      getFrameDocuments: async () => ({
         rootFrameId: "frame-0",
         frames: [
-          { frameId: "frame-0", target: { tabId: 4 } },
-          {
+          makeFrame({ frameId: "frame-0" }),
+          makeFrame({
             frameId: "frame-1",
             parentFrameId: "frame-0",
             ownerBackendNodeId: 100,
-            target: { tabId: 4, sessionId: "old" },
-          },
+            processKey: "oopif:old",
+          }),
         ],
       }),
-      sendToTarget: async <T>(_target: CdpTarget, method: string): Promise<T> =>
-        (method === "Accessibility.getFullAXTree"
-          ? { nodes: [{ nodeId: "stale", role: { value: "button" }, name: { value: "stale" } }] }
-          : {}) as T,
+      sendToFrame: async <T>(
+        handle: FrameDocumentHandle | FrameNodeHandle,
+        method: string,
+        params?: object,
+        guard?: CdpDispatchGuard,
+      ): Promise<T> => {
+        if (!handle.frameId || handle.frameId !== "frame-1")
+          return f.cdp.send<T>(handle.tabId, method, params, guard?.signal);
+        return (
+          method === "Accessibility.getFullAXTree"
+            ? { nodes: [{ nodeId: "stale", role: { value: "button" }, name: { value: "stale" } }] }
+            : {}
+        ) as T;
+      },
     };
     const facts = await captureObservationFacts(cdp, 4);
     const current = facts.documents.find((doc) => doc.frame.frameId === "frame-1");
-    expect(current?.frame.target).toEqual({ tabId: 4 });
+    expect(current?.frame.processKey).toBe("root");
     expect(current?.domNodes.length).toBeGreaterThan(0);
     expect(current?.axNodes).toEqual([]);
   });
@@ -1366,8 +1495,8 @@ describe("snapshot document provenance", () => {
   });
 
   it("retains the caller URL in the root AX-only fallback", async () => {
-    const cdp: CdpRunner = {
-      getFrameGraph: async () => {
+    const cdp: CdpRunner = createStubCdpRunner({
+      getFrameDocuments: async () => {
         throw new Error("no graph");
       },
       send: async <T>(_tabId: number, method: string): Promise<T> => {
@@ -1378,7 +1507,7 @@ describe("snapshot document provenance", () => {
             : {}
         ) as T;
       },
-    };
+    });
     const facts = await captureObservationFacts(cdp, 4, undefined, "https://page.test/");
     expect(facts.documents[0].frame.url).toBe("https://page.test/");
     expect(facts.documents[0].axNodes).toHaveLength(1);
@@ -1402,29 +1531,40 @@ describe("snapshot document provenance", () => {
     true,
   ])("isolates competing target claims independent of batch order %s", async (reverse) => {
     const f = siblingCaptureFixture();
-    const remote = {
+    const remote = makeFrame({
       frameId: "frame-1",
       parentFrameId: "frame-0",
       ownerBackendNodeId: 100,
-      target: { tabId: 4, sessionId: "remote" },
-    };
-    const main = { frameId: "frame-0", target: { tabId: 4 } };
+      processKey: "oopif:remote",
+    });
+    const main = makeFrame({ frameId: "frame-0" });
     const cdp: CdpRunner = {
       ...f.cdp,
-      getFrameGraph: async () => ({
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "frame-1",
+      getFrameDocuments: async () => ({
         rootFrameId: "frame-0",
         frames: reverse ? [remote, main] : [main, remote],
       }),
-      sendToTarget: async <T>(_target: CdpTarget, method: string): Promise<T> =>
-        (method === "DOMSnapshot.captureSnapshot"
-          ? { ...f.snapshot, documents: [f.snapshot.documents[1]] }
-          : method === "Page.getLayoutMetrics"
-            ? {
-                visualViewport: { clientWidth: 1000 },
-                cssVisualViewport: { clientWidth: 1000, scale: 1 },
-                cssLayoutViewport: { clientWidth: 200, clientHeight: 100 },
-              }
-            : {}) as T,
+      sendToFrame: async <T>(
+        handle: FrameDocumentHandle | FrameNodeHandle,
+        method: string,
+        params?: object,
+        guard?: CdpDispatchGuard,
+      ): Promise<T> => {
+        if (!handle.frameId || handle.frameId !== "frame-1")
+          return f.cdp.send<T>(handle.tabId, method, params, guard?.signal);
+        return (
+          method === "DOMSnapshot.captureSnapshot"
+            ? { ...f.snapshot, documents: [f.snapshot.documents[1]] }
+            : method === "Page.getLayoutMetrics"
+              ? {
+                  visualViewport: { clientWidth: 1000 },
+                  cssVisualViewport: { clientWidth: 1000, scale: 1 },
+                  cssLayoutViewport: { clientWidth: 200, clientHeight: 100 },
+                }
+              : {}
+        ) as T;
+      },
     };
     const facts = await captureObservationFacts(cdp, 4);
     expect(facts.documents.map((doc) => doc.frame.frameId)).not.toContain("frame-1");
@@ -1462,6 +1602,8 @@ describe("sibling frame measurement scheduling", () => {
         } as never;
       return original(tabId, method, params);
     };
+    fixture.cdp.sendToFrame = (handle, method, params, guard) =>
+      fixture.cdp.send(handle.tabId, method, params, guard?.signal);
     const captured = await captureObservationFacts(fixture.cdp, 4);
     expect(captured.issues.filter((issue) => issue.stage === "geometry")).toEqual([]);
     expect(captured.documents.map((doc) => doc.frame.frameId)).toEqual(
@@ -1529,12 +1671,12 @@ describe("sibling frame measurement scheduling", () => {
     ).toEqual([
       {
         status: "unavailable",
-        source: { target: { tabId: 4 }, frameId: "frame-1" },
+        source: { process: rootProcessBoundary(4), frameId: "frame-1" },
         ownerBackendNodeId: 100,
       },
       {
         status: "blocked",
-        source: { target: { tabId: 4 }, frameId: "frame-7" },
+        source: { process: rootProcessBoundary(4), frameId: "frame-7" },
         cause: captured.issues.find(
           (issue) => issue.frameId === "frame-1" && issue.stage === "geometry",
         )?.projectionIssue,
@@ -1617,6 +1759,8 @@ describe("AX frame scheduling", () => {
         active--;
       }
     };
+    f.cdp.sendToFrame = (handle, method, params, guard) =>
+      f.cdp.send(handle.tabId, method, params, guard?.signal);
     const controller = new AbortController();
     let settled = false;
     const capture = captureObservationFacts(f.cdp, 4, controller.signal);
@@ -1666,13 +1810,16 @@ describe("Accessibility domain lifetime", () => {
     vi.restoreAllMocks();
   });
 
-  function pendingCleanup(sessionId?: string) {
+  function pendingCleanup(processKey = "root") {
     vi.useFakeTimers();
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const f = fixture();
     const gate = new CdpReadGate();
-    const original = f.cdp.sendToTarget!;
-    const target = { tabId: 4, sessionId };
+    const original = f.cdp.sendToFrame;
+    const handle =
+      processKey === "root"
+        ? f.frames[0].handle
+        : f.frames.find((frame) => frame.processKey === processKey)!.handle;
     const attempted: string[] = [];
     let enter!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -1682,29 +1829,34 @@ describe("Accessibility domain lifetime", () => {
     const pending = new Promise<object>((resolve) => {
       finish = resolve;
     });
-    f.cdp.sendToTarget = (target, method, params) => {
+    f.cdp.sendToFrame = (targetHandle, method, params, guard) => {
+      if (guard?.attachmentId !== undefined && guard.attachmentId !== f.cdp.getAttachmentId(4))
+        return Promise.reject(new Error("Debugger attachment changed before dispatch"));
+      const targetProcessKey = f.processForHandle(targetHandle);
       attempted.push(method);
-      return gate.run(target, method, () => {
-        if (method === "Accessibility.disable" && target.sessionId === sessionId) {
-          f.logs.push({ target, method, params: (params ?? {}) as Record<string, unknown> });
+      return gate.run({ tabId: targetHandle.tabId, processKey: targetProcessKey }, method, () => {
+        if (method === "Accessibility.disable" && targetProcessKey === processKey) {
+          f.logs.push({
+            processKey: targetProcessKey,
+            handle: targetHandle,
+            method,
+            params: (params ?? {}) as Record<string, unknown>,
+            guard,
+          });
           enter();
           return pending as never;
         }
-        return original(target, method, params);
+        return original(targetHandle, method, params, guard);
       });
     };
-    f.cdp.send = (tabId, method, params) => f.cdp.sendToTarget!({ tabId }, method, params);
-    f.cdp.sendGuarded = (target, method, params, guard) => {
-      if (guard.attachmentId !== f.cdp.getAttachmentId?.(4))
-        return Promise.reject(new Error("Debugger attachment changed before dispatch"));
-      return f.cdp.sendToTarget!(target, method, params);
-    };
-    return { ...f, gate, target, attempted, started, finish };
+    f.cdp.send = (tabId, method, params, signal) =>
+      f.cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
+    return { ...f, gate, handle, processKey, attempted, started, finish };
   }
 
-  describe.each([undefined, "remote"])("pending cleanup (session=%s)", (sessionId) => {
+  describe.each(["root", "oopif:remote"])("pending cleanup (process=%s)", (processKey) => {
     it("retains every captured document and releases only after Chrome replies", async () => {
-      const f = pendingCleanup(sessionId);
+      const f = pendingCleanup(processKey);
       const work = captureObservationFacts(f.cdp, 4);
       await f.started;
       await vi.advanceTimersByTimeAsync(ACCESSIBILITY_CLEANUP_TIMEOUT_MS);
@@ -1719,12 +1871,12 @@ describe("Accessibility domain lifetime", () => {
       expect(
         f.attempted.slice(firstCleanup).every((method) => method === "Accessibility.disable"),
       ).toBe(true);
-      await expect(f.cdp.sendToTarget!(f.target, "Runtime.evaluate")).rejects.toMatchObject({
+      await expect(f.cdp.sendToFrame(f.handle, "Runtime.evaluate")).rejects.toMatchObject({
         phase: "blocked",
       });
       f.finish({});
       await vi.advanceTimersByTimeAsync(0);
-      await expect(f.cdp.sendToTarget!(f.target, "Runtime.evaluate")).resolves.toEqual({});
+      await expect(f.cdp.sendToFrame(f.handle, "Runtime.evaluate")).resolves.toEqual({});
       expect(vi.getTimerCount()).toBe(0);
     });
 
@@ -1732,7 +1884,7 @@ describe("Accessibility domain lifetime", () => {
       false,
       true,
     ])("finishes hover reads before cleanup times out (visual=%s)", async (includeVisualFacts) => {
-      const f = pendingCleanup(sessionId);
+      const f = pendingCleanup(processKey);
       const outcome = captureVomObservation(f.cdp, 4, "https://example.test", {
         conditionalSurfaceProbe: true,
         includeVisualFacts,
@@ -1761,7 +1913,7 @@ describe("Accessibility domain lifetime", () => {
     });
 
     it("rejects cancellation during cleanup within its deadline", async () => {
-      const f = pendingCleanup(sessionId);
+      const f = pendingCleanup(processKey);
       const controller = new AbortController();
       const work = captureVomObservation(f.cdp, 4, "https://example.test", {
         conditionalSurfaceProbe: true,
@@ -1776,14 +1928,14 @@ describe("Accessibility domain lifetime", () => {
     });
 
     it("keeps a replacement gate closed when the old cleanup replies late", async () => {
-      const f = pendingCleanup(sessionId);
+      const f = pendingCleanup(processKey);
       const work = captureObservationFacts(f.cdp, 4);
       await f.started;
       await vi.advanceTimersByTimeAsync(ACCESSIBILITY_CLEANUP_TIMEOUT_MS);
       await work;
       f.gate.reset(4);
       const replacement = f.gate.run(
-        f.target,
+        { tabId: 4, processKey: f.processKey },
         "Accessibility.disable",
         () => new Promise<never>(() => {}),
       );
@@ -1792,17 +1944,15 @@ describe("Accessibility domain lifetime", () => {
       await rejected;
       f.finish({});
       await vi.advanceTimersByTimeAsync(0);
-      await expect(f.cdp.sendToTarget!(f.target, "Runtime.evaluate")).rejects.toMatchObject({
+      await expect(f.cdp.sendToFrame(f.handle, "Runtime.evaluate")).rejects.toMatchObject({
         phase: "blocked",
       });
     });
   });
 
-  const axCalls = (logs: ReturnType<typeof fixture>["logs"], sessionId?: string) =>
+  const axCalls = (logs: ReturnType<typeof fixture>["logs"], processKey = "root") =>
     logs
-      .filter(
-        (call) => call.target.sessionId === sessionId && call.method.startsWith("Accessibility."),
-      )
+      .filter((call) => call.processKey === processKey && call.method.startsWith("Accessibility."))
       .map((call) => call.method);
 
   it("disables AX on each target once its trees are read", async () => {
@@ -1815,7 +1965,7 @@ describe("Accessibility domain lifetime", () => {
       "Accessibility.getFullAXTree",
       "Accessibility.disable",
     ]);
-    expect(axCalls(logs, "remote")).toEqual([
+    expect(axCalls(logs, "oopif:remote")).toEqual([
       "Accessibility.enable",
       "Accessibility.getFullAXTree",
       "Accessibility.disable",
@@ -1828,31 +1978,31 @@ describe("Accessibility domain lifetime", () => {
 
   it("sends the cleanup only on the attachment that enabled AX", async () => {
     const { cdp, logs } = fixture();
-    const sendGuarded = vi.fn(async () => ({}) as never);
-    cdp.sendGuarded = sendGuarded;
     await captureObservationFacts(cdp, 4);
-    expect(sendGuarded).toHaveBeenCalledTimes(2);
-    for (const target of [{ tabId: 4 }, { tabId: 4, sessionId: "remote" }])
-      expect(sendGuarded).toHaveBeenCalledWith(
-        target,
-        "Accessibility.disable",
-        {},
-        { attachmentId: "attachment" },
-      );
-    expect(logs.some((call) => call.method === "Accessibility.disable")).toBe(false);
+    const disables = logs.filter((call) => call.method === "Accessibility.disable");
+    expect(disables).toHaveLength(2);
+    expect(disables.map((call) => call.processKey).sort()).toEqual(["oopif:remote", "root"]);
+    for (const disable of disables) {
+      expect(disable.guard).toMatchObject({
+        attachmentId: "attachment",
+        allowReattach: false,
+        ignoreFrameNavigation: true,
+      });
+    }
   });
 
   it("leaves a replaced attachment alone", async () => {
     const { cdp, logs } = fixture();
-    const original = cdp.sendToTarget!;
+    const original = cdp.sendToFrame;
     let attachment = "attachment";
     cdp.getAttachmentId = () => attachment;
-    cdp.sendToTarget = async (target, method, params) => {
-      const reply = await original(target, method, params);
+    cdp.sendToFrame = async (handle, method, params, guard) => {
+      const reply = await original(handle, method, params, guard);
       if (method === "Accessibility.getFullAXTree") attachment = "replacement";
       return reply as never;
     };
-    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    cdp.send = (tabId, method, params, signal) =>
+      cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     await expect(captureObservationFacts(cdp, 4)).rejects.toThrow("document identity");
     expect(logs.some((call) => call.method === "Accessibility.disable")).toBe(false);
   });
@@ -1863,21 +2013,35 @@ describe("Accessibility domain lifetime", () => {
     try {
       const f = fixture();
       const gate = new CdpReadGate();
-      const original = f.cdp.sendToTarget!;
-      f.cdp.sendToTarget = (target, method, params) =>
-        gate.run(target, method, () => {
-          if (target.sessionId !== "remote" || method !== "Accessibility.getFullAXTree")
-            return original(target, method, params);
-          f.logs.push({ target, method, params: (params ?? {}) as Record<string, unknown> });
+      const original = f.cdp.sendToFrame;
+      f.cdp.sendToFrame = (handle, method, params, guard) => {
+        const processKey = f.processForHandle(handle);
+        return gate.run({ tabId: handle.tabId, processKey }, method, () => {
+          if (processKey !== "oopif:remote" || method !== "Accessibility.getFullAXTree")
+            return original(handle, method, params, guard);
+          f.logs.push({
+            processKey,
+            handle,
+            method,
+            params: (params ?? {}) as Record<string, unknown>,
+            guard,
+          });
           return new Promise<never>(() => {});
         });
-      f.cdp.send = (tabId, method, params) => f.cdp.sendToTarget!({ tabId }, method, params);
+      };
+      f.cdp.send = (tabId, method, params, signal) =>
+        f.cdp.sendToFrame(
+          toRootFrameHandle(tabId),
+          method,
+          params,
+          signal ? { signal } : undefined,
+        );
       const work = captureObservationFacts(f.cdp, 4);
       await vi.advanceTimersByTimeAsync(CAPTURE_READ_TIMEOUT_MS);
       const facts = await work;
       expect(facts.documents.map((doc) => doc.frame.frameId)).toEqual(["main", "same", "nested"]);
       expect(axCalls(f.logs).at(-1)).toBe("Accessibility.disable");
-      expect(axCalls(f.logs, "remote")).toEqual([
+      expect(axCalls(f.logs, "oopif:remote")).toEqual([
         "Accessibility.enable",
         "Accessibility.getFullAXTree",
       ]);
@@ -1890,29 +2054,31 @@ describe("Accessibility domain lifetime", () => {
   it("releases AX when the capture is cancelled during AX reads", async () => {
     const { cdp, logs } = fixture();
     const controller = new AbortController();
-    const original = cdp.sendToTarget!;
-    cdp.sendToTarget = async (target, method, params) => {
+    const original = cdp.sendToFrame;
+    cdp.sendToFrame = async (handle, method, params, guard) => {
       if (method === "Accessibility.getFullAXTree") controller.abort();
-      return original(target, method, params);
+      return original(handle, method, params, guard);
     };
-    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    cdp.send = (tabId, method, params, signal) =>
+      cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     await expect(captureObservationFacts(cdp, 4, controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     });
     expect(axCalls(logs).at(-1)).toBe("Accessibility.disable");
-    expect(axCalls(logs, "remote").at(-1)).toBe("Accessibility.disable");
+    expect(axCalls(logs, "oopif:remote").at(-1)).toBe("Accessibility.disable");
   });
 
   it("releases AX when observation is cancelled during hover reads", async () => {
     const { cdp, logs } = fixture();
     const controller = new AbortController();
-    const original = cdp.sendToTarget!;
-    cdp.sendToTarget = async (target, method, params) => {
+    const original = cdp.sendToFrame;
+    cdp.sendToFrame = async (handle, method, params, guard) => {
       if (method === "Runtime.evaluate" && (params as { returnByValue?: boolean }).returnByValue)
         controller.abort();
-      return original(target, method, params);
+      return original(handle, method, params, guard);
     };
-    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    cdp.send = (tabId, method, params, signal) =>
+      cdp.sendToFrame(toRootFrameHandle(tabId), method, params, signal ? { signal } : undefined);
     await expect(
       captureVomObservation(cdp, 4, "https://example.test", {
         conditionalSurfaceProbe: true,
@@ -1920,7 +2086,7 @@ describe("Accessibility domain lifetime", () => {
       }),
     ).rejects.toMatchObject({ name: "AbortError" });
     expect(axCalls(logs).at(-1)).toBe("Accessibility.disable");
-    expect(axCalls(logs, "remote").at(-1)).toBe("Accessibility.disable");
+    expect(axCalls(logs, "oopif:remote").at(-1)).toBe("Accessibility.disable");
   });
 
   it("releases AX without replacing an observation consumer's failure", async () => {
@@ -1934,42 +2100,50 @@ describe("Accessibility domain lifetime", () => {
       }),
     ).rejects.toBe(error);
     expect(axCalls(logs).at(-1)).toBe("Accessibility.disable");
-    expect(axCalls(logs, "remote").at(-1)).toBe("Accessibility.disable");
+    expect(axCalls(logs, "oopif:remote").at(-1)).toBe("Accessibility.disable");
   });
 
   it("reuses AX across back-to-back leased captures and disables after sliding idle TTL", async () => {
     vi.useFakeTimers();
     try {
       const { cdp, logs } = fixture();
-      const sendGuarded = vi.fn(async () => ({}) as never);
-      cdp.sendGuarded = sendGuarded;
       const lease = new AccessibilityLease(4);
+      const disableCalls = () => logs.filter((call) => call.method === "Accessibility.disable");
 
       await captureObservationFacts(cdp, 4, undefined, undefined, { accessibilityLease: lease });
-      expect(sendGuarded).not.toHaveBeenCalled();
+      expect(disableCalls()).toHaveLength(0);
       expect(axCalls(logs).filter((m) => m === "Accessibility.enable")).toHaveLength(1);
-      expect(axCalls(logs, "remote").filter((m) => m === "Accessibility.enable")).toHaveLength(1);
+      expect(
+        axCalls(logs, "oopif:remote").filter((m) => m === "Accessibility.enable"),
+      ).toHaveLength(1);
 
       await vi.advanceTimersByTimeAsync(ACCESSIBILITY_LEASE_TTL_MS - 1_000);
-      expect(sendGuarded).not.toHaveBeenCalled();
+      expect(disableCalls()).toHaveLength(0);
 
       // A second capture resets the sliding TTL without re-enabling or disabling AX.
       await captureObservationFacts(cdp, 4, undefined, undefined, { accessibilityLease: lease });
       expect(axCalls(logs).filter((m) => m === "Accessibility.enable")).toHaveLength(1);
-      expect(axCalls(logs, "remote").filter((m) => m === "Accessibility.enable")).toHaveLength(1);
+      expect(
+        axCalls(logs, "oopif:remote").filter((m) => m === "Accessibility.enable"),
+      ).toHaveLength(1);
 
       await vi.advanceTimersByTimeAsync(2_000);
-      expect(sendGuarded).not.toHaveBeenCalled();
+      expect(disableCalls()).toHaveLength(0);
 
       await vi.advanceTimersByTimeAsync(ACCESSIBILITY_LEASE_TTL_MS - 2_000);
-      expect(sendGuarded).toHaveBeenCalledTimes(2);
-      for (const target of [{ tabId: 4 }, { tabId: 4, sessionId: "remote" }])
-        expect(sendGuarded).toHaveBeenCalledWith(
-          target,
-          "Accessibility.disable",
-          {},
-          { attachmentId: "attachment" },
-        );
+      expect(disableCalls()).toHaveLength(2);
+      expect(
+        disableCalls()
+          .map((c) => c.processKey)
+          .sort(),
+      ).toEqual(["oopif:remote", "root"]);
+      for (const disable of disableCalls()) {
+        expect(disable.guard).toMatchObject({
+          attachmentId: "attachment",
+          allowReattach: false,
+          ignoreFrameNavigation: true,
+        });
+      }
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -1998,7 +2172,7 @@ describe("Accessibility domain lifetime", () => {
 
       await lease.release();
       expect(axCalls(logs).at(-1)).toBe("Accessibility.disable");
-      expect(axCalls(logs, "remote").at(-1)).toBe("Accessibility.disable");
+      expect(axCalls(logs, "oopif:remote").at(-1)).toBe("Accessibility.disable");
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -2011,21 +2185,35 @@ describe("Accessibility domain lifetime", () => {
     try {
       const f = fixture();
       const gate = new CdpReadGate();
-      const original = f.cdp.sendToTarget!;
+      const original = f.cdp.sendToFrame;
       let hangRemote = false;
-      f.cdp.sendToTarget = (target, method, params) =>
-        gate.run(target, method, () => {
+      f.cdp.sendToFrame = (handle, method, params, guard) => {
+        const processKey = f.processForHandle(handle);
+        return gate.run({ tabId: handle.tabId, processKey }, method, () => {
           if (
             hangRemote &&
-            target.sessionId === "remote" &&
+            processKey === "oopif:remote" &&
             method === "Accessibility.getFullAXTree"
           ) {
-            f.logs.push({ target, method, params: (params ?? {}) as Record<string, unknown> });
+            f.logs.push({
+              processKey,
+              handle,
+              method,
+              params: (params ?? {}) as Record<string, unknown>,
+              guard,
+            });
             return new Promise<never>(() => {});
           }
-          return original(target, method, params);
+          return original(handle, method, params, guard);
         });
-      f.cdp.send = (tabId, method, params) => f.cdp.sendToTarget!({ tabId }, method, params);
+      };
+      f.cdp.send = (tabId, method, params, signal) =>
+        f.cdp.sendToFrame(
+          toRootFrameHandle(tabId),
+          method,
+          params,
+          signal ? { signal } : undefined,
+        );
 
       const lease = new AccessibilityLease(4);
       await captureObservationFacts(f.cdp, 4, undefined, undefined, { accessibilityLease: lease });
@@ -2039,7 +2227,7 @@ describe("Accessibility domain lifetime", () => {
 
       await vi.advanceTimersByTimeAsync(ACCESSIBILITY_LEASE_TTL_MS);
       expect(axCalls(f.logs).at(-1)).toBe("Accessibility.disable");
-      expect(axCalls(f.logs, "remote")).toEqual([
+      expect(axCalls(f.logs, "oopif:remote")).toEqual([
         "Accessibility.enable",
         "Accessibility.getFullAXTree",
         "Accessibility.getFullAXTree",
@@ -2095,8 +2283,8 @@ describe("visual facts integration", () => {
       expect(calls).toHaveLength(2);
       for (const call of calls) expect(call.params.computedStyles).toEqual(expected);
     }
-    expect(base.logs.map((c) => [c.target, c.method])).toEqual(
-      visual.logs.map((c) => [c.target, c.method]),
+    expect(base.logs.map((c) => [c.processKey, c.method])).toEqual(
+      visual.logs.map((c) => [c.processKey, c.method]),
     );
     const scene = (input: typeof baseFacts) =>
       buildSemanticVomScene({
@@ -2118,7 +2306,7 @@ describe("visual facts integration", () => {
   it("passes actual snapshot styles, client units, projection and identity to pure discovery without additional CDP", async () => {
     const { cdp, logs } = fixture({
       canvas: true,
-      frames: [{ frameId: "main", target: { tabId: 4 } }],
+      frames: [{ frameId: "main" }],
     });
     const facts = await captureObservationFacts(cdp, 4, undefined, undefined, {
       includeVisualFacts: true,
@@ -2144,7 +2332,7 @@ describe("visual facts integration", () => {
     expect(logs).toHaveLength(before);
     expect(facts.documents[0].index.nodes.get(2)?.layout?.clientRect).toEqual([0, 0, 100, 40]);
     expect(facts.documents[0].geometry?.pageScale).toBe(1);
-    const baseline = fixture({ frames: [{ frameId: "main", target: { tabId: 4 } }] });
+    const baseline = fixture({ frames: [{ frameId: "main" }] });
     await captureObservationFacts(baseline.cdp, 4);
     expect(logs.map((call) => call.method)).toEqual(baseline.logs.map((call) => call.method));
   });

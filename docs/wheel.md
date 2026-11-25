@@ -7,8 +7,8 @@ when the goal is simply to bring an existing element into view.
 | Entry point | Name |
 | --- | --- |
 | CLI | `bsk wheel` |
+| MCP | `bsk_interact` with `action: "wheel"` |
 | Wire protocol | `tool.wheel` |
-| DeepSeek Harness | `bsk_interact` with `action: "wheel"` |
 
 ## Usage
 
@@ -51,8 +51,9 @@ Moving the pointer can itself trigger hover UI and change the page.
 Deltas are passed unchanged to CDP's `Input.dispatchMouseEvent`, whose input
 units are CSS pixels. Chromium applies native page-zoom and modifier behavior;
 DOM `WheelEvent.deltaX/deltaY` and actual scroll distance can differ from the
-requested values. For example, Chromium at 125% page zoom delivers a 120-unit
-input as a 96-unit DOM wheel delta. A page can also prevent the default scroll
+requested values (for example, Chromium < 158 at 125% page zoom delivers a
+120-unit input as a 96-unit DOM wheel delta, whereas Chromium 158+ preserves
+CSS-pixel deltas across browser zoom). A page can also prevent the default scroll
 or use the event to zoom a control. Browser behavior is preserved.
 
 Example result:
@@ -74,7 +75,7 @@ Success means input dispatch completed; it does not wait for scrolling,
 animations or application work to finish. Observe the page afterwards to check
 the result. The optional `dialogs` array reports dialogs handled during the call.
 
-## Protocol and plugin
+## Protocol and MCP
 
 ```json
 {
@@ -94,22 +95,21 @@ finite deltas and at most one nonempty `ref` or `selector`. See the generated
 [parameter schema](../crates/bsk-protocol/schema/tool_wheel_params.json) and
 [result schema](../crates/bsk-protocol/schema/tool_wheel_result.json).
 
-The plugin exposes the same operation through a plugin-owned session:
+`bsk mcp` exposes the same operation through `bsk_interact`:
 
 ```json
 {
   "action": "wheel",
   "session": "abcd",
-  "target": "@e3",
-  "deltaY": -120,
-  "tabId": 42,
-  "timeoutMs": 5000
+  "context": "CURRENT",
+  "params": {
+    "ref": "@e3",
+    "delta_y": -120,
+    "tab_id": 42,
+    "timeout_ms": 5000
+  }
 }
 ```
-
-Omitted `session` uses the current plugin session. The result contains `session`,
-`tabId`, `x`, `y`, `deltaX` and `deltaY`, with the same input semantics above.
-The action uses the existing ownership, cancellation, queue and observation path.
 
 ## Errors and interruption
 
@@ -135,5 +135,5 @@ scrolling, nested clips, same-process and out-of-process iframes, zoom, modifier
 `preventDefault` and cancellation. It does not attach to a user's browser.
 
 ```sh
-BSK_WHEEL_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension exec vitest run src/tools/__tests__/wheel.browser.test.ts
+BSK_TEST_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension test:browser src/tools/__tests__/wheel.browser.test.ts
 ```

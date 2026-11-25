@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests of the audit helper, not BrowserSkill product tests."""
 
-import contextlib, csv, importlib.util, io, json, tempfile, time, unittest
+import contextlib, csv, importlib.util, io, json, sys, tempfile, time, unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -37,10 +37,10 @@ class AuditTests(unittest.TestCase):
         (self.skill / "references").mkdir(parents=True)
         (self.skill / "assets/fixtures").mkdir(parents=True)
         (self.skill / "assets/fixtures/minimal.html").write_text(
-            "<title>synthetic</title>"
+            "<title>synthetic</title>", encoding="utf-8"
         )
         self.binary = self.base / "bsk"
-        self.binary.write_text(FAKE)
+        self.binary.write_text(FAKE, encoding="utf-8")
         self.binary.chmod(0o755)
         self.patch = patch.object(audit, "SKILL", self.skill)
         self.patch.start()
@@ -50,7 +50,7 @@ class AuditTests(unittest.TestCase):
         self.patch.stop()
         self.tmp.cleanup()
 
-    def init(self, extra=None):
+    def init(self, extra=None, *, root=None, port=4567):
         cases = [
             {"id": "FLOW", "kind": "workflow", "required_commands": ["status"]}
         ] + (extra or [])
@@ -58,12 +58,12 @@ class AuditTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             audit.init(
                 NS(
-                    out=str(self.root),
+                    out=str(root or self.root),
                     bsk=str(self.binary),
                     binary=str(self.binary),
                     browser="synthetic-browser",
                     candidate="synthetic-build",
-                    port=4567,
+                    port=port,
                 )
             )
 
@@ -139,14 +139,16 @@ class AuditTests(unittest.TestCase):
         self.init()
         rid = self.execute()
         self.fill(rid)
-        (self.root / "commands" / rid / "stdout.txt").write_text('{"ok":false}')
+        (self.root / "commands" / rid / "stdout.txt").write_text(
+            '{"ok":false}', encoding="utf-8"
+        )
         self.assertEqual(self.gate()[0], 1)
 
     def test_candidate_change_blocks(self):
         self.init()
         rid = self.execute()
         self.fill(rid)
-        self.binary.write_text(FAKE + "\n# changed\n")
+        self.binary.write_text(FAKE + "\n# changed\n", encoding="utf-8")
         self.assertEqual(self.gate()[0], 1)
 
     def test_deleted_scenario_blocks(self):
@@ -248,7 +250,7 @@ class AuditTests(unittest.TestCase):
             "elif '--unsatisfied'",
             "elif '--eval-false' in args:print(json.dumps({'ok':False,'marker':'present'}))\nelif '--unsatisfied'",
         )
-        self.binary.write_text(body)
+        self.binary.write_text(body, encoding="utf-8")
         self.init()
         good = self.execute()
         bad = self.execute(["evaluate", "--eval-false"], "CMD-evaluate")
@@ -337,7 +339,7 @@ if not p:print('Usage: bsk <COMMAND>\\n\\nCommands:\\n  navigate  Go\\n  navigat
 elif p==['navigate']:print('Usage: bsk navigate [URL]\\n\\nCommands:\\n  back  Back\\n\\nArguments:\\n  [URL] Destination\\n\\nOptions:\\n  --help Help')
 else:print('Usage: bsk '+' '.join(p))
 """
-        self.binary.write_text(body)
+        self.binary.write_text(body, encoding="utf-8")
         inv = audit.discover(str(self.binary), self.base / "help")
         self.assertEqual(
             set(inv["commands"]), {"help", "navigate", "navigate back", "navigate-back"}
@@ -355,7 +357,9 @@ else:print('Usage: bsk '+' '.join(p))
 
     def test_server_routes_and_event_oracle(self):
         root = self.skill / "assets/fixtures"
-        (root / "plan-recipe-lab.html").write_text("<title>plan-recipe-lab</title>")
+        (root / "plan-recipe-lab.html").write_text(
+            "<title>plan-recipe-lab</title>", encoding="utf-8"
+        )
         server = serve.make_server(root, 0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -407,7 +411,7 @@ elif args[:2] == ['recipe', 'save']:
 else:
     print(json.dumps({'ok': True, 'value': 'synthetic'}))
 """
-        self.binary.write_text(body)
+        self.binary.write_text(body, encoding="utf-8")
         inv = audit.discover(str(self.binary), self.base / "help")
         self.assertEqual(
             set(inv["commands"]),
@@ -597,19 +601,115 @@ else:
             )
         )
 
-        # Multi-run aggregation
-        agg = audit.aggregate_multi_run_benchmarks([self.root, self.root])
-        self.assertEqual(agg["runs_count"], 2)
-        self.assertEqual(agg["summary"]["full_pass_runs"], 2)
-        self.assertEqual(agg["summary"]["mean_success_rate"], 1.0)
-        md = audit.render_multi_run_markdown(agg)
-        self.assertIn("PLAN-FLOW", md)
-        self.assertIn("RECIPE-FLOW", md)
+    def test_benchmark_reports_empirical_stability_for_independent_runs(self):
+        roots = [self.root, self.base / "second", self.base / "third"]
+        scenarios = [{"id": "ALWAYS"}, {"id": "NEVER"}]
+        for i, root in enumerate(roots):
+            self.init(scenarios, root=root, port=4567 + i)
+            audit.write(root / "benchmark.json", audit.compute_run_benchmark(root))
+            audit.write(
+                root / "results.json",
+                {
+                    "cases": [
+                        {"id": "FLOW", "status": "passed"},
+                        {"id": "ALWAYS", "status": "passed"},
+                        {"id": "CMD-status", "status": "passed"},
+                    ]
+                },
+            )
+            if i == 1:
+                audit.write(root / "gate.json", {"passed_ids": ["ALWAYS", "CMD-status"]})
+
+        out = self.base / "benchmark-multi.json"
+        markdown = self.base / "benchmark-multi.md"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                audit.benchmark_cmd(NS(run=roots, runs_dir=None, out=out, markdown=markdown)),
+                0,
+            )
+        agg = audit.load(out)
+        self.assertEqual(agg["runs_count"], 3)
+        self.assertEqual(agg["summary"]["mean_success_rate"], 0.5333)
+        self.assertEqual(agg["summary"]["pass_at_k_overall"], 0.6)
+        self.assertEqual(agg["summary"]["pass_all_k_overall"], 0.4)
+        self.assertEqual(agg["summary"]["flaky_ids"], ["FLOW"])
+        cases = {c["id"]: c for c in agg["cases"]}
+        for case_id, passes, pass_all, flaky in [
+            ("FLOW", 2, False, True),
+            ("ALWAYS", 3, True, False),
+            ("NEVER", 0, False, False),
+        ]:
+            with self.subTest(case=case_id):
+                case = cases[case_id]
+                self.assertEqual(case["runs"], 3)
+                self.assertEqual(case["passes"], passes)
+                self.assertEqual(case["pass_at_k"], passes > 0)
+                self.assertEqual(case["pass_all_k"], pass_all)
+                self.assertEqual(case["flaky"], flaky)
+        md = markdown.read_text(encoding="utf-8")
+        self.assertIn("Flaky cases: `FLOW`", md)
+        self.assertIn("| `FLOW` | 3 | 2 | 66.7% | Yes | No | Yes |", md)
+        self.assertIn("| `CMD-status` | 3 | 3 | 100.0% | Yes | Yes | No |", md)
+
+    def test_benchmark_rejects_mixed_candidates_and_plans(self):
+        self.init()
+        second = self.base / "second"
+        self.init(root=second)
+        cfg_path = second / "run.json"
+        cfg = audit.load(cfg_path)
+        for field, value in [
+            ("candidate", "different-build"),
+            ("entry_sha256", "1" * 64),
+            ("binary_sha256", "2" * 64),
+        ]:
+            with self.subTest(field=field):
+                audit.write(cfg_path, {**cfg, field: value})
+                with self.assertRaisesRegex(ValueError, f"second.*{field}"):
+                    audit.aggregate_multi_run_benchmarks([self.root, second])
+
+        different_plan = self.base / "different-plan"
+        self.init([{"id": "NEW-SCENARIO"}], root=different_plan)
+        with self.assertRaisesRegex(ValueError, r"different-plan.*plan_sha256"):
+            audit.aggregate_multi_run_benchmarks([self.root, different_plan])
+
+        audit.write(cfg_path, {**cfg, "entry_sha256": "invalid"})
+        with self.assertRaisesRegex(ValueError, r"second.*invalid fields: entry_sha256"):
+            audit.aggregate_multi_run_benchmarks([self.root, second])
+
+    def test_benchmark_rejects_duplicate_runs_and_modified_plans(self):
+        self.init()
+        with self.assertRaisesRegex(ValueError, r"Duplicate benchmark run"):
+            audit.aggregate_multi_run_benchmarks([self.root, self.root / ".." / "run"])
+
+        second = self.base / "second"
+        self.init(root=second)
+        plan_path = second / "plan.json"
+        plan = audit.load(plan_path)
+        plan["cases"].pop()
+        audit.write(plan_path, plan)
+        with self.assertRaisesRegex(ValueError, r"second.*changed plan\.json"):
+            audit.aggregate_multi_run_benchmarks([self.root, second])
+
+    def test_single_run_benchmark_keeps_plain_report(self):
+        self.init()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                audit.benchmark_cmd(NS(run=[self.root], runs_dir=None, out=None, markdown=None)),
+                0,
+            )
+        bench = audit.load(self.root / "benchmark.json")
+        self.assertNotIn("pass_at_k_overall", bench["summary"])
+        self.assertNotIn("flaky", bench["cases"][0])
+        self.assertNotIn("Case Stability", (self.root / "benchmark.md").read_text(encoding="utf-8"))
 
     def test_adversarial_server_routes_bfcache_cors_and_media_mimes(self):
         root = self.skill / "assets/fixtures"
-        (root / "arena-bfcache-detail.html").write_text("<title>bfcache</title>")
-        (root / "captions-zh.vtt").write_text("WEBVTT\n\n00:00.000 --> 00:01.000\n你好\n")
+        (root / "arena-bfcache-detail.html").write_text(
+            "<title>bfcache</title>", encoding="utf-8"
+        )
+        (root / "captions-zh.vtt").write_text(
+            "WEBVTT\n\n00:00.000 --> 00:01.000\n你好\n", encoding="utf-8"
+        )
         (root / "arena-audio.wav").write_bytes(b"RIFF\x24\x00\x00\x00WAVE")
         server = serve.make_server(root, 0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -753,15 +853,20 @@ else:
 
     def test_wave_commands_range_assertions_and_long_admin_home(self):
         (self.skill / "assets/fixtures/arena-frame-outer.html").write_text(
-            '<iframe src="http://localhost:4187/a"></iframe><iframe src="http://127.0.0.1:4187/b"></iframe>'
+            '<iframe src="http://localhost:4187/a"></iframe><iframe src="http://127.0.0.1:4187/b"></iframe>',
+            encoding="utf-8",
         )
         self.init()
-        rewritten = (self.root / "fixtures/arena-frame-outer.html").read_text()
+        rewritten = (self.root / "fixtures/arena-frame-outer.html").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("http://localhost:4567/a", rewritten)
         self.assertIn("http://127.0.0.1:4567/b", rewritten)
         rid = self.execute()
         d = self.root / "commands" / rid
-        (d / "stdout.txt").write_text('{"ok": true, "size": 42, "label": "9"}')
+        (d / "stdout.txt").write_text(
+            '{"ok": true, "size": 42, "label": "9"}', encoding="utf-8"
+        )
         m = audit.load(d / "meta.json")
         m["stdout_sha256"] = audit.digest(d / "stdout.txt")
         audit.write(d / "meta.json", m)
@@ -825,6 +930,10 @@ else:
         with patch.object(audit.sys, "platform", "win32"):
             win_home = audit.resolve_admin_home(deep_run)
             self.assertEqual(Path(win_home), (deep_run / "admin-runtime").resolve())
+        if sys.platform == "win32":
+            # Windows daemons use named pipes, so the AF_UNIX 96-byte cap and its
+            # symlink workaround do not apply there.
+            return
         resolved = Path(audit.resolve_admin_home(deep_run))
         try:
             self.assertLessEqual(len(str(resolved / "run" / "daemon.sock")), 96)
@@ -833,12 +942,87 @@ else:
             if resolved.is_symlink():
                 resolved.unlink()
 
+    def test_timeout_records_metadata_instead_of_crashing(self):
+        self.binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "if '--help' in sys.argv:\n"
+            "    print('Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n  status  Show status\\n\\nOptions:\\n  --help  Help' if sys.argv[1:] == ['--help'] else 'Usage: bsk status [OPTIONS]')\n"
+            "else:\n"
+            "    time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        self.init()
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.execute(
+                NS(
+                    run=str(self.root),
+                    case="FLOW",
+                    argv=["status"],
+                    timeout=1,
+                    lane="browser",
+                    stdin_file=None,
+                    interactive=False,
+                )
+            )
+        meta = audit.load(next((self.root / "commands").glob("*/meta.json")))
+        self.assertTrue(meta["timed_out"])
+        self.assertNotEqual(meta.get("exit_code"), 0)
+
+    def test_launcher_runs_python_wrappers_through_the_interpreter(self):
+        wrapper = self.base / "bsk-wrapper"
+        wrapper.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
+        self.assertEqual(
+            audit.launcher(wrapper, "nt"), [sys.executable or "python", str(wrapper)]
+        )
+        self.assertEqual(audit.launcher(wrapper, "posix"), [wrapper])
+        for suffix in (".exe", ".cmd", ".bat"):
+            native = self.base / ("bsk" + suffix)
+            native.write_bytes(b"MZ")
+            self.assertEqual(audit.launcher(native, "nt"), [native])
+        for suffix in (".py", ".pyw"):
+            script = self.base / ("bsk" + suffix)
+            script.write_text("print('ok')\n", encoding="utf-8")
+            self.assertEqual(
+                audit.launcher(script, "nt"), [sys.executable or "python", str(script)]
+            )
+            self.assertEqual(audit.launcher(script, "posix"), [script])
+        plain = self.base / "bsk-script"
+        plain.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+        self.assertEqual(audit.launcher(plain, "nt"), [plain])
+
+    def test_events_endpoint_serves_utf8_payloads(self):
+        root = self.skill / "assets/fixtures"
+        server = serve.make_server(root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}"
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/event",
+                    data=json.dumps(
+                        {"type": "note", "value": "中文事件"}, ensure_ascii=False
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+            ) as response:
+                response.read()
+            with urllib.request.urlopen(url + "/events") as response:
+                body = response.read().decode("utf-8")
+            self.assertIn("中文事件", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_shipped_scenarios_and_fixture_manifest_integrity(self):
         import re as _re
 
         real_skill = Path(__file__).resolve().parents[1]
         scenarios = audit.load(real_skill / "references/scenarios.json")
-        self.assertEqual(len(scenarios), 111)
+        self.assertEqual(len(scenarios), 113)
         ids = [s["id"] for s in scenarios]
         self.assertEqual(len(ids), len(set(ids)))
         for required_id in [
@@ -850,6 +1034,8 @@ else:
             "READ-DYNAMIC-BOUNDED",
             "EDGE-VIRTUAL-LIST-RECYCLE",
             "EDGE-STACKED-MODALS",
+            "EDGE-NESTED-MENU-REFS",
+            "EDGE-SLOTTED-LIST-EXTRACT",
             "LOCAL-VIDEO-PORTAL",
             "LOCAL-FORUM-HUB",
             "PUBLIC-BILIBILI-FEED",
@@ -938,6 +1124,417 @@ else:
             full = real_skill / "assets" / rel
             self.assertTrue(full.is_file(), f"Missing fixture {rel}")
             self.assertEqual(audit.digest(full), expected_sha, f"Hash mismatch for {rel}")
+
+    def test_nested_menu_vom_assertions_and_gate_contract(self):
+        nested_cli = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+cmds = ["navigate", "sync", "hover", "wait-for-element", "observe", "snapshot", "click", "read"]
+if "--help" in args:
+    if args == ["--help"]:
+        body = "\\n".join(f"  {c:<18} run {c}" for c in cmds)
+        print(f"Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n{body}\\n\\nOptions:\\n  --help  Help")
+    else:
+        print(f"Usage: bsk {args[0]} [OPTIONS]")
+    sys.exit(0)
+mode = os.environ.get("FAKE_MENU_MODE", "fixed")
+cmd = args[0]
+if cmd == "navigate":
+    print(json.dumps({"ok": True, "url": args[1]}))
+elif cmd == "wait-for-element":
+    print(json.dumps({"satisfied": True}))
+elif cmd == "hover":
+    print(json.dumps({"ok": True}))
+elif cmd == "click":
+    print(json.dumps({"ok": True}))
+elif cmd == "read":
+    print(json.dumps({"items": [{"ref": "@e9", "values": {"text": "Selected audit"}, "redacted": []}]}))
+elif cmd in ("sync", "observe", "snapshot"):
+    phase = "post" if "--post" in args else "pre"
+    if phase == "pre":
+        if mode == "v050":
+            vom = (
+                "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+                "  @e1 menuitem \\"Overview\\"\\n"
+                "  @e2 menuitem \\"Workspace [has-submenu]\\""
+            )
+        else:
+            vom = (
+                "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+                "  @e1 menuitem \\"Overview\\"\\n"
+                "  @e2 menuitem \\"Workspace\\" [has-submenu]"
+                + ("\\n  @e9 menuitem \\"Audit export\\"" if mode == "leaked_pre" else "")
+            )
+    elif mode == "v050":
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace [expanded]\\"\\n"
+            "menu\\n"
+            "  @e3 menuitem \\"Members\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\""
+        )
+    elif mode == "dup_ref":
+        vom = (
+            "@vom 1\\nmenu\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history\\" [expanded]\\n"
+            "    @e5 menuitem \\"Audit export\\"\\n"
+            "    @e5 menuitem \\"Report history\\""
+        )
+    else:
+        audit_ref = "@e7" if cmd == "sync" else "@e5"
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace\\" [expanded]\\n"
+            "menu\\n"
+            "  @e3 menuitem \\"Members\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history\\" [expanded]\\n"
+            f"    {audit_ref} menuitem \\"Audit export\\"\\n"
+            "    @e8 menuitem \\"Report history\\""
+        )
+    key = "vom" if cmd == "sync" else "text"
+    print(json.dumps({key: vom}))
+"""
+        self.binary.write_text(nested_cli, encoding="utf-8")
+        self.binary.chmod(0o755)
+        real_skill = Path(__file__).resolve().parents[1]
+        nested_scenario = next(
+            s
+            for s in audit.load(real_skill / "references/scenarios.json")
+            if s["id"] == "EDGE-NESTED-MENU-REFS"
+        )
+        items = nested_scenario["nested_menu_contract"]["items"]
+
+        def run_round(run_name, mode, click_ref="@e7"):
+            out_dir = self.base / run_name
+            audit.write(self.skill / "references/scenarios.json", [nested_scenario])
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.init(
+                    NS(
+                        out=str(out_dir),
+                        bsk=str(self.binary),
+                        binary=str(self.binary),
+                        browser="chrome",
+                        candidate=run_name,
+                        port=4567,
+                    )
+                )
+
+            def ex(argv, case="EDGE-NESTED-MENU-REFS"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audit.execute(
+                        NS(
+                            run=str(out_dir),
+                            case=case,
+                            argv=argv,
+                            timeout=5,
+                            lane="browser",
+                            stdin_file=None,
+                            interactive=False,
+                            env=[f"FAKE_MENU_MODE={mode}"],
+                        )
+                    )
+                return max(
+                    (out_dir / "commands").glob("*/meta.json"),
+                    key=lambda p: p.stat().st_mtime_ns,
+                ).parent.name
+
+            r_nav = ex(["navigate", "http://127.0.0.1:4567/nested-menu"])
+            r_pre = ex(["sync", "--json"])
+            r_h1 = ex(["hover", "--ref", "@e2"])
+            r_w1 = ex(["wait-for-element", "#workspace-popper"])
+            r_h2 = ex(["hover", "--ref", "@e4"])
+            r_w2 = ex(["wait-for-element", "#advanced-popper"])
+            r_obs = ex(["observe", "--post", "--json"])
+            r_snap = ex(["snapshot", "--post", "--json"])
+            r_sync = ex(["sync", "--post", "--json"])
+            r_click = ex(["click", "--ref", click_ref])
+            r_read = ex(["read", "--selector", "#menu-selection-receipt"])
+            records = [r_nav, r_pre, r_h1, r_w1, r_h2, r_w2, r_obs, r_snap, r_sync, r_click, r_read]
+            checks = [
+                {"record": r_pre, "pointer": "/json/vom", "op": "vom_no_ref", "value": items},
+                {"record": r_obs, "pointer": "/json/text", "op": "vom_distinct_refs", "value": items},
+                {"record": r_snap, "pointer": "/json/text", "op": "vom_distinct_refs", "value": items},
+                {"record": r_sync, "pointer": "/json/vom", "op": "vom_distinct_refs", "value": items},
+                {"record": r_read, "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"},
+            ]
+            return out_dir, records, checks
+
+        # 1) 0.5.0 parent-concatenated menuitem fails vom_distinct_refs and gate()
+        d_050, recs_050, checks_050 = run_round("r050", "v050")
+        self.assertTrue(audit.assertion(d_050, checks_050[0]))
+        for c in checks_050[1:4]:
+            self.assertFalse(audit.assertion(d_050, c))
+        audit.write(
+            d_050 / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_050,
+                        "oracle_summary": "0.5.0 check",
+                        "checks": [{"record": recs_050[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            code_050 = audit.gate(d_050)
+        gate_050 = audit.load(d_050 / "gate.json")
+        self.assertEqual(code_050, 1)
+        self.assertTrue(
+            any("EDGE-NESTED-MENU-REFS" in e and "independent distinct menuitem" in e for e in gate_050["errors"]),
+            gate_050["errors"],
+        )
+
+        # 2) Duplicate @eN fails vom_distinct_refs
+        d_dup, _, checks_dup = run_round("rdup", "dup_ref")
+        self.assertFalse(audit.assertion(d_dup, checks_dup[1]))
+
+        # 3) Pre-expansion leaked ref fails vom_no_ref and gate()
+        d_leak, recs_leak, checks_leak = run_round("rleak", "leaked_pre")
+        self.assertFalse(audit.assertion(d_leak, checks_leak[0]))
+        audit.write(
+            d_leak / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_leak,
+                        "oracle_summary": "leaked pre check",
+                        "checks": [{"record": recs_leak[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_leak)
+        gate_leak = audit.load(d_leak / "gate.json")
+        self.assertTrue(
+            any("Pre-expansion sync exposed actionable child ref" in e for e in gate_leak["errors"]),
+            gate_leak["errors"],
+        )
+
+        # 4) Clicking ref NOT taken from latest sync fails gate()
+        d_wrong_ref, recs_wrong, _ = run_round("rwrong", "fixed", click_ref="@e5")
+        audit.write(
+            d_wrong_ref / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_wrong,
+                        "oracle_summary": "wrong ref check",
+                        "checks": [{"record": recs_wrong[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_wrong_ref)
+        gate_wrong = audit.load(d_wrong_ref / "gate.json")
+        self.assertTrue(
+            any("Click ref @e5 does not match latest sync ref @e7" in e for e in gate_wrong["errors"]),
+            gate_wrong["errors"],
+        )
+
+        # 5) Fixed candidate passes every assertion and EDGE-NESTED-MENU-REFS in gate()
+        d_ok, recs_ok, checks_ok = run_round("rok", "fixed", click_ref="@e7")
+        for c in checks_ok:
+            self.assertTrue(audit.assertion(d_ok, c), c)
+        audit.write(
+            d_ok / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_ok,
+                        "oracle_summary": "Verified nested menu refs and receipt",
+                        "checks": checks_ok,
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_ok)
+        gate_ok = audit.load(d_ok / "gate.json")
+        self.assertIn("EDGE-NESTED-MENU-REFS", gate_ok["passed_ids"])
+
+    def test_slotted_list_extract_gate_contract(self):
+        slotted_cli = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if "--help" in args:
+    if args == ["--help"]:
+        print("Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n  navigate  Go\\n  extract   Extract\\n\\nOptions:\\n  --help  Help")
+    elif args == ["extract", "--help"]:
+        print("Usage: bsk extract <COMMAND>\\n\\nCommands:\\n  discover  Discover\\n  list      List\\n\\nOptions:\\n  --help  Help")
+    else:
+        print("Usage: bsk " + " ".join(args[:-1]) + " [OPTIONS]")
+    sys.exit(0)
+mode = os.environ.get("FAKE_SLOTTED_MODE", "fixed")
+if args[0] == "navigate":
+    print(json.dumps({"ok": True, "url": args[1]}))
+elif args[:2] == ["extract", "discover"]:
+    print(json.dumps({
+        "targets": [
+            {"target_id": "xt_slotted", "kind": "list", "name": "Shadow Slotted Runbook List", "columns": ["text", "url"]},
+            {"target_id": "xt_nested", "kind": "list", "name": "Nested mTLS Sub-checks", "columns": ["text", "url"]}
+        ]
+    }))
+elif args[:2] == ["extract", "list"]:
+    if "--selector" in args:
+        print(json.dumps({
+            "rows": [{"text": "Sub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/mtls"}],
+            "row_sources": [{"source_row": 1}],
+            "warnings": [],
+            "coverage": {"truncated": False, "dataset_complete": "complete"}
+        }))
+    elif mode == "v050":
+        print(json.dumps({
+            "rows": [{"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}],
+            "row_sources": [{"source_row": 1}],
+            "warnings": [],
+            "coverage": {"truncated": False, "dataset_complete": "complete"}
+        }))
+    elif mode == "bad_details_pos":
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/canary"},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 2}, {"source_row": 4}],
+            "warnings": ["hidden_rows_omitted"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+    elif mode == "ambiguous_nested_url":
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": None},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 3}, {"source_row": 5}],
+            "warnings": ["hidden_rows_omitted", "ambiguous_default_url"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+    else:
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/canary"},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 3}, {"source_row": 5}],
+            "warnings": ["hidden_rows_omitted"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+"""
+        self.binary.write_text(slotted_cli, encoding="utf-8")
+        self.binary.chmod(0o755)
+        real_skill = Path(__file__).resolve().parents[1]
+        slotted_scenario = next(
+            s
+            for s in audit.load(real_skill / "references/scenarios.json")
+            if s["id"] == "EDGE-SLOTTED-LIST-EXTRACT"
+        )
+
+        def run_slotted(run_name, mode, target_id="xt_slotted"):
+            out_dir = self.base / run_name
+            audit.write(self.skill / "references/scenarios.json", [slotted_scenario])
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.init(
+                    NS(
+                        out=str(out_dir),
+                        bsk=str(self.binary),
+                        binary=str(self.binary),
+                        browser="chrome",
+                        candidate=run_name,
+                        port=4567,
+                    )
+                )
+
+            def ex(argv):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audit.execute(
+                        NS(
+                            run=str(out_dir),
+                            case="EDGE-SLOTTED-LIST-EXTRACT",
+                            argv=argv,
+                            timeout=5,
+                            lane="browser",
+                            stdin_file=None,
+                            interactive=False,
+                            env=[f"FAKE_SLOTTED_MODE={mode}"],
+                        )
+                    )
+                return max(
+                    (out_dir / "commands").glob("*/meta.json"),
+                    key=lambda p: p.stat().st_mtime_ns,
+                ).parent.name
+
+            r_nav = ex(["navigate", "http://127.0.0.1:4567/arena-shadow-iframe"])
+            r_disc = ex(["extract", "discover", "--json"])
+            r_outer = ex(["extract", "list", "--target-id", target_id, "--json"])
+            r_inner = ex(["extract", "list", "--selector", "#shadow-nested-sublist", "--json"])
+            recs = [r_nav, r_disc, r_outer, r_inner]
+            audit.write(
+                out_dir / "results.json",
+                {
+                    "cases": [
+                        {
+                            "id": "EDGE-SLOTTED-LIST-EXTRACT",
+                            "status": "passed",
+                            "records": recs,
+                            "oracle_summary": "slotted list check",
+                            "checks": [
+                                {
+                                    "record": r_inner,
+                                    "pointer": "/json/rows/0/text",
+                                    "op": "eq",
+                                    "value": "Sub-check: mTLS cert pinned",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.gate(out_dir)
+            return audit.load(out_dir / "gate.json")
+
+        g_v050 = run_slotted("slotted_v050", "v050")
+        self.assertTrue(
+            any("Slotted outer list row count 1 != 3" in e for e in g_v050["errors"]),
+            g_v050["errors"],
+        )
+
+        g_pos = run_slotted("slotted_pos", "bad_details_pos")
+        self.assertTrue(
+            any("source_row [1, 2, 4] != [1, 3, 5]" in e for e in g_pos["errors"]),
+            g_pos["errors"],
+        )
+
+        g_url = run_slotted("slotted_url", "ambiguous_nested_url")
+        self.assertTrue(
+            any("does not end with '/runbook/canary'" in e for e in g_url["errors"]),
+            g_url["errors"],
+        )
+
+        g_tid = run_slotted("slotted_tid", "fixed", target_id="xt_wrong")
+        self.assertTrue(
+            any("Missing extract list --target-id xt_slotted" in e for e in g_tid["errors"]),
+            g_tid["errors"],
+        )
+
+        g_ok = run_slotted("slotted_ok", "fixed")
+        self.assertIn("EDGE-SLOTTED-LIST-EXTRACT", g_ok["passed_ids"])
 
 
 if __name__ == "__main__":

@@ -18,15 +18,27 @@ import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 
 const exec = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
-const bsk = resolve(process.env.BSK_DIALOG_BSK ?? "target/debug/bsk");
+const defaultCli = process.platform === "win32" ? "target/debug/bsk.exe" : "target/debug/bsk";
+const bsk = resolve(process.env.BSK_TEST_CLI ?? defaultCli);
 const extension = resolve(process.env.BSK_DIALOG_EXTENSION ?? "apps/extension/dist/chrome-mv3");
-const chrome = process.env.BSK_DIALOG_CHROME;
-assert(chrome, "Set BSK_DIALOG_CHROME to a local Chrome for Testing executable");
+const chrome = process.env.BSK_TEST_CHROME;
+assert(chrome, "Set BSK_TEST_CHROME to a local Chrome for Testing executable");
 const output = resolve(process.env.BSK_DIALOG_OUTPUT ?? "evals/browser/results/js-dialog-control");
 const port = Number(process.env.BSK_DIALOG_PORT ?? 52837);
 const baseline = process.env.BSK_DIALOG_BASELINE === "1";
 const bskHome = await mkdtemp(join(tmpdir(), "bsk-dialog-home-"));
 const env = { ...process.env, BSK_HOME: bskHome, BSK_AUTO_UPDATE: "off", BSK_AUTO_START: "0" };
+for (const key of [
+  "BSK_SESSION",
+  "BSK_SCOPE",
+  "CLAUDE_CODE_AGENT_ID",
+  "CODEX_THREAD_ID",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "CURSOR_TRACE_ID",
+  "DSH_SESSION_ID",
+]) {
+  delete env[key];
+}
 const transcript = [];
 await mkdir(output, { recursive: true });
 async function cli(args, expectedCode = 0) {
@@ -121,7 +133,8 @@ try {
       extensionPath: baseline
         ? extension
         : await copyPairingExtension(extension, join(bskHome, "extension"), port),
-      extensionViaCdp: process.env.BSK_DIALOG_LOAD_CDP === "1",
+      extensionViaCdp:
+        process.env.BSK_TEST_LOAD_CDP === "1" || process.env.BSK_DIALOG_LOAD_CDP === "1",
       headless: false,
     },
     async (send) => {

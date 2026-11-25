@@ -112,7 +112,11 @@
       "readFailed": "Could not load settings. Reopen the extension.",
       "writeFailed": "Could not save. Your settings have not changed. Try again.",
       "confirmTabBorrowInfoLabel": "About tab borrowing confirmation",
-      "requestHelpEnabledInfoLabel": "About human help requests"
+      "requestHelpEnabledInfoLabel": "About human help requests",
+      "openAgentWindowMinimized": "Open Agent Windows minimized",
+      "openAgentWindowMinimizedHint": "When on, new background Agent Windows start minimized instead of appearing on screen. When off, they open as normal unfocused windows.",
+      "openAgentWindowMinimizedScope": "Saved automatically for this browser profile. Applies to new background Agent Windows; explicit foreground sessions and action recording still open visibly.",
+      "openAgentWindowMinimizedInfoLabel": "About opening Agent Windows minimized"
     },
     "remoteLocal": "Switch to local",
     "remotePairing": "Pairing link",
@@ -154,7 +158,7 @@
       "unavailableHint": "Connect this browser profile to bsk to copy its instructions.",
       "copyButton": "Copy instructions",
       "copyFailed": "Could not copy the instructions. Please try again.",
-      "promptTemplate": "For this task, use BrowserSkill in browser {{name}} (instance ID: {{instanceId}}). Start every new session for this task with the appropriate interface:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, use the tool call instead of running the CLI command separately.\nIf this instance is not connected, stop and ask me to reconnect this profile. Do not omit --browser / browser or switch to another instance.",
+      "promptTemplate": "For this task, use BrowserSkill in browser {{name}} (instance ID: {{instanceId}}). Start every new session for this task with the appropriate interface:\nCLI: {{command}}\nMCP: {{toolCall}}\nWith MCP tools, use the tool call instead of running the CLI command separately.\nIf this instance is not connected, stop and ask me to reconnect this profile. Do not omit --browser / browser or switch to another instance.",
       "title": "Current browser",
       "unnamed": "Unnamed browser"
     },
@@ -389,7 +393,21 @@
       "recordStop": "Stop operation recording",
       "recordAwait": "Wait for recording",
       "resize": "Resize window",
-      "emulate": "Change emulation settings"
+      "emulate": "Change emulation settings",
+      "cooperate": "Sync shared tab",
+      "sessionStart": "Start session",
+      "sessionStop": "Stop session",
+      "screenshotFullPage": "Capture full-page screenshot",
+      "screenshotRead": "Read screenshot",
+      "screenshotRelease": "Release screenshot",
+      "debug": "Run debugging action",
+      "video": "Manage video recording",
+      "dialogStatus": "Check dialog status",
+      "dialogAccept": "Accept dialog",
+      "dialogDismiss": "Dismiss dialog",
+      "waitForElement": "Wait for element",
+      "operationAwait": "Wait for operation",
+      "operationCancel": "Cancel operation"
     }
   },
   "debug": {

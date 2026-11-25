@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "description": "Params for `tool.tab_borrow`. Moves a *user* tab into the\nrequesting session's Agent Window, recording its original window /\nindex so `tab_return` (or session_stop) can put it back.",
   "properties": {
     "confirm": {

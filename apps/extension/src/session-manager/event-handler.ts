@@ -22,6 +22,8 @@ export interface SessionEventHandlerOptions {
       (typeof chrome.tabs)[K],
       "addListener" | "removeListener"
     >;
+  } & {
+    onReplaced?: Pick<typeof chrome.tabs.onReplaced, "addListener" | "removeListener">;
   };
   agentOverlayReset?: AgentOverlayResetApi;
   /** Runs synchronously after ownership is removed, before renderer/CDP cleanup. */
@@ -123,6 +125,8 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
   const onAttached = (tabId: number, info: chrome.tabs.TabAttachInfo) =>
     expectedTabMoves.onAttached(tabId, info.newWindowId);
   const onTabRemoved = (tabId: number) => expectedTabMoves.forget(tabId);
+  const onTabReplaced = (_addedTabId: number, removedTabId: number) =>
+    expectedTabMoves.forget(removedTabId);
 
   const onRemoved = (windowId: number): void => {
     const ctx = manager.findByWindowId(windowId);
@@ -154,7 +158,7 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
     ]);
     const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
       tab_id: tabId,
-      code: "cdp_failed",
+      code: "cdp_failed" as const,
       message: "Agent Window was closed before borrowed tab could be returned",
     }));
     if (returnFailures.length > 0) {
@@ -203,12 +207,14 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
   tabs?.onDetached.addListener(onDetached);
   tabs?.onAttached.addListener(onAttached);
   tabs?.onRemoved.addListener(onTabRemoved);
+  tabs?.onReplaced?.addListener(onTabReplaced);
   return {
     dispose: () => {
       events.removeListener(onRemoved);
       tabs?.onDetached.removeListener(onDetached);
       tabs?.onAttached.removeListener(onAttached);
       tabs?.onRemoved.removeListener(onTabRemoved);
+      tabs?.onReplaced?.removeListener(onTabReplaced);
     },
   };
 }

@@ -112,7 +112,11 @@
       "readFailed": "Impossibile caricare le impostazioni. Riapri l'estensione.",
       "writeFailed": "Impossibile salvare. Le tue impostazioni non sono cambiate. Riprova.",
       "confirmTabBorrowInfoLabel": "Informazioni sulla conferma del prestito di schede",
-      "requestHelpEnabledInfoLabel": "Informazioni sulle richieste di aiuto umano"
+      "requestHelpEnabledInfoLabel": "Informazioni sulle richieste di aiuto umano",
+      "openAgentWindowMinimized": "Apri le finestre dell'agente ridotte a icona",
+      "openAgentWindowMinimizedHint": "Se attivo, le nuove finestre dell'agente in secondo piano vengono create direttamente ridotte a icona invece di apparire sullo schermo. Se disattivo, si aprono come normali finestre senza fuoco.",
+      "openAgentWindowMinimizedScope": "Salvato automaticamente per questo profilo del browser. Si applica alle nuove finestre dell'agente in secondo piano; le sessioni esplicite in primo piano e la registrazione delle azioni continuano ad aprirsi visibilmente.",
+      "openAgentWindowMinimizedInfoLabel": "Informazioni sull'apertura ridotta a icona delle finestre dell'agente"
     },
     "remoteLocal": "Passa a locale",
     "remotePairing": "Link di associazione",
@@ -154,7 +158,7 @@
       "unavailableHint": "Collega questo profilo del browser a bsk per copiarne le istruzioni.",
       "copyButton": "Copia istruzioni",
       "copyFailed": "Impossibile copiare le istruzioni. Riprova.",
-      "promptTemplate": "Per questa attività, usa BrowserSkill nel browser {{name}} (ID istanza: {{instanceId}}). Avvia ogni nuova sessione di questa attività con l'interfaccia appropriata:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, chiama lo strumento senza eseguire separatamente il comando CLI.\nSe questa istanza non è connessa, fermati e chiedimi di riconnettere questo profilo. Non omettere --browser / browser e non passare a un'altra istanza.",
+      "promptTemplate": "Per questa attività, usa BrowserSkill nel browser {{name}} (ID istanza: {{instanceId}}). Avvia ogni nuova sessione di questa attività con l'interfaccia appropriata:\nCLI: {{command}}\nMCP: {{toolCall}}\nCon gli strumenti MCP, chiama lo strumento senza eseguire separatamente il comando CLI.\nSe questa istanza non è connessa, fermati e chiedimi di riconnettere questo profilo. Non omettere --browser / browser e non passare a un'altra istanza.",
       "title": "Browser attuale",
       "unnamed": "Browser senza nome"
     },
@@ -389,7 +393,21 @@
       "recordStop": "Ferma registrazione operazioni",
       "recordAwait": "Attendi registrazione",
       "resize": "Ridimensiona finestra",
-      "emulate": "Modifica impostazioni di emulazione"
+      "emulate": "Modifica impostazioni di emulazione",
+      "cooperate": "Sincronizza scheda condivisa",
+      "sessionStart": "Avvia sessione",
+      "sessionStop": "Interrompi sessione",
+      "screenshotFullPage": "Acquisisci screenshot pagina intera",
+      "screenshotRead": "Leggi screenshot",
+      "screenshotRelease": "Rilascia screenshot",
+      "debug": "Esegui azione di debug",
+      "video": "Gestisci registrazione video",
+      "dialogStatus": "Verifica stato finestra",
+      "dialogAccept": "Accetta finestra",
+      "dialogDismiss": "Chiudi finestra",
+      "waitForElement": "Attendi elemento",
+      "operationAwait": "Attendi operazione",
+      "operationCancel": "Annulla operazione"
     }
   },
   "debug": {

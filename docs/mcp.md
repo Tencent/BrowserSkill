@@ -41,8 +41,10 @@ and [Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 
 ## Tools and workflow
 
-The server exposes `bsk_session`, `bsk_page`, `bsk_inspect`, `bsk_interact`,
-`bsk_plan`, `bsk_tabs`, and `bsk_assist`. Each tool except `bsk_plan` has an
+The server exposes 11 first-class base tools (`bsk_session`, `bsk_page`,
+`bsk_inspect`, `bsk_interact`, `bsk_plan`, `bsk_tabs`, `bsk_assist`,
+`bsk_ledger`, `bsk_debug`, `bsk_video`, and `bsk_record`), plus opt-in `bsk_recipe`
+when enabled by `--recipes`. Each tool except `bsk_plan` has an
 `action` field; its schema and description list the available arguments. For example, use these MCP tool calls:
 
 1. `bsk_session` with `{"action":"browsers"}` to select the required browser
@@ -91,12 +93,13 @@ request token before passing `request_id` to `start`, then use `request_claim`,
 available but has no durable client-side recovery journal. Session cleanup is
 explicit; closing the MCP connection does not close all existing sessions.
 
-This adapter currently covers the operations in its tool schemas. It does not
-yet expose every CLI operation, including file upload/download, recording or
-full-page screenshot export. Sensitive-value/keychain input is not implemented;
-avoid passing credentials in tool arguments when the client logs them.
+The MCP adapter provides 100% parity with CLI automation, inspection, file transfer
+(`upload`/`download`), emulation, dialog/cooperation control, ledger management,
+debugging, video recording, and trace v3 recording/export. Sensitive-value/keychain
+input is not implemented; avoid passing credentials in tool arguments when the client
+logs them. Protocol `"2.0"` is required across client, daemon, and extension.
 
-## Dynamic page reads (protocol 1.9)
+## Dynamic page reads (protocol 2.0)
 
 Use `bsk_inspect` with action=read, selector (main document) or ref (exact frame/
 shadow node), and optional read_fields, e.g.

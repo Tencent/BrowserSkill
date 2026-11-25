@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecordStepPayload } from "@/lib/record-bridge";
 import { startRecordCapture } from "../record-capture";
+import { collectHoverSurfaceStates } from "../record-hover-surface";
 
 vi.stubGlobal("chrome", {
   runtime: {
@@ -125,6 +126,8 @@ describe("record-capture semantic", () => {
     input.type = "text"; // a "show password" toggle
     edit("BSK_SYNTHETIC_PASSWORDx");
     expect(input.hasAttribute("data-bsk-record-password")).toBe(true);
+    capture.stop();
+    expect(input.hasAttribute("data-bsk-record-password")).toBe(true);
     capture.dispose();
     expect(input.hasAttribute("data-bsk-record-password")).toBe(false);
 
@@ -132,6 +135,92 @@ describe("record-capture semantic", () => {
     expect(fills).toHaveLength(editWhileHidden ? 2 : 1);
     for (const fill of fills) expect(fill).toMatchObject({ value: "***", redacted: true });
     expect(JSON.stringify(steps)).not.toContain("BSK_SYNTHETIC_PASSWORD");
+  });
+
+  it("masks and cleans up revealed password inputs across pre-existing, dynamic, lazy, and closed ShadowRoots", async () => {
+    const closedRoots = new WeakMap<HTMLElement, ShadowRoot>();
+    vi.stubGlobal("chrome", {
+      dom: {
+        openOrClosedShadowRoot: (el: HTMLElement) => closedRoots.get(el) ?? null,
+      },
+      runtime: {
+        sendMessage: vi.fn((message: { sequence?: number }) =>
+          Promise.resolve({ ok: true, sequence: message.sequence }),
+        ),
+      },
+    });
+
+    // 1. Pre-existing open ShadowRoot
+    document.body.innerHTML = `<div id="open-host"></div><div id="lazy-host"></div><div id="closed-host"></div>`;
+    const openRoot = document.querySelector("#open-host")!.attachShadow({ mode: "open" });
+    openRoot.innerHTML = `<input id="open-pw" type="password" autocomplete="off" aria-label="Open PW">`;
+
+    // 2. Pre-existing closed ShadowRoot
+    const closedHost = document.querySelector<HTMLElement>("#closed-host")!;
+    const closedRoot = closedHost.attachShadow({ mode: "closed" });
+    closedRoots.set(closedHost, closedRoot);
+    closedRoot.innerHTML = `<input id="closed-pw" type="password" autocomplete="off" aria-label="Closed PW">`;
+
+    const capture = startRecordCapture("rec-shadow-pw", (step) => steps.push(step));
+
+    // 3. Dynamically inserted open ShadowRoot
+    const dynamicHost = document.createElement("div");
+    const dynamicRoot = dynamicHost.attachShadow({ mode: "open" });
+    dynamicRoot.innerHTML = `<input id="dyn-pw" type="password" autocomplete="off" aria-label="Dyn PW">`;
+    document.body.appendChild(dynamicHost);
+    await Promise.resolve();
+
+    // 4. Lazily attached open ShadowRoot on an already-connected host
+    const lazyHost = document.querySelector("#lazy-host")!;
+    const lazyRoot = lazyHost.attachShadow({ mode: "open" });
+    lazyRoot.innerHTML = `<input id="lazy-pw" type="password" autocomplete="off" aria-label="Lazy PW"><button id="lazy-toggle" type="button">Show</button>`;
+
+    const openPw = openRoot.querySelector<HTMLInputElement>("#open-pw")!;
+    const dynPw = dynamicRoot.querySelector<HTMLInputElement>("#dyn-pw")!;
+    const lazyPw = lazyRoot.querySelector<HTMLInputElement>("#lazy-pw")!;
+    const closedPw = closedRoot.querySelector<HTMLInputElement>("#closed-pw")!;
+
+    for (const [input, secret] of [
+      [openPw, "SHADOW_SECRET_OPEN"],
+      [dynPw, "SHADOW_SECRET_DYN"],
+      [lazyPw, "SHADOW_SECRET_LAZY"],
+    ] as const) {
+      input.dispatchEvent(new FocusEvent("focusin", { bubbles: true, composed: true }));
+      input.value = secret;
+      input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      input.type = "text";
+      input.dispatchEvent(new FocusEvent("focusout", { bubbles: true, composed: true }));
+    }
+
+    // Closed shadow root type toggle also gets marked & cleaned.
+    closedPw.value = "SHADOW_SECRET_CLOSED";
+    closedPw.type = "text";
+    await Promise.resolve();
+
+    capture.stop();
+    for (const input of [openPw, dynPw, lazyPw, closedPw]) {
+      expect(input.hasAttribute("data-bsk-record-password")).toBe(true);
+    }
+
+    capture.dispose();
+    for (const input of [openPw, dynPw, lazyPw, closedPw]) {
+      expect(input.hasAttribute("data-bsk-record-password")).toBe(false);
+    }
+
+    // After dispose(), observers are detached so later toggles leave zero residue.
+    openPw.type = "password";
+    openPw.type = "text";
+    await Promise.resolve();
+    expect(openPw.hasAttribute("data-bsk-record-password")).toBe(false);
+
+    const fills = steps.filter((step) => step.op === "fill");
+    expect(fills).toHaveLength(3);
+    for (const fill of fills) expect(fill).toMatchObject({ value: "***", redacted: true });
+    const serialized = JSON.stringify(steps);
+    expect(serialized).not.toContain("SHADOW_SECRET_OPEN");
+    expect(serialized).not.toContain("SHADOW_SECRET_DYN");
+    expect(serialized).not.toContain("SHADOW_SECRET_LAZY");
+    expect(serialized).not.toContain("SHADOW_SECRET_CLOSED");
   });
 
   it("ignores autocomplete suggestion clicks while a fill session is open", () => {
@@ -1685,5 +1774,256 @@ describe("record-capture semantic", () => {
         geometry: { tag: "summary", rect: { x: 30, y: 30, w: 194, h: 25 } },
       }),
     ]);
+  });
+
+  it("ignores interactions inside browser-skill-overlay ShadowRoot and leaves history.pushState untouched", () => {
+    const originalPushState = window.history.pushState;
+    const originalReplaceState = window.history.replaceState;
+    const overlayHost = document.createElement("browser-skill-overlay");
+    overlayHost.setAttribute("data-bsk-overlay", "");
+    overlayHost.setAttribute("role", "dialog");
+    mockRect(overlayHost, { left: 20, top: 20, width: 240, height: 120 });
+    const shadow = overlayHost.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <div role="dialog" aria-label="Help request">
+        <label for="overlay-note">Note</label>
+        <input id="overlay-note" />
+        <select id="overlay-select"><option value="a">A</option><option value="b">B</option></select>
+        <button id="overlay-finish" type="button">Finish recording</button>
+      </div>
+    `;
+    document.documentElement.appendChild(overlayHost);
+
+    try {
+      const capture = startRecordCapture("rec-overlay-ignore", (step) => steps.push(step));
+      expect(window.history.pushState).toBe(originalPushState);
+      expect(window.history.replaceState).toBe(originalReplaceState);
+      expect(collectHoverSurfaceStates()).toEqual([]);
+
+      const overlayInput = shadow.querySelector<HTMLInputElement>("#overlay-note")!;
+      const overlaySelect = shadow.querySelector<HTMLSelectElement>("#overlay-select")!;
+      const overlayButton = shadow.querySelector<HTMLButtonElement>("#overlay-finish")!;
+
+      overlayButton.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, composed: true }));
+      overlayInput.dispatchEvent(new FocusEvent("focusin", { bubbles: true, composed: true }));
+      overlayInput.dispatchEvent(
+        new CompositionEvent("compositionstart", { bubbles: true, composed: true }),
+      );
+      overlayInput.value = "help explanation";
+      overlayInput.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      overlayInput.dispatchEvent(
+        new CompositionEvent("compositionend", { bubbles: true, composed: true }),
+      );
+      overlayInput.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, composed: true }),
+      );
+      overlayInput.dispatchEvent(new FocusEvent("focusout", { bubbles: true, composed: true }));
+      overlaySelect.value = "b";
+      overlaySelect.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      overlayButton.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, composed: true, button: 0, detail: 1 }),
+      );
+
+      expect(steps).toEqual([]);
+
+      // Real webpage controls on the same document continue recording normally.
+      const pageButton = document.querySelector<HTMLButtonElement>("button")!;
+      click(pageButton);
+      capture.dispose();
+
+      expect(steps.map((s) => s.op)).toEqual(["click"]);
+    } finally {
+      overlayHost.remove();
+    }
+  });
+
+  it("avoids full-page querySelectorAll('*') and O(N) getComputedStyle scans during hover recording", () => {
+    const filler = Array.from({ length: 200 }, (_, i) => `<div class="card">Item ${i}</div>`).join(
+      "",
+    );
+    document.body.innerHTML = `
+      <button type="button" aria-haspopup="menu">More</button>
+      <ul class="dropdown-menu">
+        <li><a href="/settings">Settings</a></li>
+      </ul>
+      <section>${filler}</section>
+    `;
+    const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".dropdown-menu")!;
+    const link = document.querySelector("a")!;
+    mockRect(trigger, { left: 100, top: 10, width: 60, height: 32 });
+    mockRect(menu, { left: 100, top: 44, width: 140, height: 60 });
+    mockRect(link, { left: 108, top: 52, width: 120, height: 28 });
+
+    const qsaSpy = vi.spyOn(document, "querySelectorAll");
+    const styleSpy = vi.spyOn(window, "getComputedStyle").mockImplementation(
+      (el) =>
+        ({
+          cursor: el === trigger || el === link ? "pointer" : "auto",
+          display: "block",
+          pointerEvents: "auto",
+          position: "static",
+          visibility: "visible",
+        }) as CSSStyleDeclaration,
+    );
+    qsaSpy.mockClear();
+    styleSpy.mockClear();
+
+    const capture = startRecordCapture("rec-hover-perf", (step) => steps.push(step));
+    try {
+      mouseOver(trigger);
+      mouseOver(link);
+      click(link);
+    } finally {
+      capture.dispose();
+      qsaSpy.mockRestore();
+      styleSpy.mockRestore();
+    }
+
+    expect(qsaSpy.mock.calls.filter(([selector]) => selector === "*")).toHaveLength(0);
+    expect(styleSpy.mock.calls.length).toBeLessThan(30);
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+  });
+
+  it("preserves Account as the menu opener when pointer crosses a neighboring toolbar button before clicking inside the menu", () => {
+    document.body.innerHTML = `
+      <nav class="toolbar">
+        <button id="account" type="button" aria-haspopup="menu">Account</button>
+        <button id="notifications" type="button" aria-haspopup="menu">Notifications</button>
+      </nav>
+      <div id="account-menu" role="menu" style="display: none; position: absolute;">
+        <a id="settings" href="/settings">Settings</a>
+      </div>
+    `;
+    const account = document.getElementById("account")!;
+    const notifications = document.getElementById("notifications")!;
+    const menu = document.getElementById("account-menu")!;
+    const settings = document.getElementById("settings")!;
+
+    mockRect(account, { left: 100, top: 10, width: 90, height: 32 });
+    mockRect(notifications, { left: 200, top: 10, width: 110, height: 32 });
+    mockRect(menu, { left: 100, top: 44, width: 220, height: 80 });
+    mockRect(settings, { left: 110, top: 54, width: 180, height: 28 });
+
+    // Bubble-phase listener opens Account's menu when Account is hovered.
+    account.addEventListener("mouseover", () => {
+      menu.style.display = "block";
+    });
+
+    const styleSpy = vi.spyOn(window, "getComputedStyle").mockImplementation(
+      (el) =>
+        ({
+          cursor: el === account || el === notifications || el === settings ? "pointer" : "auto",
+          display: el instanceof HTMLElement && el.style.display ? el.style.display : "block",
+          pointerEvents: "auto",
+          position: el instanceof HTMLElement && el.style.position ? el.style.position : "static",
+          visibility: "visible",
+        }) as CSSStyleDeclaration,
+    );
+
+    const capture = startRecordCapture("rec-neighbor-toolbar", (step) => steps.push(step));
+    try {
+      mouseOver(account);
+      // Pointer crosses neighboring Notifications immediately on its way to Settings.
+      mouseOver(notifications);
+      mouseOver(settings);
+      click(settings);
+    } finally {
+      capture.dispose();
+      styleSpy.mockRestore();
+    }
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]?.target?.name).toBe("Account");
+    expect(steps[1]?.target?.name).toBe("Settings");
+  });
+});
+
+describe("record-capture editor values", () => {
+  let steps: RecordStepPayload[];
+
+  // Earlier cases replace window.getComputedStyle to fake hover styles; the
+  // white-space mode these cases depend on must come from the real cascade.
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Types into an editor that already holds `html`. Chrome stores the lines a
+   * person types as <div> blocks and <br> elements exactly as spelled here; the
+   * browser cases in `record-editor-value.browser.test.ts` confirm it.
+   */
+  function recordEditor(html: string, edited?: string): RecordStepPayload[] {
+    steps = [];
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Editor">${html}</div>`;
+    const editor = document.querySelector<HTMLElement>("#editor")!;
+    // happy-dom does not derive editability from the contenteditable attribute.
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+    const capture = startRecordCapture("rec-editor-value", (step) => steps.push(step), {
+      captureNavigation: false,
+    });
+
+    editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    if (edited !== undefined) {
+      editor.innerHTML = edited;
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    capture.dispose();
+    return steps;
+  }
+
+  const value = () => steps.find((step) => step.op === "fill")?.value;
+
+  it.each([
+    ["a typed second line", "Alpha<div>Beta</div>", "Alpha\nBeta"],
+    ["a Shift+Enter line", "Alpha<br>Beta", "Alpha\nBeta"],
+    ["an empty line between two lines", "Alpha<div><br></div><div>Beta</div>", "Alpha\n\nBeta"],
+    ["a trailing empty line", "Alpha<div><br></div>", "Alpha\n"],
+    ["a single typed line", "Alpha", "Alpha"],
+    ["rich structure kept as rendered text", "<p>One</p><p>Two</p>", "One\nTwo"],
+  ])("records the value with %s", (_name, html, expected) => {
+    recordEditor("", html);
+
+    expect(value()).toBe(expected);
+  });
+
+  it("keeps whitespace that a pre-wrap editor displays", () => {
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Editor" style="white-space: pre-wrap"></div>`;
+    const editor = document.querySelector<HTMLElement>("#editor")!;
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+    steps = [];
+    const capture = startRecordCapture("rec-editor-pre", (step) => steps.push(step), {
+      captureNavigation: false,
+    });
+
+    editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    editor.innerHTML = "  Alpha  ";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    capture.dispose();
+
+    expect(value()).toBe("  Alpha  ");
+  });
+
+  it("trims line edges and reads NBSP as a space where white-space collapses", () => {
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Editor" style="white-space: normal"></div>`;
+    const editor = document.querySelector<HTMLElement>("#editor")!;
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+    steps = [];
+    const capture = startRecordCapture("rec-editor-collapse", (step) => steps.push(step), {
+      captureNavigation: false,
+    });
+
+    editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    editor.innerHTML = "  Alpha\u00a0Beta  ";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    capture.dispose();
+
+    expect(value()).toBe("Alpha Beta");
+  });
+
+  it("records nothing for an editor that only holds an empty line", () => {
+    recordEditor("<p><br></p>", "<p><br></p>");
+
+    expect(steps).toEqual([]);
   });
 });

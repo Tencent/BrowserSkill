@@ -2,6 +2,7 @@
 // Transport envelopes deliberately admit unknown method/event names for versioned peers.
 import type {
   ErrorCode,
+  EventFrame,
   HandshakeRequest,
   NavigateBackResult,
   RpcErrorReason,
@@ -10,7 +11,7 @@ import type {
 } from "./generated/types";
 
 export type { EventName } from "./generated/methods";
-export { TRACE_VERSION_V2, TRACE_VERSION_V3, VOM_FORMAT_VERSION } from "./generated/methods";
+export { TRACE_VERSION_V3, VOM_FORMAT_VERSION } from "./generated/methods";
 export type * from "./generated/types";
 export type HandshakeParams = HandshakeRequest;
 export type HandshakeResult = import("./generated/input").HandshakeResponse;
@@ -41,6 +42,8 @@ export interface RequestFrame {
   id: RpcId;
   method: string;
   params?: unknown;
+  audit_id?: string;
+  operation_id?: string;
 }
 
 export interface OkResponseFrame {
@@ -54,21 +57,6 @@ export interface ErrResponseFrame {
 }
 
 export type ResponseFrame = OkResponseFrame | ErrResponseFrame;
-
-export interface EventFrame {
-  event: string;
-  payload?: unknown;
-}
-
-/** Terminal user action: pages stay open, but the session cannot resume. */
-export interface SessionEndedEvent extends EventFrame {
-  event: "session.ended";
-  payload: {
-    session_id: string;
-    reason: "user_moved_tab";
-    tab_id: number;
-  };
-}
 
 export type ProtocolFrame = RequestFrame | ResponseFrame | EventFrame;
 

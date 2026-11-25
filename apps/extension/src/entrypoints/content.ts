@@ -6,6 +6,7 @@ import ReactDOM from "react-dom/client";
 import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
 import { createCaptureSuppressController } from "@/content/capture-suppress";
+import { claimIdempotentContentScript } from "@/content/dom-primitives";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
 import { createHelpRequestData } from "@/content/help-request";
 import { createInputPassthroughController } from "@/content/input-passthrough";
@@ -60,6 +61,7 @@ import {
   type RecordStopAck,
   type RecordStopMessage,
 } from "@/lib/record-bridge";
+import { waitForDocumentElement } from "@/lib/recording/document-marker";
 import type {
   BorrowCancelMessage,
   BorrowRequestMessage,
@@ -67,18 +69,46 @@ import type {
 } from "@/tools/borrow-confirmation";
 import { VIDEO_OVERLAY, VideoOverlayGate, type VideoOverlayMessage } from "@/video/overlay";
 
-// Run at document_end so the overlay does not block first paint. Only attach
-// in the top-level frame so iframes do not double-render overlays.
+const OVERLAY_MOUNTED_SYMBOL = Symbol.for("bsk.overlay.mounted");
+
+function isHandledOverlayMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  const candidate = message as { type?: unknown };
+  return (
+    candidate.type === VIDEO_OVERLAY ||
+    isCaptureSuppressMessage(message) ||
+    isInputPassthroughMessage(message) ||
+    isRecordStartMessage(message) ||
+    isRecordStopMessage(message) ||
+    isRecordCancelMessage(message) ||
+    candidate.type === OVERLAY_AUTOMATION_BYPASS ||
+    isOverlayAgentStateMessage(message) ||
+    isOverlayAgentOverlayResetMessage(message) ||
+    candidate.type === "borrow-cancel" ||
+    isHelpCancelMessage(message) ||
+    isHelpRequestMessage(message) ||
+    candidate.type === "borrow-request"
+  );
+}
+
+// Runtime-only Tier A entrypoint: injected per tab via `ensureOverlayInjected`,
+// never globally registered in `manifest.json`.
 export default defineContentScript({
+  registration: "runtime",
   matches: ["<all_urls>"],
   runAt: "document_end",
   allFrames: false,
+  noScriptStartedPostMessage: true,
 
   async main(ctx) {
     if (window.top !== window) return;
+    const releaseMount = claimIdempotentContentScript(ctx, "content", OVERLAY_MOUNTED_SYMBOL);
+    if (!releaseMount) return;
+    let alive = true;
 
     const overlays = new OverlayController();
     let activeRecordRequestId: string | null = null;
+    const stoppedRecordRequestIds = new Set<string>();
     let reactRoot: ReactDOM.Root | null = null;
     let overlayHost: HTMLElement | null = null;
     let overlayContainer: HTMLElement | null = null;
@@ -86,6 +116,8 @@ export default defineContentScript({
     const overlayVersions = new OverlayVersionGate();
     let hostLossReported = false;
     let remountInProgress = false;
+    let isMounted = false;
+    let hostObserver: MutationObserver | null = null;
     const videoOverlay = new VideoOverlayGate(
       async (action) => {
         const response = await chrome.runtime.sendMessage({ type: VIDEO_OVERLAY, action });
@@ -101,46 +133,8 @@ export default defineContentScript({
       () => waitForRenderedOverlayUpdate(),
     );
 
-    // Load the user's control-hints preference up front so an already-active
-    // Agent session does not flash the overlay before the stored value lands.
-    try {
-      overlays.setControlHintsHidden(await getControlHintsHidden());
-    } catch (err) {
-      console.debug("[bsk overlay] control-hints preference read failed", err);
-    }
-
     const captureSuppress = createCaptureSuppressController(() => overlayHost);
     const inputPassthrough = createInputPassthroughController(() => overlayHost);
-
-    const ui = await createShadowRootUi(ctx, {
-      name: "browser-skill-overlay",
-      position: "inline",
-      anchor: "html",
-      css: overlayCss,
-      onMount(container, _shadow, shadowHost) {
-        shadowHost.setAttribute("aria-hidden", "true");
-        shadowHost.setAttribute("data-bsk-overlay", "");
-        overlayHost = shadowHost;
-        overlayContainer = container;
-        hostLossReported = false;
-        // A host rebuilt mid-capture must stay hidden until `end` arrives.
-        captureSuppress.onHostMounted(shadowHost);
-        inputPassthrough.onHostMounted(shadowHost);
-        const app = document.createElement("div");
-        app.className = "bsk-overlay-root";
-        container.append(app);
-        reactRoot = ReactDOM.createRoot(app);
-        renderAll();
-        void requestOverlayState();
-        return reactRoot;
-      },
-      onRemove(root) {
-        overlayHost = null;
-        overlayContainer = null;
-        root?.unmount();
-        reactRoot = null;
-      },
-    });
 
     function setOverlaySurfaceState(active: boolean, blocking: boolean): void {
       const host = overlayHost;
@@ -322,7 +316,7 @@ export default defineContentScript({
       });
     }
 
-    const onMessage = (
+    const dispatchOverlayMessage = (
       message:
         | BorrowRequestMessage
         | BorrowCancelMessage
@@ -361,25 +355,32 @@ export default defineContentScript({
       }
 
       if (isRecordStartMessage(message)) {
+        if (stoppedRecordRequestIds.has(message.requestId)) {
+          (sendResponse as unknown as (response: RecordStartAck) => void)({ ok: true });
+          return false;
+        }
         recoverVideoOverlay();
-        activeRecordRequestId = message.requestId;
-        overlays.setAgentRecordRequest({
-          id: message.requestId,
-          ...(typeof message.startedAtMs === "number" ? { startedAtMs: message.startedAtMs } : {}),
-          onFinish: () => {
-            void chrome.runtime.sendMessage({
-              type: RECORD_FINISH,
-              requestId: message.requestId,
-            });
-          },
-        });
+        mountRecordRequest(message.requestId, message.startedAtMs);
         renderAll();
         (sendResponse as unknown as (response: RecordStartAck) => void)({ ok: true });
         return false;
       }
 
       if (isRecordStopMessage(message) || isRecordCancelMessage(message)) {
-        if (activeRecordRequestId !== message.requestId) return false;
+        stoppedRecordRequestIds.add(message.requestId);
+        if (stoppedRecordRequestIds.size > 64) {
+          const oldest = stoppedRecordRequestIds.values().next().value;
+          if (oldest !== undefined) stoppedRecordRequestIds.delete(oldest);
+        }
+        if (
+          activeRecordRequestId !== message.requestId &&
+          overlays.snapshot().activeRecord?.id !== message.requestId
+        ) {
+          if (isRecordStopMessage(message)) {
+            (sendResponse as unknown as (response: RecordStopAck) => void)({ ok: true });
+          }
+          return false;
+        }
         overlays.clearAgentRecordRequest(message.requestId);
         activeRecordRequestId = null;
         renderAll();
@@ -497,14 +498,40 @@ export default defineContentScript({
       );
     }
 
+    function mountRecordRequest(requestId: string, startedAtMs?: number): void {
+      activeRecordRequestId = requestId;
+      overlays.setAgentRecordRequest({
+        id: requestId,
+        ...(typeof startedAtMs === "number" ? { startedAtMs } : {}),
+        onFinish: () => {
+          void chrome.runtime.sendMessage({
+            type: RECORD_FINISH,
+            requestId,
+          });
+        },
+      });
+    }
+
     async function queryActiveHelpWithRetry(): Promise<void> {
+      const mountedHelpId = overlays.snapshot().activeHelp?.id ?? null;
       for (let attempt = 0; attempt < 6; attempt += 1) {
+        if (!alive) return;
         try {
           const helpQuery = (await chrome.runtime.sendMessage({
             type: HELP_QUERY,
           })) as HelpQueryResponse | undefined;
+          if (!alive) return;
           if (helpQuery?.active && helpQuery.request) {
             mountHelpRequest(helpQuery.request);
+            renderAll();
+            return;
+          }
+          if (
+            helpQuery?.active === false &&
+            mountedHelpId !== null &&
+            overlays.snapshot().activeHelp?.id === mountedHelpId
+          ) {
+            overlays.clearAgentHelpRequest(mountedHelpId);
             renderAll();
             return;
           }
@@ -513,30 +540,42 @@ export default defineContentScript({
         }
         await new Promise((resolve) => window.setTimeout(resolve, 150));
       }
+      // If the last active help request ended while this document was in BFCache,
+      // the background detached its HELP_QUERY listener (returning undefined).
+      // Clear the stale banner once retries confirm no active help replaced it.
+      if (alive && mountedHelpId !== null && overlays.snapshot().activeHelp?.id === mountedHelpId) {
+        overlays.clearAgentHelpRequest(mountedHelpId);
+        renderAll();
+      }
     }
 
     async function queryActiveRecord(): Promise<void> {
+      const mountedRecordId = activeRecordRequestId;
       try {
         const recordQuery = (await chrome.runtime.sendMessage({
           type: RECORD_QUERY,
         })) as RecordQueryResponse | undefined;
+        if (!alive) return;
         if (
           recordQuery?.active &&
           typeof recordQuery.requestId === "string" &&
-          overlays.snapshot().activeRecord === null
+          !stoppedRecordRequestIds.has(recordQuery.requestId)
         ) {
-          const requestId = recordQuery.requestId;
-          const startedAtMs = recordQuery.startedAtMs;
-          overlays.setAgentRecordRequest({
-            id: requestId,
-            ...(typeof startedAtMs === "number" ? { startedAtMs } : {}),
-            onFinish: () => {
-              void chrome.runtime.sendMessage({
-                type: RECORD_FINISH,
-                requestId,
-              });
-            },
-          });
+          if (
+            activeRecordRequestId === mountedRecordId &&
+            (activeRecordRequestId !== recordQuery.requestId ||
+              overlays.snapshot().activeRecord === null)
+          ) {
+            mountRecordRequest(recordQuery.requestId, recordQuery.startedAtMs);
+            renderAll();
+          }
+        } else if (
+          recordQuery?.active === false &&
+          mountedRecordId !== null &&
+          activeRecordRequestId === mountedRecordId
+        ) {
+          activeRecordRequestId = null;
+          overlays.clearAgentRecordRequest(mountedRecordId);
           renderAll();
         }
       } catch (err) {
@@ -603,49 +642,134 @@ export default defineContentScript({
       overlays.setControlHintsHidden(change.newValue === true);
       renderAll();
     };
-    chrome.storage.onChanged.addListener(onStorageChange);
 
-    ui.mount();
-    chrome.runtime.onMessage.addListener(onMessage);
-    // Start the handshake after mounting/listening; it never delays page setup.
-    refreshVideoOverlay();
-    void requestOverlayState();
+    const mountReady = (async () => {
+      // Load the user's control-hints preference up front so an already-active
+      // Agent session does not flash the overlay before the stored value lands.
+      try {
+        overlays.setControlHintsHidden(await getControlHintsHidden());
+      } catch (err) {
+        console.debug("[bsk overlay] control-hints preference read failed", err);
+      }
+      if (!alive) return;
+      if (!document.documentElement) await waitForDocumentElement();
+      if (!alive) return;
 
-    window.addEventListener("pageshow", onPageShow);
-    document.addEventListener("prerenderingchange", onPageActivated);
-    document.addEventListener("visibilitychange", onVisibilityChange);
+      const ui = await createShadowRootUi(ctx, {
+        name: "browser-skill-overlay",
+        position: "inline",
+        anchor: "html",
+        css: overlayCss,
+        onMount(container, _shadow, shadowHost) {
+          shadowHost.setAttribute("aria-hidden", "true");
+          shadowHost.setAttribute("data-bsk-overlay", "");
+          overlayHost = shadowHost;
+          overlayContainer = container;
+          hostLossReported = false;
+          // A host rebuilt mid-capture must stay hidden until `end` arrives.
+          captureSuppress.onHostMounted(shadowHost);
+          inputPassthrough.onHostMounted(shadowHost);
+          const app = document.createElement("div");
+          app.className = "bsk-overlay-root";
+          container.append(app);
+          reactRoot = ReactDOM.createRoot(app);
+          renderAll();
+          void requestOverlayState();
+          return reactRoot;
+        },
+        onRemove(root) {
+          overlayHost = null;
+          overlayContainer = null;
+          root?.unmount();
+          reactRoot = null;
+        },
+      });
+      if (!alive) return;
 
-    const hostObserver = new MutationObserver(() => {
-      const connected = overlayHost?.isConnected ?? false;
-      if (overlays.isControlVisible() && !connected && !hostLossReported) {
-        hostLossReported = true;
-        if (!remountInProgress) {
-          remountInProgress = true;
-          try {
-            ui.mount();
-            if (activeAgentState) applyOverlayState(activeAgentState);
-            void requestOverlayState();
-          } finally {
-            remountInProgress = false;
+      chrome.storage.onChanged.addListener(onStorageChange);
+      ui.mount();
+      isMounted = true;
+      // Start the handshake after mounting/listening; it never delays page setup.
+      refreshVideoOverlay();
+      void requestOverlayState();
+
+      window.addEventListener("pageshow", onPageShow);
+      document.addEventListener("prerenderingchange", onPageActivated);
+      document.addEventListener("visibilitychange", onVisibilityChange);
+
+      hostObserver = new MutationObserver(() => {
+        const connected = overlayHost?.isConnected ?? false;
+        if (overlays.isControlVisible() && !connected && !hostLossReported) {
+          hostLossReported = true;
+          if (!remountInProgress) {
+            remountInProgress = true;
+            try {
+              ui.mount();
+              if (activeAgentState) applyOverlayState(activeAgentState);
+              void requestOverlayState();
+            } finally {
+              remountInProgress = false;
+            }
           }
         }
+        if (connected) {
+          hostLossReported = false;
+        }
+      });
+      hostObserver.observe(document.documentElement, { childList: true, subtree: false });
+    })();
+
+    const onMessage: Parameters<typeof chrome.runtime.onMessage.addListener>[0] = (
+      message,
+      sender,
+      sendResponse,
+    ) => {
+      if (!isHandledOverlayMessage(message)) return false;
+      if (isMounted) {
+        return dispatchOverlayMessage(
+          message as Parameters<typeof dispatchOverlayMessage>[0],
+          sender,
+          sendResponse,
+        );
       }
-      if (connected) {
-        hostLossReported = false;
-      }
-    });
-    hostObserver.observe(document.documentElement, { childList: true, subtree: false });
+      void mountReady.then(() => {
+        if (!alive) {
+          (sendResponse as (value?: unknown) => void)(undefined);
+          return;
+        }
+        const asyncReply = dispatchOverlayMessage(
+          message as Parameters<typeof dispatchOverlayMessage>[0],
+          sender,
+          sendResponse,
+        );
+        if (!asyncReply) {
+          (sendResponse as (value?: unknown) => void)(undefined);
+        }
+      });
+      return true;
+    };
+
+    // Register the message listener synchronously before awaiting storage/UI
+    // setup so `await ensureOverlayInjected(tabId)` followed immediately by
+    // `chrome.tabs.sendMessage` never hits a missing receiver.
+    chrome.runtime.onMessage.addListener(onMessage);
 
     ctx.onInvalidated(() => {
+      alive = false;
+      releaseMount();
+      isMounted = false;
       videoOverlay.dispose();
       inputPassthrough.reset();
-      hostObserver.disconnect();
-      chrome.runtime.onMessage.removeListener(onMessage);
-      chrome.storage.onChanged.removeListener(onStorageChange);
+      hostObserver?.disconnect();
+      hostObserver = null;
+      chrome.runtime?.onMessage?.removeListener(onMessage);
+      chrome.storage?.onChanged?.removeListener(onStorageChange);
       window.removeEventListener("pageshow", onPageShow);
       document.removeEventListener("prerenderingchange", onPageActivated);
       document.removeEventListener("visibilitychange", onVisibilityChange);
       activeRecordRequestId = null;
     });
+
+    await mountReady;
   },
 });

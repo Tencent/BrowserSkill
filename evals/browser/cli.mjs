@@ -420,8 +420,20 @@ async function commandScaffold(parsed) {
 }
 
 async function commandSummarize(parsed) {
-  const paths = [...parsed.positionals, ...optionList(parsed, "input")];
-  if (paths.length === 0) throw new Error("summarize requires at least one report path");
+  const inputs = [...parsed.positionals, ...optionList(parsed, "input")];
+  if (inputs.length === 0) throw new Error("summarize requires at least one report path");
+  const paths = [];
+  for (const input of inputs) {
+    if (!input.includes("*")) {
+      paths.push(input);
+      continue;
+    }
+    const { glob } = await import("node:fs/promises");
+    const matches = [];
+    for await (const match of glob(input.replaceAll("\\", "/"))) matches.push(match);
+    if (!matches.length) throw new Error(`no reports matched ${input}`);
+    paths.push(...matches.sort());
+  }
   const reports = await Promise.all(
     paths.map(async (path) => JSON.parse(await readFile(resolve(path), "utf8"))),
   );

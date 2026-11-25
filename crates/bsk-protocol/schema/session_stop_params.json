@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "all": {
+      "default": false,
+      "type": "boolean"
+    },
+    "recording": {
+      "default": false,
+      "type": "boolean"
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "DaemonSessionStopParams",
+  "type": "object"
+}

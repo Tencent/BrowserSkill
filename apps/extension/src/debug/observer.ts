@@ -1,3 +1,4 @@
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import type { DebugCdp } from "./manager";
 import { installPerformance } from "./performance-observer";
 import { redactText } from "./redact";
@@ -342,7 +343,7 @@ export class DebugObserver {
     return !!frameId && frameId === this.rootFrame;
   }
   private send<T>(method: string, params?: object): Promise<T> {
-    return this.cdp.sendAttached<T>({ tabId: this.tabId }, method, params);
+    return this.cdp.sendToEventSource<T>(rootEventSource(this.tabId), method, params);
   }
   async start(): Promise<void> {
     const tree = await this.send<{ frameTree: { frame: { id: string } } }>("Page.getFrameTree");

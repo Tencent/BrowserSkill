@@ -1,3 +1,4 @@
+import { canHostShadowRoot } from "@/content/dom-primitives";
 import { COOPERATION_OWNERS } from "./types";
 
 type Frame = chrome.webNavigation.GetAllFrameResultDetails;
@@ -8,11 +9,25 @@ export interface FrameOwner {
   hidden: boolean;
   /** The child document's URL when the parent can read it (same origin), otherwise null. */
   url: string | null;
+  /** Resolved owner `src`/`data` attribute when requested for cross-origin disambiguation. */
+  declaredSrc?: string | null;
 }
 
 const OWNER_ELEMENTS = new Set(["iframe", "frame", "object", "embed", "fencedframe"]);
-const OWNER_REPLY_MS = 1200;
+const OWNER_REPLY_MS = 3_000;
 const MAX_OWNERS = 4096;
+
+function originOf(raw: string): string | null {
+  try {
+    const parsed = new URL(raw);
+    if (["http:", "https:", "chrome-extension:"].includes(parsed.protocol)) {
+      return `${parsed.protocol}//${parsed.host}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Runs in the parent document's collector. It reports layout facts and readable
@@ -21,6 +36,7 @@ const MAX_OWNERS = 4096;
 export function describeFrameOwners(
   root: Document,
   shadowRoot: (element: Element) => ShadowRoot | null,
+  options?: { includeDeclaredSrc?: boolean },
 ): FrameOwner[] {
   // A focused frame element can receive keys even without area.
   const focusPath = new Set<Element>();
@@ -34,28 +50,62 @@ export function describeFrameOwners(
   const visit = (scope: Document | ShadowRoot) => {
     for (const element of scope.querySelectorAll("*")) {
       if (OWNER_ELEMENTS.has(element.localName)) owners.push(element);
-      const nested = shadowRoot(element);
-      if (nested) visit(nested);
+      if (element.shadowRoot || canHostShadowRoot(element.localName)) {
+        const nested = shadowRoot(element);
+        if (nested) visit(nested);
+      }
     }
   };
   visit(root);
+  const view = root.defaultView;
   return owners.map((element) => {
     const box = element.getBoundingClientRect();
     const visible =
       typeof element.checkVisibility !== "function" ||
       element.checkVisibility({ visibilityProperty: true });
+    const computed =
+      view && typeof view.getComputedStyle === "function"
+        ? view.getComputedStyle(element)
+        : typeof getComputedStyle === "function"
+          ? getComputedStyle(element)
+          : undefined;
+    const untargetable =
+      computed?.pointerEvents === "none" ||
+      (computed?.position === "fixed" &&
+        (box.right <= 0 ||
+          box.bottom <= 0 ||
+          (view ? box.left >= view.innerWidth || box.top >= view.innerHeight : false)));
     let url: string | null = null;
     try {
       const href = (element as HTMLIFrameElement).contentWindow?.location.href;
       if (typeof href === "string") url = href;
     } catch {
-      // A cross-origin document stays unidentified; the caller treats it as possibly any frame.
+      // A cross-origin document stays unidentified via contentWindow; declaredSrc disambiguates below.
+    }
+    let declaredSrc: string | null | undefined;
+    if (options?.includeDeclaredSrc && url === null) {
+      const raw =
+        element.localName === "object" ? element.getAttribute("data") : element.getAttribute("src");
+      if (typeof raw === "string" && raw.trim().length > 0) {
+        try {
+          declaredSrc = new URL(raw, root.baseURI || undefined).href;
+        } catch {
+          declaredSrc = null;
+        }
+      } else {
+        declaredSrc = null;
+      }
     }
     return {
       hidden:
         !focusPath.has(element) &&
-        (element.getClientRects().length === 0 || box.width <= 0 || box.height <= 0 || !visible),
+        (element.getClientRects().length === 0 ||
+          box.width <= 0 ||
+          box.height <= 0 ||
+          !visible ||
+          untargetable),
       url,
+      ...(declaredSrc !== undefined ? { declaredSrc } : {}),
     };
   });
 }
@@ -69,7 +119,10 @@ function validOwners(value: unknown): value is FrameOwner[] {
         !!owner &&
         typeof owner === "object" &&
         typeof owner.hidden === "boolean" &&
-        (owner.url === null || typeof owner.url === "string"),
+        (owner.url === null || typeof owner.url === "string") &&
+        (owner.declaredSrc === undefined ||
+          owner.declaredSrc === null ||
+          typeof owner.declaredSrc === "string"),
     )
   );
 }
@@ -91,22 +144,65 @@ const signature = (frames: Frame[]) =>
 
 /**
  * True only when `frame`'s element in its parent must be one of the hidden ones.
- * Every child document has exactly one element, so with matching counts it is
- * enough that each displayed element is identified as a different document.
+ * Every child document has an owner element in `owners`, so when `owners` has at
+ * least as many elements as `siblings` and every displayed owner is positively
+ * accounted for by a different sibling document, `frame`'s owner must be hidden.
  */
 export function ownedByHiddenElement(frame: Frame, owners: FrameOwner[], siblings: Frame[]) {
-  if (owners.length !== siblings.length || !siblings.some((s) => s.frameId === frame.frameId))
+  if (owners.length < siblings.length || !siblings.some((s) => s.frameId === frame.frameId))
     return false;
-  const others = new Map<string, number>();
-  for (const sibling of siblings)
-    if (sibling.frameId !== frame.frameId)
-      others.set(sibling.url, (others.get(sibling.url) ?? 0) + 1);
-  for (const owner of owners) {
-    if (owner.hidden) continue;
-    if (owner.url === null || owner.url === frame.url) return false;
-    const count = others.get(owner.url) ?? 0;
-    if (!count) return false;
-    others.set(owner.url, count - 1);
+  if (!owners.some((owner) => owner.hidden && (owner.url === frame.url || owner.url === null)))
+    return false;
+  const remaining = siblings.filter((s) => s.frameId !== frame.frameId).map((s) => s.url);
+  const displayed = owners.filter((owner) => !owner.hidden);
+  for (const owner of displayed) {
+    if (owner.url === null) continue;
+    if (owner.url === frame.url) return false;
+    const index = remaining.indexOf(owner.url);
+    if (index < 0) return false;
+    remaining.splice(index, 1);
+  }
+  const displayedCross = displayed.filter((owner) => owner.url === null);
+  if (!displayedCross.length) return true;
+  const failedOrigin = originOf(frame.url);
+  const hiddenCross = owners.filter((owner) => owner.hidden && owner.url === null);
+  if (
+    !hiddenCross.some(
+      (owner) =>
+        !owner.declaredSrc ||
+        owner.declaredSrc === frame.url ||
+        (failedOrigin !== null && originOf(owner.declaredSrc) === failedOrigin),
+    )
+  )
+    return false;
+  const unmatchedOriginFallback: string[] = [];
+  for (const owner of displayedCross) {
+    if (!owner.declaredSrc || owner.declaredSrc === frame.url) return false;
+    const exactIndex = remaining.indexOf(owner.declaredSrc);
+    if (exactIndex >= 0) {
+      remaining.splice(exactIndex, 1);
+    } else {
+      const declaredOrigin = originOf(owner.declaredSrc);
+      if (!declaredOrigin || !failedOrigin || declaredOrigin === failedOrigin) return false;
+      unmatchedOriginFallback.push(declaredOrigin);
+    }
+  }
+  if (unmatchedOriginFallback.length) {
+    // Do not let a displayed frame that redirected cross-origin steal a healthy
+    // sibling whose current URL is the exact `declaredSrc` of a hidden owner.
+    for (const owner of hiddenCross) {
+      if (!owner.declaredSrc || owner.declaredSrc === frame.url) continue;
+      if (failedOrigin !== null && originOf(owner.declaredSrc) === failedOrigin) continue;
+      const reserved = remaining.indexOf(owner.declaredSrc);
+      if (reserved >= 0) remaining.splice(reserved, 1);
+    }
+    for (const declaredOrigin of unmatchedOriginFallback) {
+      const originIndex = remaining.findIndex(
+        (candidate) => originOf(candidate) === declaredOrigin,
+      );
+      if (originIndex < 0) return false;
+      remaining.splice(originIndex, 1);
+    }
   }
   return true;
 }
@@ -117,7 +213,7 @@ async function readOwners(tabId: number, parent: Frame): Promise<FrameOwner[] | 
     const reply: unknown = await Promise.race([
       chrome.tabs.sendMessage(
         tabId,
-        { kind: COOPERATION_OWNERS },
+        { kind: COOPERATION_OWNERS, includeDeclaredSrc: true },
         { documentId: parent.documentId },
       ),
       new Promise<undefined>((resolve) => {

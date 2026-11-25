@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import {
   RECORD_DOCUMENT_ATTRIBUTE,
   recordingDocumentMarkerValue,
@@ -13,7 +14,10 @@ describe("projectRecordSafeObservation", () => {
       frameDocuments: [
         {
           frameId: "child",
-          target: { tabId: 4, sessionId: "oopif-session" },
+          loaderId: "",
+          processKey: "root",
+          isOutOfProcess: false,
+          handle: toFrameDocumentHandle(4, { frameId: "child" }),
           contextScopeId: "scope-1",
           axNodes: [],
           domNodes: [
@@ -39,7 +43,7 @@ describe("projectRecordSafeObservation", () => {
     expect(result.frames).toEqual([
       {
         frameId: "child",
-        target: { tabId: 4, sessionId: "oopif-session" },
+        handle: { tabId: 4, frameId: "child", loaderId: "" },
         recordingDocumentId,
       },
     ]);
@@ -56,7 +60,10 @@ describe("projectRecordSafeObservation", () => {
       frameDocuments: [
         {
           frameId: "root",
-          target: { tabId: 4 },
+          loaderId: "",
+          processKey: "root",
+          isOutOfProcess: false,
+          handle: toFrameDocumentHandle(4, { frameId: "root" }),
           contextScopeId: "scope-1",
           axNodes: [],
           domNodes: [
@@ -76,7 +83,9 @@ describe("projectRecordSafeObservation", () => {
       rendered: { text: '@vom 1\nRootWebArea "Example"', refs: [], truncated: false },
     });
 
-    expect(result.frames).toEqual([{ frameId: "root", target: { tabId: 4 } }]);
+    expect(result.frames).toEqual([
+      { frameId: "root", handle: { tabId: 4, frameId: "root", loaderId: "" } },
+    ]);
     expect(JSON.stringify(result)).not.toContain("user@example.com");
   });
 });

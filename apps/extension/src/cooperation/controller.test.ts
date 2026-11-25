@@ -1,17 +1,30 @@
 import type { VomNode, VomScene } from "@browser-skill/vom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  type CdpDebuggee,
   type CdpDebuggerApi,
   ChromiumCdp,
   DEFAULT_IDLE_DETACH_MS,
 } from "@/browser-driver/chromium-cdp";
+import { toRootFrameHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleEmulate } from "@/tools/emulate";
 import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import { type CdpRunner, sessionCdpRunner } from "@/tools/shared";
-import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
+import {
+  type CdpRunner,
+  createStubCdpRunner,
+  sessionCdpRunner,
+  withObjectGroup,
+  withRemoteObject,
+} from "@/tools/shared";
+import {
+  handleTabBorrow,
+  handleTabClose,
+  handleTabCreate,
+  handleTabReturn,
+  handleTabSelect,
+} from "@/tools/tabs";
+import { validateToolResult } from "@/transport/protocol";
 import { CooperationController } from "./controller";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import type { CooperationFrames, FrameState } from "./types";
@@ -29,7 +42,7 @@ vi.mock("@/tools/interaction", () => ({
   resolveActionTarget: vi.fn(async () => ({
     backendNodeId: 4,
     frameId: "frame",
-    cdpTarget: { tabId: 7 },
+    handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 4 },
     tab: { tabId: 7 },
   })),
 }));
@@ -71,16 +84,16 @@ async function fixture(options: { url?: string; sync?: boolean } = {}) {
     pendingUrl: undefined as string | undefined,
   };
   vi.stubGlobal("chrome", { tabs: { get: async () => tab, query: async () => [tab] } });
-  const native = vi.fn(async () => ({}));
+  const native = vi.fn(async (): Promise<any> => ({}));
   let beforeDispatch: (() => Promise<void>) | undefined;
-  const cdp = {
-    send: native,
-    sendGuarded: async (_target, _method, _params, guard) => {
+  const cdp: CdpRunner = createStubCdpRunner({
+    send: native as CdpRunner["send"],
+    sendToFrame: async (_handle, _method, _params, guard) => {
       await beforeDispatch?.();
-      guard.onDispatch?.();
+      guard?.onDispatch?.();
       return native();
     },
-  } as CdpRunner;
+  });
   const readFrames = vi.fn(
     async (): Promise<CooperationFrames> => ({
       frames: new Map([[0, structuredClone(frame)]]),
@@ -684,15 +697,15 @@ describe("shared-tab dispatch fences", () => {
     });
     // Resolves "eN" refs to backend node N.
     const refs = () =>
-      vi.mocked(resolveActionTarget).mockImplementation(
-        async (_c, _s, _t, params) =>
-          ({
-            backendNodeId: Number((params as { ref?: string }).ref?.replace(/^@?e/, "")),
-            frameId: "frame",
-            cdpTarget: { tabId: 7 },
-            tab: { tabId: 7 },
-          }) as Awaited<ReturnType<typeof resolveActionTarget>>,
-      );
+      vi.mocked(resolveActionTarget).mockImplementation(async (_c, _s, _t, params) => {
+        const backendNodeId = Number((params as { ref?: string }).ref?.replace(/^@?e/, ""));
+        return {
+          backendNodeId,
+          frameId: "frame",
+          handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
+          tab: { tabId: 7 },
+        } as Awaited<ReturnType<typeof resolveActionTarget>>;
+      });
     const run = (
       f: Awaited<ReturnType<typeof fixture>>,
       context: string,
@@ -973,15 +986,15 @@ describe("shared-tab dispatch fences", () => {
 
     it("keeps explicit dependencies exact after learning page activity", async () => {
       live((tick) => scene(`10:00:0${tick}`));
-      vi.mocked(resolveActionTarget).mockImplementation(
-        async (_c, _s, _t, params) =>
-          ({
-            backendNodeId: (params as { ref?: string }).ref === "e5" ? 5 : 4,
-            frameId: "frame",
-            cdpTarget: { tabId: 7 },
-            tab: { tabId: 7 },
-          }) as Awaited<ReturnType<typeof resolveActionTarget>>,
-      );
+      vi.mocked(resolveActionTarget).mockImplementation(async (_c, _s, _t, params) => {
+        const backendNodeId = (params as { ref?: string }).ref === "e5" ? 5 : 4;
+        return {
+          backendNodeId,
+          frameId: "frame",
+          handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
+          tab: { tabId: 7 },
+        } as Awaited<ReturnType<typeof resolveActionTarget>>;
+      });
       const f = await fixture();
       expect((await cycle(f, f.first.context_id)).message).toContain("changed by itself");
       const synced = await f.command("sync");
@@ -1102,15 +1115,15 @@ describe("shared-tab dispatch fences", () => {
         })),
       });
       live((tick) => shop(`$${100 + tick}`));
-      vi.mocked(resolveActionTarget).mockImplementation(
-        async (_c, _s, _t, params) =>
-          ({
-            backendNodeId: (params as { ref?: string }).ref === "e8" ? 8 : 4,
-            frameId: "frame",
-            cdpTarget: { tabId: 7 },
-            tab: { tabId: 7 },
-          }) as Awaited<ReturnType<typeof resolveActionTarget>>,
-      );
+      vi.mocked(resolveActionTarget).mockImplementation(async (_c, _s, _t, params) => {
+        const backendNodeId = (params as { ref?: string }).ref === "e8" ? 8 : 4;
+        return {
+          backendNodeId,
+          frameId: "frame",
+          handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
+          tab: { tabId: 7 },
+        } as Awaited<ReturnType<typeof resolveActionTarget>>;
+      });
       const click = (f: Awaited<ReturnType<typeof fixture>>, context: string, ref: string) => {
         f.change({ structure: f.controller.view(7)!.revision + 100 });
         return f.controller.run(
@@ -2802,7 +2815,7 @@ describe.each([false, true])("selection action guards, explicit dependency=%s", 
     vi.mocked(resolveActionTarget).mockResolvedValue({
       backendNodeId: 4,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 4 },
       tab: { tabId: 7, windowId: 100, active: true },
     });
     const f = await fixture();
@@ -3307,7 +3320,7 @@ describe("strict evidence around the action's own preparation", () => {
     vi.mocked(resolveActionTarget).mockResolvedValue({
       backendNodeId,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
       tab: { tabId: 7 },
     } as Awaited<ReturnType<typeof resolveActionTarget>>);
   const run = (
@@ -3443,13 +3456,13 @@ describe("strict evidence around the action's own preparation", () => {
     vi.mocked(resolveActionTarget).mockResolvedValueOnce({
       backendNodeId: 5,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 5 },
       tab: { tabId: 7 },
     } as Awaited<ReturnType<typeof resolveActionTarget>>);
     vi.mocked(resolveActionTarget).mockResolvedValueOnce({
       backendNodeId: 8,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 8 },
       tab: { tabId: 7 },
     } as Awaited<ReturnType<typeof resolveActionTarget>>);
     const f = await fixture();
@@ -3751,14 +3764,13 @@ describe("tool.record_start cooperation guard", () => {
 
   it("remaps unchanged OOPIF @eN sessions across idle soft-detach and refreshes sync snapshot when an OOPIF changes or disappears", async () => {
     vi.useFakeTimers();
-    const listeners = new Set<(source: CdpDebuggee, method: string, params: unknown) => void>();
+    type DebuggeeEvent = Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0];
+    const listeners = new Set<DebuggeeEvent>();
     const onEvent = {
-      addListener: (cb: (source: CdpDebuggee, method: string, params: unknown) => void) =>
-        listeners.add(cb),
-      removeListener: (cb: (source: CdpDebuggee, method: string, params: unknown) => void) =>
-        listeners.delete(cb),
-      fire: (source: CdpDebuggee, method: string, params: unknown) => {
-        for (const cb of listeners) cb(source, method, params);
+      addListener: (cb: DebuggeeEvent) => listeners.add(cb),
+      removeListener: (cb: DebuggeeEvent) => listeners.delete(cb),
+      fire: (...args: Parameters<DebuggeeEvent>) => {
+        for (const cb of listeners) cb(...args);
       },
     };
     const detachListeners = new Set<(source: chrome.debugger.Debuggee, reason: string) => void>();
@@ -3861,18 +3873,18 @@ describe("tool.record_start cooperation guard", () => {
       deps!.refStore?.replace(
         oopifPresent
           ? [
-              ["e1", { backendNodeId: 10, tabId: 7, frameId: "root" }],
+              ["e1", { backendNodeId: 10, tabId: 7, frameId: "root", loaderId: "root-l1" }],
               [
                 "e2",
                 {
                   backendNodeId: 20,
                   tabId: 7,
                   frameId: "child",
-                  cdpSessionId: `oopif-${attachGen}`,
+                  loaderId: "child-l1",
                 },
               ],
             ]
-          : [["e1", { backendNodeId: 10, tabId: 7, frameId: "root" }]],
+          : [["e1", { backendNodeId: 10, tabId: 7, frameId: "root", loaderId: "root-l1" }]],
       );
       return {
         text: oopifPresent ? "Main [ref=@e1]; Child [ref=@e2]" : "Main [ref=@e1]",
@@ -3905,9 +3917,13 @@ describe("tool.record_start cooperation guard", () => {
       expect(await unchanged).toMatchObject({ kind: "unchanged" });
       expect(snapshotCount).toBe(1);
 
-      // Existing `@e2` bound to pre-soft-detach `oopif-1` transparently routes to `oopif-2`!
-      const resolved = await runner.sendToTarget!<{ sessionId: string }>(
-        { tabId: 7, sessionId: "oopif-1" },
+      // Existing `@e2` FrameNodeHandle transparently routes to `oopif-2` without storing `cdpSessionId`!
+      const e2Entry = f.sessions.get("shared")!.refStore.resolveEntry("e2");
+      if (!e2Entry || e2Entry.kind !== "dom" || !e2Entry.handle) {
+        throw new Error("expected e2 DOM FrameNodeHandle");
+      }
+      const resolved = await runner.sendToFrame!<{ sessionId: string }>(
+        e2Entry.handle,
         "DOM.resolveNode",
         { backendNodeId: 20 },
       );
@@ -3935,5 +3951,361 @@ describe("tool.record_start cooperation guard", () => {
       cdp.dispose();
       vi.useRealTimers();
     }
+  });
+
+  it("tags strict-policy post-dispatch tool errors with effect_state unknown and bootstrap aborts with none", async () => {
+    vi.mocked(handleSnapshot).mockImplementation(async () => ({
+      text: "City: Shanghai; Submit [ref=@e1]",
+      ref_count: 1,
+      tab_id: 7,
+      truncated: false,
+    }));
+
+    // 1. Strict policy: `fixture()` syncs under `strict` policy; fail AFTER `beginDomMutation` / guarded `sendToFrame`.
+    const f = await fixture();
+    expect(f.first.control_policy).toBe("strict");
+
+    expect(
+      await f.controller.run(
+        {
+          id: "strict-fill",
+          method: "tool.fill",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            ref: "@e1",
+            value: "secret",
+            context_id: f.first.context_id,
+          },
+        },
+        f.cdp,
+        f.abort.signal,
+        async (runner) => {
+          await runner.sendToFrame(
+            toRootFrameHandle(7),
+            "Input.insertText",
+            { text: "secret" },
+            { signal: f.abort.signal },
+          );
+          return {
+            code: "permission_denied",
+            message: "fill verification failed after write",
+            data: { reason: "fill_value_mismatch" },
+          };
+        },
+      ),
+    ).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "fill_value_mismatch",
+        effect_state: "unknown",
+        phase: "execution",
+      },
+    });
+
+    // 2. Bootstrap initial blank-tab navigation cancelled BEFORE dispatch tags `effect_state: "none"`.
+    const blank = await fixture({ url: "about:blank", sync: false });
+    blank.abort.abort();
+    expect(
+      await blank.controller.run(
+        {
+          id: "bootstrap-nav-abort",
+          method: "tool.navigate",
+          params: { session_id: "shared", tab_id: 7, url: "https://example.test" },
+        },
+        blank.cdp,
+        blank.abort.signal,
+        async () => ({ tab_id: 7, url: "https://example.test" }),
+      ),
+    ).toMatchObject({
+      code: "cancelled",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+
+    // 3. Strict-policy `depends_on` validation and pre-dispatch resolution failures carry `effect_state: "none"`.
+    const strictDep = await fixture();
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "strict-bad-dep",
+          method: "tool.evaluate",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            expression: "1",
+            context_id: strictDep.first.context_id,
+            depends_on: [""],
+          },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({
+      code: "invalid_params",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      code: "cdp_failed",
+      message: "DOM.querySelector failed",
+    });
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "strict-missing-dep",
+          method: "tool.evaluate",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            expression: "1",
+            context_id: strictDep.first.context_id,
+            depends_on: ["@e999"],
+          },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({
+      data: {
+        effect_state: "none",
+      },
+    });
+
+    // 4. `manageTabs` (`tool.tab_select`) stamps `effect_state` onto untagged RpcErrors.
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "tab-select-err",
+          method: "tool.tab_select",
+          params: { session_id: "shared", tab_id: 7 },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ code: "cdp_failed", message: "tab activation failed before mutation" }),
+      ),
+    ).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+  });
+
+  it("validates cooperate status/sync against CooperateResult and fails wait immediately when the tab closes", async () => {
+    const f = await fixture();
+    expect(validateToolResult("tool.cooperate", f.first)).toBeUndefined();
+    const status = await f.command("status");
+    expect(validateToolResult("tool.cooperate", status)).toBeUndefined();
+
+    await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    const waiting = f.controller.command(
+      { session_id: "shared", tab_id: 7, action: "wait", timeout_ms: 15000 },
+      f.cdp,
+      f.abort.signal,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.controller.releaseTab(7);
+    await expect(waiting).resolves.toMatchObject({
+      code: "permission_denied",
+      message: "Shared-tab control has ended",
+      data: { effect_state: "none" },
+    });
+  });
+
+  it("forwards default 15s wait budget to refresh and bounds post-action evaluate/upload refresh", async () => {
+    const f = await fixture();
+    f.readFrames.mockClear();
+    const waitRes = await f.controller.command(
+      { session_id: "shared", tab_id: 7, action: "wait" },
+      f.cdp,
+      f.abort.signal,
+    );
+    expect(waitRes).toMatchObject({ ready: true });
+    const waitCall = (f.readFrames.mock.calls as unknown[][])[0];
+    expect(waitCall?.[5]).toBeGreaterThan(14000);
+    expect(waitCall?.[6]).toBe(f.abort.signal);
+
+    f.readFrames.mockClear();
+    const evalRes = await f.controller.run(
+      {
+        id: "eval-timeout-forward",
+        method: "tool.evaluate",
+        params: {
+          session_id: "shared",
+          tab_id: 7,
+          context_id: f.first.context_id,
+          expression: "1 + 1",
+          unverified: true,
+          timeout_ms: 12000,
+        },
+      },
+      f.cdp,
+      f.abort.signal,
+      async (cdp) => {
+        await cdp.send(7, "Runtime.evaluate", { expression: "1 + 1" });
+        return { ok: true, value: 2, tab_id: 7 };
+      },
+    );
+    expect(evalRes).toMatchObject({ ok: true, value: 2 });
+    const postActionCall = (f.readFrames.mock.calls as unknown[][]).at(-1);
+    expect(postActionCall?.[5]).toBeGreaterThan(11000);
+    expect(postActionCall?.[6]).toBe(f.abort.signal);
+  });
+
+  it("preserves pre-dispatch cooperation rejections inside withObjectGroup and withRemoteObject when no tab resources were owned yet", async () => {
+    const f = await fixture();
+    f.change({ human: 1, lastInput: 10000 });
+    const groupOutcome = await f.act(f.first.context_id, async (cdp) =>
+      withObjectGroup(cdp, toRootFrameHandle(7), "pre-dispatch", async (objectGroup) =>
+        cdp.send(7, "Runtime.callFunctionOn", {
+          objectId: "never-dispatched",
+          objectGroup,
+          functionDeclaration: "function() {}",
+        }),
+      ),
+    );
+    expect(groupOutcome).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "cooperation_sync_required", effect_state: "none" },
+    });
+
+    const remoteOutcome = await f.act(f.first.context_id, async (cdp) =>
+      withRemoteObject(cdp, toRootFrameHandle(7), "never-owned-obj", async (objectId) =>
+        cdp.send(7, "Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration: "function() {}",
+        }),
+      ),
+    );
+    expect(remoteOutcome).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "cooperation_sync_required", effect_state: "none" },
+    });
+    expect(f.native).not.toHaveBeenCalled();
+  });
+
+  it("evicts sessionCdpRunner entries on release, migrates default tab across replaceTab, and refuses local tab_close on unmanaged tabs", async () => {
+    const f = await fixture();
+    // 1) Evicting sessionRunners on release: before release, sessionCdpRunner returns the cached runner;
+    //    after release(), a subsequent sessionCdpRunner call creates a brand-new wrapper instead of leaking the old one.
+    const cachedBefore = sessionCdpRunner(f.cdp, "shared", () => true);
+    expect(sessionCdpRunner(f.cdp, "shared", () => true)).toBe(cachedBefore);
+    f.controller.release("shared");
+    const createdAfter = sessionCdpRunner(f.cdp, "shared", () => true);
+    expect(createdAfter).not.toBe(cachedBefore);
+
+    // 2) replaceTab migrates defaultTabs and clears stale TabState on removedTabId.
+    const f2 = await fixture();
+    expect(f2.controller.view(7)).toBeDefined();
+    f2.tab.id = 77;
+    f2.sessions.replaceTab(77, 7);
+    f2.controller.replaceTab(77, 7);
+    expect(f2.controller.view(7)).toBeUndefined();
+    const statusAfterReplace = await f2.controller.command(
+      { session_id: "shared", action: "status" },
+      f2.cdp,
+      f2.abort.signal,
+    );
+    expect(statusAfterReplace).toMatchObject({ tab_id: 77 });
+
+    // 3) Local tool.tab_close routed through CooperationController refuses an unmanaged user tab in Agent Window.
+    const f3 = await fixture();
+    const userTab = {
+      id: 99,
+      windowId: 100,
+      active: false,
+      url: "https://user-opened.example/",
+      title: "User Tab",
+    } as chrome.tabs.Tab;
+    const tabsApi = {
+      get: vi.fn(async (tabId: number) =>
+        tabId === 99 ? userTab : ({ id: tabId, windowId: 100 } as chrome.tabs.Tab),
+      ),
+      query: vi.fn(async () => [userTab]),
+      remove: vi.fn(async () => {}),
+    };
+    const closed = await f3.controller.run(
+      {
+        id: "close-unmanaged",
+        method: "tool.tab_close",
+        params: { session_id: "shared", tab_id: 99 },
+      },
+      f3.cdp,
+      f3.abort.signal,
+      () =>
+        handleTabClose(
+          f3.sessions,
+          { session_id: "shared", tab_id: 99 },
+          { tabs: tabsApi as never },
+        ),
+    );
+    expect(closed).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none" },
+    });
+    expect(tabsApi.remove).not.toHaveBeenCalled();
+    // Direct handleTabClose in a local session also enforces controlled-tab scope.
+    const closedDirect = await handleTabClose(
+      f3.sessions,
+      { session_id: "shared", tab_id: 99 },
+      { tabs: tabsApi as never },
+    );
+    expect(closedDirect).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
+    expect(tabsApi.remove).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "hold",
+    "stop",
+  ] as const)("preserves user %s authority across replaceTab while invalidating the old document context", async (decision) => {
+    const f = await fixture();
+    if (decision === "hold") {
+      await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    } else {
+      f.controller.stopSession("shared");
+    }
+    expect(f.controller.view(7)).toMatchObject({ mode: "held" });
+    f.sessionActivity.mockClear();
+
+    // Chrome replaces tab 7 -> 77 (Memory Saver / prerender).
+    f.tab.id = 77;
+    f.sessions.replaceTab(77, 7);
+    f.controller.replaceTab(77, 7);
+
+    expect(f.controller.view(7)).toBeUndefined();
+    expect(f.controller.view(77)).toMatchObject({ mode: "held" });
+    if (decision === "hold") {
+      // Replacing a held tab must keep idle_protected=true without any intermediate false drop.
+      expect(f.sessionActivity).not.toHaveBeenCalledWith("shared", false);
+      expect(f.sessionActivity).toHaveBeenLastCalledWith("shared", true);
+    }
+
+    // Agent must remain blocked on the replacement tab without bypassing user Hold/Stop.
+    const blocked = await f.controller.run(
+      {
+        id: "post-replace-act",
+        method: "tool.click",
+        params: { session_id: "shared", tab_id: 77, context_id: f.first.context_id },
+      },
+      f.cdp,
+      f.abort.signal,
+      (runner) => runner.send(77, "Input.dispatchMouseEvent", { type: "mousePressed" }),
+    );
+    expect(blocked).toMatchObject({
+      code: decision === "stop" ? "user_aborted" : "permission_denied",
+      data: { effect_state: "none" },
+    });
+    expect(f.native).not.toHaveBeenCalled();
   });
 });

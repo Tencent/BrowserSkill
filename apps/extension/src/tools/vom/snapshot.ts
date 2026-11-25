@@ -1,4 +1,9 @@
-import { type CdpFrame, type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentInfo,
+  type FrameProcessBoundary,
+  frameProcessIdentityKey,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 import { createCaptureCheckpoint } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
@@ -23,6 +28,7 @@ export const REQUESTED_STYLES = [
   "overflow-y",
   "width",
   "height",
+  "z-index",
 ] as const;
 export const VISUAL_STYLES = [
   ...REQUESTED_STYLES,
@@ -77,6 +83,8 @@ export interface SnapshotDocument {
     nodeValue?: number[];
     /** Maps node array index → index into `documents[]` for frame content. */
     contentDocumentIndex?: SparseArray;
+    /** Shadow root type (`"open"`, `"closed"`, `"user-agent"`) per shadow-tree node. */
+    shadowRootType?: SparseArray;
     inputValue?: SparseArray;
     textValue?: SparseArray;
     inputChecked?: RareBooleanData;
@@ -102,6 +110,14 @@ export function snapshotFrameId(document: SnapshotDocument, strings: string[]): 
 export interface SnapshotReply {
   strings?: string[];
   documents?: SnapshotDocument[];
+}
+
+function parseZIndex(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) return undefined;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 function isSensitiveFormControl(node: Pick<CapturedNode, "tag" | "attrs">): boolean {
@@ -169,6 +185,7 @@ export async function decodeDocument(
 
   const inputValues = sparseIndexMap(dn.inputValue);
   const textValues = sparseIndexMap(dn.textValue);
+  const shadowRootTypes = sparseIndexMap(dn.shadowRootType);
   const checkedInputs = new Set(dn.inputChecked?.index ?? []);
   const selectedOptions = new Set(dn.optionSelected?.index ?? []);
   const clickableNodes = new Set(dn.isClickable?.index ?? []);
@@ -298,15 +315,29 @@ export async function decodeDocument(
     const rawFormValue =
       rawFormValueIndex !== undefined ? str(strings, rawFormValueIndex) : undefined;
     const sensitive = isSensitiveFormControl({ tag, attrs });
+    const inputType = tag === "input" ? (attrs.type ?? "").toLowerCase() : "";
+    const isCheckable = inputType === "checkbox" || inputType === "radio";
+    const hasValueAttr = Object.prototype.hasOwnProperty.call(attrs, "value");
+    const isChecked = isCheckable ? checkedInputs.has(n) : undefined;
+    const defaultChecked = isCheckable && Object.prototype.hasOwnProperty.call(attrs, "checked");
     const formDefaultValue = attrs.value ?? "";
-    const formValue = sensitive ? undefined : rawFormValue;
-    const formState = snapshotFormState(
-      rawFormValue,
-      formDefaultValue,
-      Object.prototype.hasOwnProperty.call(attrs, "value"),
-      sensitive,
-    );
+    const formValue =
+      sensitive || (isCheckable && !hasValueAttr && rawFormValue === "on")
+        ? undefined
+        : rawFormValue;
+    const formState = isCheckable
+      ? !isChecked
+        ? "empty"
+        : defaultChecked
+          ? "default"
+          : "filled"
+      : snapshotFormState(rawFormValue, formDefaultValue, hasValueAttr, sensitive);
     if (sensitive && "value" in attrs) delete attrs.value;
+
+    const zIndex = parseZIndex(styles?.["z-index"]);
+    const shadowRootTypeIdx = shadowRootTypes.get(n);
+    const shadowRootType =
+      shadowRootTypeIdx !== undefined ? str(strings, shadowRootTypeIdx) || undefined : undefined;
 
     nodes.push({
       backendNodeId,
@@ -315,11 +346,13 @@ export async function decodeDocument(
       ...(dn.parentIndex?.[n] === undefined || (parentIdx >= 0 && parentBackendNodeId === null)
         ? { parentMissing: true }
         : {}),
+      ...(shadowRootType ? { shadowRootType } : {}),
 
       tag,
       attrs,
       layout,
       paintOrder: li === undefined ? 0 : (dl?.paintOrders?.[li] ?? 0),
+      ...(zIndex !== undefined ? { zIndex } : {}),
       position: styles?.position || "static",
       pointerEvents: styles?.["pointer-events"] || "auto",
       cursor: styles?.cursor || "auto",
@@ -334,9 +367,7 @@ export async function decodeDocument(
             ...(formState ? { formState } : {}),
           }
         : {}),
-      ...(tag === "input" && ["checkbox", "radio"].includes((attrs.type ?? "").toLowerCase())
-        ? { checked: checkedInputs.has(n) }
-        : {}),
+      ...(isCheckable ? { checked: isChecked } : {}),
       ...(tag === "option" && dn.optionSelected !== undefined
         ? { checked: selectedOptions.has(n) }
         : {}),
@@ -350,14 +381,15 @@ export async function decodeDocument(
  * The earlier graph only supplies compatible metadata and cross-target edges. */
 export function describeSnapshotFrames(
   snapshot: SnapshotReply,
-  target: CdpTarget,
-  hintById: ReadonlyMap<string, CdpFrame>,
+  process: FrameProcessBoundary,
+  hintById: ReadonlyMap<string, FrameDocumentInfo>,
   pageUrl?: string,
-): { frames: CdpFrame[]; ids: Set<string>; rootFrameId?: string } {
+): { frames: FrameDocumentInfo[]; ids: Set<string>; rootFrameId?: string } {
   const raw = snapshot.documents ?? [];
   const strings = snapshot.strings ?? [];
   const ids = new Set<string>();
   const invalid = new Set<string>();
+  const processIdentity = frameProcessIdentityKey(process);
   const frames = raw.map((doc) => {
     const frameId = snapshotFrameId(doc, strings);
     if (!frameId) return undefined;
@@ -365,26 +397,52 @@ export function describeSnapshotFrames(
     ids.add(frameId);
     const hint = hintById.get(frameId);
     const compatible =
-      hint && cdpTargetKey(hint.target) === cdpTargetKey(target) ? hint : undefined;
+      hint &&
+      frameProcessIdentityKey({ tabId: hint.handle.tabId, processKey: hint.processKey }) ===
+        processIdentity
+        ? hint
+        : undefined;
+    const loaderId = compatible?.loaderId ?? "";
     const url =
       (doc.documentURL === undefined ? undefined : strings[doc.documentURL]) || compatible?.url;
-    return { frameId, target, ...(url ? { url } : {}) } as CdpFrame;
+    const next: {
+      handle: FrameDocumentInfo["handle"];
+      frameId: string;
+      loaderId: string;
+      parentFrameId?: string;
+      ownerBackendNodeId?: number;
+      url?: string;
+      urlFragment?: string;
+      processKey: string;
+      isOutOfProcess: boolean;
+    } = {
+      handle: compatible?.handle ?? toFrameDocumentHandle(process.tabId, { frameId, loaderId }),
+      frameId,
+      loaderId,
+      ...(url ? { url } : {}),
+      ...(compatible?.urlFragment !== undefined ? { urlFragment: compatible.urlFragment } : {}),
+      processKey: process.processKey,
+      isOutOfProcess: process.isOutOfProcess,
+    };
+    return next;
   });
   const root = frames[0];
   if (root) {
     const hint = hintById.get(root.frameId);
     const parent = hint?.parentFrameId ? hintById.get(hint.parentFrameId) : undefined;
     if (
-      target.sessionId &&
+      process.isOutOfProcess &&
       hint &&
-      cdpTargetKey(hint.target) === cdpTargetKey(target) &&
+      frameProcessIdentityKey({ tabId: hint.handle.tabId, processKey: hint.processKey }) ===
+        processIdentity &&
       parent &&
-      cdpTargetKey(parent.target) !== cdpTargetKey(target)
+      frameProcessIdentityKey({ tabId: parent.handle.tabId, processKey: parent.processKey }) !==
+        processIdentity
     ) {
       root.parentFrameId = parent.frameId;
       root.ownerBackendNodeId = hint.ownerBackendNodeId;
     }
-    if (!target.sessionId && !root.url && pageUrl) root.url = pageUrl;
+    if (!process.isOutOfProcess && !root.url && pageUrl) root.url = pageUrl;
   }
   const owned = new Set<string>();
   for (let i = 0; i < raw.length; i++) {
@@ -405,7 +463,9 @@ export function describeSnapshotFrames(
     }
   }
   return {
-    frames: frames.filter((frame): frame is CdpFrame => !!frame && !invalid.has(frame.frameId)),
+    frames: frames.filter(
+      (frame): frame is FrameDocumentInfo => !!frame && !invalid.has(frame.frameId),
+    ),
     ids,
     rootFrameId: root?.frameId,
   };

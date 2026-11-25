@@ -147,6 +147,74 @@ describe("startKeepalive", () => {
     await Promise.resolve();
     expect(transport.connectCalls).toBe(1);
   });
+  it("does not re-create an alarm the platform already has", async () => {
+    const alarms = makeAlarms();
+    (alarms as typeof alarms & { get: NonNullable<AlarmsApi["get"]> }).get = async () => ({
+      name: KEEPALIVE_ALARM_NAME,
+    });
+    startKeepalive({ transport: makeTransport(), alarms });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(alarms.created).toEqual([]);
+  });
+
+  it("creates the alarm when the platform reports it missing", async () => {
+    const alarms = makeAlarms();
+    (alarms as typeof alarms & { get: NonNullable<AlarmsApi["get"]> }).get = async () => undefined;
+    startKeepalive({ transport: makeTransport(), alarms });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(alarms.created).toEqual([
+      { name: KEEPALIVE_ALARM_NAME, info: { periodInMinutes: 0.5 } },
+    ]);
+  });
+
+  it("creates the alarm when the lookup rejects", async () => {
+    const alarms = makeAlarms();
+    (alarms as typeof alarms & { get: NonNullable<AlarmsApi["get"]> }).get = async () => {
+      throw new Error("storage unavailable");
+    };
+    startKeepalive({ transport: makeTransport(), alarms });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(alarms.created).toHaveLength(1);
+  });
+
+  it("retries the handshake when the socket is connected but the controller is not", async () => {
+    const transport = makeTransport("connected");
+    const requestConnect = vi.fn();
+    const handle = startKeepalive({
+      transport,
+      alarms: makeAlarms(),
+      requestConnect,
+      isConnected: () => false,
+    });
+
+    await handle.tickForTest();
+
+    expect(requestConnect).toHaveBeenCalledOnce();
+    expect(transport.connect).not.toHaveBeenCalled();
+  });
+
+  it("uses isConnected instead of the raw transport state", async () => {
+    const transport = makeTransport("disconnected");
+    const onConnectedTick = vi.fn();
+    const handle = startKeepalive({
+      transport,
+      alarms: makeAlarms(),
+      onConnectedTick,
+      isConnected: () => true,
+    });
+
+    await handle.tickForTest();
+
+    expect(onConnectedTick).toHaveBeenCalledOnce();
+    expect(transport.connectCalls).toBe(0);
+  });
+
   it("delegates reconnect policy to the controller callback", async () => {
     const transport = makeTransport("disconnected");
     const requestConnect = vi.fn();

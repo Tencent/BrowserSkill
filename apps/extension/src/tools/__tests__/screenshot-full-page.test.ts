@@ -1,13 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { rootEventSource, targetEventSource } from "@/browser-driver/frame-handles";
 import { capturePage } from "@/long-screenshot/capture";
 import { ScreenshotExports } from "@/long-screenshot/exports";
 import { exportPng } from "@/long-screenshot/png";
 import { SessionManager } from "@/session-manager/manager";
 import { handleFullPageScreenshot } from "../screenshot-full-page";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 vi.mock("@/long-screenshot/page-client", () => ({
-  createPageClient: () => ({ documentId: "document-one", prepare: async () => {}, page: vi.fn() }),
+  createPageClient: (
+    _tabId: number,
+    _id: string,
+    _signal: AbortSignal,
+    _checkTab: () => Promise<void>,
+    onSend?: (command: { action: string }) => void,
+  ) => ({
+    documentId: "document-one",
+    prepare: async () => {},
+    page: vi.fn(async (command: { action: string }) => {
+      onSend?.(command);
+      return {};
+    }),
+  }),
 }));
 vi.mock("@/long-screenshot/capture", () => ({ capturePage: vi.fn(async () => {}) }));
 vi.mock("@/long-screenshot/tiles", () => ({
@@ -41,29 +55,44 @@ async function setup() {
     active: true,
     url: "https://example.test/",
   } as chrome.tabs.Tab;
-  let onEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+  let onEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
   const disposeEvents = vi.fn(() => {
     onEvent = undefined;
   });
-  const cdp = {
-    onEvent: vi.fn((handler: NonNullable<typeof onEvent>) => {
-      onEvent = handler;
-      return { dispose: disposeEvents };
+  const onEventMock = vi.fn((_tabId: number, handler: NonNullable<typeof onEvent>) => {
+    onEvent = handler;
+    return { dispose: disposeEvents };
+  });
+  const getAttachmentIdMock = vi.fn(() => "attachment-one" as string | undefined);
+  const sendMock = vi.fn(async <T>(_id: number, method: string, _params?: object): Promise<T> => {
+    if (method === "Page.startScreencast") {
+      onEvent?.(rootEventSource(7), "Page.screencastFrame", { sessionId: 1 });
+      return {} as T;
+    }
+    if (
+      method === "Page.stopScreencast" ||
+      method === "Page.screencastFrameAck" ||
+      method === "Emulation.setFocusEmulationEnabled"
+    )
+      return {} as T;
+    if (method === "Page.getFrameTree") return {} as T;
+    if (method === "Page.captureScreenshot") return { data: "cG5n" } as T;
+    throw new Error(`Unexpected CDP call: ${method}`);
+  });
+  const cdp = Object.assign(
+    createStubCdpRunner({
+      send: sendMock as CdpRunner["send"],
+      onEvent: onEventMock,
+      getAttachmentId: getAttachmentIdMock,
     }),
-    getAttachmentId: vi.fn(() => "attachment-one" as string | undefined),
-    send: vi.fn(async <T>(_id: number, method: string, _params?: object): Promise<T> => {
-      if (method === "Page.startScreencast") {
-        onEvent?.({ tabId: 7 }, "Page.screencastFrame", { sessionId: 1 });
-        return {} as T;
-      }
-      if (method === "Page.stopScreencast" || method === "Page.screencastFrameAck") return {} as T;
-      if (method === "Page.getFrameTree") return {} as T;
-      if (method === "Page.captureScreenshot") return { data: "cG5n" } as T;
-      throw new Error(`Unexpected CDP call: ${method}`);
-    }),
-  };
+    {
+      send: sendMock,
+      onEvent: onEventMock,
+      getAttachmentId: getAttachmentIdMock,
+    },
+  );
   const deps = {
-    cdp: cdp as CdpRunner & typeof cdp,
+    cdp,
     tabsApi: { get: vi.fn(async () => tab), query: vi.fn(async () => [tab]) },
     exports: new ScreenshotExports((id) => manager.has(id)),
   };
@@ -419,13 +448,13 @@ describe("Windows full-page rendering lifetime", () => {
     const { manager, deps, disposeEvents } = await setupWindowsCapture();
     vi.mocked(capturePage).mockImplementationOnce(async (options) => {
       await options.screenshot();
-      const frame = deps.cdp.onEvent.mock.calls[0][0];
-      frame({ tabId: 99 }, "Page.screencastFrame", { sessionId: 2 });
-      frame({ tabId: 7, sessionId: "child" }, "Page.screencastFrame", { sessionId: 3 });
-      frame({ tabId: 7 }, "Page.screencastVisibilityChanged", {});
-      frame({ tabId: 7 }, "Page.screencastFrame", { sessionId: 4 });
+      const frame = deps.cdp.onEvent.mock.calls[0][1];
+      frame(rootEventSource(99), "Page.screencastFrame", { sessionId: 2 });
+      frame(targetEventSource(7, "child"), "Page.screencastFrame", { sessionId: 3 });
+      frame(rootEventSource(7), "Page.screencastVisibilityChanged", {});
+      frame(rootEventSource(7), "Page.screencastFrame", { sessionId: 4 });
       deps.cdp.getAttachmentId.mockReturnValue("replacement");
-      frame({ tabId: 7 }, "Page.screencastFrame", { sessionId: 5 });
+      frame(rootEventSource(7), "Page.screencastFrame", { sessionId: 5 });
       return { width: 64, height: 256 };
     });
     expect(await handleFullPageScreenshot(manager, { session_id: "one" }, deps)).toMatchObject({
@@ -509,6 +538,30 @@ describe("Windows full-page rendering lifetime", () => {
     expect(deps.exports.discard).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("wakes an unfocused headed Linux/Windows Agent Window while skipping HeadlessChrome", async () => {
+    for (const [ua, expectedScreencasts] of [
+      ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136.0.0.0", 1],
+      ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 HeadlessChrome/136.0.0.0", 0],
+    ] as const) {
+      const { manager, tab, deps } = await setupWindowsCapture();
+      tab.active = true;
+      vi.mocked(chrome.runtime.getPlatformInfo).mockResolvedValue({
+        os: "linux",
+      } as chrome.runtime.PlatformInfo);
+      (chrome as unknown as { windows: unknown }).windows = {
+        get: vi.fn(async () => ({ id: 100, focused: false, state: "normal" })),
+      };
+      vi.stubGlobal("navigator", { userAgent: ua });
+      expect(await handleFullPageScreenshot(manager, { session_id: "one" }, deps)).toMatchObject({
+        format: "png",
+      });
+      expect(
+        deps.cdp.send.mock.calls.filter(([, method]) => method === "Page.startScreencast"),
+      ).toHaveLength(expectedScreencasts);
+      await deps.exports.dispose();
+    }
+  });
 });
 
 describe("full-page scope and diagnostics", () => {
@@ -527,7 +580,7 @@ describe("full-page scope and diagnostics", () => {
     expect(vi.mocked(capturePage).mock.calls.at(-1)?.[0]).toMatchObject({
       scope: "current",
       loadingTimeoutMs: 30000,
-      checkFreshness: os === "win",
+      checkFreshness: os === "win" || os === "linux",
     });
     const renderingCalls = deps.cdp.send.mock.calls
       .filter(([, method]) => method.endsWith("Screencast"))
@@ -552,5 +605,83 @@ describe("full-page scope and diagnostics", () => {
     });
     expect(exportPng).not.toHaveBeenCalled();
     expect(deps.exports.discard).toHaveBeenCalledOnce();
+  });
+
+  it("enables and releases temporary focus emulation only for non-minimized unowned tabs", async () => {
+    // Minimized window: never enables focus emulation and reports effect_state: none on pre-begin page_hidden.
+    const minimized = await setupCapture();
+    (chrome as unknown as { windows: unknown }).windows = {
+      get: vi.fn(async () => ({ id: 100, focused: false, state: "minimized" })),
+    };
+    const { ScreenshotError } = await import("@/long-screenshot/types");
+    vi.mocked(capturePage).mockImplementationOnce(async () => {
+      throw new ScreenshotError("interrupted", "page_hidden");
+    });
+    expect(
+      await handleFullPageScreenshot(minimized.manager, { session_id: "one" }, minimized.deps),
+    ).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "page_hidden", effect_state: "none" },
+    });
+    expect(
+      minimized.deps.cdp.send.mock.calls.filter(
+        ([, method]) => method === "Emulation.setFocusEmulationEnabled",
+      ),
+    ).toEqual([]);
+
+    // Normal unfocused/occluded window without persistent lease: enables then disables focus emulation.
+    const occluded = await setupCapture();
+    (chrome as unknown as { windows: unknown }).windows = {
+      get: vi.fn(async () => ({ id: 100, focused: false, state: "normal" })),
+    };
+    expect(
+      await handleFullPageScreenshot(occluded.manager, { session_id: "one" }, occluded.deps),
+    ).toMatchObject({ format: "png" });
+    expect(
+      occluded.deps.cdp.send.mock.calls
+        .filter(([, method]) => method === "Emulation.setFocusEmulationEnabled")
+        .map(([, , params]) => params),
+    ).toEqual([{ enabled: true }, { enabled: false }]);
+    await occluded.deps.exports.dispose();
+
+    // Persistent background lease: never toggles focus emulation.
+    const owned = await setupCapture();
+    owned.deps.cdp.ownsBackgroundExecution = vi.fn(() => true);
+    expect(
+      await handleFullPageScreenshot(owned.manager, { session_id: "one" }, owned.deps),
+    ).toMatchObject({ format: "png" });
+    expect(
+      owned.deps.cdp.send.mock.calls.filter(
+        ([, method]) => method === "Emulation.setFocusEmulationEnabled",
+      ),
+    ).toEqual([]);
+    await owned.deps.exports.dispose();
+  });
+
+  it("reports effect_state: unknown when capture fails after begin is sent or succeeds", async () => {
+    const { manager, deps } = await setupCapture();
+    const { ScreenshotError } = await import("@/long-screenshot/types");
+    vi.mocked(capturePage).mockImplementationOnce(async (d) => {
+      d.prepared?.();
+      d.progress("capturing", 50, 2);
+      throw new ScreenshotError("interrupted", "page_hidden");
+    });
+    expect(await handleFullPageScreenshot(manager, { session_id: "one" }, deps)).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "page_hidden", effect_state: "unknown", frames: 2, progress: 50 },
+    });
+
+    // A lost message-port reply (`unavailable`) AFTER `begin` was sent must stay `unknown`.
+    const lostReply = await setupCapture();
+    vi.mocked(capturePage).mockImplementationOnce(async (d) => {
+      await d.page({ action: "begin", label: "Capturing", cancelLabel: "Cancel" });
+      throw new ScreenshotError("unavailable");
+    });
+    expect(
+      await handleFullPageScreenshot(lostReply.manager, { session_id: "one" }, lostReply.deps),
+    ).toMatchObject({
+      code: "unsupported",
+      data: { effect_state: "unknown" },
+    });
   });
 });

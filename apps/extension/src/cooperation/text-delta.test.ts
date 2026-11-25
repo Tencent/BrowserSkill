@@ -200,4 +200,207 @@ describe("textDelta", () => {
     });
     expect(delta(after(grown), { ...held, maxTokens: 120 }, 120)).toBe("token_budget_shift");
   });
+
+  it("uses structured VomLineMetadata so placeholder attributes and landmark names containing 'canvas ' are classified accurately", () => {
+    const trickyVom = [
+      "@vom 1",
+      "@view 1280x720",
+      "@layers 1 focus=L1",
+      "L1 page",
+      '  RootWebArea "Studio"',
+      '    @e1 textbox placeholder="Version: rev-0"',
+      '    banner "Paint on canvas Version: rev-0"',
+      '      StaticText "Paint on canvas Version: rev-0"',
+    ].join("\n");
+    const trickyHeld: HeldText = { text: trickyVom, truncated: false };
+
+    // A landmark whose label happens to contain `canvas ` is NOT a `[visual:screenshot]` canvas line;
+    // structured VOM metadata patches both the landmark's derived name and its StaticText cleanly.
+    const res = delta(
+      after([text(1, "Paint on canvas Version: rev-0", "Paint on canvas Version: rev-1")]),
+      trickyHeld,
+    );
+    expect(res).toMatchObject({
+      lines: [
+        {
+          line: 7,
+          previous: '    banner "Paint on canvas Version: rev-0"',
+          text: '    banner "Paint on canvas Version: rev-1"',
+        },
+        {
+          line: 8,
+          previous: '      StaticText "Paint on canvas Version: rev-0"',
+          text: '      StaticText "Paint on canvas Version: rev-1"',
+        },
+      ],
+    });
+
+    // Meanwhile, an unnamed textbox with `placeholder="Version: rev-0"` has no quoted node name
+    // or StaticText line, so changing `"Version: rev-0"` refuses rather than mutating placeholder attributes.
+    expect(
+      delta(after([text(1, "Version: rev-0", "Version: rev-1")]), {
+        text: [
+          "@vom 1",
+          "@view 1280x720",
+          "@layers 1 focus=L1",
+          "L1 page",
+          '  RootWebArea "Studio"',
+          '    @e1 textbox placeholder="Version: rev-0"',
+        ].join("\n"),
+        truncated: false,
+      }),
+    ).toBe("text_ambiguous");
+  });
+
+  it("replaces only inside the quoted name segment when UI text matches or overlaps role names", () => {
+    const roleOverlapVom = [
+      "@vom 1",
+      "@view 1280x720",
+      "@layers 1 focus=L1",
+      "L1 page",
+      '  RootWebArea "App"',
+      '    status "Current status"',
+      '      StaticText "Current"',
+      '      status "status"',
+      '    status "Ready"',
+      '    timer "time"',
+      '    main "Orders"',
+      '      StaticText "main"',
+    ].join("\n");
+
+    const statusRes = delta(after([text(1, "status", "Saved")]), {
+      text: roleOverlapVom,
+      truncated: false,
+    });
+    expect(statusRes).toMatchObject({
+      lines: [
+        {
+          line: 6,
+          previous: '    status "Current status"',
+          text: '    status "Current Saved"',
+        },
+        {
+          line: 8,
+          previous: '      status "status"',
+          text: '      status "Saved"',
+        },
+      ],
+    });
+    if (typeof statusRes === "string") throw new Error(statusRes);
+    expect(statusRes.text).toContain('    status "Ready"');
+    expect(statusRes.text).not.toContain('Saved "status"');
+
+    const timerRes = delta(after([text(1, "time", "00:01")]), {
+      text: roleOverlapVom,
+      truncated: false,
+    });
+    expect(timerRes).toMatchObject({
+      lines: [
+        {
+          line: 10,
+          previous: '    timer "time"',
+          text: '    timer "00:01"',
+        },
+      ],
+    });
+    if (typeof timerRes === "string") throw new Error(timerRes);
+    expect(timerRes.text).not.toContain('00:01r "time"');
+
+    // Sibling/ancestor role name `main` must not cause false hit when `StaticText "main"` updates.
+    const mainRes = delta(after([text(1, "main", "home")]), {
+      text: roleOverlapVom,
+      truncated: false,
+    });
+    expect(mainRes).toMatchObject({
+      lines: [
+        {
+          line: 12,
+          previous: '      StaticText "main"',
+          text: '      StaticText "home"',
+        },
+      ],
+    });
+    if (typeof mainRes === "string") throw new Error(mainRes);
+    expect(mainRes.text).toContain('    main "Orders"');
+
+    // Escaped quotes and `$&` replacement patterns stay properly escaped inside quotes.
+    const escapedVom = [
+      "@vom 1",
+      "@view 1280x720",
+      "@layers 1 focus=L1",
+      "L1 page",
+      '  RootWebArea "App"',
+      '    status "status \\"v1\\""',
+    ].join("\n");
+    const escapedRes = delta(after([text(1, 'status "v1"', 'Saved "$&"')]), {
+      text: escapedVom,
+      truncated: false,
+    });
+    expect(escapedRes).toMatchObject({
+      lines: [
+        {
+          line: 6,
+          previous: '    status "status \\"v1\\""',
+          text: '    status "Saved \\"$&\\""',
+        },
+      ],
+    });
+  });
+
+  it("refuses to patch when the changed text also appears in an active-scope block or clears to empty", () => {
+    const scopeVom = [
+      "@vom 1",
+      "@view 1280x720",
+      "@layers 1 focus=L1",
+      "L1 page",
+      '  RootWebArea "Shop"',
+      '    @e1 button "Products" [expanded]',
+      "      [§ active: Products]",
+      "        Shoes Bags",
+      '    StaticText "Shoes"',
+    ].join("\n");
+    expect(delta(after([text(1, "Shoes", "Boots")]), { text: scopeVom, truncated: false })).toBe(
+      "text_ambiguous",
+    );
+    // Unescaped quotes inside active-scope lines must also block patching instead of going stale.
+    const quotedScopeVom = [
+      "@vom 1",
+      "@view 1280x720",
+      "@layers 1 focus=L1",
+      "L1 page",
+      '  RootWebArea "Orders"',
+      '    @e1 button "Details" [expanded]',
+      "      [§ active: Details]",
+      '        Order "A" pending',
+      '    StaticText "Order \\"A\\" pending"',
+    ].join("\n");
+    expect(
+      delta(after([text(1, 'Order "A" pending', 'Order "A" shipped')]), {
+        text: quotedScopeVom,
+        truncated: false,
+      }),
+    ).toBe("text_ambiguous");
+    // Active-scope body lines silently clip at 160 chars without an ellipsis; edits within
+    // that clipped prefix must refuse with text_cut_by_truncation instead of going stale.
+    const longBefore = `Alpha ${"x".repeat(170)}`;
+    const longAfter = `Beta ${"x".repeat(170)}`;
+    const truncatedScopeVom = [
+      "@vom 1",
+      "@view 1280x720",
+      "@layers 1 focus=L1",
+      "L1 page",
+      '  RootWebArea "Orders"',
+      '    @e1 button "Details" [expanded]',
+      "      [§ active: Details]",
+      `        ${longBefore.slice(0, 160)}`,
+      `    StaticText "${longBefore}"`,
+    ].join("\n");
+    expect(
+      delta(after([text(1, longBefore, longAfter)]), {
+        text: truncatedScopeVom,
+        truncated: false,
+      }),
+    ).toBe("text_cut_by_truncation");
+    expect(delta(after([text(1, "Total: 5", "")]), held)).toBe("structure_changed");
+  });
 });

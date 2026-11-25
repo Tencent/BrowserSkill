@@ -1,19 +1,20 @@
 // @vitest-environment node
-// Opt in with BSK_NAV_CHROME. The shared harness owns its browser and profile.
+// Opt in with BSK_TEST_CHROME. The shared harness owns its browser and profile.
 import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleNavigate, handleNavigateBack, handleNavigateForward } from "../navigation";
 import { handleRead } from "../read";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
   params?: object,
   sessionId?: string,
 ) => Promise<T>;
-type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
+type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
 interface CdpEvent {
   sessionId?: string;
   method: string;
@@ -23,7 +24,7 @@ interface FrameTree {
   frameTree: { frame: { id: string; loaderId: string } };
 }
 
-describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser same-document navigation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser same-document navigation", () => {
   it("revokes passive-read refs after loaded-tab SPA routes, including a fresh attachment", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html");
@@ -47,7 +48,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser same-document navigat
       );
       await withChrome(
         {
-          executable: process.env.BSK_NAV_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30_000,
@@ -125,7 +126,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser same-document navigat
             },
             { onDocumentChanged: (tabId) => context.refStore.invalidateTab(tabId) },
           );
-          const graph = vi.spyOn(cdp, "getFrameGraph");
+          const graph = vi.spyOn(cdp, "getFrameDocuments");
           const tab = async () => {
             const { targetInfo } = await send<{ targetInfo: { url: string } }>(
               "Target.getTargetInfo",
@@ -207,14 +208,14 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser same-document navigat
       );
       await withChrome(
         {
-          executable: process.env.BSK_NAV_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30_000,
           onEvent: (event: CdpEvent) => {
             if (sessionId && event.sessionId === sessionId)
               for (const listener of [...listeners])
-                listener({ tabId: 4 }, event.method, event.params);
+                listener(rootEventSource(4), event.method, event.params);
           },
         },
         async (send: Send) => {
@@ -248,10 +249,10 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser same-document navigat
             },
           });
           await manager.start("navigation");
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: <T>(_tabId: number, method: string, params?: object) =>
               send<T>(method, params, sessionId),
-            onEvent: (listener) => {
+            onEvent: (_tabId, listener) => {
               listeners.add(listener);
               return {
                 dispose: () => {
@@ -259,7 +260,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser same-document navigat
                 },
               };
             },
-          };
+          });
           const tab = async () =>
             ({
               id: 4,

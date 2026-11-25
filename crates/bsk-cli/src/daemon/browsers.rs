@@ -101,6 +101,10 @@ impl BrowserSink {
 pub struct Pending {
     waiters: HashMap<RpcId, oneshot::Sender<bsk_protocol::ResponseFrame>>,
     terminated: Option<Termination>,
+    /// Cancelled whenever this socket is closed or replaced so the owning
+    /// `drive_connection` task stops immediately instead of parking on
+    /// `rx.recv()` while holding `Arc<BrowserClient>`.
+    closed: super::abort::AbortToken,
 }
 
 #[derive(Debug)]
@@ -110,6 +114,10 @@ enum Termination {
 }
 
 impl Pending {
+    pub fn closed_token(&self) -> super::abort::AbortToken {
+        self.closed.clone()
+    }
+
     pub fn register(
         &mut self,
         id: RpcId,
@@ -146,6 +154,7 @@ impl Pending {
     /// later registrations. The first termination wins, so a replaced socket
     /// keeps reporting the reconnect when its own teardown closes it later.
     pub fn terminate(&mut self, cause: RpcError) {
+        self.closed.cancel();
         if self.terminated.is_some() {
             return;
         }
@@ -161,6 +170,7 @@ impl Pending {
     /// The socket is gone: drop every waiter so each caller takes its
     /// existing transport-closed path, and refuse later registrations.
     pub fn close(&mut self) {
+        self.closed.cancel();
         self.terminated.get_or_insert(Termination::Closed);
         self.waiters.clear();
     }
@@ -175,8 +185,6 @@ impl Pending {
 /// Either way the frame never left the daemon.
 #[derive(Debug)]
 pub enum SendError {
-    /// This connection does not support an explicitly requested feature.
-    UnsupportedFeature(RpcError),
     /// The daemon abandoned this socket; the inner error names the cause.
     Terminated(RpcError),
     /// The socket's writer is gone.
@@ -355,18 +363,6 @@ impl BrowserClient {
         &self,
         request: RequestFrame,
     ) -> Result<oneshot::Receiver<bsk_protocol::ResponseFrame>, SendError> {
-        bsk_protocol::compatibility::check_request(
-            &request.method,
-            request.params.as_ref().unwrap_or(&serde_json::Value::Null),
-            bsk_protocol::compatibility::Peer::Extension,
-            &self.extension_protocol_version,
-        )
-        .map_err(|mut error| {
-            if let Some(data) = error.data.as_mut() {
-                data["browser_instance_id"] = serde_json::Value::String(self.id.0.clone());
-            }
-            SendError::UnsupportedFeature(error)
-        })?;
         let id = request.id.clone();
         let mut pending = self.pending.lock().expect("browser pending poisoned");
         let waiter = pending.register(id.clone())?;
@@ -375,6 +371,24 @@ impl BrowserClient {
             return Err(SendError::SinkClosed);
         }
         Ok(waiter)
+    }
+
+    /// Token cancelled as soon as this browser connection is closed, evicted,
+    /// or replaced by a reconnect.
+    pub fn closed_token(&self) -> super::abort::AbortToken {
+        self.pending
+            .lock()
+            .expect("browser pending poisoned")
+            .closed_token()
+    }
+
+    /// Close this client: fail all pending RPC waiters and signal the owning
+    /// WS driver task to stop and release its socket/permit.
+    pub fn close(&self) {
+        self.pending
+            .lock()
+            .expect("browser pending poisoned")
+            .close();
     }
 
     /// Record that a frame just arrived from this browser.
@@ -420,6 +434,17 @@ impl BrowserClient {
     }
 }
 
+/// Why a browser registration was (not) dropped when its socket closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisconnectDisposition {
+    /// This generation owned the entry and it was removed.
+    RemovedCurrent,
+    /// A newer connection already owns the id; its sessions stay alive.
+    ReplacedBy { current_generation: u64 },
+    /// The entry was already evicted (liveness reaper or failed reconnect).
+    AlreadyAbsent,
+}
+
 #[derive(Debug, Default)]
 pub struct BrowserRegistry {
     inner: Mutex<HashMap<BrowserId, std::sync::Arc<BrowserClient>>>,
@@ -459,11 +484,48 @@ impl BrowserRegistry {
         }
     }
 
+    /// Remove and terminate any prior registration for `id` ahead of a
+    /// reconnect's session purge and audit setup so no new sessions can attach
+    /// to the dying socket while the new registration finishes initializing.
+    pub fn evict_for_reconnect(&self, id: &BrowserId) -> Option<std::sync::Arc<BrowserClient>> {
+        let prev = self.remove(id)?;
+        tracing::info!(
+            id = %id,
+            old_generation = prev.generation,
+            "browser reconnect: evicting previous registration"
+        );
+        prev.pending
+            .lock()
+            .expect("browser pending poisoned")
+            .terminate(extension_reconnected_error());
+        Some(prev)
+    }
+
     pub fn remove(&self, id: &BrowserId) -> Option<std::sync::Arc<BrowserClient>> {
         self.inner
             .lock()
             .expect("browser registry poisoned")
             .remove(id)
+    }
+
+    /// Drop a disconnecting browser and report why it was (not) removed.
+    ///
+    /// Session cleanup depends on distinguishing "this generation owned the
+    /// registration" from "a newer reconnect owns it" and from "the reaper
+    /// already evicted it": the last case leaves no registration behind but
+    /// must still purge the sessions the eviction did not clean up.
+    pub fn remove_on_disconnect(&self, id: &BrowserId, generation: u64) -> DisconnectDisposition {
+        let mut guard = self.inner.lock().expect("browser registry poisoned");
+        match guard.get(id) {
+            Some(current) if current.generation == generation => {
+                guard.remove(id);
+                DisconnectDisposition::RemovedCurrent
+            }
+            Some(current) => DisconnectDisposition::ReplacedBy {
+                current_generation: current.generation,
+            },
+            None => DisconnectDisposition::AlreadyAbsent,
+        }
     }
 
     /// Drop the entry for `id` only if the current registered
@@ -661,7 +723,7 @@ mod tests {
             browser_name: "chrome".into(),
             browser_version: "131".into(),
             extension_version: "0.1.0-dev.0".into(),
-            extension_protocol_version: "1.0".into(),
+            extension_protocol_version: "2.0".into(),
             label: label.into(),
             sink: BrowserSink { tx },
             pending: Mutex::new(Pending::default()),
@@ -671,6 +733,78 @@ mod tests {
             liveness: Liveness::default(),
         });
         (client, rx)
+    }
+
+    fn client_with_generation(id: &str, generation: u64) -> std::sync::Arc<BrowserClient> {
+        let (tx, _rx) = mpsc::unbounded_channel::<Frame>();
+        std::sync::Arc::new(BrowserClient {
+            id: BrowserId(id.into()),
+            browser_name: "chrome".into(),
+            browser_version: "131".into(),
+            extension_version: "0.1.0-dev.0".into(),
+            extension_protocol_version: "2.0".into(),
+            label: String::new(),
+            sink: BrowserSink { tx },
+            pending: Mutex::new(Pending::default()),
+            generation,
+            connected_at_ms: 0,
+            version_skew: false,
+            liveness: Liveness::default(),
+        })
+    }
+
+    #[test]
+    fn remove_on_disconnect_reports_removed_current() {
+        let reg = BrowserRegistry::new();
+        reg.insert(client_with_generation("b1", 7));
+
+        assert_eq!(
+            reg.remove_on_disconnect(&BrowserId("b1".into()), 7),
+            DisconnectDisposition::RemovedCurrent
+        );
+        assert!(reg.get(&BrowserId("b1".into())).is_none());
+    }
+
+    #[test]
+    fn remove_on_disconnect_keeps_newer_registration() {
+        let reg = BrowserRegistry::new();
+        reg.insert(client_with_generation("b1", 7));
+        reg.insert(client_with_generation("b1", 8));
+
+        assert_eq!(
+            reg.remove_on_disconnect(&BrowserId("b1".into()), 7),
+            DisconnectDisposition::ReplacedBy {
+                current_generation: 8
+            }
+        );
+        let current = reg.get(&BrowserId("b1".into())).expect("newer entry stays");
+        assert_eq!(current.generation, 8);
+    }
+
+    #[test]
+    fn remove_on_disconnect_reports_already_absent() {
+        let reg = BrowserRegistry::new();
+
+        assert_eq!(
+            reg.remove_on_disconnect(&BrowserId("b1".into()), 7),
+            DisconnectDisposition::AlreadyAbsent
+        );
+    }
+
+    #[test]
+    fn remove_if_generation_matches_still_ignores_newer_registration() {
+        let reg = BrowserRegistry::new();
+        reg.insert(client_with_generation("b1", 7));
+        reg.insert(client_with_generation("b1", 8));
+
+        assert!(
+            reg.remove_if_generation_matches(&BrowserId("b1".into()), 7)
+                .is_none()
+        );
+        assert!(
+            reg.remove_if_generation_matches(&BrowserId("b1".into()), 8)
+                .is_some()
+        );
     }
 
     #[test]
@@ -966,6 +1100,8 @@ mod tests {
                 id: "late".into(),
                 method: bsk_protocol::Method::ToolSnapshot,
                 params: None,
+                audit_id: None,
+                operation_id: None,
             })
             .expect_err("a replaced socket must not accept a new call");
         match refused {
@@ -1001,6 +1137,8 @@ mod tests {
                 id: "inflight".into(),
                 method: bsk_protocol::Method::ToolSnapshot,
                 params: None,
+                audit_id: None,
+                operation_id: None,
             })
             .expect("a live socket accepts a call");
         assert!(socket.try_recv().is_ok());
@@ -1016,6 +1154,8 @@ mod tests {
                 id: "late".into(),
                 method: bsk_protocol::Method::ToolSnapshot,
                 params: None,
+                audit_id: None,
+                operation_id: None,
             })
             .expect_err("a closed socket must not accept a new call");
         assert!(matches!(refused, SendError::SinkClosed));

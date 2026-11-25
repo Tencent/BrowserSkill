@@ -1,10 +1,11 @@
 import type { VomScene } from "@browser-skill/vom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NativeInputClockError } from "@/browser-driver/native-input-clock";
 import { SessionManager } from "@/session-manager/manager";
 import { scrollNodeIntoView } from "@/tools/element-geometry";
-import { resolveActionTarget } from "@/tools/interaction";
+import { handleSelect, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner, lookupPinnedSelectorTarget } from "@/tools/shared";
 import {
   ActionCheckError,
   actionError,
@@ -18,7 +19,10 @@ vi.mock("@/tools/observation", () => ({
   captureVomObservation: vi.fn(),
   handleSnapshot: vi.fn(async () => ({ text: "@e1 button Continue", tab_id: 7 })),
 }));
-vi.mock("@/tools/interaction", () => ({ resolveActionTarget: vi.fn() }));
+vi.mock("@/tools/interaction", async (original) => ({
+  ...(await original<typeof import("@/tools/interaction")>()),
+  resolveActionTarget: vi.fn(),
+}));
 vi.mock("./action-checks", async (original) => ({
   ...(await original<typeof import("./action-checks")>()),
   checkActionTarget: vi.fn(async () => undefined),
@@ -52,11 +56,18 @@ async function fixture(policy: "strict" | "target" = "target") {
   vi.mocked(resolveActionTarget).mockResolvedValue({
     tab,
     backendNodeId: 4,
-    cdpTarget: { tabId: 7 },
+    handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 4 },
     usedRef: "e1",
   });
-  const send = vi.fn(async () => ({}));
-  const cdp = { send } as CdpRunner;
+  const send = vi.fn(
+    async (
+      _tabId: number,
+      _method: string,
+      _params?: object,
+      _signal?: AbortSignal,
+    ): Promise<any> => ({}),
+  );
+  const cdp: CdpRunner = createStubCdpRunner({ send: send as CdpRunner["send"] });
   const readFrames = vi.fn<CooperationDeps["readFrames"]>(async () => ({
     frames: new Map([[0, structuredClone(frame)]]),
     gaps: [],
@@ -1083,7 +1094,7 @@ describe("negotiated target control", () => {
     "tool.download",
     "tool.upload",
     "tool.wheel",
-  ])("preserves the selector in a pinned %s receipt", async (method) => {
+  ])("preserves the selector in a pinned %s receipt without polluting refStore", async (method) => {
     const f = await fixture();
     const request = {
       id: "selector-action",
@@ -1096,9 +1107,9 @@ describe("negotiated target control", () => {
       } as Record<string, unknown>,
     };
     const result = await f.controller.run(request, f.cdp, f.signal, async (runner) => {
-      expect(request.params.selector).toBeUndefined();
-      expect(request.params.ref).toMatch(/^e\d+$/);
-      expect(f.session.refStore.resolveEntry(request.params.ref as string)).toMatchObject({
+      expect(request.params.selector).toBe("#confirm");
+      expect(request.params.ref).toBeUndefined();
+      expect(lookupPinnedSelectorTarget(runner, 7, "#confirm")).toMatchObject({
         backendNodeId: 4,
       });
       await runner.send(7, "Input.dispatchMouseEvent", {
@@ -1107,11 +1118,10 @@ describe("negotiated target control", () => {
         x: 10,
         y: 20,
       });
-      return { tab_id: 7, used_ref: request.params.ref };
+      return { tab_id: 7, used_selector: "#confirm" };
     });
     expect(result).toEqual({
       tab_id: 7,
-      used_ref: request.params.ref,
       used_selector: "#confirm",
     });
     expect(resolveActionTarget).toHaveBeenCalledTimes(1);
@@ -1212,6 +1222,154 @@ describe("whether a click was pressed", () => {
     })) as { data: Record<string, unknown> };
     expect(result.data.effect_state).toBe("unknown");
     expect(result.data).not.toHaveProperty("press_sent");
+    expect(result.data).not.toHaveProperty("dispatched");
+  });
+
+  it("marks wheel, drag, unfocused press, download and upload as dispatched: false when refused before native input", async () => {
+    for (const method of [
+      "tool.wheel",
+      "tool.drag",
+      "tool.press",
+      "tool.download",
+      "tool.upload",
+    ] as const) {
+      const f = await fixture();
+      const result = (await f.run(
+        method === "tool.drag"
+          ? { source: { ref: "e1" }, target: { ref: "e2" } }
+          : method === "tool.press"
+            ? { key: "PageDown", observation_id: f.first.observation_id }
+            : method === "tool.wheel"
+              ? { ref: "e1", delta_y: 400 }
+              : { ref: "e1" },
+        method,
+        async (runner) => {
+          await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+          throw covered();
+        },
+      )) as { data: Record<string, unknown> };
+      expect(result.data).toMatchObject({
+        reason: "target_covered",
+        effect_state: "unknown",
+        dispatched: false,
+      });
+      expect(result.data).not.toHaveProperty("press_sent");
+    }
+  });
+
+  it("omits dispatched: false once native input starts or DOM.focus runs on press", async () => {
+    const fWheel = await fixture();
+    const afterWheel = (await fWheel.run(
+      { ref: "e1", delta_y: 400 },
+      "tool.wheel",
+      async (runner) => {
+        await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+        await runner.send(7, "Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: 10,
+          y: 20,
+          deltaX: 0,
+          deltaY: 400,
+        });
+        throw covered();
+      },
+    )) as { data: Record<string, unknown> };
+    expect(afterWheel.data.effect_state).toBe("unknown");
+    expect(afterWheel.data).not.toHaveProperty("dispatched");
+
+    const fPressFocus = await fixture();
+    const afterFocus = (await fPressFocus.run(
+      { ref: "e1", key: "Enter" },
+      "tool.press",
+      async (runner) => {
+        await runner.send(7, "DOM.focus", { backendNodeId: 4 });
+        throw covered();
+      },
+    )) as { data: Record<string, unknown> };
+    expect(afterFocus.data.effect_state).toBe("unknown");
+    expect(afterFocus.data).not.toHaveProperty("dispatched");
+  });
+
+  it("treats focus-emulation-only preparation failures as effect_state: none", async () => {
+    const f = await fixture();
+    const result = (await f.run({ ref: "e1", delta_y: 400 }, "tool.wheel", async (runner) => {
+      await runner.send(7, "Emulation.setFocusEmulationEnabled", { enabled: true });
+      try {
+        throw covered();
+      } finally {
+        await runner.send(7, "Emulation.setFocusEmulationEnabled", { enabled: false });
+      }
+    })) as { data: Record<string, unknown> };
+    expect(result.data).toMatchObject({
+      reason: "target_covered",
+      effect_state: "none",
+    });
+    expect(result.data).not.toHaveProperty("dispatched");
+  });
+
+  it("marks wheel input_clock_unavailable after mouseMoved as dispatched: false", async () => {
+    const f = await fixture();
+    f.cdp.prepareInputTimestamp = async () => {
+      throw new NativeInputClockError("native input clock unavailable");
+    };
+    const result = (await f.run({ ref: "e1", delta_y: 400 }, "tool.wheel", async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x: 10,
+        y: 20,
+        deltaX: 0,
+        deltaY: 400,
+      });
+      return { tab_id: 7 };
+    })) as { data: Record<string, unknown> };
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        reason: "input_clock_unavailable",
+        effect_state: "unknown",
+        dispatched: false,
+      },
+    });
+  });
+
+  it("preserves effect_state: none when full-page screenshot rejects before begin mutates the page", async () => {
+    const f = await fixture("strict");
+    const result = await f.run({}, "tool.screenshot_full_page", async (runner) => {
+      try {
+        await runner.runBrowserMutation?.(async () => {
+          throw new Error("page_hidden");
+        });
+      } catch {
+        return {
+          code: "cdp_failed",
+          message: "Full-page screenshot stopped because the page became hidden",
+          data: { reason: "page_hidden", effect_state: "none", frames: 0 },
+        };
+      }
+      return { tab_id: 7 };
+    });
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "page_hidden", effect_state: "none", frames: 0 },
+    });
+  });
+
+  it("preserves effect_state: unknown on cancellation when focus-emulation cleanup fails", async () => {
+    const f = await fixture("strict");
+    const result = await f.run({}, "tool.screenshot_full_page", async (runner) => {
+      await runner.send(7, "Emulation.setFocusEmulationEnabled", { enabled: true });
+      f.abort.abort();
+      return {
+        code: "cancelled",
+        message: "Full-page screenshot cancelled; no image was saved",
+        data: { effect_state: "unknown" },
+      };
+    });
+    expect(result).toMatchObject({
+      code: "cancelled",
+      data: { effect_state: "unknown", phase: "execution" },
+    });
   });
 });
 
@@ -1254,6 +1412,10 @@ describe("pre-write validation failures", () => {
 });
 
 describe("targeted optimistic fast-path", () => {
+  afterEach(() => {
+    vi.mocked(checkExpectations).mockImplementation(async () => undefined);
+  });
+
   it("skips cross-frame readFrames broadcasts and target resampling on internal CDP steps", async () => {
     const f = await fixture("target");
     f.readFrames.mockClear();
@@ -1280,13 +1442,14 @@ describe("targeted optimistic fast-path", () => {
     // Entry preflight runs checkActionTarget & checkExpectations once.
     expect(checkActionTarget).toHaveBeenCalledTimes(1);
     expect(checkExpectations).toHaveBeenCalledTimes(1);
-    // readFrames is called at entry refresh (undefined), once to arm beforeinput (not twice),
-    // plus non-blocking clear cleanup for beforeinput.
+    // readFrames is called at entry refresh (undefined), once at beginDomMutation() to
+    // re-fence human input after scroll/focus preparation, once to arm beforeinput,
+    // plus non-blocking clear cleanup for beforeinput. Internal runner.send steps emit 0 polls.
     const armCalls = f.readFrames.mock.calls.filter(
       ([, input]) => input !== undefined && input.type !== "clear",
     );
     const pollCalls = f.readFrames.mock.calls.filter(([, input]) => input === undefined);
-    expect(pollCalls).toHaveLength(1);
+    expect(pollCalls).toHaveLength(2);
     expect(armCalls).toHaveLength(1);
     expect(armCalls[0]?.[1]).toMatchObject({ type: "beforeinput", text: "hello" });
   });
@@ -1312,6 +1475,171 @@ describe("targeted optimistic fast-path", () => {
     expect(f.send).toHaveBeenCalledExactlyOnceWith(7, "DOM.focus", { backendNodeId: 4 });
     f.advance();
     expect(await f.run()).toMatchObject({ data: { reason: "control_context_invalid" } });
+  });
+
+  it("re-verifies --expect before mousePressed when preparation hover mutates a fact", async () => {
+    const f = await fixture("target");
+    const expectCheck = [{ target: "#price", field: "text" as const, equals: "100" }];
+    let price = "100";
+    vi.mocked(checkExpectations).mockImplementation(async () =>
+      price === "100"
+        ? undefined
+        : {
+            code: "permission_denied",
+            message: "Action condition 0 failed: #price text changed",
+            data: { reason: "precondition_failed", phase: "precondition" },
+          },
+    );
+
+    const result = await f.run({ ref: "e1", expect: expectCheck }, "tool.click", async (runner) => {
+      await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+      // Hovering over the button mutates #price in mouseover before mousePressed.
+      price = "120";
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      return { tab_id: 7 };
+    });
+
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "precondition_failed",
+        effect_state: "unknown",
+        press_sent: false,
+      },
+    });
+    expect(checkExpectations).toHaveBeenCalledTimes(2);
+    expect(
+      f.send.mock.calls.some(
+        (call: unknown[]) =>
+          call[1] === "Input.dispatchMouseEvent" &&
+          (call[2] as { type?: string } | undefined)?.type === "mousePressed",
+      ),
+    ).toBe(false);
+  });
+
+  it("re-verifies --expect in beginDomMutation before marking nativeInputStarted", async () => {
+    const f = await fixture("target");
+    const expectCheck = [{ target: "#price", field: "text" as const, equals: "100" }];
+    let price = "100";
+    vi.mocked(checkExpectations).mockImplementation(async () =>
+      price === "100"
+        ? undefined
+        : {
+            code: "permission_denied",
+            message: "Action condition 0 failed: #price text changed",
+            data: { reason: "precondition_failed", phase: "precondition" },
+          },
+    );
+
+    const result = await f.run(
+      { ref: "e1", expect: expectCheck },
+      "tool.select",
+      async (runner) => {
+        await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+        await runner.send(7, "DOM.focus", { backendNodeId: 4 });
+        price = "200";
+        await runner.beginDomMutation?.();
+        await runner.send(7, "Runtime.callFunctionOn", {
+          objectId: "obj-1",
+          functionDeclaration: "function() { this.value = 'mutated'; }",
+        });
+        return { tab_id: 7 };
+      },
+    );
+
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "precondition_failed",
+        effect_state: "unknown",
+      },
+    });
+    expect((result as { data: Record<string, unknown> }).data).not.toHaveProperty("press_sent");
+    expect(checkExpectations).toHaveBeenCalledTimes(2);
+    expect(f.send.mock.calls.some((call: unknown[]) => call[1] === "Runtime.callFunctionOn")).toBe(
+      false,
+    );
+  });
+
+  it("re-verifies --expect with effect_state none in pre-effect beginDomMutation and before primaryEffect internal steps", async () => {
+    const f = await fixture("target");
+    const expectCheck = [{ target: "#price", field: "text" as const, equals: "100" }];
+    let price = "100";
+    let advanceAfterInitialCheck = false;
+    vi.mocked(checkExpectations).mockImplementation(async () => {
+      const current = price;
+      if (advanceAfterInitialCheck) {
+        price = "200";
+        advanceAfterInitialCheck = false;
+      }
+      return current === "100"
+        ? undefined
+        : {
+            code: "permission_denied",
+            message: "Action condition 0 failed: #price text changed",
+            data: { reason: "precondition_failed", phase: "precondition" },
+          };
+    });
+
+    // 1. Main-frame fill / evaluate calls beginDomMutation before any CDP effect (`sent === false`),
+    // so failing --expect reports `effect_state: "none"` (never freezing Intent WAL) and keeps context reusable.
+    advanceAfterInitialCheck = true;
+    const preEffectFill = await f.run(
+      { ref: "e1", expect: expectCheck },
+      "tool.fill",
+      async (runner) => {
+        await runner.beginDomMutation?.();
+        await runner.send(7, "Runtime.callFunctionOn", {
+          objectId: "obj-1",
+          functionDeclaration: "function() { this.value = 'mutated'; }",
+        });
+        return { tab_id: 7 };
+      },
+    );
+    expect(preEffectFill).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "precondition_failed",
+        effect_state: "none",
+      },
+    });
+    expect(f.send).not.toHaveBeenCalled();
+
+    // 2. `tool.hover` / `tool.focus` primaryEffect internal steps must not bypass --expect after scroll preparation.
+    price = "100";
+    vi.mocked(checkExpectations).mockClear();
+    const hoverResult = await f.run(
+      { ref: "e1", expect: expectCheck },
+      "tool.hover",
+      async (runner) => {
+        await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+        // IntersectionObserver / scroll handler mutates #price before hover mouseMoved.
+        price = "300";
+        await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+        return { tab_id: 7 };
+      },
+    );
+    expect(hoverResult).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "precondition_failed",
+        effect_state: "unknown",
+      },
+    });
+    expect(checkExpectations).toHaveBeenCalledTimes(2);
+    expect(
+      f.send.mock.calls.some(
+        (call: unknown[]) =>
+          call[1] === "Input.dispatchMouseEvent" &&
+          (call[2] as { type?: string } | undefined)?.type === "mouseMoved",
+      ),
+    ).toBe(false);
   });
 });
 
@@ -1549,5 +1877,509 @@ describe("text deltas under target control", () => {
       ],
     });
     expect(await f.sync()).toMatchObject({ kind: "baseline", baseline_reason: "no_held_text" });
+  });
+
+  it.each([
+    "strict",
+    "target",
+  ] as const)("never short-circuits an unchanged page across max_tokens budgets (%s)", async (policy) => {
+    const f = await fixture(policy);
+    snapshots.mockImplementation(async (_sessions, params) =>
+      params.max_tokens === 150
+        ? {
+            text: '[page "Board"]\n  banner "Board Version: rev-0"\n[truncated: 4 more lines]',
+            ref_count: 1,
+            tab_id: 7,
+            truncated: true,
+            next_cursor: "line:3",
+          }
+        : {
+            text: VOM,
+            ref_count: 1,
+            tab_id: 7,
+            truncated: false,
+          },
+    );
+
+    const cut = (await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy, max_tokens: 150 },
+      f.cdp,
+      f.signal,
+    )) as Record<string, unknown>;
+    expect(cut).toMatchObject({
+      kind: "baseline",
+      baseline_reason: "token_budget_changed",
+      observation: { truncated: true, next_cursor: "line:3" },
+    });
+
+    // Repeating the exact same 150-token budget on an unchanged page stays unchanged
+    // and preserves the 150-token baseline metadata for subsequent sync calls.
+    const sameCut = (await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy, max_tokens: 150 },
+      f.cdp,
+      f.signal,
+    )) as Record<string, unknown>;
+    expect(sameCut).toMatchObject({
+      kind: "unchanged",
+      previous_context_id: cut.context_id,
+      ...(policy === "target" ? { previous_observation_id: cut.observation_id } : {}),
+    });
+
+    // Unbounded sync (max_tokens: undefined) on the exact same unchanged page MUST NOT
+    // return kind: "unchanged"; it must re-capture the full untruncated observation.
+    const unbounded = (await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy },
+      f.cdp,
+      f.signal,
+    )) as Record<string, unknown>;
+    expect(unbounded).toMatchObject({
+      kind: "baseline",
+      baseline_reason: "token_budget_changed",
+      observation: { text: VOM, truncated: false },
+    });
+
+    // Likewise, switching from a 150-token budget to a larger 500-token budget re-captures.
+    await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy, max_tokens: 150 },
+      f.cdp,
+      f.signal,
+    );
+    const larger = (await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy, max_tokens: 500 },
+      f.cdp,
+      f.signal,
+    )) as Record<string, unknown>;
+    expect(larger).toMatchObject({
+      kind: "baseline",
+      baseline_reason: "token_budget_changed",
+      observation: { text: VOM, truncated: false },
+    });
+  });
+
+  it("pins --selector without polluting session.refStore, emitting used_ref, or leaking @eN in handleSelect errors", async () => {
+    const f = await fixture("target");
+    const initialRefs = [...f.session.refStore.entries()];
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 77,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 77 },
+      usedSelector: "#custom-combo",
+    });
+
+    f.send.mockImplementation(async (_tabId: number, method: string) => {
+      if (method === "DOM.describeNode") {
+        return { node: { nodeName: "DIV", localName: "div", attributes: [] } };
+      }
+      return {};
+    });
+
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 100, initialTabIds: [7] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 7,
+      },
+    });
+    // Reuse the controller's real session manager via a wrapper calling real handleSelect.
+    const selectReq = {
+      id: "sel-custom",
+      method: "tool.select",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        observation_id: f.first.observation_id,
+        selector: "#custom-combo",
+        values: ["opt-1"],
+      },
+    };
+    const fakeSm = {
+      get: (id: string) => (id === "s" ? f.session : sessions.get(id)),
+      findByWindowId: (wid: number) => (wid === 100 ? f.session : null),
+    } as unknown as SessionManager;
+    const tab = {
+      id: 7,
+      windowId: 100,
+      active: true,
+      url: "https://fixture.test",
+    } as chrome.tabs.Tab;
+    const errRes = await f.controller.run(selectReq, f.cdp, f.signal, (runner, sig) =>
+      handleSelect(fakeSm, selectReq.params, {
+        cdp: runner,
+        tabsApi: { get: async () => tab, query: async () => [tab] },
+        signal: sig,
+      }),
+    );
+    expect(errRes).toMatchObject({
+      code: "invalid_params",
+      message: expect.stringContaining("Click #custom-combo first"),
+    });
+    expect((errRes as { message: string }).message).not.toMatch(/@e\d+/);
+    expect([...f.session.refStore.entries()]).toEqual(initialRefs);
+
+    // Valid selector action returns used_selector without used_ref and leaves refStore untouched.
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 78,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 78 },
+      usedSelector: "#save-btn",
+    });
+    const clickReq = {
+      id: "clk-sel",
+      method: "tool.click",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        observation_id: f.first.observation_id,
+        selector: "#save-btn",
+      },
+    };
+    const okRes = (await f.controller.run(clickReq, f.cdp, f.signal, async (runner) => {
+      const pinned = lookupPinnedSelectorTarget(runner, 7, "#save-btn");
+      expect(pinned?.backendNodeId).toBe(78);
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      return { tab_id: 7, used_selector: "#save-btn", x: 10, y: 20 };
+    })) as Record<string, unknown>;
+    expect(okRes).toMatchObject({ tab_id: 7, used_selector: "#save-btn" });
+    expect(okRes).not.toHaveProperty("used_ref");
+    expect([...f.session.refStore.entries()]).toEqual(initialRefs);
+
+    // Drag with source.selector pins both endpoints without injecting top-level used_selector onto DragResult.
+    vi.mocked(resolveActionTarget)
+      .mockResolvedValueOnce({
+        tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+        backendNodeId: 79,
+        handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 79 },
+        usedSelector: "#drag-card",
+      })
+      .mockResolvedValueOnce({
+        tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+        backendNodeId: 80,
+        handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 80 },
+        usedSelector: "#drop-zone",
+      });
+    const dragReq = {
+      id: "drag-sel",
+      method: "tool.drag",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        source: { selector: "#drag-card" },
+        target: { selector: "#drop-zone" },
+      },
+    };
+    const dragRes = (await f.controller.run(dragReq, f.cdp, f.signal, async (runner) => {
+      expect(lookupPinnedSelectorTarget(runner, 7, "#drag-card")?.backendNodeId).toBe(79);
+      expect(lookupPinnedSelectorTarget(runner, 7, "#drop-zone")?.backendNodeId).toBe(80);
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 30,
+        y: 40,
+      });
+      return { tab_id: 7, source: { x: 10, y: 20 }, target: { x: 30, y: 40 } };
+    })) as Record<string, unknown>;
+    expect(dragRes).toEqual({ tab_id: 7, source: { x: 10, y: 20 }, target: { x: 30, y: 40 } });
+    expect(dragRes).not.toHaveProperty("used_selector");
+
+    // Directed press with selector pins focus target without injecting undocumented used_selector onto PressResult.
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 81,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 81 },
+      usedSelector: "#search-input",
+    });
+    const pressReq = {
+      id: "press-sel",
+      method: "tool.press",
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        selector: "#search-input",
+        key: "Enter",
+      },
+    };
+    const pressRes = (await f.controller.run(pressReq, f.cdp, f.signal, async (runner) => {
+      expect(lookupPinnedSelectorTarget(runner, 7, "#search-input")?.backendNodeId).toBe(81);
+      await runner.send(7, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+      });
+      await runner.send(7, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Enter",
+        code: "Enter",
+      });
+      return { tab_id: 7, key: "Enter", code: "Enter", modifiers: [] };
+    })) as Record<string, unknown>;
+    expect(pressRes).toEqual({ tab_id: 7, key: "Enter", code: "Enter", modifiers: [] });
+    expect(pressRes).not.toHaveProperty("used_selector");
+    expect(pressRes).not.toHaveProperty("used_ref");
+
+    // Download with selector preserves baseline on pre-dispatch error and attaches used_selector on completion.
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 82,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 82 },
+      usedSelector: "#export-csv",
+    });
+    const dlFailRes = await f.controller.run(
+      {
+        id: "dl-fail",
+        method: "tool.download",
+        params: {
+          session_id: "s",
+          tab_id: 7,
+          context_id: f.first.context_id,
+          selector: "#export-csv",
+        },
+      },
+      f.cdp,
+      f.signal,
+      async () => ({
+        code: "timeout",
+        message: "another bsk download is active",
+        data: { reason: "session_busy", effect_state: "none", dispatched: false },
+      }),
+    );
+    expect(dlFailRes).toMatchObject({
+      code: "timeout",
+      data: { reason: "session_busy", effect_state: "none" },
+    });
+    expect(dlFailRes).not.toHaveProperty("used_selector");
+
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      tab: { tabId: 7, windowId: 100, active: true, url: "https://fixture.test" },
+      backendNodeId: 82,
+      handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 82 },
+      usedSelector: "#export-csv",
+    });
+    const dlOkRes = await f.controller.run(
+      {
+        id: "dl-ok",
+        method: "tool.download",
+        params: {
+          session_id: "s",
+          tab_id: 7,
+          context_id: f.first.context_id,
+          selector: "#export-csv",
+        },
+      },
+      f.cdp,
+      f.signal,
+      async (runner) => {
+        expect(lookupPinnedSelectorTarget(runner, 7, "#export-csv")?.backendNodeId).toBe(82);
+        await runner.send(7, "Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          button: "left",
+          x: 15,
+          y: 25,
+        });
+        await runner.send(7, "Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          button: "left",
+          x: 15,
+          y: 25,
+        });
+        return {
+          tab_id: 7,
+          filename: "report.csv",
+          mime_type: "text/csv",
+          byte_size: 42,
+          browser_path: "/tmp/report.csv",
+        };
+      },
+    );
+    expect(dlOkRes).toMatchObject({
+      tab_id: 7,
+      filename: "report.csv",
+      used_selector: "#export-csv",
+    });
+    expect(dlOkRes).not.toHaveProperty("used_ref");
+  });
+
+  it("refreshes live frame activity inside beginDomMutation under target policy and blocks DOM write on human intervention", async () => {
+    const f = await fixture("target");
+    let domMutated = false;
+    const res = await f.run(
+      { ref: "e1", observation_id: f.first.observation_id, value: "opt-a" },
+      "tool.select",
+      async (runner) => {
+        // Simulate human input occurring during scroll/focus preparation without push notification yet.
+        f.change({ human: 1, editing: true }, false);
+        await runner.beginDomMutation?.();
+        domMutated = true;
+        return { tab_id: 7, used_ref: "e1", selected_values: ["opt-a"], selected_labels: ["A"] };
+      },
+    );
+    expect(domMutated).toBe(false);
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "human_intervention", effect_state: "none" },
+    });
+  });
+
+  it("does not consume target-policy baseline when an untargeted action fails pre-write validation with effect_state: none", async () => {
+    const f = await fixture("target");
+    const preWriteErr = await f.run(
+      { key: "InvalidKey", observation_id: f.first.observation_id },
+      "tool.press",
+      async () => ({
+        code: "invalid_params",
+        message: "unsupported key",
+        data: { effect_state: "none", phase: "precondition" },
+      }),
+    );
+    expect(preWriteErr).toMatchObject({
+      code: "invalid_params",
+      data: { effect_state: "none" },
+    });
+
+    // Retrying with the same observation_id succeeds without requiring a redundant sync.
+    const retryOk = await f.run(
+      { key: "Enter", observation_id: f.first.observation_id },
+      "tool.press",
+      async (runner) => {
+        await runner.send(7, "Input.dispatchKeyEvent", { type: "keyDown", key: "Enter" });
+        return { tab_id: 7, key: "Enter" };
+      },
+    );
+    expect(retryOk).toMatchObject({ tab_id: 7, key: "Enter" });
+  });
+
+  it("passes includeVisualFacts: true during cooperate sync so Canvas @eN visual refs stay in parity with observe", async () => {
+    const f = await fixture("target");
+    snapshots.mockClear();
+    f.change({ structure: 5, revision: 5 });
+    await f.sync("target");
+    expect(snapshots).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ session_id: "s", tab_id: 7 }),
+      expect.objectContaining({ includeVisualFacts: true }),
+      expect.anything(),
+    );
+  });
+});
+
+describe("same-document routes, concurrent background observation, and handler failure receipts", () => {
+  it("completes multi-step targeted actions across same-pathname query/hash updates and defers pathname route invalidation until settlement", async () => {
+    const f = await fixture("target");
+    const stepReceipt = { tab_id: 7, actual_value: "shoes", value_length: 5 };
+    const fillResult = await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+      await runner.beginDomMutation?.();
+      await runner.send(7, "Input.insertText", { text: "shoes" });
+      f.controller.invalidateRoute(7, "https://fixture.test/?q=shoes#results");
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "input-obj-1",
+        functionDeclaration: "function() { return true; }",
+      });
+      return stepReceipt;
+    });
+    expect(fillResult).toEqual(stepReceipt);
+    expect(f.controller.view(7)?.mode).toBe("ready");
+    // Same-pathname query/hash update preserves target context for the next step.
+    expect(await f.run({ ref: "e1" }, "tool.click", async () => ({ tab_id: 7 }))).toEqual({
+      tab_id: 7,
+    });
+
+    // Clicking an SPA link that changes pathname finishes cleanly, keeps mode out of
+    // `unavailable`, and revokes the old context with `effect_state: "none"` afterward.
+    const routeClick = await f.run({ ref: "e1" }, "tool.click", async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      f.controller.invalidateRoute(7, "https://fixture.test/orders");
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      return { tab_id: 7, x: 4, y: 5 };
+    });
+    expect(routeClick).toEqual({ tab_id: 7, x: 4, y: 5 });
+    expect(f.controller.view(7)?.mode).toBe("syncing");
+    expect(await f.run({ ref: "e1" }, "tool.click")).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "control_context_invalid", effect_state: "none" },
+    });
+  });
+
+  it("isolates in-flight actions and target contexts from transient background observeTab failures while preserving structured handler errors", async () => {
+    const f = await fixture("target");
+    // Transient subframe error during idle background `observeTab` recovers once collection succeeds.
+    f.readFrames.mockRejectedValueOnce(new Error("subframe temporarily unavailable"));
+    await f.controller.observeTab(7);
+    expect(f.controller.view(7)?.mode).toBe("unavailable");
+
+    // In-flight main-document action survives a concurrent background `observeTab` failure.
+    const fillReceipt = { tab_id: 7, actual_value: "ok", value_length: 2 };
+    const completed = await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+      await runner.beginDomMutation?.();
+      await runner.send(7, "Input.insertText", { text: "ok" });
+      f.readFrames.mockRejectedValueOnce(new Error("background subframe replacing"));
+      await f.controller.observeTab(7);
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "input-obj-2",
+        functionDeclaration: "function() { return true; }",
+      });
+      return fillReceipt;
+    });
+    expect(completed).toEqual(fillReceipt);
+
+    // Structured handler error (e.g. failed download after `onBeforeNavigate`) is preserved,
+    // not overwritten with `Page interaction coverage changed`, while revoking old context.
+    const downloadError = {
+      code: "cdp_failed" as const,
+      message: "HTTP 500 instead of file attachment",
+      data: {
+        reason: "download_capture_failed",
+        phase: "execution",
+        effect_state: "unknown" as const,
+      },
+    };
+    const failedDownload = await f.run({ ref: "e1" }, "tool.download", async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      f.controller.invalidate(7);
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      return downloadError;
+    });
+    expect(failedDownload).toMatchObject({
+      code: "cdp_failed",
+      message: "HTTP 500 instead of file attachment",
+      data: { reason: "download_capture_failed", effect_state: "unknown" },
+    });
+    expect(await f.run({ ref: "e1" }, "tool.click")).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "control_context_invalid", effect_state: "none" },
+    });
   });
 });

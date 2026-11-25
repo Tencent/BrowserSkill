@@ -1,9 +1,10 @@
 // @vitest-environment node
-// Opt in with BSK_NAV_CHROME. The shared harness owns its browser and profile.
+// Opt in with BSK_TEST_CHROME. The shared harness owns its browser and profile.
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { handleWaitForNavigation } from "../waits";
 
 type Send = <T = Record<string, unknown>>(
@@ -11,7 +12,7 @@ type Send = <T = Record<string, unknown>>(
   params?: object,
   sessionId?: string,
 ) => Promise<T>;
-type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
+type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
 interface CdpEvent {
   sessionId?: string;
   method: string;
@@ -26,7 +27,7 @@ const START_PAGE = `<!doctype html><title>Start</title>
 <button id="noop">No navigation</button>
 <div id="section">Section</div>`;
 
-describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wait_for_navigation", () => {
   it("waits for scheduled, in-flight, client-redirected and same-document navigations", async () => {
     const server = createServer((request, response) => {
       response.setHeader("Content-Type", "text/html");
@@ -57,7 +58,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
       );
       await withChrome(
         {
-          executable: process.env.BSK_NAV_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30_000,
@@ -81,7 +82,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
               pendingUrl = undefined;
             }
             for (const listener of [...listeners])
-              listener({ tabId: 4 }, event.method, event.params);
+              listener(rootEventSource(4), event.method, event.params);
           },
         },
         async (send: Send) => {
@@ -120,14 +121,14 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
             },
           });
           await manager.start("wait-nav");
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: <T>(_tabId: number, method: string, params?: object) =>
               send<T>(method, params, sessionId),
-            onEvent: (listener) => {
+            onEvent: (_tabId, listener) => {
               listeners.add(listener);
               return { dispose: () => void listeners.delete(listener) };
             },
-          };
+          });
           const tab = async () =>
             ({
               id: 4,

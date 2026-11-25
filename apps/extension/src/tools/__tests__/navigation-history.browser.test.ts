@@ -1,24 +1,30 @@
 // @vitest-environment node
-// Opt in with BSK_NAV_CHROME. The shared harness owns its browser and profile.
+// Opt in with BSK_TEST_CHROME. The shared harness owns its browser and profile.
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
-import { handleNavigate, handleNavigateBack, handleNavigateForward } from "../navigation";
-import type { CdpRunner } from "../shared";
+import {
+  handleNavigate,
+  handleNavigateBack,
+  handleNavigateForward,
+  handleReload,
+} from "../navigation";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
   params?: object,
   sessionId?: string,
 ) => Promise<T>;
-type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
+type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
 interface CdpEvent {
   sessionId?: string;
   method: string;
   params?: object;
 }
 
-describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser history navigation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser history navigation", () => {
   it("completes back and forward at load when Chrome restores from the back/forward cache", async () => {
     // No Cache-Control: no-store, so both documents are bfcache eligible.
     const server = createServer((request, response) => {
@@ -39,7 +45,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser history navigation", 
       );
       await withChrome(
         {
-          executable: process.env.BSK_NAV_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30_000,
@@ -49,7 +55,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser history navigation", 
             if (event.method === "Page.frameNavigated" && params.type === "BackForwardCacheRestore")
               restores.push(new URL(params.frame?.url ?? origin).pathname);
             for (const listener of [...listeners])
-              listener({ tabId: 4 }, event.method, event.params);
+              listener(rootEventSource(4), event.method, event.params);
           },
         },
         async (send: Send) => {
@@ -76,14 +82,14 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser history navigation", 
             },
           });
           await manager.start("history");
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: <T>(_tabId: number, method: string, params?: object) =>
               send<T>(method, params, sessionId),
-            onEvent: (listener) => {
+            onEvent: (_tabId, listener) => {
               listeners.add(listener);
               return { dispose: () => void listeners.delete(listener) };
             },
-          };
+          });
           const tab = async () =>
             ({
               id: 4,
@@ -119,6 +125,174 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser history navigation", 
           }
           // The regression only covers restores; fail loudly if Chrome stopped using bfcache.
           expect(restores).toEqual(expectedRestores);
+          expect(listeners.size).toBe(0);
+        },
+      );
+    } finally {
+      listeners.clear();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  }, 60_000);
+
+  it("returns user_cancelled instead of cdp_failed when beforeunload is dismissed on navigate_back, navigate_forward, and reload", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("Content-Type", "text/html");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(`<!doctype html>
+        <title>${request.url}</title>
+        <button id="arm" style="position:fixed;left:10px;top:10px;width:120px;height:40px">Arm</button>
+        <script>
+          window.__guardUnload = false;
+          document.getElementById('arm').addEventListener('click', () => {
+            window.__guardUnload = true;
+          });
+          window.addEventListener('beforeunload', (event) => {
+            if (window.__guardUnload) {
+              event.preventDefault();
+              event.returnValue = '';
+            }
+          });
+        </script>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    let sessionId: string | undefined;
+    let dismissBeforeUnload: (() => void) | undefined;
+    const listeners = new Set<Listener>();
+    try {
+      const { withChrome } = await import(
+        new URL(
+          "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+          import.meta.url,
+        ).href
+      );
+      await withChrome(
+        {
+          executable: process.env.BSK_TEST_CHROME,
+          deviceScale: 1,
+          zoom: 1,
+          startupTimeout: 30_000,
+          onEvent: (event: CdpEvent) => {
+            if (!sessionId || event.sessionId !== sessionId) return;
+            for (const listener of [...listeners])
+              listener(rootEventSource(4), event.method, event.params);
+            if (
+              event.method === "Page.javascriptDialogOpening" &&
+              (event.params as { type?: string } | undefined)?.type === "beforeunload"
+            ) {
+              dismissBeforeUnload?.();
+            }
+          },
+        },
+        async (send: Send) => {
+          const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+            url: "about:blank",
+          });
+          ({ sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
+            targetId,
+            flatten: true,
+          }));
+          dismissBeforeUnload = () => {
+            void send("Page.handleJavaScriptDialog", { accept: false }, sessionId).catch(() => {});
+          };
+          const evaluate = async <T>(expression: string): Promise<T> => {
+            const reply = await send<{ result: { value: T } }>(
+              "Runtime.evaluate",
+              { expression, returnByValue: true },
+              sessionId,
+            );
+            return reply.result.value;
+          };
+          const manager = new SessionManager({
+            agentWindow: {
+              create: async () => ({ windowId: 100, initialTabIds: [4] }),
+              ensureActiveTab: async () => 4,
+              remove: async () => {},
+            },
+          });
+          await manager.start("beforeunload-history");
+          const cdp: CdpRunner = createStubCdpRunner({
+            send: <T>(_tabId: number, method: string, params?: object) =>
+              send<T>(method, params, sessionId),
+            onEvent: (_tabId, listener) => {
+              listeners.add(listener);
+              return { dispose: () => void listeners.delete(listener) };
+            },
+          });
+          const tab = async () =>
+            ({
+              id: 4,
+              windowId: 100,
+              active: true,
+              url: await evaluate<string>("location.href"),
+            }) as chrome.tabs.Tab;
+          const deps = {
+            cdp,
+            tabsApi: { get: tab, query: async () => [await tab()] },
+            defaultTimeoutMs: 5_000,
+          };
+
+          // Build history /a -> /b -> /c, then step back to /b so both back and forward exist.
+          for (const path of ["/a", "/b", "/c"]) {
+            expect(
+              await handleNavigate(
+                manager,
+                { session_id: "beforeunload-history", url: origin + path, wait_until: "load" },
+                deps,
+              ),
+            ).toMatchObject({ reached: "load" });
+          }
+          expect(
+            await handleNavigateBack(
+              manager,
+              { session_id: "beforeunload-history", wait_until: "load" },
+              deps,
+            ),
+          ).toMatchObject({ reached: "load", final_url: `${origin}/b` });
+
+          // Grant real user activation on /b so Chrome fires the beforeunload prompt.
+          const armUserActivation = async () => {
+            await send(
+              "Input.dispatchMouseEvent",
+              { type: "mousePressed", x: 50, y: 25, button: "left", clickCount: 1 },
+              sessionId,
+            );
+            await send(
+              "Input.dispatchMouseEvent",
+              { type: "mouseReleased", x: 50, y: 25, button: "left", clickCount: 1 },
+              sessionId,
+            );
+            expect(await evaluate<boolean>("window.__guardUnload")).toBe(true);
+          };
+
+          await armUserActivation();
+          expect(
+            await handleNavigateBack(manager, { session_id: "beforeunload-history" }, deps),
+          ).toMatchObject({
+            code: "cancelled",
+            data: { reason: "user_cancelled", effect_state: "none" },
+          });
+          expect(await evaluate<string>("location.pathname")).toBe("/b");
+
+          await armUserActivation();
+          expect(
+            await handleNavigateForward(manager, { session_id: "beforeunload-history" }, deps),
+          ).toMatchObject({
+            code: "cancelled",
+            data: { reason: "user_cancelled", effect_state: "none" },
+          });
+          expect(await evaluate<string>("location.pathname")).toBe("/b");
+
+          await armUserActivation();
+          expect(
+            await handleReload(manager, { session_id: "beforeunload-history" }, deps),
+          ).toMatchObject({
+            code: "cancelled",
+            data: { reason: "user_cancelled", effect_state: "none" },
+          });
+          expect(await evaluate<string>("location.pathname")).toBe("/b");
           expect(listeners.size).toBe(0);
         },
       );

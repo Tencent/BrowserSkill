@@ -1,11 +1,11 @@
 // @vitest-environment node
-// Opt in with BSK_FILL_CHROME=/path/to/chrome; the suite owns its browser/profile and each test gets a fresh tab.
+// Opt in with BSK_TEST_CHROME=/path/to/chrome; the suite owns its browser/profile and each test gets a fresh tab.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { CdpFrame } from "@/browser-driver/frame-graph";
+import { type FrameDocumentInfo, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleFill } from "../interaction";
 import { handleObserve } from "../observation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -17,7 +17,7 @@ let browserSend: Send;
 let closeBrowser: (() => void) | undefined;
 let browserRun: Promise<void> | undefined;
 
-if (process.env.BSK_FILL_CHROME) {
+if (process.env.BSK_TEST_CHROME) {
   beforeAll(async () => {
     const { withChrome } = await import(
       new URL(
@@ -29,7 +29,7 @@ if (process.env.BSK_FILL_CHROME) {
     const closed = Promise.withResolvers<void>();
     closeBrowser = () => closed.resolve();
     browserRun = withChrome(
-      { executable: process.env.BSK_FILL_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (send: Send) => {
         ready.resolve(send);
         await closed.promise;
@@ -105,43 +105,47 @@ async function withFillBrowser(
     const ctx = await manager.start("aa11");
     const calls: string[] = [];
     let afterCommand: ((method: string, params?: object) => void | Promise<void>) | undefined;
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: async (_tabId, method, params) => {
         calls.push(method);
         const result = await send(method, params, sessionId);
         await afterCommand?.(method, params);
         return result as never;
       },
-    };
-    cdp.sendToTarget = (_target, method, params) => cdp.send(4, method, params);
-    cdp.getAttachmentId = () => sessionId;
-    cdp.getFrameGraph = async () => {
-      type FrameTree = { frame: { id: string }; childFrames?: FrameTree[] };
-      const { frameTree } = await send<{ frameTree: FrameTree }>(
-        "Page.getFrameTree",
-        {},
-        sessionId,
-      );
-      const frames: CdpFrame[] = [];
-      const visit = async (tree: FrameTree, parentFrameId?: string) => {
-        const owner = parentFrameId
-          ? await send<{ backendNodeId: number }>(
-              "DOM.getFrameOwner",
-              { frameId: tree.frame.id },
-              sessionId,
-            )
-          : undefined;
-        frames.push({
-          frameId: tree.frame.id,
-          parentFrameId,
-          target: { tabId: 4 },
-          ownerBackendNodeId: owner?.backendNodeId,
-        });
-        for (const child of tree.childFrames ?? []) await visit(child, tree.frame.id);
-      };
-      await visit(frameTree);
-      return { rootFrameId: frameTree.frame.id, frames };
-    };
+      sendToFrame: (_handle, method, params) => cdp.send(4, method, params),
+      getAttachmentId: () => sessionId,
+      getFrameDocuments: async () => {
+        type FrameTree = { frame: { id: string; loaderId?: string }; childFrames?: FrameTree[] };
+        const { frameTree } = await send<{ frameTree: FrameTree }>(
+          "Page.getFrameTree",
+          {},
+          sessionId,
+        );
+        const frames: FrameDocumentInfo[] = [];
+        const visit = async (tree: FrameTree, parentFrameId?: string) => {
+          const owner = parentFrameId
+            ? await send<{ backendNodeId: number }>(
+                "DOM.getFrameOwner",
+                { frameId: tree.frame.id },
+                sessionId,
+              )
+            : undefined;
+          const loaderId = tree.frame.loaderId ?? "";
+          frames.push({
+            handle: toFrameDocumentHandle(4, { frameId: tree.frame.id, loaderId }),
+            frameId: tree.frame.id,
+            loaderId,
+            parentFrameId,
+            ownerBackendNodeId: owner?.backendNodeId,
+            processKey: "root",
+            isOutOfProcess: false,
+          });
+          for (const child of tree.childFrames ?? []) await visit(child, tree.frame.id);
+        };
+        await visit(frameTree);
+        return { rootFrameId: frameTree.frame.id, frames };
+      },
+    });
     const deps = {
       cdp,
       tabsApi: {
@@ -214,7 +218,7 @@ const unchangedState = `JSON.stringify({
   scroll: [scrollX, scrollY], events: window.fillEvents
 })`;
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("native controls and editing hosts", () => {
   describe.each([
     ["foreground", false],
     ["background", true],
@@ -376,7 +380,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts
   });
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverability", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("fill lifecycle and discoverability", () => {
   it.each([
     "",
     "true",
@@ -570,7 +574,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
   }, 30_000);
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("fill focus changes", () => {
   it.each([
     ["input", "hidden tab", '<input id="target" value="old">', "value"],
     ["textarea", "hidden tab", '<textarea id="target">old</textarea>', "value"],
@@ -718,7 +722,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
   }, 30_000);
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("date-like fill regressions", () => {
   it("keeps a background date fill after the tab becomes active", async () => {
     await withFillBrowser(
       { background: true, markup: guard + '<input id="target" type="date">' },
@@ -955,7 +959,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
   );
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("fill caret validation", () => {
   it.each([
     [
       "nested text",
@@ -1063,6 +1067,47 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
     );
   }, 30_000);
 
+  it("replaces existing text in a ProseMirror editor that restores a placeholder widget when cleared", async () => {
+    const value = "替换后的正文。";
+    await withFillBrowser(
+      {
+        background: false,
+        markup:
+          guard +
+          '<div id="target" class="ProseMirror" contenteditable="true" style="white-space:pre-wrap"><p>旧正文</p></div>',
+      },
+      async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`(() => {
+            const editor = document.querySelector('#target');
+            editor.addEventListener('input', () => {
+              if (editor.textContent === '') {
+                editor.innerHTML = '<p><span class="syl-placeholder ProseMirror-widget" contenteditable="false" style="position:absolute;user-select:none;pointer-events:none">请输入正文</span><img class="ProseMirror-separator" alt=""><br class="ProseMirror-trailingBreak"></p>';
+              } else {
+                const widget = editor.querySelector('.ProseMirror-widget');
+                if (widget && editor.textContent !== widget.textContent) {
+                  widget.remove();
+                  editor.querySelector('.ProseMirror-separator')?.remove();
+                  editor.querySelector('.ProseMirror-trailingBreak')?.remove();
+                }
+              }
+            });
+            document.addEventListener('selectionchange', () => {
+              const selection = document.getSelection();
+              if (selection?.isCollapsed && selection.anchorNode === editor &&
+                  selection.anchorOffset === editor.childNodes.length &&
+                  editor.querySelector('.ProseMirror-widget'))
+                selection.collapse(editor.firstChild, 1);
+            });
+          })()`);
+        expect(await h.fill(value, true)).toMatchObject({ value_length: value.length });
+        expect(await h.evaluate("document.querySelector('#target').innerText")).toBe(value);
+        expect(await h.fill("", true)).toMatchObject({ value_length: 0 });
+        expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+      },
+    );
+  }, 30_000);
+
   it("replaces a draft after selection synchronization in an empty rich-text paragraph", async () => {
     const value = "A long message for the editor. ".repeat(40);
     await withFillBrowser(
@@ -1118,6 +1163,18 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
     ["inside an image", '<p>old<img alt=""></p>', "editor.querySelector('img')", "0"],
     ["before two line breaks", "<p>old<br><br></p>", "editor.firstChild.firstChild", "3"],
     ["before empty line breaks", "<p><br><br></p>", "editor.firstChild", "0"],
+    [
+      "before text next to a widget",
+      '<p><span class="ProseMirror-widget" contenteditable="false">placeholder</span>old</p>',
+      "editor.firstChild",
+      "1",
+    ],
+    [
+      "before multiple line breaks next to a widget",
+      '<p><span class="ProseMirror-widget" contenteditable="false">placeholder</span><br><br></p>',
+      "editor.firstChild",
+      "1",
+    ],
     ["before another block", "<p>old</p><p><br></p>", "editor.firstChild.firstChild", "3"],
     ["before a separate break", "<p>old</p><br>", "editor.firstChild.firstChild", "3"],
     [
@@ -1201,7 +1258,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
   }, 30_000);
 });
 
-describe.skipIf(!process.env.BSK_FILL_CHROME)("fill native event deduplication", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("fill native event deduplication", () => {
   it.each([
     ["input append", '<input id="target">', "value", "hello", false, ["hello"]],
     ["input clear", '<input id="target" value="old">', "value", "hello", true, ["", "hello"]],

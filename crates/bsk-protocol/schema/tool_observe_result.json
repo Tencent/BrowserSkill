@@ -221,7 +221,8 @@
   "required": [
     "text",
     "ref_count",
-    "tab_id"
+    "tab_id",
+    "truncated"
   ],
   "title": "ObserveResult",
   "type": "object"

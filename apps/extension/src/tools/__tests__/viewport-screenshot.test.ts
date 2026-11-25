@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CaptureSuppressMessage } from "@/lib/capture-suppress-bridge";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { captureControlledViewport } from "../viewport-screenshot";
 
 const PNG =
@@ -19,10 +19,10 @@ function fixture() {
     if (method === "Page.captureScreenshot") return { data: state.png };
     return {};
   });
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as CdpRunner["send"],
     getAttachmentId: () => state.attachment,
-  };
+  });
   const bridge = vi.fn(async (_tabId: number, message: CaptureSuppressMessage) => {
     await hook.bridge(message.phase);
   });

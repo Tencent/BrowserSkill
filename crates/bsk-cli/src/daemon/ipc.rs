@@ -1,59 +1,36 @@
-//! JSON-line IPC server: CLI ↔ daemon transport.
+//! JSON-line IPC server router and handler types for CLI ↔ daemon RPCs.
 //!
-//! On Unix the server binds a `SOCK_STREAM` UDS at
-//! [`paths::sock_path`](crate::daemon::paths::sock_path); on Windows it
-//! exposes a per-user named pipe from [`paths::pipe_name`].
-//!
-//! Wire format per connection:
-//! * one frame per line (`\n`-terminated UTF-8 JSON);
-//! * frames are decoded as [`bsk_protocol::Frame::Request`] and dispatched
-//!   to the [`RpcHandler`] callback;
-//! * the handler returns a [`ResponseBody`] which is written back as a
-//!   single line.
-//!
-//! Methods served by the production handler:
-//! * `system.ping` / `system.status` (M2/M3 lifecycle metadata)
-//! * `session.start` / `session.stop` / `session.stop_all` / `session.list` (M5)
-//! * `browser.list` (M4)
+//! Transport accept/connection loops live in [`super::ipc_transport`],
+//! control-plane/session/transfer handlers live in [`super::ipc_sessions`],
+//! and the unified `tool.*` execution pipeline lives in [`super::tool_pipeline`].
 
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bsk_protocol::system::{
-    BrowserListParams, BrowserStatusEntry, SessionStatusEntry, StatusParams, StatusResult,
-    VersionSkewEntry,
+    BrowserStatusEntry, SessionStatusEntry, StatusResult, VersionSkewEntry,
 };
-use bsk_protocol::tools::{
-    DownloadParams, DownloadResult, ReturnFailure, TransferBeginParams, TransferIdParams,
-    UploadParams, WaitMsParams, WaitMsResult,
-};
-use bsk_protocol::{
-    CancelParams, CancelResult, ErrorCode, Method, PingResult, ResponseBody, RpcError, RpcId,
-};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use bsk_protocol::{ErrorCode, Method, PingResult, ResponseBody, RpcError, RpcId};
 use serde_json::Value;
-use tokio::sync::{Notify, watch};
-use tokio::task::JoinHandle;
-use tracing::{debug, warn};
 
-use super::abort::{AbortRegistry, AbortToken};
-use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
-use super::sessions::{
-    AgentWindowOptions, SessionId, StartSessionError, StopSessionError, snapshot_status_entries,
-    stop_session,
+use crate::ipc_client::{IpcRequestMeta, IpcResponseMeta};
+
+pub(super) use super::ipc_sessions::{RecordSessionStop, handle_session_start_scoped};
+use super::ipc_sessions::{
+    handle_browser_list, handle_ledger_request, handle_session_list, handle_session_run_log,
+    handle_session_stop, handle_session_stop_all_rpc, handle_status, handle_transfer_begin,
+    handle_transfer_chunk, handle_transfer_finish, handle_transfer_read, handle_transfer_release,
 };
-use super::state::{DAEMON_VERSION, DaemonState, PROTOCOL_VERSION};
+pub use super::ipc_transport::{IpcHandle, IpcServer, bind, serve};
+use super::sessions::SessionId;
+use super::state::DaemonState;
+pub use super::tool_pipeline::MAX_WAIT_MS;
+use super::tool_pipeline::{execute_tool_rpc, handle_cancel};
 
 /// Handler type: async fn(rpc_id, method, params) -> ResponseBody.
-///
-/// The `rpc_id` is the wire correlation id the IPC connection
-/// allocated; daemon-side long-runners (M9.3 `tool.wait_ms`) register
-/// an `AbortToken` against it so a peer `cancel { rpc_id }` can trip
-/// them. Handlers that do not need it ignore the argument.
 pub type RpcHandler = Arc<
     dyn Fn(RpcId, Method, Value) -> Pin<Box<dyn Future<Output = ResponseBody> + Send>>
         + Send
@@ -61,26 +38,71 @@ pub type RpcHandler = Arc<
         + 'static,
 >;
 
-const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
-// Some tools own their operation deadline and answer exactly at it: the file
-// transfers need a bounded cleanup before they can return a useful structured
-// error, request-help settles its own wait, and the navigation waits report
-// `reached: "timeout"` with the URL the page actually reached. Keep those
-// transports alive slightly longer so the transport deadline cannot replace a
-// result the extension has already produced.
-const EXTENSION_RESPONSE_GRACE: Duration = Duration::from_secs(2);
-/// Upper bound on `wait_for_browser_ms` accepted over IPC.
-const MAX_BROWSER_WAIT: Duration = Duration::from_secs(60);
-// `session.stop` fast-fails while another tool is active; this budget
-// only needs to cover the stop RPC itself and IPC scheduling grace.
-const DEFAULT_SESSION_STOP_TIMEOUT: Duration =
-    Duration::from_secs(DEFAULT_TOOL_TIMEOUT.as_secs() + DEFAULT_RPC_TIMEOUT.as_secs() + 5);
+/// Envelope-aware IPC handler carrying out-of-band [`IpcRequestMeta`] and
+/// [`IpcResponseMeta`] so caller scope and cached observation metadata never
+/// pollute business `params` / `result` JSON objects.
+pub type EnvelopeRpcHandler = Arc<
+    dyn Fn(
+            RpcId,
+            Method,
+            Value,
+            IpcRequestMeta,
+        ) -> Pin<Box<dyn Future<Output = (ResponseBody, IpcResponseMeta)> + Send>>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+/// Adapter allowing `ipc::serve` to accept either a plain [`RpcHandler`] (used
+/// by minimal ping/system tests) or the production [`EnvelopeRpcHandler`].
+pub trait IntoEnvelopeHandler {
+    fn into_envelope_handler(self) -> EnvelopeRpcHandler;
+}
+
+impl IntoEnvelopeHandler for EnvelopeRpcHandler {
+    fn into_envelope_handler(self) -> EnvelopeRpcHandler {
+        self
+    }
+}
+
+#[derive(Default)]
+struct RpcHandlerEnvelopeBridge {
+    req_meta: Option<IpcRequestMeta>,
+    resp_meta: IpcResponseMeta,
+}
+
+tokio::task_local! {
+    static RPC_HANDLER_ENVELOPE_BRIDGE: std::sync::Mutex<RpcHandlerEnvelopeBridge>;
+}
+
+impl IntoEnvelopeHandler for RpcHandler {
+    fn into_envelope_handler(self) -> EnvelopeRpcHandler {
+        Arc::new(move |rpc_id, method, params, meta| {
+            let handler = Arc::clone(&self);
+            Box::pin(async move {
+                let bridge = std::sync::Mutex::new(RpcHandlerEnvelopeBridge {
+                    req_meta: Some(meta),
+                    resp_meta: IpcResponseMeta::default(),
+                });
+                RPC_HANDLER_ENVELOPE_BRIDGE
+                    .scope(bridge, async move {
+                        let body = (handler)(rpc_id, method, params).await;
+                        let resp_meta = RPC_HANDLER_ENVELOPE_BRIDGE
+                            .try_with(|slot| {
+                                std::mem::take(
+                                    &mut slot.lock().unwrap_or_else(|p| p.into_inner()).resp_meta,
+                                )
+                            })
+                            .unwrap_or_default();
+                        (body, resp_meta)
+                    })
+                    .await
+            })
+        })
+    }
+}
 
 /// Snapshot of daemon-side bookkeeping needed to answer `system.status`.
-///
-/// The lifecycle / process metadata (pid, ws_port, sock_path, …) is owned
-/// here; the live browser + session lists are read out of [`DaemonState`]
-/// at request time so the snapshot never goes stale.
 #[derive(Debug, Clone)]
 pub struct DaemonStatus {
     pub started_at: Instant,
@@ -106,6 +128,7 @@ impl DaemonStatus {
             browsers: Vec::new(),
             sessions: Vec::new(),
             version_skew_browsers: Vec::new(),
+            ipc_envelope: true,
         }
     }
 
@@ -149,6 +172,7 @@ impl DaemonStatus {
             browsers,
             sessions,
             version_skew_browsers,
+            ipc_envelope: true,
         }
     }
 }
@@ -173,9 +197,7 @@ pub fn default_ping_handler() -> RpcHandler {
     })
 }
 
-/// Build a system-only handler bound to a daemon status snapshot. The
-/// browsers/sessions fields of the reply are empty (test helper for
-/// callers that don't carry a [`DaemonState`]).
+/// Build a system-only handler bound to a daemon status snapshot.
 pub fn system_handler(status: DaemonStatus) -> RpcHandler {
     Arc::new(move |_rpc_id, method, _params| {
         let status = status.clone();
@@ -199,2501 +221,221 @@ pub fn system_handler(status: DaemonStatus) -> RpcHandler {
     })
 }
 
-/// Build the production handler: `system.*` plus M4 (`browser.list`),
-/// M5 (`session.*`), M6–M9 tool methods, and the M9.3 daemon-local
-/// `tool.wait_ms` / `cancel` paths.
+/// Build a plain [`RpcHandler`] wrapper around [`full_envelope_handler`].
 pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler {
+    let envelope_handler = full_envelope_handler(status, state);
     Arc::new(move |rpc_id, method, params| {
-        let status = status.clone();
-        let state = Arc::clone(&state);
+        let envelope_handler = Arc::clone(&envelope_handler);
         Box::pin(async move {
-            let mut params = params;
-            let scope_meta = strip_envelope_scope_meta(&mut params);
-            if let Err(err) =
-                prepare_implicit_session_and_evidence(&state, &method, &mut params, &scope_meta)
-            {
-                return ResponseBody::Err(err);
-            }
-            let cooperate_sync_session = (method == Method::ToolCooperate)
-                .then(|| {
-                    let action = params.get("action").and_then(Value::as_str)?;
-                    if matches!(action, "sync" | "enable") {
-                        let sid = params
-                            .get("session_id")
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                            .map(|s| SessionId(s.to_string()))?;
-                        let req_tab_id = params.get("tab_id").and_then(Value::as_i64);
-                        Some((sid, action == "sync", req_tab_id))
-                    } else {
-                        None
-                    }
+            let req_meta = RPC_HANDLER_ENVELOPE_BRIDGE
+                .try_with(|slot| {
+                    slot.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .req_meta
+                        .take()
                 })
-                .flatten();
-            let tab_transition = matches!(
-                method,
-                Method::ToolTabCreate
-                    | Method::ToolTabSelect
-                    | Method::ToolTabBorrow
-                    | Method::ToolTabClose
-                    | Method::ToolTabReturn
-            )
-            .then(|| {
-                let sid = params
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| SessionId(s.to_string()))?;
-                Some((sid, method.clone(), params.clone()))
-            })
-            .flatten();
-            let mut ticket = if method.is_tool() {
-                match state.audit.begin(params.get("session_id").and_then(Value::as_str).unwrap_or(""), &method, &params) {
-                    Ok(ticket) => ticket,
-                    Err(_) => return ResponseBody::Err(RpcError { code: ErrorCode::ProtocolError, message: "Operation audit could not be saved; action was not dispatched. Check the audit page or turn recording off.".into(), data: None }),
-                }
-            } else {
-                None
-            };
-            if let Some(ticket) = &ticket
-                && let Some(object) = params.as_object_mut()
-            {
-                object.insert(
-                    "_audit_id".into(),
-                    Value::String(ticket.operation_id.clone()),
-                );
-            }
-            let logged = method.is_tool().then(|| (method.clone(), params.clone()));
-            let body = match method {
-                Method::LocalAuthPair
-                | Method::LocalAuthDevices
-                | Method::LocalAuthRevoke
-                | Method::LocalAuthRotate
-                | Method::LocalAuthSetMode => {
-                    super::local_auth::maintenance::handle(
-                        state.clone(),
-                        status.ws_port,
-                        method,
-                        params,
-                    )
-                    .await
-                }
-                Method::SystemPing => {
-                    let result = PingResult { pong: true };
-                    ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
-                }
-                Method::SessionRunLog => {
-                    let session =
-                        SessionId(params["session_id"].as_str().unwrap_or_default().to_owned());
-                    // An empty log would read as a session that did nothing, so a
-                    // mistyped or stopped session is reported as missing.
-                    if state.sessions.get(&session).is_some() {
-                        ResponseBody::Ok(
-                            serde_json::to_value(state.run_logs.read(&session.0))
-                                .unwrap_or(Value::Null),
-                        )
-                    } else {
-                        ResponseBody::Err(
-                            DispatchError::SessionNotFound {
-                                ended: state.sessions.end_info(&session),
-                            }
-                            .into_rpc(),
-                        )
-                    }
-                }
-                Method::SystemStatus => match handle_status(&status, &state, params).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
-                Method::SessionStartTracked => {
-                    let tracked_incognito = params
-                        .get("incognito")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    let body = super::session_requests::start(&state, rpc_id, params).await;
-                    if scope_meta.bind_scope
-                        && let Some(scope) = scope_meta.caller_scope.as_deref()
-                        && let ResponseBody::Ok(ref value) = body
-                        && let Some(sid_str) = value.get("session_id").and_then(Value::as_str)
-                    {
-                        let sid = SessionId(sid_str.to_owned());
-                        if let Some(session) = state.sessions.get(&sid) {
-                            state.scopes.bind_scope(
-                                scope,
-                                sid,
-                                session.browser_id,
-                                tracked_incognito,
-                            );
-                        }
-                    }
-                    body
-                }
-                Method::SessionRequest => super::session_requests::operate(&state, params).await,
-                Method::SessionStart => {
-                    match handle_session_start_scoped(&state, rpc_id, params, false, &scope_meta)
-                        .await
-                    {
-                        Ok(v) => ResponseBody::Ok(v),
-                        Err(e) => ResponseBody::Err(e),
-                    }
-                }
-                Method::SessionStop => {
-                    match handle_session_stop(&state, rpc_id, params, &scope_meta).await {
-                        Ok(v) => ResponseBody::Ok(v),
-                        Err(e) => ResponseBody::Err(e),
-                    }
-                }
-                Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
-                Method::SessionList => handle_session_list(&state),
-                Method::LedgerRequest => handle_ledger_request(&state, params, &scope_meta),
-                Method::BrowserList => match handle_browser_list(&state, params).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
-                Method::TransferBegin => handle_transfer_begin(&state, params),
-                Method::TransferChunk => handle_transfer_chunk(&state, params),
-                Method::TransferFinish => handle_transfer_finish(&state, params),
-                Method::TransferRead => handle_transfer_read(&state, params),
-                Method::TransferRelease => handle_transfer_release(&state, params),
-                Method::ToolVideo => handle_video(&state, rpc_id, params).await,
-                Method::ToolTabList
-                | Method::ToolTabCreate
-                | Method::ToolTabClose
-                | Method::ToolTabSelect
-                | Method::ToolTabBorrow
-                | Method::ToolTabReturn
-                | Method::ToolWindowResize
-                | Method::ToolEmulate
-                | Method::ToolScreenshot
-                | Method::ToolScreenshotFullPage
-                | Method::ToolScreenshotRead
-                | Method::ToolScreenshotRelease
-                | Method::ToolConsole
-                | Method::ToolDebug
-                | Method::ToolNetwork
-                | Method::ToolSnapshot
-                | Method::ToolObserve
-                | Method::ToolCooperate
-                | Method::ToolGetHtml
-                | Method::ToolRead
-                | Method::ToolExtract
-                | Method::ToolNavigate
-                | Method::ToolNavigateBack
-                | Method::ToolNavigateForward
-                | Method::ToolReload
-                | Method::ToolClick
-                | Method::ToolHover
-                | Method::ToolDrag
-                | Method::ToolWheel
-                | Method::ToolScrollTo
-                | Method::ToolFocus
-                | Method::ToolBlur
-                | Method::ToolFill
-                | Method::ToolPress
-                | Method::ToolSelect
-                | Method::ToolUpload
-                | Method::ToolDownload
-                | Method::ToolEvaluate
-                | Method::ToolWaitForNavigation
-                | Method::ToolWaitForElement
-                | Method::ToolRequestHelp
-                | Method::ToolRecordStart
-                | Method::ToolRecordStop
-                | Method::ToolRecordAwait
-                | Method::ToolDialogStatus
-                | Method::ToolDialogAccept
-                | Method::ToolDialogDismiss => {
-                    handle_dialog_aware_dispatch(
-                        Arc::clone(&state),
-                        rpc_id,
-                        method,
-                        params,
-                        ticket.take(),
-                    )
-                    .await
-                }
-                Method::ToolOperationAwait | Method::ToolOperationCancel => {
-                    handle_operation(&state, rpc_id, method, params).await
-                }
-                Method::ToolWaitMs => handle_wait_ms(&state.abort_registry, rpc_id, params).await,
-                Method::Cancel => handle_cancel(&state, params),
-                other => ResponseBody::Err(RpcError {
-                    code: ErrorCode::UnknownMethod,
-                    message: format!("method not implemented yet: {other:?}"),
-                    data: None,
-                }),
-            };
-            let mut body = body;
-            if let (Some((sid, is_sync, req_tab_id)), ResponseBody::Ok(value)) =
-                (&cooperate_sync_session, &mut body)
-            {
-                let recorded = state.scopes.record_cooperate_result(sid, value);
-                if *is_sync {
-                    let synced_tab_id = value
-                        .get("tab_id")
-                        .and_then(Value::as_i64)
-                        .or(*req_tab_id)
-                        .or_else(|| state.scopes.active_tab_id(sid));
-                    state
-                        .intent_wal
-                        .reconcile_tab(sid, synced_tab_id, "cooperate_sync");
-                }
-                if scope_meta.return_scope_meta
-                    && let Some(obj) = value.as_object_mut()
-                {
-                    obj.insert("_scope_meta".into(), recorded);
-                }
-            }
-            if let (Some((sid, req_method, req_params)), ResponseBody::Ok(value)) =
-                (&tab_transition, &body)
-            {
-                state
-                    .scopes
-                    .record_tab_transition(sid, req_method, req_params, value);
-            }
-            if let Some(ticket) = ticket {
-                state.audit.finish(ticket, &body);
-            }
-            if let Some((method, params)) = logged {
-                state.run_logs.record(
-                    |id| state.sessions.get(&SessionId(id.to_owned())).is_some(),
-                    &method,
-                    &params,
-                    &body,
-                );
-            }
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let (body, resp_meta) = (envelope_handler)(rpc_id, method, params, req_meta).await;
+            let _ = RPC_HANDLER_ENVELOPE_BRIDGE.try_with(|slot| {
+                slot.lock().unwrap_or_else(|p| p.into_inner()).resp_meta = resp_meta;
+            });
             body
         })
     })
 }
 
-#[derive(Debug, Default, Clone)]
-pub(super) struct EnvelopeScopeMeta {
-    pub caller_scope: Option<String>,
-    pub bind_scope: bool,
-    pub reuse_or_start_scope: bool,
-    pub explicit_incognito: bool,
-    pub return_scope_meta: bool,
-}
-
-fn strip_envelope_scope_meta(params: &mut Value) -> EnvelopeScopeMeta {
-    let mut meta = EnvelopeScopeMeta::default();
-    if let Some(object) = params.as_object_mut() {
-        // Internal correlation and caller-scope hints are stripped here and never
-        // forwarded onto the extension WebSocket wire.
-        object.remove("_audit_id");
-        object.remove("_operation_id");
-        meta.caller_scope = object
-            .remove("_caller_scope")
-            .and_then(|v| v.as_str().map(str::to_owned));
-        meta.bind_scope = object
-            .remove("_bind_scope")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        meta.reuse_or_start_scope = object
-            .remove("_reuse_or_start_scope")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        meta.explicit_incognito = object
-            .remove("_explicit_incognito")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        meta.return_scope_meta = object
-            .remove("_return_scope_meta")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-    }
-    meta
-}
-
-fn method_uses_implicit_session(method: &Method, params: &Value) -> bool {
-    match method {
-        Method::SessionRunLog | Method::TransferBegin => true,
-        Method::ToolVideo => params.get("session_id").is_some(),
-        Method::ToolWaitMs | Method::ToolSessionStart | Method::ToolSessionStop => false,
-        other => other.is_tool(),
-    }
-}
-
-fn method_auto_injects_target_context(method: &Method, params: &Value) -> bool {
-    match method {
-        Method::ToolObserve => params.get("probe_hover") == Some(&Value::Bool(true)),
-        Method::ToolDebug => params
-            .get("action")
-            .and_then(|v| {
-                serde_json::from_value::<bsk_protocol::tools::DebugAction>(v.clone()).ok()
-            })
-            .is_some_and(|action| action.cooperation_guarded()),
-        other => other.accepts_action_metadata(),
-    }
-}
-
-fn prepare_implicit_session_and_evidence(
-    state: &DaemonState,
-    method: &Method,
-    params: &mut Value,
-    scope_meta: &EnvelopeScopeMeta,
-) -> Result<(), RpcError> {
-    if !method_uses_implicit_session(method, params) {
-        return Ok(());
-    }
-    if params.is_null() {
-        *params = serde_json::json!({});
-    }
-    let Some(obj) = params.as_object_mut() else {
-        return Ok(());
-    };
-
-    let explicit_sid = obj
-        .get("session_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-
-    let session_id = match explicit_sid {
-        Some(sid) => SessionId(sid),
-        None => {
-            // Only resolve an implicit session when the caller signalled an implicit
-            // CLI/MCP invocation via `_caller_scope` OR passed an empty `session_id: ""`
-            // placeholder from an optional `--session` flag; raw protocol unit tests
-            // sending malformed JSON without `session_id` keep InvalidParams.
-            let has_empty_placeholder = obj
-                .get("session_id")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s.trim().is_empty());
-            if scope_meta.caller_scope.is_none() && !has_empty_placeholder {
-                return Ok(());
+/// Build the production envelope handler.
+pub fn full_envelope_handler(status: DaemonStatus, state: Arc<DaemonState>) -> EnvelopeRpcHandler {
+    Arc::new(move |rpc_id, method, mut params, req_meta| {
+        let status = status.clone();
+        let state = Arc::clone(&state);
+        Box::pin(async move {
+            let (req_meta, legacy_inband_scope_meta) =
+                IpcRequestMeta::extract_legacy_from_params(&mut params, req_meta);
+            let method_for_post = method.clone();
+            let (mut body, mut resp_meta) =
+                dispatch_envelope_rpc(&status, state, rpc_id, method, params, req_meta).await;
+            if legacy_inband_scope_meta {
+                attach_legacy_inband_scope_meta(&method_for_post, &mut body, &mut resp_meta);
             }
-            let scope = scope_meta.caller_scope.as_deref().unwrap_or("default");
-            let resolved = state
-                .scopes
-                .resolve_implicit_session(scope, &state.sessions)?;
-            obj.insert("session_id".into(), Value::String(resolved.0.clone()));
-            resolved
-        }
-    };
-
-    let tab_id = obj.get("tab_id").and_then(Value::as_i64);
-
-    // Expand explicit `--context c1`, or inject latest target-policy context when omitted.
-    match obj.get("context_id").and_then(Value::as_str) {
-        Some(raw_ctx) if !raw_ctx.trim().is_empty() => {
-            if let Some(uuid) = state.scopes.expand_short_ctx(&session_id, raw_ctx.trim()) {
-                obj.insert("context_id".into(), Value::String(uuid));
-            }
-        }
-        _ => {
-            obj.remove("context_id");
-            if method_auto_injects_target_context(method, &Value::Object(obj.clone()))
-                && let Some(uuid) = state.scopes.implicit_target_context(&session_id, tab_id)
-            {
-                obj.insert("context_id".into(), Value::String(uuid));
-            }
-        }
-    }
-
-    // Expand explicit `--observation o1` ONLY; never fabricate omitted `observation_id`.
-    match obj.get("observation_id").and_then(Value::as_str) {
-        Some(raw_obs) if !raw_obs.trim().is_empty() => {
-            if let Some(uuid) = state.scopes.expand_short_obs(&session_id, raw_obs.trim()) {
-                obj.insert("observation_id".into(), Value::String(uuid));
-            }
-        }
-        Some(_) => {
-            obj.remove("observation_id");
-        }
-        None => {}
-    }
-
-    Ok(())
-}
-
-/// Stored videos remain addressable after session teardown. Only start takes
-/// the session queue; status, stop and artifact transfer cannot wait behind a
-/// long page action. The extension validates connection ownership + capability.
-async fn handle_video(state: &Arc<DaemonState>, rpc_id: RpcId, params: Value) -> ResponseBody {
-    use super::browsers::SendError;
-    if let Err(error) = serde_json::from_value::<bsk_protocol::tools::VideoParams>(params.clone()) {
-        return ResponseBody::Err(invalid_params(error.to_string()));
-    }
-    let browser = if let Some(session_id) = params.get("session_id").and_then(Value::as_str) {
-        let Some(session) = state.sessions.get(&SessionId(session_id.into())) else {
-            return ResponseBody::Err(invalid_params("Video task session is no longer active"));
-        };
-        state.browsers.get(&session.browser_id)
-    } else {
-        match state
-            .browsers
-            .select(params.get("browser").and_then(Value::as_str))
-        {
-            Ok(browser) => Some(browser),
-            Err(error) => {
-                return ResponseBody::Err(invalid_params(format!(
-                    "Select a connected browser with --browser: {error:?}"
-                )));
-            }
-        }
-    };
-    let Some(browser) = browser else {
-        return ResponseBody::Err(invalid_params(
-            "Recording browser is disconnected; reconnect it to retrieve the video",
-        ));
-    };
-    let mut result = if params.get("action").and_then(Value::as_str) == Some("start") {
-        handle_tool_dispatch(state, rpc_id, Method::ToolVideo, params).await
-    } else {
-        let id = format!("video-{}", uuid::Uuid::new_v4().simple());
-        let receiver = match browser.dispatch(bsk_protocol::RequestFrame {
-            id: id.clone(),
-            method: Method::ToolVideo,
-            params: Some(params),
-        }) {
-            Ok(receiver) => receiver,
-            Err(SendError::Terminated(error) | SendError::UnsupportedFeature(error)) => {
-                return ResponseBody::Err(error);
-            }
-            Err(SendError::SinkClosed) => {
-                return ResponseBody::Err(invalid_params("Recording browser disconnected"));
-            }
-        };
-        let reply = tokio::time::timeout(Duration::from_secs(32), receiver).await;
-        browser
-            .pending
-            .lock()
-            .expect("browser pending poisoned")
-            .cancel(&id);
-        match reply {
-            Ok(Ok(frame)) => frame.body,
-            Ok(Err(_)) => ResponseBody::Err(invalid_params("Recording browser disconnected")),
-            Err(_) => ResponseBody::Err(RpcError {
-                code: ErrorCode::Timeout,
-                message: "Video service timed out; use video list/status before retrying".into(),
-                data: None,
-            }),
-        }
-    };
-    if let ResponseBody::Ok(value) = &mut result {
-        value["browser"] = Value::String(browser.id.0.clone());
-    }
-    result
-}
-
-/// IPC entry point for `tool.*` RPCs (M6+). Looks up the per-session
-/// dispatch queue and forwards the call; never touches the
-/// BrowserSink directly. `tool.session_start` / `tool.session_stop`
-/// stay on the direct path because they manage the queue lifecycle
-/// itself.
-///
-/// Registers a fresh [`super::inflight::ToolInflightEntry`] BEFORE
-/// the per-session queue takes over so a `cancel { rpc_id }` arriving
-/// while the job is still queued has something to trip — that's the
-/// fix for review C2 (queued cancels were previously invisible to
-/// `handle_cancel`). The same entry covers the in-flight phase too,
-/// so the worker can short-circuit via its cancel token instead of
-/// hand-rolling a second mechanism.
-async fn handle_dialog_aware_dispatch(
-    state: Arc<DaemonState>,
-    cli_rpc_id: RpcId,
-    method: Method,
-    mut params: Value,
-    ticket: Option<super::audit::Ticket>,
-) -> ResponseBody {
-    if matches!(
-        method,
-        Method::ToolDialogStatus
-            | Method::ToolDialogAccept
-            | Method::ToolDialogDismiss
-            | Method::ToolRecordStop
-            | Method::ToolDebug
-    ) {
-        let body = handle_tool_dispatch(&state, cli_rpc_id, method, params).await;
-        if let Some(ticket) = ticket {
-            state.audit.finish(ticket, &body);
-        }
-        return body;
-    }
-    let session = params
-        .get("session_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let operation = match state
-        .dialog_operations
-        .register(session, &cli_rpc_id, method.clone())
-    {
-        Ok(operation) => operation,
-        Err(error) => return ResponseBody::Err(error),
-    };
-    if let Some(params) = params.as_object_mut() {
-        params.insert("_operation_id".into(), Value::String(operation.id.clone()));
-    }
-    let work = Arc::clone(&operation);
-    let background = Arc::clone(&state);
-    tokio::spawn(async move {
-        use futures_util::FutureExt;
-        let body = std::panic::AssertUnwindSafe(handle_tool_dispatch(
-            &background,
-            cli_rpc_id,
-            method,
-            params,
-        ))
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| {
-            ResponseBody::Err(RpcError {
-                code: ErrorCode::ProtocolError,
-                message: "operation task failed; browser effect is unknown".into(),
-                data: None,
-            })
-        });
-        if let Some(ticket) = ticket {
-            background.audit.finish(ticket, &body);
-        }
-        work.finish(body);
-    });
-    let (body, suspended) = operation.initial_response().await;
-    if !suspended {
-        state.dialog_operations.remove(&operation.id);
-    }
-    body
-}
-
-async fn handle_operation(
-    state: &Arc<DaemonState>,
-    cli_rpc_id: RpcId,
-    method: Method,
-    params: Value,
-) -> ResponseBody {
-    let p: bsk_protocol::tools::OperationParams = match serde_json::from_value(params) {
-        Ok(p) => p,
-        Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
-    };
-    if p.wait_ms.is_some_and(|ms| ms > 60000) {
-        return ResponseBody::Err(invalid_params("wait_ms must be 0..60000"));
-    }
-    let Some(session) = state.sessions.get(&SessionId(p.session_id.clone())) else {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::NotFound,
-            message: "session no longer exists".into(),
-            data: None,
-        });
-    };
-    if state.browsers.get(&session.browser_id).is_none() {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::NotFound,
-            message: "owning browser disconnected; original effect is unknown".into(),
-            data: None,
-        });
-    }
-    let Some(operation) = state.dialog_operations.get(&p.session_id, &p.operation_id) else {
-        return ResponseBody::Err(RpcError { code: ErrorCode::NotFound, message: "operation not found in this session or its retained result expired; do not replay an action with unknown effects".into(), data: None });
-    };
-    if method == Method::ToolOperationCancel {
-        return handle_cancel(state, serde_json::json!({"rpc_id":operation.cli_rpc_id}));
-    }
-    let guard = match state.abort_registry.register(cli_rpc_id) {
-        Ok(guard) => guard,
-        Err(error) => {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::ProtocolError,
-                message: format!("operation await registration failed: {error:?}"),
-                data: None,
-            });
-        }
-    };
-    tokio::select! {
-        body = operation.await_result(p.wait_ms.unwrap_or(10000)) => body,
-        _ = guard.token().cancelled() => ResponseBody::Err(RpcError { code: ErrorCode::Cancelled, message: "Result wait cancelled; the original operation continues. Use operation cancel to stop it".into(), data: None }),
-    }
-}
-
-async fn handle_tool_dispatch(
-    state: &Arc<DaemonState>,
-    cli_rpc_id: RpcId,
-    method: Method,
-    params: Value,
-) -> ResponseBody {
-    let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => SessionId(s.to_string()),
-        _ => {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::InvalidParams,
-                message: "tool.* RPC requires non-empty session_id".into(),
-                data: None,
-            });
-        }
-    };
-    // Reject before allocating local transfer resources. The extension also
-    // enforces this for third-party gateways backed by a local-mode daemon.
-    if state.config.server.is_some() && matches!(method, Method::ToolUpload | Method::ToolDownload)
-    {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::Unsupported,
-            message: "upload and download are not supported for remote browsers".into(),
-            data: None,
-        });
-    }
-    // Pre-flight: if the user has clicked the agent-window mask's
-    // stop button, every session carries a one-shot "pending
-    // interrupt" marker. The marker is consumed by the next method
-    // that dispatches browser/page input (which is rejected with
-    // `UserAborted`). Passive reads and control-plane RPCs pass through
-    // transparently — gating them would prevent the agent from observing
-    // page state before asking the user, or from cleanly tearing down the
-    // session. Classification lives on `Method::effect()` so adding a new
-    // tool variant requires an explicit classification call.
-    if method.requires_interrupt_gate_with_params(&params)
-        && state.session_interrupts.try_consume(&session_id)
-    {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::UserAborted,
-            message: "tool dispatch rejected: pending user interrupt. The user explicitly requested to stop. Ask the user how to proceed before issuing further actions.".into(),
-            data: None,
-        });
-    }
-    let wal_mutating = super::intent_wal::IntentWal::is_mutating_tool(&method);
-    let wal_tab_id = wal_mutating
-        .then(|| {
-            params
-                .get("tab_id")
-                .and_then(Value::as_i64)
-                .or_else(|| state.scopes.active_tab_id(&session_id))
+            (body, resp_meta)
         })
-        .flatten();
-    if wal_mutating && let Err(err) = state.intent_wal.check_gate(&session_id, wal_tab_id) {
-        return ResponseBody::Err(err);
-    }
-    let timeout = match tool_dispatch_transport_timeout(&method, &params) {
-        Ok(timeout) => timeout,
-        Err(err) => return ResponseBody::Err(err),
-    };
-    let inflight_guard = match state.tool_inflight.register(cli_rpc_id, session_id.clone()) {
-        Ok(guard) => guard,
-        Err(err) => {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::ProtocolError,
-                message: format!("inflight registration rejected: {err}"),
-                data: None,
-            });
-        }
-    };
-    if method == Method::ToolDebug
-        && matches!(
-            params.get("action").and_then(Value::as_str),
-            Some("activity" | "wait")
-        )
-    {
-        let p: bsk_protocol::tools::DebugParams = match serde_json::from_value(params) {
-            Ok(value) => value,
-            Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
-        };
-        if p.wait_ms.is_some_and(|ms| ms > 60000)
-            || p.command_id.as_ref().is_some_and(|id| id.len() > 200)
-        {
-            return ResponseBody::Err(invalid_params(
-                "wait_ms must be 0..60000; command_id up to 200 characters",
-            ));
-        }
-        let activity = if p.action == bsk_protocol::tools::DebugAction::Activity {
-            state.tool_queues.activity(&session_id)
-        } else {
-            state
-                .tool_queues
-                .wait_idle(
-                    &session_id,
-                    p.command_id.as_deref(),
-                    p.wait_ms.unwrap_or(10000),
-                    inflight_guard.entry().cancel_token(),
-                )
-                .await
-        };
-        return match activity {
-            Ok(activity) => ResponseBody::Ok(
-                serde_json::json!({"session_id": session_id.0, "activity":activity}),
-            ),
-            Err(error) => ResponseBody::Err(error.into_rpc()),
-        };
-    }
-    // Transfer staging normalizes typed params; retain observation and operation bindings.
-    let operation_id = params.get("_operation_id").cloned();
-    let metadata: Vec<_> = [
-        "_audit_id",
-        "context_id",
-        "depends_on",
-        "expect",
-        "observation_id",
-    ]
-    .into_iter()
-    .filter_map(|key| params.get(key).cloned().map(|value| (key, value)))
-    .collect();
-    let mut params = params;
-    if method == Method::ToolTabBorrow {
-        // Old CLI clients can still send this field. Never forward their
-        // override to an older extension that would act on it.
-        if let Some(confirm) = params.get("confirm")
-            && !confirm.is_boolean()
-            && !confirm.is_null()
-        {
-            return ResponseBody::Err(invalid_params("confirm must be a boolean"));
-        }
-        if let Some(object) = params.as_object_mut() {
-            object.remove("confirm");
-        }
-    }
-    // Reject unsupported extension features up front before staging transfers or queueing;
-    // `BrowserClient::dispatch` repeats this check at the WebSocket boundary as a second gate.
-    if let Some(session) = state.sessions.get(&session_id)
-        && let Some(browser) = state.browsers.get(&session.browser_id)
-        && let Err(error) = bsk_protocol::compatibility::check_request(
-            &method,
-            &params,
-            bsk_protocol::compatibility::Peer::Extension,
-            &browser.extension_protocol_version,
-        )
-    {
-        return ResponseBody::Err(error);
-    }
-    let mut download_transfer_id: Option<String> = None;
-    if method == Method::ToolUpload {
-        let mut upload: UploadParams = match serde_json::from_value(params) {
-            Ok(v) => v,
-            Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-        };
-        if upload.files.is_empty() || upload.files.len() > super::file_transfer::MAX_UPLOAD_FILES {
-            return ResponseBody::Err(invalid_params(format!(
-                "upload requires 1..={} files",
-                super::file_transfer::MAX_UPLOAD_FILES
-            )));
-        }
-        let ids: Vec<String> = upload.files.iter().map(|f| f.transfer_id.clone()).collect();
-        let paths = match state.transfers.resolve_uploads(&session_id.0, &ids) {
-            Ok(v) => v,
-            Err(err) => return ResponseBody::Err(err),
-        };
-        for (file, path) in upload.files.iter_mut().zip(paths) {
-            file.staged_path = Some(path.to_string_lossy().into_owned());
-        }
-        params = serde_json::to_value(upload).unwrap_or(Value::Null);
-    } else if method == Method::ToolDownload {
-        let mut download: DownloadParams = match serde_json::from_value(params) {
-            Ok(v) => v,
-            Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-        };
-        let staging = match state.transfers.begin_download(&session_id.0) {
-            Ok(v) => v,
-            Err(err) => return ResponseBody::Err(err),
-        };
-        download.browser_relative_dir = Some(staging.browser_relative_dir);
-        download.max_byte_size = Some(super::file_transfer::MAX_TRANSFER_BYTES);
-        download_transfer_id = Some(staging.transfer_id);
-        params = serde_json::to_value(download).unwrap_or(Value::Null);
-    }
-    if let Some(object) = params.as_object_mut() {
-        for (key, value) in metadata {
-            object.insert(key.into(), value);
-        }
-    }
-    if let Some(operation_id) = operation_id
-        && let Some(object) = params.as_object_mut()
-    {
-        object.insert("_operation_id".into(), operation_id);
-    }
-    let entry = inflight_guard.entry();
-    // `record_stop` must reach the extension while `record_await` holds the
-    // serial busy lock — finishing the recording unblocks await.
-    let independent_control = method == Method::ToolCooperate
-        && params.get("action").and_then(Value::as_str) != Some("enable");
-    let wal_ticket = wal_mutating.then(|| {
-        let op_id = params.get("_operation_id").and_then(Value::as_str);
-        state
-            .intent_wal
-            .begin_dispatch(&session_id, wal_tab_id, op_id, &method, &params)
-    });
-    let outcome = if independent_control
-        || matches!(
-            method,
-            Method::ToolRecordStop
-                | Method::ToolDialogStatus
-                | Method::ToolDialogAccept
-                | Method::ToolDialogDismiss
-        ) {
-        state
-            .tool_queues
-            .dispatch_unlocked(&session_id, method.clone(), params, timeout, Some(entry))
-            .await
-    } else {
-        state
-            .tool_queues
-            .dispatch(&session_id, method.clone(), params, timeout, Some(entry))
-            .await
-    };
-    drop(inflight_guard);
-    if let Some(wal_ticket) = wal_ticket {
-        state
-            .intent_wal
-            .finish_dispatch(wal_ticket, &method, &outcome);
-    }
-    match outcome {
-        Ok(v) if method == Method::ToolDownload => {
-            let id = download_transfer_id.expect("download transfer allocated");
-            let mut result: DownloadResult = match serde_json::from_value(v) {
-                Ok(v) => v,
-                Err(err) => {
-                    state
-                        .transfers
-                        .release(TransferIdParams { transfer_id: id });
-                    return ResponseBody::Err(RpcError {
-                        code: ErrorCode::ProtocolError,
-                        message: format!("invalid tool.download result: {err}"),
-                        data: None,
-                    });
-                }
-            };
-            let Some(path) = result.browser_path.take() else {
-                state
-                    .transfers
-                    .release(TransferIdParams { transfer_id: id });
-                return ResponseBody::Err(RpcError {
-                    code: ErrorCode::ProtocolError,
-                    message: "tool.download returned no browser_path".into(),
-                    data: None,
-                });
-            };
-            match state
-                .transfers
-                .import_download(&id, std::path::Path::new(&path))
-            {
-                Ok(size) => {
-                    result.byte_size = size;
-                    result.transfer_id = Some(id);
-                    ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
-                }
-                Err(err) => {
-                    state
-                        .transfers
-                        .release(TransferIdParams { transfer_id: id });
-                    ResponseBody::Err(err)
-                }
-            }
-        }
-        Ok(v) => ResponseBody::Ok(v),
-        Err(err) => {
-            if let Some(id) = download_transfer_id {
-                state
-                    .transfers
-                    .release(TransferIdParams { transfer_id: id });
-            }
-            let busy = matches!(err, DispatchError::SessionBusy);
-            let mut error = err.into_rpc();
-            if busy {
-                error.data = Some(serde_json::json!({
-                    "reason": crate::rpc_reason::SESSION_BUSY,
-                    "dispatched": false,
-                    "activity": state.tool_queues.activity(&session_id).ok(),
-                    "wait": { "action": "wait", "session_id": session_id.0, "wait_ms": 10000 },
-                }));
-            }
-            ResponseBody::Err(error)
-        }
-    }
-}
-
-fn handle_transfer_begin(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
-    let p: TransferBeginParams = match serde_json::from_value(params) {
-        Ok(v) => v,
-        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-    };
-    if state
-        .sessions
-        .get(&SessionId(p.session_id.clone()))
-        .is_none()
-    {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::NotFound,
-            message: format!("session {} unknown", p.session_id),
-            data: None,
-        });
-    }
-    match state.transfers.begin_upload(p) {
-        Ok(v) => ResponseBody::Ok(serde_json::to_value(v).unwrap_or(Value::Null)),
-        Err(err) => ResponseBody::Err(err),
-    }
-}
-
-fn handle_transfer_chunk(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
-    let p = match serde_json::from_value(params) {
-        Ok(v) => v,
-        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-    };
-    match state.transfers.write_chunk(p) {
-        Ok(v) => ResponseBody::Ok(serde_json::to_value(v).unwrap_or(Value::Null)),
-        Err(err) => ResponseBody::Err(err),
-    }
-}
-
-fn handle_transfer_finish(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
-    let p = match serde_json::from_value(params) {
-        Ok(v) => v,
-        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-    };
-    match state.transfers.finish_upload(p) {
-        Ok(v) => ResponseBody::Ok(serde_json::to_value(v).unwrap_or(Value::Null)),
-        Err(err) => ResponseBody::Err(err),
-    }
-}
-
-fn handle_transfer_read(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
-    let p = match serde_json::from_value(params) {
-        Ok(v) => v,
-        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-    };
-    match state.transfers.read_chunk(p) {
-        Ok(v) => ResponseBody::Ok(serde_json::to_value(v).unwrap_or(Value::Null)),
-        Err(err) => ResponseBody::Err(err),
-    }
-}
-
-fn handle_transfer_release(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
-    let p: TransferIdParams = match serde_json::from_value(params) {
-        Ok(v) => v,
-        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-    };
-    ResponseBody::Ok(serde_json::to_value(state.transfers.release(p)).unwrap_or(Value::Null))
-}
-
-fn invalid_params(message: impl Into<String>) -> RpcError {
-    RpcError {
-        code: ErrorCode::InvalidParams,
-        message: message.into(),
-        data: None,
-    }
-}
-
-/// Upper bound on `tool.wait_ms` (5 minutes). Larger values are
-/// rejected as `invalid_params` so a buggy agent cannot wedge a
-/// daemon-side sleep beyond a reasonable window. The cap matches the
-/// design-doc red-line that long waits should use the queue-based
-/// `wait_for_navigation` instead.
-pub const MAX_WAIT_MS: u64 = 5 * 60 * 1_000;
-
-/// Daemon-local handler for `tool.wait_ms` (M9.3). Does NOT go
-/// through `handle_tool_dispatch` / `tool_queues`: the sleep is
-/// answered entirely on this side of the WS link, so no extension
-/// hop and no session id required.
-async fn handle_wait_ms(
-    registry: &Arc<AbortRegistry>,
-    rpc_id: RpcId,
-    params: Value,
-) -> ResponseBody {
-    let params: WaitMsParams = match serde_json::from_value(params) {
-        Ok(p) => p,
-        Err(err) => {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::InvalidParams,
-                message: err.to_string(),
-                data: None,
-            });
-        }
-    };
-    if params.duration_ms > MAX_WAIT_MS {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::InvalidParams,
-            message: format!(
-                "wait_ms duration {} exceeds limit {}ms",
-                params.duration_ms, MAX_WAIT_MS
-            ),
-            data: None,
-        });
-    }
-    if params.duration_ms == 0 {
-        return ResponseBody::Ok(
-            serde_json::to_value(WaitMsResult { waited_ms: 0 }).unwrap_or(Value::Null),
-        );
-    }
-    let guard = match registry.register(rpc_id) {
-        Ok(guard) => guard,
-        Err(err) => {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::ProtocolError,
-                message: format!("cannot register wait_ms cancellation token: {err:?}"),
-                data: None,
-            });
-        }
-    };
-    let token = guard.token().clone();
-    let result = tokio::select! {
-        _ = tokio::time::sleep(Duration::from_millis(params.duration_ms)) => {
-            ResponseBody::Ok(
-                serde_json::to_value(WaitMsResult { waited_ms: params.duration_ms })
-                    .unwrap_or(Value::Null),
-            )
-        }
-        _ = token.cancelled() => {
-            ResponseBody::Err(RpcError {
-                code: ErrorCode::Cancelled,
-                message: "wait_ms cancelled".into(),
-                data: None,
-            })
-        }
-    };
-    drop(guard);
-    result
-}
-
-/// Resolve a `cancel { rpc_id }` against the daemon's two
-/// cancellation surfaces (M10.2 + review C2):
-///
-/// 1. [`AbortRegistry`] — answers daemon-local cancellable runners
-///    (`tool.wait_ms` and `session.*` lifecycle calls). If a token is
-///    registered we trip it and stop. Lifecycle handlers forward their
-///    own WS cancel after preserving request-before-cancel ordering.
-/// 2. [`super::inflight::ToolInflightRegistry`] — every IPC-tracked
-///    `tool.*` RPC, registered the moment the IPC handler accepts the
-///    request. Trips the entry's cancel token regardless of whether
-///    the per-session queue worker has dequeued the job yet:
-///    * **Queued** — the worker's pre-flight observes the cancelled
-///      token and short-circuits with `cancelled` before any WS
-///      frame leaves the daemon (review C2 fix).
-///    * **Forwarded** — we push a WS-side `cancel { rpc_id: ws_rpc_id }`
-///      frame so the extension's dispatcher can trip its
-///      `AbortController`; the worker keeps the session busy until the
-///      extension returns its final result or the cleanup timeout expires.
-///
-/// Returns `{ cancelled }` reflecting whether either surface
-/// matched. The RPC itself never errors — a cancelled tool surfaces
-/// the `Cancelled` code in its own response.
-fn handle_cancel(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
-    let params: CancelParams = match serde_json::from_value(params) {
-        Ok(p) => p,
-        Err(err) => {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::InvalidParams,
-                message: err.to_string(),
-                data: None,
-            });
-        }
-    };
-    let local = state.abort_registry.cancel(&params.rpc_id);
-    let mut cancelled = local;
-    if !local && let Some(snap) = state.tool_inflight.cancel(&params.rpc_id) {
-        cancelled = true;
-        // Forward the WS-side cancel only when the worker has
-        // already promoted the entry to "forwarded"; queued entries
-        // short-circuit on their own pre-flight without ever
-        // touching the extension.
-        if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
-            && let Err(err) =
-                super::cancel_forward::forward_cancel_to_browser(state, &browser_id, &ws_rpc_id)
-        {
-            warn!(
-                cli_rpc_id = %params.rpc_id,
-                browser = %browser_id,
-                ws_rpc_id = %ws_rpc_id,
-                %err,
-                "failed to forward cancel to extension"
-            );
-        }
-    }
-    ResponseBody::Ok(serde_json::to_value(CancelResult { cancelled }).unwrap_or(Value::Null))
-}
-
-/// Test-only re-export of the cancel handler: the system-only handler
-/// used by older tests doesn't carry `DaemonState`. Kept private so
-/// the production handler in [`full_handler`] is the canonical entry
-/// point.
-#[cfg(test)]
-fn handle_cancel_with_registry_only(registry: &Arc<AbortRegistry>, params: Value) -> ResponseBody {
-    let params: CancelParams = match serde_json::from_value(params) {
-        Ok(p) => p,
-        Err(err) => {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::InvalidParams,
-                message: err.to_string(),
-                data: None,
-            });
-        }
-    };
-    let cancelled = registry.cancel(&params.rpc_id);
-    ResponseBody::Ok(serde_json::to_value(CancelResult { cancelled }).unwrap_or(Value::Null))
-}
-
-fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
-    let Some(raw) = params.get("timeout_ms") else {
-        return Ok(DEFAULT_TOOL_TIMEOUT);
-    };
-    let Some(ms) = raw.as_u64() else {
-        return Err(RpcError {
-            code: ErrorCode::InvalidParams,
-            message: "timeout_ms must be a positive integer number of milliseconds".into(),
-            data: None,
-        });
-    };
-    if ms == 0 {
-        return Err(RpcError {
-            code: ErrorCode::InvalidParams,
-            message: "timeout_ms must be greater than zero".into(),
-            data: None,
-        });
-    }
-    let ms = u32::try_from(ms).map_err(|_| RpcError {
-        code: ErrorCode::InvalidParams,
-        message: "timeout_ms too large for u32 milliseconds".into(),
-        data: None,
-    })?;
-    Ok(Duration::from_millis(u64::from(ms)))
-}
-
-fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
-    if *method == Method::ToolCooperate {
-        let parsed: bsk_protocol::tools::CooperateParams =
-            serde_json::from_value(params.clone())
-                .map_err(|error| invalid_params(error.to_string()))?;
-        if parsed.timeout_ms.is_some_and(|ms| ms > 25_000) {
-            return Err(invalid_params("cooperation wait is bounded to 25000ms"));
-        }
-        // The renderer owns the wait deadline. Leave room for collection and its reply,
-        // including the zero-duration status check; sync uses the ordinary read budget.
-        return Ok(DEFAULT_TOOL_TIMEOUT);
-    }
-    let policy = super::tool_policy::execution_policy(method);
-    if policy.deadline == super::tool_policy::Deadline::BorrowConfirmation {
-        let ms = params
-            .get("confirmation_timeout_ms")
-            .map_or(Some(60_000), Value::as_u64)
-            .filter(|ms| (1..=2_147_000_000).contains(ms))
-            .ok_or_else(|| {
-                invalid_params("confirmation_timeout_ms must be a positive bounded integer")
-            })?;
-        // Include the UI countdown/fade and Chrome move before deadline cancellation.
-        return Ok(Duration::from_millis(ms).saturating_add(Duration::from_secs(15)));
-    }
-    let timeout = if policy.deadline == super::tool_policy::Deadline::FullPage
-        && params.get("timeout_ms").is_none()
-    {
-        Ok(Duration::from_secs(120))
-    } else {
-        tool_dispatch_timeout(params)
-    };
-    timeout.map(|timeout| {
-        if policy.response_grace {
-            timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
-        } else {
-            timeout
-        }
     })
 }
 
-// Local CLI-facing shapes. Intentionally distinct from
-// `bsk_protocol::tools::SessionStart*` (which describes the WS-facing
-// `tool.session_*` round-trip with the extension) so the two sides can
-// evolve independently.
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliSessionStartParams {
-    #[serde(default)]
-    pub controller: Option<bsk_protocol::tools::ControllerInfo>,
-    #[serde(default)]
-    pub incognito: bool,
-    #[serde(default)]
-    pub browser_instance_id: Option<String>,
-    #[serde(default)]
-    pub width: Option<u32>,
-    #[serde(default)]
-    pub height: Option<u32>,
-    #[serde(default)]
-    pub focused: Option<bool>,
+fn attach_legacy_inband_scope_meta(
+    method: &Method,
+    body: &mut ResponseBody,
+    resp_meta: &mut IpcResponseMeta,
+) {
+    let (ResponseBody::Ok(value), Some(mut scope_meta)) = (body, resp_meta.scope_meta.take())
+    else {
+        return;
+    };
+    let coop_val = if *method == Method::ToolOperationAwait {
+        value.get("result")
+    } else {
+        Some(&*value)
+    };
+    let is_slim_non_unchanged = coop_val.is_some_and(|cv| {
+        let has_obs_text = cv
+            .pointer("/observation/text")
+            .and_then(Value::as_str)
+            .is_some();
+        let is_unchanged = cv.get("kind").and_then(Value::as_str) == Some("unchanged");
+        !has_obs_text && !is_unchanged
+    });
+    if is_slim_non_unchanged {
+        scope_meta.cache_reusable = false;
+        scope_meta.cached_vom = None;
+        scope_meta.cached_vom_truncated = false;
+        scope_meta.cached_vom_next_cursor = None;
+    }
+    if let Some(obj) = value.as_object_mut()
+        && let Ok(serialized) = serde_json::to_value(scope_meta)
+    {
+        obj.insert(crate::ipc_client::LEGACY_SCOPE_META_KEY.into(), serialized);
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliSessionStartResult {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
-    pub session_id: String,
-    pub browser_instance_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_window_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct CliSessionStopParams {
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub all: bool,
-    #[serde(default)]
-    pub recording: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(super) struct CliSessionStopResult {
-    stopped: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    failed: Vec<CliSessionStopFailure>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    returned_tab_ids: Vec<i64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    return_failures: Vec<ReturnFailure>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliSessionStopFailure {
-    pub session_id: String,
-    pub code: ErrorCode,
-    pub message: String,
-}
-
-type SessionStopReply = Result<CliSessionStopResult, RpcError>;
-
-#[derive(Debug)]
-pub(super) struct RecordSessionStop {
-    created_at_ms: i64,
-    result: watch::Receiver<Option<SessionStopReply>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionListResult {
-    pub sessions: Vec<SessionStatusEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct BrowserListResult {
-    pub browsers: Vec<BrowserStatusEntry>,
-}
-
-async fn handle_status(
+async fn dispatch_envelope_rpc(
     status: &DaemonStatus,
-    state: &Arc<DaemonState>,
-    params: Value,
-) -> Result<Value, RpcError> {
-    let params: StatusParams = parse_params_or_default(params)?;
-    maybe_wait_for_browser(state, params.wait_for_browser_ms).await;
-    Ok(serde_json::to_value(status.snapshot_with(state)).unwrap_or(Value::Null))
-}
-
-fn parse_params_or_default<T>(params: Value) -> Result<T, RpcError>
-where
-    T: DeserializeOwned + Default,
-{
-    if params.is_null() {
-        Ok(T::default())
-    } else {
-        serde_json::from_value(params).map_err(|err| RpcError {
-            code: ErrorCode::InvalidParams,
-            message: err.to_string(),
-            data: None,
-        })
-    }
-}
-
-async fn maybe_wait_for_browser(state: &Arc<DaemonState>, wait_ms: Option<u64>) {
-    if let Some(wait) = clamp_browser_wait(wait_ms) {
-        state.browsers.wait_for_any_connected(wait).await;
-    }
-}
-
-fn clamp_browser_wait(wait_ms: Option<u64>) -> Option<Duration> {
-    let ms = wait_ms?;
-    if ms == 0 {
-        return None;
-    }
-    Some(Duration::from_millis(
-        ms.min(MAX_BROWSER_WAIT.as_millis() as u64),
-    ))
-}
-
-pub(super) async fn handle_session_start(
-    state: &Arc<DaemonState>,
+    state: Arc<DaemonState>,
     rpc_id: RpcId,
-    params: Value,
-    recoverable: bool,
-) -> Result<Value, RpcError> {
-    let mut params = params;
-    let scope_meta = strip_envelope_scope_meta(&mut params);
-    handle_session_start_scoped(state, rpc_id, params, recoverable, &scope_meta).await
-}
-
-pub(super) async fn handle_session_start_scoped(
-    state: &Arc<DaemonState>,
-    rpc_id: RpcId,
-    params: Value,
-    recoverable: bool,
-    scope_meta: &EnvelopeScopeMeta,
-) -> Result<Value, RpcError> {
-    let task_name = params
-        .get("task_name")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let abort_guard = state
-        .abort_registry
-        .register(rpc_id)
-        .map_err(|err| RpcError {
-            code: ErrorCode::ProtocolError,
-            message: format!("session.start cancellation registration failed: {err:?}"),
-            data: None,
-        })?;
-    let cancel = abort_guard.token().clone();
-    let params: CliSessionStartParams = if params.is_null() {
-        CliSessionStartParams {
-            controller: None,
-            incognito: false,
-            browser_instance_id: None,
-            width: None,
-            height: None,
-            focused: None,
-        }
-    } else {
-        serde_json::from_value(params).map_err(|err| RpcError {
-            code: ErrorCode::InvalidParams,
-            message: err.to_string(),
-            data: None,
-        })?
-    };
-    if let Some(controller) = &params.controller {
-        controller.validate().map_err(|message| RpcError {
-            code: ErrorCode::InvalidParams,
-            message,
-            data: None,
-        })?;
-    }
-    // `--width` without `--height` (or vice versa) is rejected: the
-    // extension only accepts a complete size pair.
-    let window_size = match (params.width, params.height) {
-        (Some(width), Some(height)) => Some((width, height)),
-        (None, None) => None,
-        _ => {
-            return Err(RpcError {
-                code: ErrorCode::InvalidParams,
-                message: "width and height must be given together".into(),
-                data: None,
-            });
-        }
-    };
-
-    let scope = scope_meta.caller_scope.as_deref().unwrap_or("default");
-    let binds_caller_scope = scope_meta.bind_scope
-        || scope_meta.reuse_or_start_scope
-        || super::scopes::is_isolated_scope(scope);
-    let scope_lock = binds_caller_scope.then(|| state.scopes.scope_start_lock(scope));
-    let _scope_guard = match &scope_lock {
-        Some(lock) => Some(lock.lock().await),
-        None => None,
-    };
-    if scope_meta.reuse_or_start_scope
-        && let Some((binding, live)) = state.scopes.active_binding(scope, &state.sessions)
+    method: Method,
+    mut params: Value,
+    req_meta: IpcRequestMeta,
+) -> (ResponseBody, IpcResponseMeta) {
+    if state.config.server.is_some()
+        && (!method.spec().remote_allowed
+            || matches!(
+                method,
+                Method::TransferBegin
+                    | Method::TransferChunk
+                    | Method::TransferFinish
+                    | Method::TransferRead
+            ))
     {
-        if let Some(ref selector) = params.browser_instance_id {
-            match state.browsers.select(Some(selector.as_str())) {
-                Ok(selected) if selected.id != binding.browser_id => {
-                    return Err(RpcError {
-                        code: ErrorCode::InvalidParams,
-                        message: format!(
-                            "current scope is already bound to session '{}' on browser '{}', which conflicts with --browser '{}'; run 'bsk close' first or pass '--scope <name>'",
-                            binding.session_id, binding.browser_id, selector
-                        ),
-                        data: Some(serde_json::json!({
-                            "reason": crate::rpc_reason::SCOPE_BROWSER_CONFLICT,
-                            "session_id": binding.session_id.0,
-                            "bound_browser": binding.browser_id.0,
-                            "requested_browser": selected.id.0,
-                        })),
-                    });
-                }
-                Ok(_) => {}
-                Err(select_err) => {
-                    if selector != &binding.browser_id.0 {
-                        return Err(map_select_browser_error(&state.browsers, select_err));
-                    }
-                }
+        let label = match method {
+            Method::TransferBegin | Method::TransferChunk | Method::TransferFinish => {
+                Method::ToolUpload.wire_name()
             }
-        }
-        if (scope_meta.explicit_incognito && params.incognito != binding.incognito)
-            || (params.incognito && !binding.incognito)
-        {
-            return Err(RpcError {
-                code: ErrorCode::InvalidParams,
-                message: format!(
-                    "current scope is already bound to {} session '{}', which conflicts with --incognito; run 'bsk close' first or pass '--scope <name>'",
-                    if binding.incognito {
-                        "an incognito"
-                    } else {
-                        "a normal"
-                    },
-                    binding.session_id
-                ),
-                data: Some(serde_json::json!({
-                    "reason": crate::rpc_reason::SCOPE_INCOGNITO_CONFLICT,
-                    "session_id": binding.session_id.0,
-                })),
-            });
-        }
-        if state.browsers.get(&binding.browser_id).is_some() {
-            state.sessions.touch(&binding.session_id);
-            let result = CliSessionStartResult {
-                interaction: live.interaction,
-                session_id: live.id.0,
-                browser_instance_id: live.browser_id.0,
-                agent_window_id: live.agent_window_id,
-            };
-            return Ok(serde_json::to_value(result).unwrap_or(Value::Null));
-        }
-        state
-            .scopes
-            .on_session_ended(&binding.session_id, crate::rpc_reason::BROWSER_DISCONNECTED);
-        state.intent_wal.on_session_ended(&binding.session_id);
-    }
-
-    let requested_incognito = params.incognito;
-    match super::sessions::start_session_recoverable(
-        &state.browsers,
-        &state.sessions,
-        &state.tool_queues,
-        params.browser_instance_id.as_deref(),
-        AgentWindowOptions {
-            controller: params.controller,
-            incognito: params.incognito,
-            size: window_size,
-            focused: params.focused,
-        },
-        state.config.extension_connect_wait,
-        DEFAULT_RPC_TIMEOUT,
-        Some(cancel),
-        recoverable,
-    )
-    .await
-    {
-        Ok(session) => {
-            if let Some(name) = task_name {
-                state.audit.set_name(&session.id.0, &name);
-            }
-            if scope_meta.bind_scope
-                || scope_meta.reuse_or_start_scope
-                || super::scopes::is_isolated_scope(scope)
-            {
-                state.scopes.bind_scope(
-                    scope,
-                    session.id.clone(),
-                    session.browser_id.clone(),
-                    requested_incognito,
-                );
-            }
-            let result = CliSessionStartResult {
-                interaction: session.interaction,
-                session_id: session.id.0.clone(),
-                browser_instance_id: session.browser_id.0.clone(),
-                agent_window_id: session.agent_window_id,
-            };
-            Ok(serde_json::to_value(result).unwrap_or(Value::Null))
-        }
-        Err(err) => {
-            if recoverable && let StartSessionError::CleanupFailed { session_id, .. } = &err {
-                state.tool_queues.spawn(session_id.clone());
-            }
-            let mut error = map_start_error(err);
-            if error.code == ErrorCode::NoBrowserConnected && state.recent_unpaired().is_some() {
-                error.data = Some(serde_json::json!({"reason":"local_pairing_required"}));
-            }
-            Err(error)
-        }
-    }
-}
-
-fn map_start_error(err: StartSessionError) -> RpcError {
-    let code = match &err {
-        StartSessionError::NoBrowserConnected => ErrorCode::NoBrowserConnected,
-        StartSessionError::MultipleBrowsersOnline { .. } => ErrorCode::MultipleBrowsersOnline,
-        StartSessionError::BrowserNotFound { .. } => ErrorCode::NotFound,
-        StartSessionError::AmbiguousBrowserLabel { .. } => ErrorCode::InvalidParams,
-        StartSessionError::IdExhausted => ErrorCode::ProtocolError,
-        StartSessionError::Timeout => ErrorCode::Timeout,
-        StartSessionError::Cancelled => ErrorCode::Cancelled,
-        StartSessionError::CleanupFailed { .. } => ErrorCode::ProtocolError,
-        StartSessionError::TransportClosed => ErrorCode::ProtocolError,
-        StartSessionError::ExtensionUnresponsive => ErrorCode::Timeout,
-        StartSessionError::ExtensionError(inner) => inner.code,
-    };
-    let message = err.to_string();
-    let data = match &err {
-        StartSessionError::MultipleBrowsersOnline { browsers } => {
-            Some(serde_json::json!({ "browsers": browsers }))
-        }
-        // A selector miss lists the candidates it could have meant, so
-        // the caller can pick a connected instance or label instead of
-        // probing every browser in turn. Emitted only when at least one
-        // browser is online, so a miss against an empty registry keeps
-        // the historical `code` + `message`-only payload.
-        StartSessionError::BrowserNotFound { browsers } if !browsers.is_empty() => {
-            Some(serde_json::json!({ "browsers": browsers }))
-        }
-        StartSessionError::AmbiguousBrowserLabel {
-            label,
-            instance_ids,
-        } => Some(serde_json::json!({
-            "label": label,
-            "instance_ids": instance_ids,
-        })),
-        StartSessionError::CleanupFailed {
-            session_id,
-            agent_window_id,
-            ..
-        } => Some(serde_json::json!({
-            "reason": "cleanup_failed",
-            "session_id": session_id.0,
-            "agent_window_id": agent_window_id,
-        })),
-        StartSessionError::ExtensionError(inner) => inner.data.clone(),
-        StartSessionError::ExtensionUnresponsive => {
-            Some(serde_json::json!({ "reason": "extension_unresponsive" }))
-        }
-        StartSessionError::TransportClosed => Some(super::browsers::extension_disconnected_data()),
-        _ => None,
-    };
-    RpcError {
-        code,
-        message,
-        data,
-    }
-}
-
-fn map_select_browser_error(
-    browsers: &super::browsers::BrowserRegistry,
-    err: super::browsers::SelectError,
-) -> RpcError {
-    let entries: Vec<BrowserStatusEntry> = browsers
-        .snapshot()
-        .into_iter()
-        .map(|b| b.status_entry(0))
-        .collect();
-    match err {
-        super::browsers::SelectError::NoBrowserConnected => {
-            map_start_error(StartSessionError::NoBrowserConnected)
-        }
-        super::browsers::SelectError::MultipleBrowsersOnline => {
-            map_start_error(StartSessionError::MultipleBrowsersOnline { browsers: entries })
-        }
-        super::browsers::SelectError::NotFound => {
-            map_start_error(StartSessionError::BrowserNotFound { browsers: entries })
-        }
-        super::browsers::SelectError::AmbiguousLabel {
-            label,
-            instance_ids,
-        } => map_start_error(StartSessionError::AmbiguousBrowserLabel {
-            label,
-            instance_ids,
-        }),
-    }
-}
-
-async fn handle_session_stop(
-    state: &Arc<DaemonState>,
-    rpc_id: RpcId,
-    params: Value,
-    scope_meta: &EnvelopeScopeMeta,
-) -> Result<Value, RpcError> {
-    let abort_guard = state
-        .abort_registry
-        .register(rpc_id)
-        .map_err(|err| RpcError {
-            code: ErrorCode::ProtocolError,
-            message: format!("session.stop cancellation registration failed: {err:?}"),
-            data: None,
-        })?;
-    let cancel = abort_guard.token().clone();
-    let params: CliSessionStopParams = if params.is_null() {
-        CliSessionStopParams::default()
-    } else {
-        serde_json::from_value(params).map_err(|err| RpcError {
-            code: ErrorCode::InvalidParams,
-            message: err.to_string(),
-            data: None,
-        })?
-    };
-    if params.all {
-        return handle_session_stop_all(state, Some(cancel)).await;
-    }
-    let session_id = match params.session_id.filter(|s| !s.trim().is_empty()) {
-        Some(s) => SessionId(s),
-        None => {
-            if let Some(scope) = scope_meta.caller_scope.as_deref() {
-                state
-                    .scopes
-                    .resolve_implicit_session(scope, &state.sessions)?
-            } else {
-                return Err(RpcError {
-                    code: ErrorCode::InvalidParams,
-                    message: "session.stop requires session_id or all=true".into(),
-                    data: None,
-                });
-            }
-        }
-    };
-    let result = if params.recording {
-        stop_record_session(state, &session_id, cancel).await?
-    } else {
-        stop_one_session(state, &session_id, Some(cancel)).await?
-    };
-    Ok(serde_json::to_value(result).unwrap_or(Value::Null))
-}
-
-async fn stop_record_session(
-    state: &Arc<DaemonState>,
-    session_id: &SessionId,
-    cancel: AbortToken,
-) -> SessionStopReply {
-    let mut pending = {
-        let mut stops = state.record_session_stops.lock().unwrap();
-        // Keep failed outcomes while the session is live so the other
-        // recorder observes the same failure. Explicit session.stop can retry.
-        stops.retain(|id, stop| {
-            stop.result.borrow().is_none()
-                || state
-                    .sessions
-                    .get(id)
-                    .is_some_and(|session| session.created_at_ms == stop.created_at_ms)
-        });
-        if let Some(pending) = stops.get(session_id) {
-            pending.result.clone()
-        } else {
-            let Some(session) = state.sessions.get(session_id) else {
-                if state
-                    .sessions
-                    .end_info(session_id)
-                    .is_some_and(|end| end.reason == crate::rpc_reason::SESSION_STOPPED)
-                {
-                    return Ok(CliSessionStopResult {
-                        stopped: vec![session_id.0.clone()],
-                        ..Default::default()
-                    });
-                }
-                return Err(map_stop_error(StopSessionError::NotFound));
-            };
-
-            let (finished, pending) = watch::channel(None);
-            stops.insert(
-                session_id.clone(),
-                RecordSessionStop {
-                    created_at_ms: session.created_at_ms,
-                    result: pending.clone(),
-                },
-            );
-            let state = Arc::clone(state);
-            let session_id = session_id.clone();
-            // The caller owns its wait. The daemon owns teardown, even if
-            // the first CLI cancels or disconnects.
-            tokio::spawn(async move {
-                let result = finish_record_session(&state, &session_id).await;
-                let mut stops = state.record_session_stops.lock().unwrap();
-                if result.as_ref().is_ok_and(|stop| stop.failed.is_empty()) {
-                    stops.remove(&session_id);
-                }
-                finished.send_replace(Some(result));
-            });
-            pending
-        }
-    };
-
-    tokio::select! {
-        biased;
-        result = pending.wait_for(Option::is_some) => match result {
-            Ok(result) => result.as_ref().expect("completed stop result").clone(),
-            Err(_) => Err(RpcError {
-                code: ErrorCode::ProtocolError,
-                message: "recording session cleanup ended without a result".into(),
+            Method::TransferRead => Method::ToolDownload.wire_name(),
+            _ => method.wire_name(),
+        };
+        return (
+            ResponseBody::Err(RpcError {
+                code: ErrorCode::Unsupported,
+                message: format!("{label} is not supported for remote browsers"),
                 data: None,
             }),
+            IpcResponseMeta::default(),
+        );
+    }
+    if let Err(err) = super::tool_pipeline::prepare_implicit_session_and_evidence(
+        &state,
+        &method,
+        &mut params,
+        &req_meta,
+    ) {
+        return (ResponseBody::Err(err), IpcResponseMeta::default());
+    }
+    // Daemon-side `tool.*` RPCs (`tool.session_start` / `tool.session_stop` are
+    // extension-bound WS methods, not daemon IPC RPCs, so `UnknownMethod` stays
+    // authoritative for them).
+    if method.is_tool() && !matches!(method, Method::ToolSessionStart | Method::ToolSessionStop) {
+        return execute_tool_rpc(state, rpc_id, method, params, &req_meta).await;
+    }
+
+    let body = match method {
+        Method::LocalAuthPair
+        | Method::LocalAuthDevices
+        | Method::LocalAuthRevoke
+        | Method::LocalAuthRotate
+        | Method::LocalAuthSetMode => {
+            super::local_auth::maintenance::handle(state.clone(), status.ws_port, method, params)
+                .await
+        }
+        Method::SystemPing => {
+            let result = PingResult { pong: true };
+            ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+        }
+        Method::SessionRunLog => handle_session_run_log(&state, params),
+        Method::SystemStatus => match handle_status(status, &state, params).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
         },
-        _ = cancel.cancelled() => Err(RpcError {
-            code: ErrorCode::Cancelled,
-            message: "recording session cleanup wait cancelled; cleanup continues".into(),
+        Method::SessionStartTracked => {
+            let tracked_incognito = params
+                .get("incognito")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let body = super::session_requests::start(&state, rpc_id, params, &req_meta).await;
+            if req_meta.bind_scope
+                && let Some(scope) = req_meta.caller_scope.as_deref()
+                && let ResponseBody::Ok(ref value) = body
+                && let Some(sid_str) = value.get("session_id").and_then(Value::as_str)
+            {
+                let sid = SessionId(sid_str.to_owned());
+                if let Some(session) = state.sessions.get(&sid) {
+                    state
+                        .scopes
+                        .bind_scope(scope, sid, session.browser_id, tracked_incognito);
+                }
+            }
+            body
+        }
+        Method::SessionRequest => super::session_requests::operate(&state, params).await,
+        Method::SessionStart => {
+            match handle_session_start_scoped(&state, rpc_id, params, false, &req_meta).await {
+                Ok(v) => ResponseBody::Ok(v),
+                Err(e) => ResponseBody::Err(e),
+            }
+        }
+        Method::SessionStop => match handle_session_stop(&state, rpc_id, params, &req_meta).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id, params).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::SessionList => handle_session_list(&state, params),
+        Method::LedgerRequest => handle_ledger_request(&state, params, &req_meta).await,
+        Method::BrowserList => match handle_browser_list(&state, params).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::TransferBegin => handle_transfer_begin(&state, params).await,
+        Method::TransferChunk => handle_transfer_chunk(&state, params).await,
+        Method::TransferFinish => handle_transfer_finish(&state, params).await,
+        Method::TransferRead => handle_transfer_read(&state, params).await,
+        Method::TransferRelease => handle_transfer_release(&state, params).await,
+        Method::Cancel => handle_cancel(&state, params),
+        other => ResponseBody::Err(RpcError {
+            code: ErrorCode::UnknownMethod,
+            message: format!("method not implemented yet: {other:?}"),
             data: None,
         }),
-    }
-}
-
-async fn finish_record_session(
-    state: &Arc<DaemonState>,
-    session_id: &SessionId,
-) -> SessionStopReply {
-    // record_stop bypasses the busy gate and can return its trace just
-    // before the queued record_await has delivered the same trace.
-    if let Ok(activity) = state.tool_queues.activity(session_id)
-        && activity.method.as_deref() == Some(Method::ToolRecordAwait.wire_name())
-    {
-        state
-            .tool_queues
-            .wait_idle(
-                session_id,
-                activity.command_id.as_deref(),
-                DEFAULT_SESSION_STOP_TIMEOUT.as_millis() as u32,
-                AbortToken::default(),
-            )
-            .await
-            .map_err(DispatchError::into_rpc)?;
-    }
-    stop_one_session(state, session_id, None).await
-}
-
-async fn stop_one_session(
-    state: &Arc<DaemonState>,
-    session_id: &SessionId,
-    cancel: Option<AbortToken>,
-) -> SessionStopReply {
-    match stop_session(
-        &state.browsers,
-        &state.sessions,
-        &state.tool_queues,
-        &state.session_interrupts,
-        session_id,
-        DEFAULT_SESSION_STOP_TIMEOUT,
-        cancel,
-    )
-    .await
-    {
-        Ok(stop) => {
-            state.transfers.release_session(&session_id.0);
-            state.dialog_operations.remove_session(&session_id.0);
-            state
-                .scopes
-                .on_session_ended(session_id, crate::rpc_reason::SESSION_STOPPED);
-            state.intent_wal.on_session_ended(session_id);
-            Ok(CliSessionStopResult {
-                stopped: vec![session_id.0.clone()],
-                failed: Vec::new(),
-                returned_tab_ids: stop.returned_tab_ids,
-                return_failures: stop.return_failures,
-            })
-        }
-        Err(StopSessionError::ReturnFailures(stop)) => {
-            let message = format!(
-                "failed to return borrowed tabs during session stop ({} failure(s)); session left running",
-                stop.return_failures.len()
-            );
-            Ok(CliSessionStopResult {
-                stopped: Vec::new(),
-                failed: vec![CliSessionStopFailure {
-                    session_id: session_id.0.clone(),
-                    code: ErrorCode::CdpFailed,
-                    message,
-                }],
-                returned_tab_ids: stop.returned_tab_ids,
-                return_failures: stop.return_failures,
-            })
-        }
-        Err(err) => Err(map_stop_error(err)),
-    }
-}
-
-fn map_stop_error(err: StopSessionError) -> RpcError {
-    let code = match &err {
-        StopSessionError::NotFound => ErrorCode::NotFound,
-        StopSessionError::Stopping => ErrorCode::Timeout,
-        StopSessionError::SessionBusy => return DispatchError::SessionBusy.into_rpc(),
-        StopSessionError::BrowserGone => ErrorCode::NotFound,
-        StopSessionError::Timeout => ErrorCode::Timeout,
-        StopSessionError::TransportClosed => ErrorCode::ProtocolError,
-        StopSessionError::ExtensionError(inner) => inner.code,
-        StopSessionError::ReturnFailures(_) => ErrorCode::CdpFailed,
     };
-    let data = matches!(err, StopSessionError::TransportClosed)
-        .then(super::browsers::extension_disconnected_data);
-    RpcError {
-        code,
-        message: err.to_string(),
-        data,
-    }
+    (body, IpcResponseMeta::default())
 }
-
-async fn handle_session_stop_all_rpc(
-    state: &Arc<DaemonState>,
-    rpc_id: RpcId,
-) -> Result<Value, RpcError> {
-    let abort_guard = state
-        .abort_registry
-        .register(rpc_id)
-        .map_err(|err| RpcError {
-            code: ErrorCode::ProtocolError,
-            message: format!("session.stop_all cancellation registration failed: {err:?}"),
-            data: None,
-        })?;
-    handle_session_stop_all(state, Some(abort_guard.token().clone())).await
-}
-
-async fn handle_session_stop_all(
-    state: &Arc<DaemonState>,
-    cancel: Option<super::abort::AbortToken>,
-) -> Result<Value, RpcError> {
-    let ids: Vec<SessionId> = state
-        .sessions
-        .snapshot()
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
-    let mut stopped = Vec::new();
-    let mut failed = Vec::new();
-    let mut returned_tab_ids = Vec::new();
-    let mut return_failures = Vec::new();
-    for id in ids {
-        if cancel
-            .as_ref()
-            .is_some_and(super::abort::AbortToken::is_cancelled)
-        {
-            return Err(RpcError {
-                code: ErrorCode::Cancelled,
-                message: "session.stop_all was cancelled".into(),
-                data: None,
-            });
-        }
-        match stop_session(
-            &state.browsers,
-            &state.sessions,
-            &state.tool_queues,
-            &state.session_interrupts,
-            &id,
-            DEFAULT_SESSION_STOP_TIMEOUT,
-            cancel.clone(),
-        )
-        .await
-        {
-            Ok(stop) => {
-                state.transfers.release_session(&id.0);
-                state.dialog_operations.remove_session(&id.0);
-                state
-                    .scopes
-                    .on_session_ended(&id, crate::rpc_reason::SESSION_STOPPED);
-                state.intent_wal.on_session_ended(&id);
-                stopped.push(id.0);
-                returned_tab_ids.extend(stop.returned_tab_ids);
-                return_failures.extend(stop.return_failures);
-            }
-            Err(StopSessionError::ReturnFailures(stop)) => {
-                debug!(
-                    session = %id,
-                    failures = stop.return_failures.len(),
-                    "session.stop_all: borrowed tab return failure (leaving session running)"
-                );
-                failed.push(CliSessionStopFailure {
-                    session_id: id.0,
-                    code: ErrorCode::CdpFailed,
-                    message: format!(
-                        "failed to return borrowed tabs during session stop ({} failure(s)); session left running",
-                        stop.return_failures.len()
-                    ),
-                });
-                returned_tab_ids.extend(stop.returned_tab_ids);
-                return_failures.extend(stop.return_failures);
-            }
-            Err(err)
-                if matches!(
-                    &err,
-                    StopSessionError::ExtensionError(inner)
-                        if inner.code == ErrorCode::Cancelled
-                ) =>
-            {
-                return Err(map_stop_error(err));
-            }
-            Err(err) => {
-                debug!(session = %id, ?err, "session.stop_all: failure (continuing)");
-                let rpc = map_stop_error(err);
-                failed.push(CliSessionStopFailure {
-                    session_id: id.0,
-                    code: rpc.code,
-                    message: rpc.message,
-                });
-            }
-        }
-    }
-    let result = CliSessionStopResult {
-        stopped,
-        failed,
-        returned_tab_ids,
-        return_failures,
-    };
-    Ok(serde_json::to_value(result).unwrap_or(Value::Null))
-}
-
-fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
-    let sessions: Vec<_> = state
-        .sessions
-        .snapshot()
-        .into_iter()
-        .map(|s| s.status_entry())
-        .collect();
-    ResponseBody::Ok(serde_json::to_value(SessionListResult { sessions }).unwrap_or(Value::Null))
-}
-
-fn handle_ledger_request(
-    state: &Arc<DaemonState>,
-    params: Value,
-    scope_meta: &EnvelopeScopeMeta,
-) -> ResponseBody {
-    #[derive(serde::Deserialize)]
-    struct LedgerParams {
-        action: String,
-        #[serde(default)]
-        session_id: Option<String>,
-        #[serde(default)]
-        tab_id: Option<i64>,
-        #[serde(default)]
-        operation_id: Option<String>,
-    }
-
-    let p: LedgerParams = match serde_json::from_value(params) {
-        Ok(p) => p,
-        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-    };
-    let explicit_sid = p
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| SessionId(s.to_owned()));
-
-    match p.action.as_str() {
-        "status" => {
-            let sid = match explicit_sid {
-                Some(sid) => Some(sid),
-                None => match scope_meta.caller_scope.as_deref() {
-                    Some(scope) => {
-                        match state
-                            .scopes
-                            .resolve_implicit_session(scope, &state.sessions)
-                        {
-                            Ok(sid) => Some(sid),
-                            Err(_) if scope == "default" || state.sessions.is_empty() => None,
-                            Err(_) if scope.starts_with("session_env:") => scope
-                                .strip_prefix("session_env:")
-                                .map(|raw| SessionId(raw.to_owned())),
-                            Err(err) => return ResponseBody::Err(err),
-                        }
-                    }
-                    None => None,
-                },
-            };
-            let reply = state.intent_wal.status(sid.as_ref());
-            ResponseBody::Ok(serde_json::to_value(reply).unwrap_or(Value::Null))
-        }
-        "resolve" => {
-            let sid = match explicit_sid {
-                Some(sid) => sid,
-                None => {
-                    let scope_res = scope_meta
-                        .caller_scope
-                        .as_deref()
-                        .ok_or_else(|| {
-                            invalid_params("ledger.resolve requires session_id or caller scope")
-                        })
-                        .and_then(|scope| {
-                            state
-                                .scopes
-                                .resolve_implicit_session(scope, &state.sessions)
-                        });
-                    match scope_res {
-                        Ok(sid) => sid,
-                        Err(err) => {
-                            if let Some(op_id) = p.operation_id.as_deref()
-                                && let Some(sid) =
-                                    state.intent_wal.find_unknown_session_by_operation(op_id)
-                            {
-                                sid
-                            } else if let Some(raw) = scope_meta
-                                .caller_scope
-                                .as_deref()
-                                .and_then(|sc| sc.strip_prefix("session_env:"))
-                            {
-                                SessionId(raw.to_owned())
-                            } else {
-                                return ResponseBody::Err(err);
-                            }
-                        }
-                    }
-                }
-            };
-            let reply = state
-                .intent_wal
-                .resolve(&sid, p.tab_id, p.operation_id.as_deref());
-            ResponseBody::Ok(serde_json::to_value(reply).unwrap_or(Value::Null))
-        }
-        other => ResponseBody::Err(invalid_params(format!(
-            "unsupported ledger action '{other}'; expected 'status' or 'resolve'"
-        ))),
-    }
-}
-
-async fn handle_browser_list(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
-    let params: BrowserListParams = parse_params_or_default(params)?;
-    maybe_wait_for_browser(state, params.wait_for_browser_ms).await;
-    // Reuse the same helper that produces the
-    // `multiple_browsers_online.error.data.browsers` payload so the
-    // two surfaces always agree on order — sorted by `connected_at_ms`
-    // ascending, with `instance_id` as a deterministic tiebreaker
-    // (review I1).
-    let browsers = snapshot_status_entries(&state.browsers, &state.sessions);
-    Ok(serde_json::to_value(BrowserListResult { browsers }).unwrap_or(Value::Null))
-}
-
-// ----- Test-helper IpcServer wrapper around the transport layer -----
-
-/// Owning handle around a spawned IPC server task. Returned by
-/// [`IpcServer::bind`] and the public [`super::run`] helper.
-pub struct IpcHandle {
-    pub sock_path: PathBuf,
-    pub shutdown: Arc<Notify>,
-    pub task: JoinHandle<()>,
-}
-
-pub struct IpcServer {
-    state: Arc<DaemonState>,
-}
-
-impl IpcServer {
-    pub fn new(state: Arc<DaemonState>) -> Self {
-        Self { state }
-    }
-
-    /// Bind `sock_path` and spawn the serve loop. The returned
-    /// [`IpcHandle`] can be used to wait for / shut down the task.
-    pub async fn bind(self, sock_path: PathBuf) -> anyhow::Result<IpcHandle> {
-        let started_at = Instant::now();
-        let status = DaemonStatus {
-            started_at,
-            ws_port: 0,
-            sock_path: sock_path.clone(),
-            daemon_version: DAEMON_VERSION,
-            protocol_version: PROTOCOL_VERSION,
-        };
-        let handler = full_handler(status, Arc::clone(&self.state));
-        let listener = bind(&sock_path).await?;
-        let shutdown = Arc::new(Notify::new());
-        let shutdown_signal = Arc::clone(&shutdown);
-        let task = tokio::spawn(serve(listener, handler, || {}, || {}, || {}, async move {
-            shutdown_signal.notified().await;
-        }));
-        Ok(IpcHandle {
-            sock_path,
-            shutdown,
-            task,
-        })
-    }
-}
-
-// ----- Transport: UDS / Named Pipe accept loops (M2/M3) -----
-
-#[cfg(unix)]
-mod unix {
-    use std::path::Path;
-    use std::sync::Arc;
-
-    use anyhow::{Context, Result};
-    use bsk_protocol::{ErrorCode, Frame, RequestFrame, ResponseBody, RpcError};
-    use serde_json::Value;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::{UnixListener, UnixStream};
-    use tracing::{debug, info, warn};
-
-    use super::RpcHandler;
-
-    /// Bind the IPC server. Unbinds a stale socket if present (the daemon
-    /// lock has already prevented two daemons running, so this is safe).
-    pub async fn bind(path: &Path) -> Result<UnixListener> {
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
-        let listener =
-            UnixListener::bind(path).with_context(|| format!("bind UDS {}", path.display()))?;
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        Ok(listener)
-    }
-
-    /// Run the IPC server loop until `shutdown` resolves.
-    pub async fn serve<S>(
-        listener: UnixListener,
-        handler: RpcHandler,
-        on_open: impl Fn() + Send + Sync + 'static,
-        on_activity: impl Fn() + Send + Sync + 'static,
-        on_close: impl Fn() + Send + Sync + 'static,
-        shutdown: S,
-    ) where
-        S: std::future::Future<Output = ()> + Send + 'static,
-    {
-        info!("ipc server listening");
-        let on_open = Arc::new(on_open);
-        let on_activity = Arc::new(on_activity);
-        let on_close = Arc::new(on_close);
-        tokio::pin!(shutdown);
-        loop {
-            tokio::select! {
-                _ = &mut shutdown => {
-                    info!("ipc server shutdown requested");
-                    break;
-                }
-                accepted = listener.accept() => {
-                    match accepted {
-                        Ok((stream, _addr)) => {
-                            on_open();
-                            let handler = handler.clone();
-                            let on_act = on_activity.clone();
-                            let on_done = on_close.clone();
-                            tokio::spawn(async move {
-                                if let Err(err) = handle_connection(stream, handler, on_act).await {
-                                    debug!(?err, "ipc connection ended with error");
-                                }
-                                on_done();
-                            });
-                        }
-                        Err(err) => {
-                            warn!(?err, "ipc accept failed");
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    async fn handle_connection(
-        stream: UnixStream,
-        handler: RpcHandler,
-        on_activity: Arc<dyn Fn() + Send + Sync>,
-    ) -> Result<()> {
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = reader.read_line(&mut line).await?;
-            if n == 0 {
-                break;
-            }
-            on_activity();
-            let trimmed = line.trim_end_matches(['\n', '\r']);
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let response = match serde_json::from_str::<Frame>(trimmed) {
-                Ok(Frame::Request(RequestFrame { id, method, params })) => {
-                    let params = params.unwrap_or(Value::Null);
-                    let body = (handler)(id.clone(), method, params).await;
-                    let frame = bsk_protocol::ResponseFrame { id, body };
-                    serde_json::to_string(&Frame::Response(frame))?
-                }
-                Ok(other) => {
-                    debug!(?other, "ipc client sent non-request frame");
-                    continue;
-                }
-                Err(err) => serde_json::to_string(&Frame::Response(bsk_protocol::ResponseFrame {
-                    id: "0".into(),
-                    body: ResponseBody::Err(RpcError {
-                        code: ErrorCode::ProtocolError,
-                        message: format!("invalid frame: {err}"),
-                        data: None,
-                    }),
-                }))?,
-            };
-
-            write_half.write_all(response.as_bytes()).await?;
-            write_half.write_all(b"\n").await?;
-            write_half.flush().await?;
-        }
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-pub use unix::{bind, serve};
-
-#[cfg(windows)]
-mod windows {
-    use std::path::Path;
-    use std::sync::Arc;
-
-    use anyhow::{Context, Result};
-    use bsk_protocol::{ErrorCode, Frame, RequestFrame, ResponseBody, RpcError};
-    use serde_json::Value;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-    use tracing::{debug, info, warn};
-
-    use super::RpcHandler;
-
-    pub struct NamedPipeListener {
-        pipe_name: String,
-        first: Option<NamedPipeServer>,
-    }
-
-    pub async fn bind(_path: &Path) -> Result<NamedPipeListener> {
-        let pipe_name = crate::daemon::paths::pipe_name();
-        let first = ServerOptions::new()
-            .first_pipe_instance(true)
-            .access_inbound(true)
-            .access_outbound(true)
-            .create(&pipe_name)
-            .with_context(|| format!("create first named-pipe instance {pipe_name}"))?;
-        Ok(NamedPipeListener {
-            pipe_name,
-            first: Some(first),
-        })
-    }
-
-    pub async fn serve<S>(
-        mut listener: NamedPipeListener,
-        handler: RpcHandler,
-        on_open: impl Fn() + Send + Sync + 'static,
-        on_activity: impl Fn() + Send + Sync + 'static,
-        on_close: impl Fn() + Send + Sync + 'static,
-        shutdown: S,
-    ) where
-        S: std::future::Future<Output = ()> + Send + 'static,
-    {
-        info!(pipe = %listener.pipe_name, "ipc named-pipe server listening");
-        let on_open = Arc::new(on_open);
-        let on_activity = Arc::new(on_activity);
-        let on_close = Arc::new(on_close);
-        tokio::pin!(shutdown);
-        loop {
-            let pipe = match listener.first.take() {
-                Some(pipe) => pipe,
-                None => match ServerOptions::new()
-                    .first_pipe_instance(false)
-                    .access_inbound(true)
-                    .access_outbound(true)
-                    .create(&listener.pipe_name)
-                {
-                    Ok(pipe) => pipe,
-                    Err(err) => {
-                        warn!(?err, "create named-pipe instance failed");
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        continue;
-                    }
-                },
-            };
-
-            tokio::select! {
-                _ = &mut shutdown => {
-                    info!("ipc named-pipe server shutdown requested");
-                    break;
-                }
-                connected = pipe.connect() => {
-                    match connected {
-                        Ok(()) => {
-                            // Keep the connected instance alive until its replacement
-                            // exists. Otherwise a fast handler can close the last
-                            // instance and make new clients fail with NotFound.
-                            loop {
-                                match ServerOptions::new()
-                                    .access_inbound(true)
-                                    .access_outbound(true)
-                                    .create(&listener.pipe_name)
-                                {
-                                    Ok(next) => {
-                                        listener.first = Some(next);
-                                        break;
-                                    }
-                                    Err(err) => {
-                                        warn!(?err, "create next named-pipe instance failed");
-                                        tokio::select! {
-                                            _ = &mut shutdown => return,
-                                            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-                                        }
-                                    }
-                                }
-                            }
-                            on_open();
-                            let handler = handler.clone();
-                            let on_act = on_activity.clone();
-                            let on_done = on_close.clone();
-                            tokio::spawn(async move {
-                                if let Err(err) = handle_connection(pipe, handler, on_act).await {
-                                    debug!(?err, "named-pipe connection ended with error");
-                                }
-                                on_done();
-                            });
-                        }
-                        Err(err) => {
-                            warn!(?err, "named-pipe connect failed");
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    async fn handle_connection(
-        pipe: NamedPipeServer,
-        handler: RpcHandler,
-        on_activity: Arc<dyn Fn() + Send + Sync>,
-    ) -> Result<()> {
-        let (read_half, mut write_half) = tokio::io::split(pipe);
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = reader.read_line(&mut line).await?;
-            if n == 0 {
-                break;
-            }
-            on_activity();
-            let trimmed = line.trim_end_matches(['\n', '\r']);
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let response = match serde_json::from_str::<Frame>(trimmed) {
-                Ok(Frame::Request(RequestFrame { id, method, params })) => {
-                    let params = params.unwrap_or(Value::Null);
-                    let body = (handler)(id.clone(), method, params).await;
-                    let frame = bsk_protocol::ResponseFrame { id, body };
-                    serde_json::to_string(&Frame::Response(frame))?
-                }
-                Ok(other) => {
-                    debug!(?other, "named-pipe client sent non-request frame");
-                    continue;
-                }
-                Err(err) => serde_json::to_string(&Frame::Response(bsk_protocol::ResponseFrame {
-                    id: "0".into(),
-                    body: ResponseBody::Err(RpcError {
-                        code: ErrorCode::ProtocolError,
-                        message: format!("invalid frame: {err}"),
-                        data: None,
-                    }),
-                }))?,
-            };
-
-            write_half.write_all(response.as_bytes()).await?;
-            write_half.write_all(b"\n").await?;
-            write_half.flush().await?;
-        }
-        Ok(())
-    }
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::sync::Mutex;
-        use std::time::Duration;
-        use tokio::net::windows::named_pipe::ClientOptions;
-        use tokio::sync::oneshot;
-
-        fn isolated_listener() -> NamedPipeListener {
-            let pipe_name = format!(r"\\.\pipe\bsk-test-{}", uuid::Uuid::new_v4());
-            let first = ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(&pipe_name)
-                .unwrap();
-            NamedPipeListener {
-                pipe_name,
-                first: Some(first),
-            }
-        }
-
-        #[tokio::test]
-        async fn next_instance_exists_before_connection_is_handed_off() {
-            let listener = isolated_listener();
-            let name = listener.pipe_name.clone();
-            let probe_name = name.clone();
-            let (probe_tx, probe_rx) = oneshot::channel();
-            let probe_tx = Mutex::new(Some(probe_tx));
-            let (stop_tx, stop_rx) = oneshot::channel();
-            let server = tokio::spawn(serve(
-                listener,
-                crate::daemon::ipc::default_ping_handler(),
-                move || {
-                    if let Some(tx) = probe_tx.lock().unwrap().take() {
-                        // This callback runs before the connection task can finish.
-                        // A second client must already have an instance to open.
-                        let result = ClientOptions::new().open(&probe_name).map(drop);
-                        let _ = tx.send(result);
-                    }
-                },
-                || {},
-                || {},
-                async {
-                    let _ = stop_rx.await;
-                },
-            ));
-            let client = ClientOptions::new().open(&name).unwrap();
-            let result = tokio::time::timeout(Duration::from_secs(5), probe_rx).await;
-            drop(client);
-            let _ = stop_tx.send(());
-            server.await.unwrap();
-            result
-                .expect("accept callback ran")
-                .unwrap()
-                .expect("next pipe instance is ready");
-        }
-
-        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-        async fn rapid_disconnects_and_concurrent_rpc_connections() {
-            let listener = isolated_listener();
-            let name = listener.pipe_name.clone();
-            let (stop_tx, stop_rx) = oneshot::channel();
-            let server = tokio::spawn(serve(
-                listener,
-                crate::daemon::ipc::default_ping_handler(),
-                || {},
-                || {},
-                || {},
-                async {
-                    let _ = stop_rx.await;
-                },
-            ));
-            let exercise = async {
-                // Include clients that close without sending any request.
-                for _ in 0..64 {
-                    drop(
-                        crate::ipc_client::Client::connect_path(name.clone().into())
-                            .await
-                            .unwrap(),
-                    );
-                }
-                let mut clients = tokio::task::JoinSet::new();
-                for _ in 0..8 {
-                    let name = name.clone();
-                    clients.spawn(async move {
-                        for _ in 0..32 {
-                            let mut client =
-                                crate::ipc_client::Client::connect_path(name.clone().into())
-                                    .await
-                                    .unwrap();
-                            let reply: bsk_protocol::PingResult = client
-                                .call(
-                                    bsk_protocol::Method::SystemPing,
-                                    &serde_json::json!({}),
-                                    Duration::from_secs(5),
-                                )
-                                .await
-                                .unwrap()
-                                .unwrap();
-                            assert!(reply.pong);
-                        }
-                    });
-                }
-                while let Some(result) = clients.join_next().await {
-                    result.unwrap();
-                }
-            };
-            let result = tokio::time::timeout(Duration::from_secs(30), exercise).await;
-            let _ = stop_tx.send(());
-            server.await.unwrap();
-            result.expect("connection exercise completed");
-        }
-    }
-}
-
-#[cfg(windows)]
-pub use windows::{bind, serve};
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::daemon::DaemonConfig;
+    use crate::daemon::inflight::ToolInflightRegistry;
+    use crate::daemon::ipc_sessions::{DEFAULT_RPC_TIMEOUT, DEFAULT_SESSION_STOP_TIMEOUT};
+    use crate::daemon::queue::DEFAULT_TOOL_TIMEOUT;
+    use crate::daemon::tool_pipeline::{
+        EXTENSION_RESPONSE_GRACE, handle_wait_ms, tool_dispatch_timeout,
+        tool_dispatch_transport_timeout,
+    };
     use bsk_protocol::{Frame, Method, RequestFrame};
+    use std::time::Duration;
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -2863,6 +605,14 @@ mod tests {
                     > Duration::from_millis(wait_ms)
             );
         }
+        for action in ["sync", "enable"] {
+            let sync_params =
+                serde_json::json!({"session_id":"s1", "action":action, "timeout_ms":25_000});
+            assert!(
+                tool_dispatch_transport_timeout(&Method::ToolCooperate, &sync_params).unwrap()
+                    >= Duration::from_secs(45)
+            );
+        }
         assert!(
             tool_dispatch_transport_timeout(
                 &Method::ToolCooperate,
@@ -2874,7 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_ms_zero_short_circuits_without_registering() {
-        let registry = Arc::new(AbortRegistry::new());
+        let registry = Arc::new(ToolInflightRegistry::new());
         let body = handle_wait_ms(
             &registry,
             "rpc-zero".into(),
@@ -2893,7 +643,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_ms_rejects_durations_over_five_minutes() {
-        let registry = Arc::new(AbortRegistry::new());
+        let registry = Arc::new(ToolInflightRegistry::new());
         let body = handle_wait_ms(
             &registry,
             "rpc-too-long".into(),
@@ -2912,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_ms_completes_for_short_duration() {
-        let registry = Arc::new(AbortRegistry::new());
+        let registry = Arc::new(ToolInflightRegistry::new());
         let body = handle_wait_ms(
             &registry,
             "rpc-50".into(),
@@ -2928,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_ms_cancellation_returns_cancelled_and_unregisters() {
-        let registry = Arc::new(AbortRegistry::new());
+        let registry = Arc::new(ToolInflightRegistry::new());
         let reg_for_cancel = Arc::clone(&registry);
         let task = tokio::spawn(async move {
             handle_wait_ms(
@@ -2938,10 +688,9 @@ mod tests {
             )
             .await
         });
-        // Give the handler a moment to register before we cancel.
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(reg_for_cancel.len(), 1);
-        assert!(reg_for_cancel.cancel(&"rpc-cancel".to_string()));
+        assert!(reg_for_cancel.cancel(&"rpc-cancel".to_string()).is_some());
         let body = tokio::time::timeout(Duration::from_millis(500), task)
             .await
             .expect("cancellation should propagate quickly")
@@ -2955,9 +704,8 @@ mod tests {
 
     #[test]
     fn cancel_unknown_rpc_returns_false_flag() {
-        let registry = Arc::new(AbortRegistry::new());
-        let body =
-            handle_cancel_with_registry_only(&registry, serde_json::json!({"rpc_id": "ghost"}));
+        let state = Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        let body = handle_cancel(&state, serde_json::json!({"rpc_id": "ghost"}));
         match body {
             ResponseBody::Ok(v) => assert_eq!(v, serde_json::json!({"cancelled": false})),
             other => panic!("expected ok, got {other:?}"),
@@ -2982,6 +730,8 @@ mod tests {
             id: "p1".into(),
             method: Method::SystemPing,
             params: None,
+            audit_id: None,
+            operation_id: None,
         });
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
@@ -3029,6 +779,8 @@ mod tests {
             id: "p2".into(),
             method: Method::SystemHandshake,
             params: None,
+            audit_id: None,
+            operation_id: None,
         });
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
@@ -3056,9 +808,7 @@ mod tests {
     }
 }
 
-/// Platform-neutral coverage for the `session.start` selector-miss
-/// payload. Kept out of the `#[cfg(all(test, unix))]` IPC transport
-/// module above so it also runs on Windows.
+/// Platform-neutral coverage for the `session.start` selector-miss payload.
 #[cfg(test)]
 mod selector_miss_payload_tests {
     use super::*;
@@ -3066,9 +816,13 @@ mod selector_miss_payload_tests {
         BrowserClient, BrowserId, BrowserRegistry, BrowserSink, Liveness, Pending,
         next_browser_generation,
     };
+    use crate::daemon::ipc_sessions::map_start_error;
     use crate::daemon::queue::ToolQueueRegistry;
-    use crate::daemon::sessions::{SessionRegistry, start_session_recoverable};
+    use crate::daemon::sessions::{
+        AgentWindowOptions, SessionRegistry, StartSessionError, start_session_recoverable,
+    };
     use std::sync::Mutex;
+    use std::time::Duration;
 
     fn status_entry(instance_id: &str, label: &str) -> BrowserStatusEntry {
         BrowserStatusEntry {
@@ -3085,18 +839,12 @@ mod selector_miss_payload_tests {
         }
     }
 
-    /// A selector miss must hand the caller the connected candidates so
-    /// it can pick a real instance id or label in one round trip,
-    /// instead of enumerating `bsk browsers` and retrying instances one
-    /// after another.
     #[test]
     fn browser_selector_miss_lists_connected_candidates() {
         let err = map_start_error(StartSessionError::BrowserNotFound {
             browsers: vec![status_entry("alpha", "Personal"), status_entry("beta", "")],
         });
         assert_eq!(err.code, ErrorCode::NotFound);
-        // The human-readable message is unchanged (existing callers and
-        // the `details:` line depend on it).
         assert_eq!(err.message, "requested browser is not connected");
         let data = err.data.expect("selector miss must carry candidates");
         let browsers = data["browsers"].as_array().expect("browsers array");
@@ -3106,8 +854,6 @@ mod selector_miss_payload_tests {
         assert_eq!(browsers[1]["instance_id"], "beta");
     }
 
-    /// Backward compatibility: with nothing connected there is nothing
-    /// to suggest, so the error keeps its previous message-only shape.
     #[test]
     fn browser_selector_miss_without_browsers_keeps_message_only_payload() {
         let err = map_start_error(StartSessionError::BrowserNotFound { browsers: vec![] });
@@ -3119,14 +865,6 @@ mod selector_miss_payload_tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // Integration: the real start path, not the pieces
-    // -----------------------------------------------------------------
-
-    /// A registered browser, built in-process. `BrowserClient`'s fields
-    /// are public, so this registers candidates through the same
-    /// `BrowserRegistry` the daemon fills from the extension handshake —
-    /// no transport, no extension, no model.
     fn connected_browser(instance_id: &str, label: &str) -> Arc<BrowserClient> {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(BrowserClient {
@@ -3134,7 +872,7 @@ mod selector_miss_payload_tests {
             browser_name: "chrome".into(),
             browser_version: "131".into(),
             extension_version: "0.1.0-dev.0".into(),
-            extension_protocol_version: "1.0".into(),
+            extension_protocol_version: "2.0".into(),
             label: label.into(),
             sink: BrowserSink { tx },
             pending: Mutex::new(Pending::default()),
@@ -3145,16 +883,6 @@ mod selector_miss_payload_tests {
         })
     }
 
-    /// Drives the function the daemon actually calls for
-    /// `session.start` against a populated registry. The two tests above
-    /// cover the error mapping and the CLI rendering in isolation; this
-    /// one pins both halves of the review ask on a single run:
-    ///
-    /// 1. the candidate list reaches the caller in the wire shape, and
-    /// 2. a failed selection creates **no** session.
-    ///
-    /// (2) is structural today — the selection `?` returns before any id
-    /// is reserved — and this test is what keeps it that way.
     #[tokio::test]
     async fn selector_miss_reaches_caller_and_creates_no_session() {
         let registry = Arc::new(BrowserRegistry::new());
@@ -3165,8 +893,6 @@ mod selector_miss_payload_tests {
 
         assert!(sessions.is_empty(), "fixture must start with no sessions");
 
-        // A selector that matches nothing, with two browsers online:
-        // this must fail immediately and start nothing.
         let error = start_session_recoverable(
             &registry,
             &sessions,
@@ -3181,15 +907,11 @@ mod selector_miss_payload_tests {
         .await
         .expect_err("a selector that matches nothing must not start a session");
 
-        // (2) no session was reserved, so the caller can retry with a
-        // real instance id from the list below.
         assert!(
             sessions.is_empty(),
             "a selector miss must not leave a session behind"
         );
 
-        // (1) the candidates reach the caller through the daemon's own
-        // error mapping.
         let rpc = map_start_error(error);
         assert_eq!(rpc.code, ErrorCode::NotFound);
         let data = rpc

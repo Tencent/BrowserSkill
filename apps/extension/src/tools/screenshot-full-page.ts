@@ -28,7 +28,9 @@ import {
   isRpcError,
   lookupSession,
   resolveTargetTab,
+  toRootFrameHandle,
 } from "./shared";
+import { isHiddenCompositorSurface } from "./viewport-screenshot";
 
 export interface FullPageScreenshotDeps {
   cdp: CdpRunner;
@@ -109,9 +111,19 @@ export async function handleFullPageScreenshot(
     checkOwnership();
     return current;
   };
-  const client = createPageClient(target.tabId, id, controller.signal, async () => {
-    await checkTab();
-  });
+  let beginAttempted = false;
+  let capturePrepared = false;
+  const client = createPageClient(
+    target.tabId,
+    id,
+    controller.signal,
+    async () => {
+      await checkTab();
+    },
+    (command) => {
+      if (command.action === "begin") beginAttempted = true;
+    },
+  );
   const changed = () => controller.abort(new ScreenshotError("changed"));
   const navigated = (info: { tabId: number; frameId: number }) => {
     if (info.tabId === target.tabId && info.frameId === 0)
@@ -163,6 +175,25 @@ export async function handleFullPageScreenshot(
     rendering = false;
     await renderingLease?.release().catch(() => {});
   };
+  let restoreFocus = false;
+  let focusCleanupFailed = false;
+  const stopFocusEmulation = async () => {
+    if (!restoreFocus) return;
+    restoreFocus = false;
+    if (attachmentId !== undefined && deps.cdp.getAttachmentId?.(target.tabId) !== attachmentId)
+      return;
+    try {
+      await waitForReply(
+        deps.cdp.send(target.tabId, "Emulation.setFocusEmulationEnabled", { enabled: false }),
+        undefined,
+        1000,
+      );
+    } catch {
+      focusCleanupFailed = true;
+      if (attachmentId !== undefined && deps.cdp.getAttachmentId?.(target.tabId) === attachmentId)
+        await deps.cdp.detach?.(target.tabId, attachmentId).catch(() => {});
+    }
+  };
   let phase = "preparing";
   let frames = 0;
   let progress = 0;
@@ -172,18 +203,53 @@ export async function handleFullPageScreenshot(
     releaseTabAttachment = deps.cdp.retainTabAttachment?.(target.tabId);
     await deps.exports.prepare();
     // Attach before measuring: the debugger infobar can change viewport geometry.
-    // The dispatcher owns background execution; this job never toggles it.
-    await checkTab();
+    const currentTab = await checkTab();
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     await waitForReply(deps.cdp.send(target.tabId, "Page.getFrameTree"), controller.signal);
     attachmentId = deps.cdp.getAttachmentId?.(target.tabId);
     if (!attachmentId) throw new ScreenshotError("changed");
+    // Cooperation strips persistent background leases on shared tabs. Keep a
+    // non-minimized window awake for the duration of this capture (mirroring
+    // withInputReady) so occluded windows and unselected tabs repaint, while
+    // explicitly minimized windows still reject with `page_hidden`.
+    const persistentLease =
+      deps.cdp.ownsBackgroundExecution?.(ctx.sessionId, target.tabId) === true;
+    const win =
+      typeof chrome.windows?.get === "function"
+        ? await waitForReply(chrome.windows.get(currentTab.windowId), controller.signal).catch(
+            () => undefined,
+          )
+        : undefined;
+    if (!persistentLease && win?.state !== "minimized") {
+      await waitForReply(
+        deps.cdp.sendToFrame(
+          toRootFrameHandle(target.tabId),
+          "Emulation.setFocusEmulationEnabled",
+          { enabled: true },
+          {
+            signal: controller.signal,
+            attachmentId,
+            onDispatch: () => {
+              checkOwnership();
+              restoreFocus = true;
+            },
+          },
+        ),
+        controller.signal,
+      );
+    }
     const platform = await waitForReply(chrome.runtime.getPlatformInfo(), controller.signal);
+    const keepUnselectedAwake = platform.os === "win" || platform.os === "linux";
     await client.prepare();
     const ensureRendering = async (active: boolean) => {
-      if (platform.os !== "win" || active || rendering) return;
-      // Focus emulation keeps script execution alive, but Windows can stop
-      // producing compositor frames on an unselected tab after the first read.
+      if (
+        !keepUnselectedAwake ||
+        rendering ||
+        !(await waitForReply(isHiddenCompositorSurface(active, target.windowId), controller.signal))
+      )
+        return;
+      // Focus emulation keeps script execution alive, but Windows and Linux (Aura)
+      // can stop producing compositor frames on an unselected tab or minimized window.
       // A tiny screencast holds the renderer awake without selecting/resizing it.
       // Its pixels are unused; each tile still comes from captureScreenshot.
       checkOwnership();
@@ -209,9 +275,14 @@ export async function handleFullPageScreenshot(
           page: (command) => {
             if (command.action !== "finish") phase = `page ${command.action}`;
             const run = () => client.page(command);
-            return command.action !== "finish" && deps.cdp.runBrowserMutation
+            return command.action !== "finish" &&
+              command.action !== "inspect" &&
+              deps.cdp.runBrowserMutation
               ? deps.cdp.runBrowserMutation(run)
               : run();
+          },
+          prepared: () => {
+            capturePrepared = true;
           },
           signal: controller.signal,
           screenshot: async () => {
@@ -236,8 +307,8 @@ export async function handleFullPageScreenshot(
           write: (...args) => writer.write(...args, controller.signal),
           scope: params.scope,
           loadingTimeoutMs: 30_000,
-          // Preserve the Windows stale-frame guard with the target-only CDP source.
-          checkFreshness: platform.os === "win",
+          // Preserve the Aura stale-frame guard with the target-only CDP source.
+          checkFreshness: keepUnselectedAwake,
           progress: (_phase, value, count) => {
             progress = value;
             frames = count;
@@ -248,6 +319,7 @@ export async function handleFullPageScreenshot(
       },
     );
     await stopRendering();
+    await stopFocusEmulation();
     controller.signal.throwIfAborted();
     await writer.finish();
     phase = "encoding";
@@ -268,10 +340,29 @@ export async function handleFullPageScreenshot(
       byte_size: file.size,
     });
   } catch (error) {
+    await stopRendering();
+    await stopFocusEmulation();
     const reason = controller.signal.aborted ? controller.signal.reason : error;
+    const preBeginNoEffect =
+      !capturePrepared &&
+      (!beginAttempted ||
+        (reason instanceof ScreenshotError &&
+          (reason.reason === "page_hidden" || reason.code === "busy")));
+    const effectState: "none" | "unknown" =
+      !focusCleanupFailed && preBeginNoEffect ? "none" : "unknown";
     if (controller.signal.aborted && !(reason instanceof ScreenshotError))
-      return { code: "cancelled", message: "Full-page screenshot cancelled; no image was saved" };
-    const details = { phase, frames, progress, captured_height: writer.shot.height };
+      return {
+        code: "cancelled",
+        message: "Full-page screenshot cancelled; no image was saved",
+        data: { effect_state: effectState },
+      };
+    const details = {
+      phase,
+      frames,
+      progress,
+      captured_height: writer.shot.height,
+      effect_state: effectState,
+    };
     if (reason instanceof ScreenshotError) {
       if (reason.reason) {
         const messages = {
@@ -307,22 +398,34 @@ export async function handleFullPageScreenshot(
         return {
           code: "unsupported",
           message: "This page does not allow automatic scrolling for full-page screenshots",
+          data: { effect_state: effectState },
         };
       if (reason.code === "busy")
-        return { code: "invalid_params", message: "A screenshot is already running on this page" };
-      return rpcError(
+        return {
+          code: "invalid_params",
+          message: "A screenshot is already running on this page",
+          data: { effect_state: effectState },
+        };
+      return {
+        ...rpcError(
+          "cdp_failed",
+          "screenshot_capture_failed",
+          `Full-page screenshot failed (${reason.code}); no partial image was saved`,
+        ),
+        data: { reason: "screenshot_capture_failed", effect_state: effectState },
+      };
+    }
+    return {
+      ...rpcError(
         "cdp_failed",
         "screenshot_capture_failed",
-        `Full-page screenshot failed (${reason.code}); no partial image was saved`,
-      );
-    }
-    return rpcError(
-      "cdp_failed",
-      "screenshot_capture_failed",
-      reason instanceof Error ? reason.message : String(reason),
-    );
+        reason instanceof Error ? reason.message : String(reason),
+      ),
+      data: { reason: "screenshot_capture_failed", effect_state: effectState },
+    };
   } finally {
     await stopRendering();
+    await stopFocusEmulation();
     releaseTabAttachment?.();
     clearTimeout(deadline);
     signal?.removeEventListener("abort", abort);

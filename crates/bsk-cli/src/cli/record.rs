@@ -1,32 +1,35 @@
 //! `bsk record start|stop` — capture user actions in the Agent Window.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::tools::{
     RecordAwaitParams, RecordAwaitResult, RecordStartParams, RecordStartResult, RecordStopParams,
-    RecordStopResult, RecordedTrace, TRACE_VERSION_V3,
+    RecordStopResult, RecordedTrace,
 };
 use bsk_protocol::{ErrorCode, Method};
 use clap::{Args, Subcommand};
 
 use crate::cli::TOOL_IPC_TIMEOUT;
 
-mod export;
+pub(crate) mod export;
 
-use crate::cli::business_rpc::{self, ipc_timeout};
+use crate::cli::business_rpc::{self, ClientContext, ipc_timeout};
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::record_recovery;
 use crate::cli::record_state;
-use crate::cli::session::{SessionStartOptions, start_session, stop_record_session, stop_session};
-use export::{
-    ExportMeta, export_with_recovery, states_dir_for_output, trace_json_path,
-    validate_record_output,
+use crate::cli::session::{
+    SessionStartOptions, start_session_with_context, stop_record_session_with_context,
 };
+use export::{ExportMeta, export_with_recovery, trace_json_path, validate_record_output};
 
 /// Max wait for the user to click 结束 in the browser (24 hours).
-const RECORD_AWAIT_TIMEOUT_MS: u32 = 86_400_000;
+pub(crate) const RECORD_AWAIT_TIMEOUT_MS: u32 = 86_400_000;
+
+/// Bounded timeout for cancellation-independent recording teardown.
+const RECORD_CANCEL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `bsk record …` subcommand tree.
 #[derive(Debug, Clone, Args)]
@@ -87,19 +90,26 @@ pub struct RecordStopArgs {
     pub output: PathBuf,
 }
 
-pub fn dispatch(cmd: RecordCmd, format: Format) -> Result<(), CliError> {
+pub fn dispatch(cmd: RecordCmd, ctx: &ClientContext, format: Format) -> Result<(), CliError> {
+    ctx.prepare_params(&Method::ToolRecordStart, Some(serde_json::json!({})))?;
+    let aux_ctx = ctx.without_action_metadata();
     match cmd.sub {
-        RecordSub::Start(args) => dispatch_start(args, format),
-        RecordSub::Stop(args) => dispatch_stop(args, format),
+        RecordSub::Start(args) => dispatch_start(args, &aux_ctx, format),
+        RecordSub::Stop(args) => dispatch_stop(args, &aux_ctx, format),
     }
 }
 
-fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError> {
+fn dispatch_start(
+    args: RecordStartArgs,
+    ctx: &ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     prepare_record_start(&args.output)?;
 
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let session = start_session(
+    let session = start_session_with_context(
         info.sock_path.clone(),
+        ctx,
         SessionStartOptions {
             browser: args.browser,
             focused: Some(true),
@@ -114,10 +124,8 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         purpose: args.purpose.clone(),
         max_page_tokens: args.max_page_tokens,
         redact_values: Some(args.redact_values),
-        trace_version: Some(TRACE_VERSION_V3),
-        supports_tab_switch_steps: Some(true),
     };
-    let start_result = business_rpc::call::<RecordStartParams, RecordStartResult>(
+    let start_result = ctx.call::<RecordStartParams, RecordStartResult>(
         info.sock_path.clone(),
         "record-start",
         Method::ToolRecordStart,
@@ -128,13 +136,23 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     let start_result = match start_result {
         Ok(result) => result,
         Err(err) => {
-            let _ = stop_session(info.sock_path, &session.session_id);
+            let _ = stop_record_session_uncancelled(
+                info.sock_path,
+                &session.session_id,
+                false,
+                RECORD_CANCEL_STOP_TIMEOUT,
+            );
             return Err(annotate_default_start_page_error(err, args.url.as_deref()));
         }
     };
 
     if let Err(err) = record_state::write(&session.session_id) {
-        let _ = stop_session(info.sock_path.clone(), &session.session_id);
+        let _ = stop_record_session_uncancelled(
+            info.sock_path.clone(),
+            &session.session_id,
+            false,
+            RECORD_CANCEL_STOP_TIMEOUT,
+        );
         return Err(CliError::Local(err));
     }
 
@@ -149,7 +167,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         session_id: session.session_id.clone(),
         timeout_ms: Some(RECORD_AWAIT_TIMEOUT_MS),
     };
-    let await_result = business_rpc::call::<RecordAwaitParams, RecordAwaitResult>(
+    let await_result = ctx.call::<RecordAwaitParams, RecordAwaitResult>(
         info.sock_path.clone(),
         "record-await",
         Method::ToolRecordAwait,
@@ -159,6 +177,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
 
     finish_recording(
         info.sock_path,
+        ctx,
         &session.session_id,
         await_result.map(|result| result.trace),
         &args.output,
@@ -166,7 +185,11 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     )
 }
 
-fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
+fn dispatch_stop(
+    args: RecordStopArgs,
+    ctx: &ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     validate_record_output(&args.output)?;
 
     if let Ok(state) = record_state::read() {
@@ -176,17 +199,36 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
         let params = RecordStopParams {
             session_id: session_id.clone(),
         };
-        let result = business_rpc::call::<RecordStopParams, RecordStopResult>(
+        let result = match ctx.call::<RecordStopParams, RecordStopResult>(
             info.sock_path.clone(),
             "record-stop",
             Method::ToolRecordStop,
             Some(params),
             TOOL_IPC_TIMEOUT,
-        )
-        .map_err(|err| forget_stale_recording(err, &session_id))?;
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                if err.code() == Some(ErrorCode::NotFound) {
+                    // Recording may have already ended while its Agent Window stayed alive
+                    // after a prior teardown failure; close the session before clearing state.
+                    let session_stop = stop_record_session_uncancelled(
+                        info.sock_path.clone(),
+                        &session_id,
+                        false,
+                        RECORD_CANCEL_STOP_TIMEOUT,
+                    );
+                    if should_clear_record_state(&session_stop) {
+                        return Err(forget_stale_recording(err, &session_id));
+                    }
+                    return Err(session_stop.unwrap_err());
+                }
+                return Err(err);
+            }
+        };
 
         return finish_recording(
             info.sock_path,
+            ctx,
             &session_id,
             Ok(result.trace),
             &args.output,
@@ -206,6 +248,7 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
 
 fn finish_recording(
     sock: PathBuf,
+    ctx: &ClientContext,
     session_id: &str,
     trace: Result<RecordedTrace, CliError>,
     output: &PathBuf,
@@ -216,17 +259,127 @@ fn finish_recording(
         Ok((trace, exported))
     });
     // Preserve the trace before teardown, even if cleanup later fails.
-    let stopped = stop_record_session(sock, session_id);
-    record_state::clear_session(session_id);
+    let stopped = if business_rpc::cancel_requested() {
+        stop_record_session_uncancelled(sock, session_id, false, RECORD_CANCEL_STOP_TIMEOUT)
+    } else {
+        stop_record_session_with_context(sock, ctx, session_id)
+    };
+    if should_clear_record_state(&stopped) {
+        record_state::clear_session(session_id);
+    }
 
     let (trace, exported) = bundle?;
     stopped?;
     render_finish(&trace, output, &exported, format)
 }
 
+const SESSION_BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Dispatch `session.stop` directly over IPC without checking `business_rpc::cancel_requested()`
+/// so Ctrl-C / parent cancellation during `bsk record start` still closes the recording window.
+/// Retries transient `session_busy` replies with short backoff until `timeout` so cleanup
+/// bridges the gap between client `CANCEL_RESPONSE_GRACE` and daemon `CANCEL_CLEANUP_TIMEOUT`.
+fn stop_record_session_uncancelled(
+    sock: PathBuf,
+    session_id: &str,
+    recording: bool,
+    timeout: Duration,
+) -> Result<(), CliError> {
+    let params = if recording {
+        serde_json::json!({ "session_id": session_id, "all": false, "recording": true })
+    } else {
+        serde_json::json!({ "session_id": session_id, "all": false })
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime for record cleanup")
+        .map_err(CliError::Local)?;
+    let reply = runtime.block_on(async move {
+        let mut client = crate::ipc_client::IpcClient::connect(&sock)
+            .await
+            .map_err(CliError::Local)?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut attempt: u32 = 0;
+        let mut last_busy: Option<CliError> = None;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(last_busy.unwrap_or_else(|| CliError::Rpc {
+                    code: ErrorCode::Timeout,
+                    message: format!("session {session_id} stayed busy during recording cleanup"),
+                    data: Some(serde_json::json!({
+                        "reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str(),
+                    })),
+                    source: None,
+                }));
+            }
+            attempt = attempt.saturating_add(1);
+            let (res, _) = client
+                .call_envelope::<serde_json::Value, serde_json::Value>(
+                    format!("record-cleanup-stop-{attempt}"),
+                    Method::SessionStop,
+                    Some(params.clone()),
+                    crate::ipc_client::IpcRequestMeta::default(),
+                    remaining,
+                )
+                .await
+                .map_err(CliError::Local)?;
+            match res.map_err(CliError::from_rpc) {
+                Ok(reply) => return Ok(reply),
+                Err(err) if err.is_session_busy() => {
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if left.is_zero() {
+                        return Err(err);
+                    }
+                    last_busy = Some(err);
+                    tokio::time::sleep(SESSION_BUSY_RETRY_INTERVAL.min(left)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    })?;
+    if let Some(failure) = reply
+        .get("failed")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|arr| arr.first())
+    {
+        let code = failure
+            .get("code")
+            .cloned()
+            .and_then(|v| serde_json::from_value::<ErrorCode>(v).ok())
+            .unwrap_or(ErrorCode::ProtocolError);
+        let message = failure
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("failed to stop recording session")
+            .to_owned();
+        return Err(CliError::Rpc {
+            code,
+            message,
+            data: Some(serde_json::json!({
+                "session_id": session_id,
+                "return_failures": reply.get("return_failures").cloned().unwrap_or(serde_json::Value::Null),
+            })),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+/// Clear `record-session.json` only when teardown confirmed the session stopped
+/// or is already gone (`NotFound`), preserving the pointer if cleanup failed
+/// while the browser recording session may still be running.
+fn should_clear_record_state(stop_res: &Result<(), CliError>) -> bool {
+    match stop_res {
+        Ok(()) => true,
+        Err(err) => err.code() == Some(ErrorCode::NotFound),
+    }
+}
+
 /// A `not_found` stop means the session or its recording is gone, so the
 /// saved pointer can never be stopped; drop it so `record start` works again.
-fn forget_stale_recording(err: CliError, session_id: &str) -> CliError {
+pub(crate) fn forget_stale_recording(err: CliError, session_id: &str) -> CliError {
     let CliError::Rpc {
         code: ErrorCode::NotFound,
         message,
@@ -249,7 +402,7 @@ fn forget_stale_recording(err: CliError, session_id: &str) -> CliError {
 
 /// When `record start` omitted `--url` and the default example.com page
 /// never loaded, rewrite the RPC error so the CLI hint points at `--url`.
-fn annotate_default_start_page_error(err: CliError, user_url: Option<&str>) -> CliError {
+pub(crate) fn annotate_default_start_page_error(err: CliError, user_url: Option<&str>) -> CliError {
     if user_url.is_some() {
         return err;
     }
@@ -274,7 +427,7 @@ fn annotate_default_start_page_error(err: CliError, user_url: Option<&str>) -> C
         code,
         message,
         data: Some(serde_json::json!({
-            "reason": crate::cli::render_error::reason::RECORD_START_PAGE_UNREACHABLE
+            "reason": bsk_protocol::RpcErrorReason::RecordStartPageUnreachable.as_str()
         })),
         source,
     }
@@ -290,7 +443,7 @@ fn is_default_start_page_failure(code: ErrorCode, message: &str) -> bool {
     }
 }
 
-fn prepare_record_start(output: &Path) -> Result<(), CliError> {
+pub(crate) fn prepare_record_start(output: &Path) -> Result<(), CliError> {
     if record_state::read().is_ok() {
         return Err(CliError::Local(anyhow::anyhow!(
             "a recording is already in progress; run `bsk record stop` first"
@@ -313,57 +466,28 @@ fn render_finish(
     let trace_path = trace_json_path(output_dir);
     match format {
         Format::Json => {
-            let payload = match trace {
-                RecordedTrace::V3(t) => serde_json::json!({
-                    "output": output_dir,
-                    "trace_json": trace_path,
-                    "trace_version": exported.trace_version,
-                    "states_dir": exported.states_dir,
-                    "trace": t,
-                    "window_closed": true,
-                }),
-                RecordedTrace::V2(t) => serde_json::json!({
-                    "output": output_dir,
-                    "trace_json": trace_path,
-                    "trace_version": exported.trace_version,
-                    "states_dir": null,
-                    "trace": t,
-                    "window_closed": true,
-                }),
-            };
+            let payload = serde_json::json!({
+                "output": output_dir,
+                "trace_json": trace_path,
+                "trace_version": exported.trace_version,
+                "states_dir": exported.states_dir,
+                "trace": trace,
+                "window_closed": true,
+            });
             println!(
                 "{}",
                 serde_json::to_string(&payload).map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
             );
         }
-        Format::Human => match trace {
-            RecordedTrace::V3(t) => {
-                let states_dir = exported
-                    .states_dir
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| states_dir_for_output(output_dir).display().to_string());
-                println!(
-                    "saved {} steps to {} and {} states to {}",
-                    t.steps.len(),
-                    trace_path.display(),
-                    t.states.len(),
-                    states_dir
-                );
-            }
-            RecordedTrace::V2(t) => {
-                if exported.v2_fallback {
-                    eprintln!(
-                        "note: extension returned trace v2 (no page observations); update the BrowserSkill extension for v3 bundles"
-                    );
-                }
-                println!(
-                    "saved {} steps to {} (trace v2)",
-                    t.steps.len(),
-                    trace_path.display()
-                );
-            }
-        },
+        Format::Human => {
+            println!(
+                "saved {} steps to {} and {} states to {}",
+                trace.steps.len(),
+                trace_path.display(),
+                trace.states.len(),
+                exported.states_dir.display()
+            );
+        }
     }
     Ok(())
 }
@@ -522,7 +646,7 @@ mod tests {
         let annotated = annotate_default_start_page_error(err, None);
         assert_eq!(
             crate::cli::render_error::reason_for_data(annotated.data()),
-            Some(crate::cli::render_error::reason::RECORD_START_PAGE_UNREACHABLE)
+            Some(bsk_protocol::RpcErrorReason::RecordStartPageUnreachable.as_str())
         );
         let info =
             crate::cli::render_error::info_for_error(annotated.code().unwrap(), annotated.data());

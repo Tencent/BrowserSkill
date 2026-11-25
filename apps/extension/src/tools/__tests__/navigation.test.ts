@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { rootEventSource, type TabEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import {
   eventLoaderIsRelevant,
   handleNavigate,
@@ -27,7 +28,7 @@ function fakeAgentWindow(ids: number[]) {
 }
 
 interface EventListener {
-  (source: chrome.debugger.Debuggee, method: string, params: unknown): void;
+  (source: TabEventSource, method: string, params: unknown): void;
 }
 
 /**
@@ -76,7 +77,7 @@ function makeFakeCdp(opts?: {
             opts.fireLifecycleDuringNavigateLoaderId ?? opts.navigateLoaderId ?? "loader-after",
         };
         for (const listener of [...events]) {
-          listener({ tabId: 4 }, "Page.lifecycleEvent", payload);
+          listener(rootEventSource(4), "Page.lifecycleEvent", payload);
         }
       }
       return {
@@ -92,7 +93,7 @@ function makeFakeCdp(opts?: {
           loaderId: opts.navigateLoaderId ?? "loader-after",
         };
         for (const listener of [...events]) {
-          listener({ tabId: 4 }, "Page.lifecycleEvent", payload);
+          listener(rootEventSource(4), "Page.lifecycleEvent", payload);
         }
       }
       return {};
@@ -126,14 +127,14 @@ function makeFakeCdp(opts?: {
     throw new Error(`unexpected CDP call ${method}`);
   };
   const send = vi.fn(sendImpl);
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as unknown as <T = unknown>(
       tabId: number,
       method: string,
       params?: object,
     ) => Promise<T>,
     trackSessionTab: vi.fn(),
-    onEvent: vi.fn((handler: EventListener) => {
+    onEvent: vi.fn((_tabId: number, handler: EventListener) => {
       events.push(handler);
       return {
         dispose: () => {
@@ -142,7 +143,7 @@ function makeFakeCdp(opts?: {
         },
       };
     }),
-  };
+  });
   const tabsApi = {
     get: vi.fn(
       async (tabId: number) =>
@@ -172,7 +173,8 @@ function makeFakeCdp(opts?: {
       loaderId = opts?.navigateLoaderId ?? "loader-after",
     ) {
       const payload = { name, frameId, loaderId };
-      for (const listener of [...events]) listener({ tabId: 4 }, "Page.lifecycleEvent", payload);
+      for (const listener of [...events])
+        listener(rootEventSource(4), "Page.lifecycleEvent", payload);
     },
     fireFrameNavigated(
       frameId = opts?.navigateFrameId ?? "frame-1",
@@ -183,7 +185,8 @@ function makeFakeCdp(opts?: {
         frame: { id: frameId, loaderId, url: opts?.finalUrl ?? "https://example.com/" },
         ...(type ? { type } : {}),
       };
-      for (const listener of [...events]) listener({ tabId: 4 }, "Page.frameNavigated", payload);
+      for (const listener of [...events])
+        listener(rootEventSource(4), "Page.frameNavigated", payload);
     },
     listeners: events,
   };
@@ -270,7 +273,9 @@ describe("handleNavigate", () => {
     fake.cdp.send = vi.fn(async (tabId, method, params) => {
       if (method === "Page.navigate") {
         for (const listener of [...fake.listeners])
-          listener({ tabId }, "Page.javascriptDialogOpening", { type: "beforeunload" });
+          listener(rootEventSource(tabId), "Page.javascriptDialogOpening", {
+            type: "beforeunload",
+          });
         return { frameId: "frame-1", errorText: "net::ERR_ABORTED" };
       }
       return original(tabId, method, params);
@@ -289,7 +294,7 @@ describe("handleNavigate", () => {
     );
     expect(finished).toBe(false);
     for (const listener of [...fake.listeners])
-      listener({ tabId: 4 }, "Page.javascriptDialogClosed", { result: false });
+      listener(rootEventSource(4), "Page.javascriptDialogClosed", { result: false });
     expect(await navigation).toMatchObject({
       code: "cancelled",
       message: expect.stringContaining("page was kept"),
@@ -770,7 +775,7 @@ it.each([
   await vi.waitFor(() => expect(fake.sent.some((s) => s.method === "Page.navigate")).toBe(true));
   fake.fireFrameNavigated();
   for (const listener of [...fake.listeners])
-    listener({ tabId: 4 }, "Page.frameRequestedNavigation", {
+    listener(rootEventSource(4), "Page.frameRequestedNavigation", {
       frameId: "frame-1",
       disposition: "currentTab",
     });
@@ -796,7 +801,7 @@ it("does not overwrite a successor observed before Page.navigate resolves with i
     if (method === "Page.navigate") {
       fake.fireFrameNavigated();
       for (const listener of [...fake.listeners])
-        listener({ tabId: 4 }, "Page.frameRequestedNavigation", {
+        listener(rootEventSource(4), "Page.frameRequestedNavigation", {
           frameId: "frame-1",
           disposition: "currentTab",
         });
@@ -832,7 +837,7 @@ it.each([
     return send(tabId, method, params);
   }) as CdpRunner["send"];
   const fire = (method: string, params: Record<string, unknown>) => {
-    for (const listener of [...fake.listeners]) listener({ tabId: 4 }, method, params);
+    for (const listener of [...fake.listeners]) listener(rootEventSource(4), method, params);
   };
   let settled = false;
   const work = handleNavigate(
@@ -884,7 +889,7 @@ it.each([
     return send(tabId, method, params);
   }) as CdpRunner["send"];
   const fire = (method: string, params: Record<string, unknown>) => {
-    for (const listener of [...fake.listeners]) listener({ tabId: 4 }, method, params);
+    for (const listener of [...fake.listeners]) listener(rootEventSource(4), method, params);
   };
   let settled = false;
   const work = handleNavigate(
@@ -937,7 +942,7 @@ it.each([
     return send(tabId, method, params);
   }) as CdpRunner["send"];
   const fire = (method: string, params: Record<string, unknown>) => {
-    for (const listener of [...fake.listeners]) listener({ tabId: 4 }, method, params);
+    for (const listener of [...fake.listeners]) listener(rootEventSource(4), method, params);
   };
   const begin = (loaderId: string) => {
     fire("Page.frameRequestedNavigation", { frameId: "frame-1", disposition: "currentTab" });
@@ -985,4 +990,106 @@ it.each([
   fake.fireLifecycle(lifecycle, "frame-1", current);
   expect(await work).toMatchObject({ reached: phase });
   expect(fake.listeners).toHaveLength(0);
+});
+
+describe("beforeunload dismissal handling across sibling navigation commands", () => {
+  it.each([
+    ["navigate", handleNavigate, "Page.navigate", 1],
+    ["navigate_back", handleNavigateBack, "Page.navigateToHistoryEntry", 1],
+    ["navigate_forward", handleNavigateForward, "Page.navigateToHistoryEntry", 0],
+    ["reload", handleReload, "Page.reload", 1],
+  ] as const)("returns user_cancelled with effect_state=none instead of cdp_failed when %s is blocked and dismissed by beforeunload", async (label, handler, cdpMethod, historyIndex) => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await manager.start("aa11");
+    const fake = makeFakeCdp({
+      historyIndex,
+      historyEntries: [
+        { id: 11, url: "https://a.example/" },
+        { id: 12, url: "https://b.example/" },
+      ],
+    });
+    const baseSend = fake.cdp.send.bind(fake.cdp);
+    fake.cdp.send = (async (tabId, method, params) => {
+      if (method === cdpMethod) {
+        for (const listener of [...fake.listeners]) {
+          listener(rootEventSource(4), "Page.javascriptDialogOpening", {
+            type: "beforeunload",
+            message: "Unsaved changes",
+          });
+          listener(rootEventSource(4), "Page.javascriptDialogClosed", { result: false });
+        }
+        throw new Error("Navigation interrupted by beforeunload");
+      }
+      return baseSend(tabId, method, params);
+    }) as CdpRunner["send"];
+
+    const res =
+      label === "navigate"
+        ? await handleNavigate(
+            manager,
+            { session_id: "aa11", url: "https://next.example/", timeout_ms: 500 },
+            { cdp: fake.cdp, tabsApi: fake.tabsApi },
+          )
+        : await (handler as typeof handleReload)(
+            manager,
+            { session_id: "aa11", timeout_ms: 500 },
+            { cdp: fake.cdp, tabsApi: fake.tabsApi },
+          );
+    expect(res).toMatchObject({
+      code: "cancelled",
+      data: { reason: "user_cancelled", effect_state: "none" },
+    });
+    expect(fake.listeners).toHaveLength(0);
+  });
+
+  it.each([
+    ["navigate", handleNavigate, "Page.navigate", 1],
+    ["navigate_back", handleNavigateBack, "Page.navigateToHistoryEntry", 1],
+    ["navigate_forward", handleNavigateForward, "Page.navigateToHistoryEntry", 0],
+    ["reload", handleReload, "Page.reload", 1],
+  ] as const)("returns user_cancelled with effect_state=none when %s command resolves but beforeunload dialog is dismissed afterwards", async (label, handler, cdpMethod, historyIndex) => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await manager.start("aa11");
+    const fake = makeFakeCdp({
+      historyIndex,
+      historyEntries: [
+        { id: 11, url: "https://a.example/" },
+        { id: 12, url: "https://b.example/" },
+      ],
+    });
+    const baseSend = fake.cdp.send.bind(fake.cdp);
+    fake.cdp.send = (async (tabId, method, params) => {
+      const result = await baseSend(tabId, method, params);
+      if (method === cdpMethod) {
+        queueMicrotask(() => {
+          for (const listener of [...fake.listeners]) {
+            listener(rootEventSource(4), "Page.javascriptDialogOpening", {
+              type: "beforeunload",
+              message: "Unsaved changes",
+            });
+            listener(rootEventSource(4), "Page.javascriptDialogClosed", { result: false });
+          }
+        });
+      }
+      return result;
+    }) as CdpRunner["send"];
+
+    const res =
+      label === "navigate"
+        ? await handleNavigate(
+            manager,
+            { session_id: "aa11", url: "https://next.example/", timeout_ms: 500 },
+            { cdp: fake.cdp, tabsApi: fake.tabsApi },
+          )
+        : await (handler as typeof handleReload)(
+            manager,
+            { session_id: "aa11", timeout_ms: 500 },
+            { cdp: fake.cdp, tabsApi: fake.tabsApi },
+          );
+    expect(res).toMatchObject({
+      code: "cancelled",
+      data: { reason: "user_cancelled", effect_state: "none" },
+    });
+    expect(fake.listeners).toHaveLength(0);
+  });
 });

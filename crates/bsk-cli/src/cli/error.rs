@@ -115,6 +115,13 @@ impl CliError {
         }
     }
 
+    pub(crate) fn is_session_busy(&self) -> bool {
+        self.data()
+            .and_then(|d| d.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            == Some(bsk_protocol::RpcErrorReason::SessionBusy.as_str())
+    }
+
     /// Map this error to the CLI exit code (§3.1).
     pub fn exit_code(&self) -> u8 {
         if let CliError::RenderedExit { exit_code } = self {
@@ -300,14 +307,14 @@ fn json_error_string(err: &CliError, exit: u8, hint: Option<&str>) -> String {
         .unwrap_or_else(|_| "{\"message\":\"failed to encode error\"}".into())
 }
 
-/// The same `{ code, message, hint, exit_code, data }` payload `--json`
-/// prints, for callers that return errors as data (the MCP server).
-pub(crate) fn json_error_value(err: &CliError) -> serde_json::Value {
-    let render_info = render_info_for(err);
+/// MCP error payload `{ code, message, hint, exit_code, data }` preferring
+/// MCP-native recovery hints (`mcp_hint`) before CLI-only `data.recovery`
+/// or `hint`, so LLM callers never receive CLI subcommands like `bsk ledger resolve`.
+pub(crate) fn mcp_json_error_value(err: &CliError) -> serde_json::Value {
     let body = JsonError {
         code: err.code(),
         message: err.to_string(),
-        hint: hint_for(err, render_info.as_ref()),
+        hint: mcp_hint_for(err),
         exit_code: err.exit_code(),
         data: err.data().cloned(),
     };
@@ -370,6 +377,38 @@ fn hint_for<'a>(
         })
 }
 
+/// Hint line tailored for MCP responses:
+///   1. Reason-specific `mcp_hint` overrides CLI-only `data.recovery` (such as
+///      `uncertain_prior_effect` or `local_file_error`).
+///   2. Tool-neutral `data.recovery` from the extension/daemon wins before
+///      generic [`ErrorCode`]-level fallbacks.
+///   3. Reason-specific `hint`, then base `ErrorCode` `mcp_hint` / `hint`,
+///      then the local daemon reachability hint.
+fn mcp_hint_for(err: &CliError) -> Option<&str> {
+    let reason_info = err
+        .code()
+        .and_then(|code| render_error::reason_info_for_error(code, err.data()));
+    let base_info = err.code().map(render_error::info_for);
+    reason_info
+        .and_then(|info| info.mcp_hint)
+        .or_else(|| {
+            err.data()
+                .and_then(|data| data.get("recovery"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| reason_info.and_then(|info| info.hint))
+        .or_else(|| base_info.and_then(|info| info.mcp_hint))
+        .or_else(|| base_info.and_then(|info| info.hint))
+        .or_else(|| match err {
+            CliError::Local(error) => recovery_hint(error)
+                .or_else(|| super::update::source_recovery_hint(error))
+                .or(Some(
+                    "is the bsk daemon running? check bsk_session(action='browsers') or ask the user to start the bsk daemon",
+                )),
+            _ => None,
+        })
+}
+
 /// Render an error to stderr (human-readable) or stdout (`--json`),
 /// returning the matching `ExitCode`.
 ///
@@ -393,6 +432,7 @@ pub fn render(err: &CliError, format: Format) -> ExitCode {
 /// ```text
 ///   error: <centralised summary>
 ///   <extras (caller-controlled)>
+///   observed: <structured evidence difference, when the refusal carries one>
 ///   hint: <centralised hint>
 ///   details: <raw daemon message, when it adds context>
 /// ```
@@ -443,6 +483,7 @@ pub fn render_with_extras(
             {
                 let _ = writeln!(out, "(failed to render extras: {e})");
             }
+            write_observed_change(&mut out, err);
             if let Some(h) = hint {
                 let _ = writeln!(out, "hint: {h}");
             }
@@ -484,6 +525,7 @@ pub(crate) fn render_human_to_string(err: &CliError, extras: Option<&dyn RenderE
     {
         let _ = writeln!(buf, "(failed to render extras: {e})");
     }
+    write_observed_change(&mut buf, err);
     if let Some(h) = hint {
         let _ = writeln!(buf, "hint: {h}");
     }
@@ -492,6 +534,18 @@ pub(crate) fn render_human_to_string(err: &CliError, extras: Option<&dyn RenderE
         let _ = writeln!(buf, "details: {raw}");
     }
     String::from_utf8(buf).unwrap_or_default()
+}
+
+/// Write the `observed:` line for an evidence refusal that carries the
+/// extension's structured diagnosis (`data.observed_change` /
+/// `data.observed_changes`). JSON and MCP callers already receive those fields;
+/// human output used to show only the generic refusal sentence.
+fn write_observed_change(out: &mut dyn std::io::Write, err: &CliError) {
+    if let Some(data) = err.data()
+        && let Some(line) = render_error::observed_change_line(data)
+    {
+        let _ = writeln!(out, "{line}");
+    }
 }
 
 #[cfg(test)]
@@ -835,10 +889,67 @@ mod tests {
         assert_eq!(rendered["data"]["expected"], "$12");
         assert_eq!(rendered["data"]["effect_state"], "none");
     }
+
+    #[test]
+    fn human_evidence_refusal_names_the_observed_difference() {
+        let err = CliError::from_rpc(RpcError {
+            code: ErrorCode::PermissionDenied,
+            message: "The action's observed content changed; synchronize and replan".into(),
+            data: Some(serde_json::json!({
+                "reason": "cooperation_sync_required",
+                "effect_state": "none",
+                "observed_change": {
+                    "part": "media",
+                    "change": "changed",
+                    "scope": "form",
+                    "phase": "decision",
+                    "role": "slider",
+                    "name": "Preview progress",
+                    "field": "value",
+                    "before": "12%",
+                    "after": "13%"
+                },
+                "observed_changes": {"changed": 2, "added": 0, "removed": 1}
+            })),
+        });
+        let human = render_human_to_string(&err, None);
+        assert!(
+            human.contains(
+                "observed: part=media change=changed scope=form phase=decision role=\"slider\" \
+                 name=\"Preview progress\" field=\"value\" before=\"12%\" after=\"13%\" \
+                 (changed=2 added=0 removed=1)"
+            ),
+            "{human}"
+        );
+        assert!(human.contains("hint:"));
+        assert!(human.contains("details: The action's observed content changed"));
+        // The diagnosis is printed before the hint so it is not buried.
+        assert!(human.find("observed:").unwrap() < human.find("hint:").unwrap());
+        // JSON callers keep receiving the raw structured fields.
+        let json = mcp_json_error_value(&err);
+        assert_eq!(json["data"]["observed_change"]["field"], "value");
+        assert_eq!(json["data"]["observed_changes"]["changed"], 2);
+    }
+
+    #[test]
+    fn human_errors_without_evidence_diagnosis_stay_concise() {
+        let err = CliError::from_rpc(RpcError {
+            code: ErrorCode::PermissionDenied,
+            message: "The action's observed content changed; synchronize and replan".into(),
+            data: Some(serde_json::json!({
+                "reason": "cooperation_sync_required",
+                "effect_state": "none"
+            })),
+        });
+        let human = render_human_to_string(&err, None);
+        assert!(!human.contains("observed:"), "{human}");
+    }
 }
 
 #[cfg(test)]
 mod action_timeout_render_tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -855,7 +966,7 @@ mod action_timeout_render_tests {
                 message: "tool RPC timed out after 400ms".into(),
                 data: Some(data.clone()),
             });
-            let mcp = json_error_value(&error);
+            let mcp = mcp_json_error_value(&error);
             let render_info = render_info_for(&error);
             let cli: serde_json::Value = serde_json::from_str(&json_error_string(
                 &error,
@@ -863,13 +974,46 @@ mod action_timeout_render_tests {
                 hint_for(&error, render_info.as_ref()),
             ))
             .unwrap();
-            assert_eq!(cli, mcp);
+            assert_eq!(cli["code"], mcp["code"]);
+            assert_eq!(cli["message"], mcp["message"]);
+            assert_eq!(cli["exit_code"], mcp["exit_code"]);
+            assert_eq!(cli["data"], mcp["data"]);
             assert_eq!(cli["data"], data);
             assert_eq!(cli["exit_code"], 4);
-            let hint = cli["hint"].as_str().unwrap();
-            assert!(hint.contains("inspect the application result"));
-            assert!(hint.contains("do not replay"));
-            assert!(!hint.contains("retry the command"));
+            let cli_hint = cli["hint"].as_str().unwrap();
+            assert!(cli_hint.contains("inspect the application result"));
+            assert!(cli_hint.contains("synchronize"));
+            assert!(cli_hint.contains("do not replay"));
+            assert!(!cli_hint.contains("retry the command"));
+            let mcp_hint = mcp["hint"].as_str().unwrap();
+            assert!(mcp_hint.contains("inspect the application result"));
+            assert!(mcp_hint.contains("bsk_session(action='sync')"));
+            assert!(mcp_hint.contains("do not replay"));
+            assert!(!mcp_hint.contains("retry the command"));
         }
+    }
+
+    #[test]
+    fn mcp_error_preserves_tool_neutral_recovery_while_sanitizing_local_file_flags() {
+        let read_recovery = "Inspect the current document and target. Use read/extract for data and explicit expect conditions before input.";
+        let read_err = CliError::from_rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "read requires selector or ref".into(),
+            data: Some(serde_json::json!({
+                "reason": "read_params_invalid",
+                "phase": "read",
+                "effect_state": "none",
+                "recovery": read_recovery,
+            })),
+        });
+        let read_mcp = mcp_json_error_value(&read_err);
+        assert_eq!(read_mcp["hint"].as_str(), Some(read_recovery));
+
+        let file_err = crate::cli::download::output_exists(Path::new("/tmp/already-there.png"));
+        let file_mcp = mcp_json_error_value(&file_err);
+        let file_hint = file_mcp["hint"].as_str().unwrap();
+        assert!(file_hint.contains("overwrite=true"));
+        assert!(!file_hint.contains("--out"));
+        assert!(!file_hint.contains("--overwrite"));
     }
 }

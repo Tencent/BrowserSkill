@@ -31,10 +31,10 @@ pub(crate) const BSK_HOME_HINT: &str = "set BSK_HOME to a writable private direc
 /// 1. `BSK_HOME` env var (any non-empty value); or
 /// 2. `~/.bsk` (using [`dirs::home_dir`]).
 pub fn bsk_home() -> Result<PathBuf> {
-    if let Ok(p) = env::var(BSK_HOME_ENV) {
-        if !p.is_empty() {
-            return Ok(PathBuf::from(p));
-        }
+    if let Ok(p) = env::var(BSK_HOME_ENV)
+        && !p.is_empty()
+    {
+        return Ok(PathBuf::from(p));
     }
     let home = dirs::home_dir()
         .with_context(|| format!("could not determine user home directory; {BSK_HOME_HINT}"))?;
@@ -164,11 +164,36 @@ pub fn pipe_name() -> String {
     render_pipe_name(&user, &home)
 }
 
+/// Resolve an IPC endpoint path on Windows into a valid NPFS `\\.\pipe\...` name.
+///
+/// Production `start.rs` passes `PathBuf::from(paths::pipe_name())`
+/// (`r"\\.\pipe\bsk-daemon-<hex>"`), which is returned unchanged. Ad-hoc
+/// integration tests pass isolated temp file paths (such as `temp.join("ipc.sock")`);
+/// hashing `(user, endpoint)` yields a deterministic, safe-charset named pipe per
+/// test endpoint so `daemon::run` and `IpcClient::connect` agree without mutating `BSK_HOME`.
+#[cfg(windows)]
+pub fn endpoint_pipe_name(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if raw.is_empty() {
+        return pipe_name();
+    }
+    let user = env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
+    render_endpoint_pipe_name(&user, &raw)
+}
+
 /// Process-wide lock for tests that mutate `BSK_HOME`.
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
     GUARD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(any(windows, test))]
+fn render_endpoint_pipe_name(user: &str, raw_endpoint: &str) -> String {
+    if raw_endpoint.starts_with(r"\\.\pipe\") {
+        return raw_endpoint.to_string();
+    }
+    render_pipe_name(user, raw_endpoint)
 }
 
 /// Render the Windows named-pipe name for a user/home pair. Kept
@@ -271,5 +296,16 @@ mod tests {
         assert_eq!(a, render_pipe_name("alice", r"C:\Users\alice\.bsk"));
         assert_ne!(a, render_pipe_name("bob", r"C:\Users\alice\.bsk"));
         assert_ne!(a, render_pipe_name("alice", r"D:\alt-home\.bsk"));
+
+        let existing = r"\\.\pipe\bsk-daemon-0123456789abcdef";
+        assert_eq!(render_endpoint_pipe_name("alice", existing), existing);
+        let sock_a = render_endpoint_pipe_name("alice", r"C:\Temp\t1\ipc.sock");
+        let sock_b = render_endpoint_pipe_name("alice", r"C:\Temp\t2\ipc.sock");
+        assert!(sock_a.starts_with(r"\\.\pipe\bsk-daemon-"));
+        assert_ne!(sock_a, sock_b);
+        assert_eq!(
+            sock_a,
+            render_endpoint_pipe_name("alice", r"C:\Temp\t1\ipc.sock")
+        );
     }
 }

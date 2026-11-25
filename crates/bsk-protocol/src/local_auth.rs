@@ -2,6 +2,7 @@
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, KeyInit, Mac};
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 use sha2::Sha256;
 
@@ -9,6 +10,7 @@ use crate::RpcId;
 
 pub const MAX_MESSAGE_BYTES: usize = 4096;
 pub const MAX_CREDENTIALS: usize = 16;
+pub const LOCAL_AUTH_KDF_DOMAIN: &str = "bsk-local-auth-v1";
 
 /// Canonical, unpadded base64url with a fixed decoded length. Debug output is
 /// deliberately redacted: the same representation is used for stored keys.
@@ -259,7 +261,7 @@ pub struct Transcript<'a> {
 impl Transcript<'_> {
     pub fn encode(&self) -> Vec<u8> {
         fields(&[
-            b"bsk-local-auth-v1",
+            LOCAL_AUTH_KDF_DOMAIN.as_bytes(),
             &self.daemon_id.0,
             &self.device_id.0,
             &self.r#gen.to_be_bytes(),
@@ -328,4 +330,117 @@ pub fn verify(
     mac(key, purpose, transcript, txn)
         .verify_slice(&proof.0)
         .is_ok()
+}
+
+// ---------------------------------------------------------------------------
+// Local pairing management RPC contracts (`local_auth.*`)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalAuthMode {
+    #[default]
+    Warn,
+    Required,
+    TrustLocal,
+}
+
+impl LocalAuthMode {
+    pub fn accepts_legacy(self) -> bool {
+        self != Self::Required
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PairedDeviceStatus {
+    Unactivated,
+    Active,
+    Revoked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PairedDeviceSummary {
+    Local {
+        device_id: String,
+        browser_id: Option<String>,
+        label: String,
+        status: PairedDeviceStatus,
+        activated_at: Option<String>,
+        expires_at: Option<String>,
+        r#gen: u32,
+    },
+    Remote {
+        device_id: String,
+        browser_id: String,
+        label: String,
+        expires_at: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LocalAuthPairParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LocalAuthPairResult {
+    pub link: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LocalAuthDevicesParams {}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LocalAuthDevicesResult(pub Vec<PairedDeviceSummary>);
+
+impl JsonSchema for LocalAuthDevicesResult {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LocalAuthDevicesResult".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Vec<PairedDeviceSummary>>::json_schema(generator)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LocalAuthRevokeParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub all: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LocalAuthRevokeResult {
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LocalAuthRotateParams {
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LocalAuthRotateResult {
+    pub rotate_on_next_connection: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LocalAuthSetModeParams {
+    pub mode: LocalAuthMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LocalAuthSetModeResult {
+    pub local_auth: LocalAuthMode,
 }

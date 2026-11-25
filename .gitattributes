@@ -1,2 +1,10 @@
 # Historical test snapshots must retain their original bytes on Windows.
 /crates/bsk-cli/tests/fixtures/legacy-skills/*.md text eol=lf
+
+# Release-test fixtures are hashed byte-for-byte by fixture-manifest.json, so a
+# CRLF checkout makes every manifest check fail. Keep text fixtures on LF and
+# media fixtures untouched.
+/evals/browser/skills/browserskill-release-test/assets/fixtures/*.html text eol=lf
+/evals/browser/skills/browserskill-release-test/assets/fixtures/*.vtt text eol=lf
+/evals/browser/skills/browserskill-release-test/assets/fixtures/*.wav -text
+/evals/browser/skills/browserskill-release-test/assets/fixtures/*.mp4 -text

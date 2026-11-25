@@ -7,12 +7,14 @@ export function createPageClient(
   id: string,
   signal: AbortSignal,
   checkTab: () => Promise<void>,
+  onSend?: (command: PageCommand) => void,
 ) {
   let documentId: string | undefined;
   const page = async (command: PageCommand) => {
     if (command.action !== "finish") await checkTab();
     let response: PageReply;
     try {
+      onSend?.(command);
       response = await waitForReply(
         chrome.tabs.sendMessage(
           tabId,

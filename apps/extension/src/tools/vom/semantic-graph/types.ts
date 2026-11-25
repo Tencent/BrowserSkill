@@ -1,5 +1,5 @@
 import type { Viewport, VomNode } from "@browser-skill/vom";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
 import type { CapturedNode } from "../capture";
 
 export interface SemanticAxNode {
@@ -20,11 +20,13 @@ export type SemanticNodeId = string;
 
 export interface SemanticFrame {
   frameId: string;
+  loaderId?: string;
   parentFrameId?: string;
   ownerBackendNodeId?: number;
   ownerNodeId?: SemanticNodeId;
   contextScopeId: string;
-  target: CdpTarget;
+  handle: FrameDocumentHandle;
+  processKey: string;
   url?: string;
   order: number;
 }

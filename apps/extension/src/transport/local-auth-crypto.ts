@@ -1,3 +1,5 @@
+import { LOCAL_AUTH_KDF_DOMAIN } from "./generated/methods";
+
 /** Local authentication v1. Keys remain in extension-owned storage. */
 export function encodeBytes(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes))
@@ -49,7 +51,7 @@ export interface Transcript {
 }
 export function transcript(value: Transcript): Uint8Array<ArrayBuffer> {
   return fields([
-    utf8("bsk-local-auth-v1"),
+    utf8(LOCAL_AUTH_KDF_DOMAIN),
     decodeBytes(value.daemon_id, 16),
     decodeBytes(value.device_id, 16),
     uint32(value.gen),

@@ -112,7 +112,11 @@
       "readFailed": "Einstellungen konnten nicht geladen werden. Öffnen Sie die Erweiterung erneut.",
       "writeFailed": "Speichern nicht möglich. Ihre Einstellungen wurden nicht geändert. Versuchen Sie es erneut.",
       "confirmTabBorrowInfoLabel": "Über die Bestätigung des Tab-Ausleihens",
-      "requestHelpEnabledInfoLabel": "Über Anfragen nach menschlicher Hilfe"
+      "requestHelpEnabledInfoLabel": "Über Anfragen nach menschlicher Hilfe",
+      "openAgentWindowMinimized": "Agent-Fenster minimiert öffnen",
+      "openAgentWindowMinimizedHint": "Wenn aktiviert, starten neue Agent-Fenster im Hintergrund direkt minimiert, statt auf dem Bildschirm zu erscheinen. Wenn deaktiviert, werden sie als normale Fenster ohne Fokus geöffnet.",
+      "openAgentWindowMinimizedScope": "Wird automatisch für dieses Browserprofil gespeichert. Gilt für neue Agent-Fenster im Hintergrund; explizite Vordergrundsitzungen und Aktionsaufzeichnungen werden weiterhin sichtbar geöffnet.",
+      "openAgentWindowMinimizedInfoLabel": "Über das minimierte Öffnen von Agent-Fenstern"
     },
     "remoteLocal": "Zu lokal wechseln",
     "remotePairing": "Kopplungslink",
@@ -154,7 +158,7 @@
       "unavailableHint": "Verbinden Sie dieses Browserprofil mit bsk, um die Anweisungen zu kopieren.",
       "copyButton": "Anweisungen kopieren",
       "copyFailed": "Die Anweisungen konnten nicht kopiert werden. Bitte versuchen Sie es erneut.",
-      "promptTemplate": "Nutze für diese Aufgabe BrowserSkill im Browser {{name}} (Instanz-ID: {{instanceId}}). Starte jede neue Sitzung für diese Aufgabe über die passende Schnittstelle:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNutze in DeepSeek Harness den Tool-Aufruf. Führe den CLI-Befehl nicht zusätzlich aus.\nWenn diese Instanz nicht verbunden ist, halte an und bitte mich, dieses Profil wieder zu verbinden. Lasse --browser / browser nicht weg und wechsle nicht zu einer anderen Instanz.",
+      "promptTemplate": "Nutze für diese Aufgabe BrowserSkill im Browser {{name}} (Instanz-ID: {{instanceId}}). Starte jede neue Sitzung für diese Aufgabe über die passende Schnittstelle:\nCLI: {{command}}\nMCP: {{toolCall}}\nNutze bei MCP-Tools den Tool-Aufruf. Führe den CLI-Befehl nicht zusätzlich aus.\nWenn diese Instanz nicht verbunden ist, halte an und bitte mich, dieses Profil wieder zu verbinden. Lasse --browser / browser nicht weg und wechsle nicht zu einer anderen Instanz.",
       "title": "Aktueller Browser",
       "unnamed": "Unbenannter Browser"
     },
@@ -389,7 +393,21 @@
       "recordStop": "Vorgangsaufzeichnung stoppen",
       "recordAwait": "Auf Aufzeichnung warten",
       "resize": "Fenstergröße ändern",
-      "emulate": "Emulationseinstellungen ändern"
+      "emulate": "Emulationseinstellungen ändern",
+      "cooperate": "Geteilten Tab synchronisieren",
+      "sessionStart": "Sitzung starten",
+      "sessionStop": "Sitzung beenden",
+      "screenshotFullPage": "Vollseiten-Screenshot aufnehmen",
+      "screenshotRead": "Screenshot lesen",
+      "screenshotRelease": "Screenshot freigeben",
+      "debug": "Debug-Aktion ausführen",
+      "video": "Videoaufnahme verwalten",
+      "dialogStatus": "Dialogstatus prüfen",
+      "dialogAccept": "Dialog bestätigen",
+      "dialogDismiss": "Dialog schließen",
+      "waitForElement": "Auf Element warten",
+      "operationAwait": "Auf Vorgang warten",
+      "operationCancel": "Vorgang abbrechen"
     }
   },
   "debug": {

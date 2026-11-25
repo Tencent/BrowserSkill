@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { attachExtensionWorker } from "./compatibility.mjs";
-import { createDshRegressionClient } from "./dsh-client.mjs";
+import { createMcpRegressionClient } from "./mcp-client.mjs";
 
 /** Exercise real task pages, not just never-used blank sessions. No tool call
  * touches the idle tasks during the wait; session list is a registry-only read. */
@@ -17,7 +17,7 @@ export async function runLifetimeScenario({
   fullIdle,
   artifacts,
 }) {
-  const dsh = createDshRegressionClient(cli, env);
+  const mcp = await createMcpRegressionClient(cli, env, { legacyStrict: true });
   const tasks = [];
   const targets = async () => (await send("Target.getTargets")).targetInfos;
   const start = async (client, suffix) => {
@@ -40,17 +40,17 @@ export async function runLifetimeScenario({
         state.context_id,
       ]);
     } else {
-      id = (await dsh.run("bsk_session", { action: "start", url })).sessionId;
+      id = (await mcp.run("bsk_session", { action: "start" })).session_id;
       assert(id);
       tasks.push({ client, id, url });
-      const state = await dsh.run("bsk_session", { action: "sync", session: id });
+      await mcp.run("bsk_page", { action: "navigate", session: id, url });
+      const state = await mcp.run("bsk_session", { action: "sync", session: id });
       assert.equal(state.control_policy, "strict");
-      await dsh.run("bsk_interact", {
+      await mcp.run("bsk_interact", {
         action: "fill",
-        target: "#city",
-        value: "Shanghai",
         session: id,
-        contextId: state.context_id,
+        context: state.context_id,
+        params: { selector: "#city", value: "Shanghai" },
       });
     }
     const task = tasks.at(-1);
@@ -65,7 +65,7 @@ export async function runLifetimeScenario({
   const stop = (task) =>
     task.client === "cli"
       ? bsk(["session", "stop", task.id])
-      : dsh.run("bsk_session", { action: "stop", session: task.id });
+      : mcp.run("bsk_session", { action: "stop", session: task.id });
   const assertCleaned = async (task) => {
     assert(
       !(await targets()).some((t) => t.targetId === task.targetId),
@@ -77,7 +77,7 @@ export async function runLifetimeScenario({
     );
   };
   try {
-    for (const client of ["cli", "dsh"]) {
+    for (const client of ["cli", "mcp"]) {
       const task = await start(client, "stop");
       await stop(task);
       await assertCleaned(task);
@@ -117,7 +117,7 @@ export async function runLifetimeScenario({
       await send("Target.closeTarget", { targetId: moved.targetId }).catch(() => {});
       await send("Target.closeTarget", { targetId: destination.targetId }).catch(() => {});
     }
-    const ordinary = [await start("cli", "idle"), await start("dsh", "idle")];
+    const ordinary = [await start("cli", "idle"), await start("mcp", "idle")];
     console.error(`idle-check: waiting ${idleWaitMs} ms without task keepalive`);
     const started = performance.now();
     let beforeDeadline;
@@ -152,7 +152,7 @@ export async function runLifetimeScenario({
       defaultTimeout: fullIdle,
       sharedRetained: true,
       ordinaryReaped: true,
-      cliAndDsh: true,
+      cliAndMcp: true,
       nonblankTasks: true,
       explicitStopCleaned: true,
       detachedSessionEnded: true,
@@ -178,6 +178,6 @@ export async function runLifetimeScenario({
     return result;
   } finally {
     for (const task of tasks) await stop(task).catch(() => {});
-    await dsh.dispose();
+    await mcp.dispose();
   }
 }

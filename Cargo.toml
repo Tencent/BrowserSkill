@@ -9,7 +9,7 @@ default-members = ["crates/bsk-cli"]
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89.0"
 license = "MIT"
 repository = "https://github.com/Tencent/BrowserSkill"
 
@@ -49,3 +49,9 @@ bsk-protocol = { version = "0.5.0", path = "crates/bsk-protocol" }
 strip = "symbols"
 lto = "thin"
 codegen-units = 1
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

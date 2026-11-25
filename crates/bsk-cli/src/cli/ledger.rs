@@ -60,23 +60,29 @@ pub struct LedgerResolveArgs {
     pub operation_id: Option<String>,
 }
 
-pub fn dispatch(cmd: LedgerCmd, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    cmd: LedgerCmd,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     match cmd.command {
-        LedgerSubcommand::Status(args) => dispatch_status(args, format),
-        LedgerSubcommand::Resolve(args) => dispatch_resolve(args, format),
+        LedgerSubcommand::Status(args) => dispatch_status(args, ctx, format),
+        LedgerSubcommand::Resolve(args) => dispatch_resolve(args, ctx, format),
     }
 }
 
-fn dispatch_status(args: LedgerStatusArgs, format: Format) -> Result<(), CliError> {
-    if args.scope.is_some() {
-        business_rpc::set_caller_scope(args.scope);
-    }
+fn dispatch_status(
+    args: LedgerStatusArgs,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().map_err(CliError::Local)?;
     let params = json!({
         "action": "status",
         "session_id": args.session.unwrap_or_default(),
     });
-    let reply: LedgerStatusReply = business_rpc::call(
+    let reply: LedgerStatusReply = op_ctx.call(
         info.sock_path,
         "ledger-status",
         Method::LedgerRequest,
@@ -126,10 +132,12 @@ fn dispatch_status(args: LedgerStatusArgs, format: Format) -> Result<(), CliErro
     Ok(())
 }
 
-fn dispatch_resolve(args: LedgerResolveArgs, format: Format) -> Result<(), CliError> {
-    if args.scope.is_some() {
-        business_rpc::set_caller_scope(args.scope);
-    }
+fn dispatch_resolve(
+    args: LedgerResolveArgs,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().map_err(CliError::Local)?;
     let mut params = json!({
         "action": "resolve",
@@ -141,7 +149,7 @@ fn dispatch_resolve(args: LedgerResolveArgs, format: Format) -> Result<(), CliEr
     if let Some(op_id) = args.operation_id {
         params["operation_id"] = json!(op_id);
     }
-    let reply: LedgerResolveReply = business_rpc::call(
+    let reply: LedgerResolveReply = op_ctx.call(
         info.sock_path,
         "ledger-resolve",
         Method::LedgerRequest,

@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "transfer_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "transfer_id"
+  ],
+  "title": "TransferIdParams",
+  "type": "object"
+}

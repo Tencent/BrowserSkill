@@ -1,5 +1,5 @@
 // @vitest-environment node
-// BSK_TAB_DETACH_CHROME=/path/to/chrome runs in an isolated headless profile.
+// BSK_TEST_CHROME=/path/to/chrome runs in an isolated headless profile.
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -226,7 +226,7 @@ globalThis.run = async url => {
 };
 `;
 
-describe.skipIf(!process.env.BSK_TAB_DETACH_CHROME)("tab detachment browser regression", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("tab detachment browser regression", () => {
   it("releases the whole task after an unregistered cross-window move", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-tab-detachment-"));
     const server = createServer((_request, response) => {
@@ -316,7 +316,7 @@ window.addEventListener('unhandledrejection', event => {
       );
       await withChrome(
         {
-          executable: process.env.BSK_TAB_DETACH_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           extensionPath: directory,

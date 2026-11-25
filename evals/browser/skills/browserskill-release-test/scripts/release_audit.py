@@ -151,6 +151,35 @@ def parse(text):
             return None
 
 
+def launcher(exe, platform=None):
+    """Return the argv prefix that actually starts ``exe``.
+
+    Windows cannot exec a file without an executable extension, even when it
+    carries a shebang, so the script-based ``--bsk`` wrappers described in the
+    evidence contract fail there with WinError 193. Run Python wrappers with the
+    current interpreter instead; native executables and ``.cmd``/``.bat`` shims
+    are launched unchanged. ``platform`` exists so the decision can be tested
+    without mutating ``os.name``, which would also change how ``pathlib`` builds
+    paths.
+    """
+    path = Path(exe)
+    platform = os.name if platform is None else platform
+    suffix = path.suffix.lower()
+    if platform != "nt" or suffix in {".exe", ".com", ".bat", ".cmd"}:
+        return [exe]
+    # CreateProcessW rejects `.py`/`.pyw` too, with or without a shebang.
+    if suffix in {".py", ".pyw"}:
+        return [sys.executable or "python", str(path)]
+    try:
+        with path.open("rb") as handle:
+            shebang = handle.readline(256).decode("utf-8", "replace").strip()
+    except OSError:
+        return [exe]
+    if shebang.startswith("#!") and "python" in shebang.lower():
+        return [sys.executable or "python", str(path)]
+    return [exe]
+
+
 def discover(bsk, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -165,9 +194,11 @@ def discover(bsk, directory):
             return
         seen.add(key)
         r = subprocess.run(
-            [bsk, *parts, "--help"],
+            [*launcher(bsk), *parts, "--help"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=20,
             env=env,
         )
@@ -175,7 +206,7 @@ def discover(bsk, directory):
             raise ValueError("Help discovery failed: " + key + " " + r.stderr)
         text = r.stdout
         file = directory / ((key.replace(" ", "__") or "root") + ".txt")
-        file.write_text(text)
+        file.write_text(text, encoding="utf-8")
         documents.append({"command": key, "path": file.name, "sha256": digest(file)})
         match = re.search(r"^Commands:\s*\n(.*?)(?=^\S|\Z)", text, re.M | re.S)
         children = (
@@ -187,9 +218,11 @@ def discover(bsk, directory):
         # exposes its subcommands when supported by the candidate binary.
         if not parts and "recipe" not in children:
             probe = subprocess.run(
-                [bsk, "recipe", "--help"],
+                [*launcher(bsk), "recipe", "--help"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=20,
                 env=env,
             )
@@ -582,7 +615,11 @@ def execute(args):
             else (subprocess.PIPE if args.interactive else subprocess.DEVNULL)
         )
         p = subprocess.Popen(
-            [exe, *argv], stdout=stdout, stderr=stderr, stdin=input_handle, env=env
+            [*launcher(exe), *argv],
+            stdout=stdout,
+            stderr=stderr,
+            stdin=input_handle,
+            env=env,
         )
         if args.interactive:
 
@@ -619,7 +656,11 @@ def execute(args):
             code = p.wait(timeout=args.timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            p.send_signal(signal.SIGINT)
+            if os.name == "nt":
+                # Windows has no SIGINT for processes; send_signal raises ValueError.
+                p.terminate()
+            else:
+                p.send_signal(signal.SIGINT)
             try:
                 code = p.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -634,8 +675,8 @@ def execute(args):
         if started_ms is not None and finished_ms is not None
         else 0.0
     )
-    out_text = (folder / "stdout.txt").read_text(errors="replace")
-    err_text = (folder / "stderr.txt").read_text(errors="replace")
+    out_text = (folder / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+    err_text = (folder / "stderr.txt").read_text(encoding="utf-8", errors="replace")
     parsed_json = parse(out_text.strip() or err_text.strip())
     metrics = extract_metrics(cmd_name, code, parsed_json, elapsed_ms)
     meta.update(
@@ -697,8 +738,8 @@ def read_record(root, record_id):
             raise ValueError("Changed raw " + kind)
     if (d / "stdin.txt").exists() and digest(d / "stdin.txt") != m.get("stdin_sha256"):
         raise ValueError("Changed protocol input")
-    out = (d / "stdout.txt").read_text(errors="replace")
-    err = (d / "stderr.txt").read_text(errors="replace")
+    out = (d / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+    err = (d / "stderr.txt").read_text(encoding="utf-8", errors="replace")
     parsed_json = parse(out.strip() or err.strip())
     if "elapsed_ms" not in m:
         s_ms = parse_iso_ms(m.get("started"))
@@ -721,6 +762,344 @@ def read_record(root, record_id):
         "elapsed_ms": m["elapsed_ms"],
         "metrics": m["metrics"],
     }
+
+
+VOM_DRAG_HINTS = ("[draggable]", "[drop-target]", "[drag-handle]")
+VOM_NAME_STATES = (" [has-submenu]", " [expanded]")
+
+
+def normalize_ws(text):
+    return " ".join(str(text).split())
+
+
+def parse_vom_ref_rows(text):
+    if not isinstance(text, str):
+        return None
+    rows = []
+    has_header = False
+    scope_indent = None
+    decoder = json.JSONDecoder()
+    for raw in text.splitlines():
+        line = raw.lstrip(" ")
+        indent = len(raw) - len(line)
+        if scope_indent is not None:
+            if indent > scope_indent:
+                continue
+            scope_indent = None
+        if line.startswith("[§ active:"):
+            scope_indent = indent
+            continue
+        if line.startswith("@vom "):
+            has_header = True
+            continue
+        m = re.match(r"^@(e[0-9]+)\s+([A-Za-z][A-Za-z0-9]*)(?:\s+(.*))?$", line)
+        if not m:
+            continue
+        ref = "@" + m.group(1)
+        role = m.group(2)
+        rest = (m.group(3) or "").lstrip(" ")
+        for hint in VOM_DRAG_HINTS:
+            if rest.startswith(hint):
+                rest = rest[len(hint) :].lstrip(" ")
+        name = None
+        if rest.startswith('"'):
+            try:
+                parsed_name, _ = decoder.raw_decode(rest)
+                if isinstance(parsed_name, str):
+                    for state in VOM_NAME_STATES:
+                        if parsed_name.endswith(state):
+                            parsed_name = parsed_name[: -len(state)]
+                            break
+                    name = normalize_ws(parsed_name)
+            except ValueError:
+                name = None
+        rows.append({"ref": ref, "role": role, "name": name, "line": raw})
+    return rows if has_header else None
+
+
+def vom_has_no_ref(text, expected):
+    rows = parse_vom_ref_rows(text)
+    if rows is None or not isinstance(expected, list) or not expected:
+        return False
+    forbidden = {
+        normalize_ws(item["name"] if isinstance(item, dict) else item)
+        for item in expected
+    }
+    return all(
+        r["role"].lower() == "canvas" or r["name"] not in forbidden for r in rows
+    )
+
+
+def vom_distinct_item_refs(text, expected):
+    rows = parse_vom_ref_rows(text)
+    if rows is None or not isinstance(expected, list) or not expected:
+        return None
+    refs = []
+    for item in expected:
+        if not isinstance(item, dict) or "role" not in item or "name" not in item:
+            return None
+        role = str(item["role"]).lower()
+        name = normalize_ws(item["name"])
+        matches = [
+            r["ref"]
+            for r in rows
+            if r["role"].lower() == role and r["name"] == name
+        ]
+        if len(matches) != 1:
+            return None
+        refs.append(matches[0])
+    return refs if len(set(refs)) == len(refs) else None
+
+
+def record_vom_text(value):
+    j = value.get("json")
+    if isinstance(j, dict):
+        for ptr in ("/vom", "/observation/text", "/text"):
+            try:
+                cand = pointer(j, ptr)
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+            if isinstance(cand, str) and "@vom " in cand:
+                return cand
+    out = value.get("stdout")
+    return out if isinstance(out, str) and "@vom " in out else None
+
+
+def extract_click_ref(argv):
+    tokens = list(argv or [])
+    if tokens and tokens[0] == "click":
+        tokens = tokens[1:]
+    if any(t == "--selector" or t.startswith("--selector=") for t in tokens):
+        return None
+    flags_with_value = {
+        "--session",
+        "--scope",
+        "--tab-id",
+        "--button",
+        "--click-count",
+        "--count",
+        "--context",
+        "--observation",
+        "--depends-on",
+        "--expect",
+        "--modifiers",
+        "--timeout",
+        "--capture",
+        "--image-x",
+        "--image-y",
+    }
+    skip_next = False
+    positional = []
+    for i, tok in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--ref" and i + 1 < len(tokens):
+            cand = tokens[i + 1]
+            return ("@" + cand.lstrip("@")) if re.fullmatch(r"@?e[0-9]+", cand) else None
+        if tok.startswith("--ref="):
+            cand = tok.split("=", 1)[1]
+            return ("@" + cand.lstrip("@")) if re.fullmatch(r"@?e[0-9]+", cand) else None
+        if tok in flags_with_value:
+            skip_next = True
+            continue
+        if tok.startswith("-"):
+            continue
+        positional.append(tok)
+    if len(positional) == 1 and re.fullmatch(r"@?e[0-9]+", positional[0]):
+        return "@" + positional[0].lstrip("@")
+    return None
+
+
+def verify_nested_menu_contract(metas_and_values, contract):
+    items = contract["items"]
+    click_item = contract["click_item"]
+    expected_receipt = normalize_ws(contract["expected_receipt"])
+    obs_cmds = ("sync", "cooperate sync", "observe", "snapshot")
+    hover_indices = [
+        i
+        for i, (m, _) in enumerate(metas_and_values)
+        if m["command"] == "hover" and m["exit_code"] == 0
+    ]
+    if len(hover_indices) < 2:
+        raise ValueError("Nested menu contract requires two-level hover")
+    second_hover_idx = hover_indices[1]
+    pre_obs = [
+        (m, v)
+        for m, v in metas_and_values[:second_hover_idx]
+        if m["command"] in obs_cmds
+    ]
+    if not pre_obs:
+        raise ValueError("Missing pre-expansion VOM observation before secondary hover")
+    for m, v in pre_obs:
+        if not vom_has_no_ref(record_vom_text(v), items):
+            raise ValueError(
+                "Pre-expansion " + m["command"] + " exposed actionable child ref"
+            )
+    click_candidates = [
+        i
+        for i in range(second_hover_idx + 1, len(metas_and_values))
+        if metas_and_values[i][0]["command"] == "click"
+        and metas_and_values[i][0]["exit_code"] == 0
+        and extract_click_ref(metas_and_values[i][0]["argv"])
+    ]
+    if not click_candidates:
+        raise ValueError("Missing ref-based click after secondary hover")
+    click_idx = click_candidates[0]
+    post_slice = metas_and_values[second_hover_idx + 1 : click_idx]
+    sync_records = [
+        (m, v) for m, v in post_slice if m["command"] in ("sync", "cooperate sync")
+    ]
+    observe_records = [(m, v) for m, v in post_slice if m["command"] == "observe"]
+    snapshot_records = [(m, v) for m, v in post_slice if m["command"] == "snapshot"]
+    if not sync_records or not observe_records or not snapshot_records:
+        raise ValueError(
+            "Post-expansion requires sync, observe, and snapshot before click"
+        )
+    for m, v in post_slice:
+        if m["command"] in obs_cmds and not vom_distinct_item_refs(
+            record_vom_text(v), items
+        ):
+            raise ValueError(
+                "Post-expansion "
+                + m["command"]
+                + " lacks independent distinct menuitem lines"
+            )
+    latest_sync_vom = record_vom_text(sync_records[-1][1])
+    target_refs = vom_distinct_item_refs(latest_sync_vom, [click_item])
+    if not target_refs:
+        raise ValueError("Latest sync missing click target menuitem ref")
+    click_ref = extract_click_ref(metas_and_values[click_idx][0]["argv"])
+    if click_ref != target_refs[0]:
+        raise ValueError(
+            f"Click ref {click_ref} does not match latest sync ref {target_refs[0]}"
+        )
+    receipt_ok = False
+    for m, v in metas_and_values[click_idx + 1 :]:
+        if m["command"] == "read" and isinstance(v.get("json"), dict):
+            for it in v["json"].get("items") or []:
+                if isinstance(it, dict):
+                    vals = it.get("values") if isinstance(it.get("values"), dict) else {}
+                    txt = vals.get("text") if "text" in vals else it.get("text", "")
+                    if normalize_ws(txt) == expected_receipt:
+                        receipt_ok = True
+    if not receipt_ok:
+        raise ValueError("Post-click read did not confirm receipt " + expected_receipt)
+
+
+def _argv_flag(argv, flag):
+    tokens = list(argv or [])
+    for i, tok in enumerate(tokens):
+        if tok == flag and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if tok.startswith(flag + "="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def verify_slotted_list_contract(metas_and_values, contract):
+    target_name = contract["target_name"]
+    discovered_target_id = None
+    discover_idx = None
+    for i, (m, v) in enumerate(metas_and_values):
+        if m["command"] == "extract discover" and m["exit_code"] == 0:
+            targets = (v.get("json") or {}).get("targets") or []
+            for t in targets:
+                if (
+                    isinstance(t, dict)
+                    and t.get("kind") == "list"
+                    and t.get("name") == target_name
+                    and isinstance(t.get("target_id"), str)
+                    and t["target_id"]
+                ):
+                    discovered_target_id = t["target_id"]
+                    discover_idx = i
+                    break
+        if discovered_target_id:
+            break
+    if not discovered_target_id:
+        raise ValueError(f"extract discover did not find list target {target_name!r}")
+
+    outer_json = None
+    for m, v in metas_and_values[discover_idx + 1 :]:
+        if (
+            m["command"] == "extract list"
+            and m["exit_code"] == 0
+            and _argv_flag(m["argv"], "--target-id") == discovered_target_id
+        ):
+            outer_json = v.get("json") if isinstance(v.get("json"), dict) else None
+            break
+    if not outer_json:
+        raise ValueError(
+            f"Missing extract list --target-id {discovered_target_id} after extract discover"
+        )
+
+    outer_rows = outer_json.get("rows") or []
+    expected_outer = contract["outer_items"]
+    if len(outer_rows) != len(expected_outer):
+        raise ValueError(
+            f"Slotted outer list row count {len(outer_rows)} != {len(expected_outer)}"
+        )
+    for row, spec in zip(outer_rows, expected_outer):
+        txt = str((row or {}).get("text") or "")
+        url = str((row or {}).get("url") or "")
+        if spec["text"] not in txt:
+            raise ValueError(f"Slotted list row {txt!r} missing {spec['text']!r}")
+        if not url.endswith(spec["url_suffix"]):
+            raise ValueError(
+                f"Slotted list row {spec['text']!r} url {url!r} does not end with {spec['url_suffix']!r}"
+            )
+        for forbidden in contract.get("forbidden_texts", []):
+            if forbidden in txt:
+                raise ValueError(f"Forbidden text {forbidden!r} leaked into outer row")
+
+    actual_sources = [
+        s.get("source_row")
+        for s in (outer_json.get("row_sources") or [])
+        if isinstance(s, dict)
+    ]
+    expected_sources = [spec["source_row"] for spec in expected_outer]
+    if actual_sources != expected_sources:
+        raise ValueError(
+            f"Slotted outer list source_row {actual_sources} != {expected_sources}"
+        )
+    if (outer_json.get("warnings") or []) != ["hidden_rows_omitted"]:
+        raise ValueError(
+            f"Unexpected slotted outer list warnings: {outer_json.get('warnings')}"
+        )
+    if (outer_json.get("coverage") or {}).get("dataset_complete") != "unknown":
+        raise ValueError("Slotted outer list with hidden rows must report dataset_complete=unknown")
+
+    inner_selector = contract["inner_selector"]
+    inner_json = None
+    for m, v in metas_and_values:
+        if (
+            m["command"] == "extract list"
+            and m["exit_code"] == 0
+            and _argv_flag(m["argv"], "--selector") == inner_selector
+        ):
+            inner_json = v.get("json") if isinstance(v.get("json"), dict) else None
+            break
+    if not inner_json:
+        raise ValueError(f"Missing extract list --selector {inner_selector}")
+    inner_rows = inner_json.get("rows") or []
+    expected_inner = contract["inner_items"]
+    if len(inner_rows) != len(expected_inner):
+        raise ValueError(
+            f"Nested inner list row count {len(inner_rows)} != {len(expected_inner)}"
+        )
+    for row, spec in zip(inner_rows, expected_inner):
+        txt = normalize_ws((row or {}).get("text"))
+        url = str((row or {}).get("url") or "")
+        if txt != normalize_ws(spec["text"]) or not url.endswith(spec["url_suffix"]):
+            raise ValueError(f"Nested inner list row mismatch: {row!r}")
+    inner_sources = [
+        s.get("source_row")
+        for s in (inner_json.get("row_sources") or [])
+        if isinstance(s, dict)
+    ]
+    if inner_sources != [spec["source_row"] for spec in expected_inner]:
+        raise ValueError(f"Nested inner list source_row mismatch: {inner_sources}")
 
 
 def assertion(root, check):
@@ -768,6 +1147,10 @@ def assertion(root, check):
         return isinstance(value, str) and bool(value)
     if op == "not_contains":
         return expected not in value
+    if op == "vom_no_ref":
+        return vom_has_no_ref(value, expected)
+    if op == "vom_distinct_refs":
+        return vom_distinct_item_refs(value, expected) is not None
     raise ValueError("Unknown assertion " + op)
 
 
@@ -1141,18 +1524,44 @@ def render_benchmark_markdown(bench):
     return "\n".join(lines) + "\n"
 
 
-def aggregate_multi_run_benchmarks(roots):
-    run_benchmarks = []
-    for r in roots:
-        root = Path(r).resolve()
-        b_path = root / "benchmark.json"
-        if b_path.exists():
-            run_benchmarks.append(load(b_path))
+def validate_benchmark_runs(roots):
+    fields = ("candidate", "entry_sha256", "binary_sha256", "plan_sha256")
+    expected = None
+    seen = set()
+    for root in roots:
+        if root in seen:
+            raise ValueError(f"Duplicate benchmark run: {root}; use a fresh run for each trial")
+        seen.add(root)
+        cfg = load(root / "run.json")
+        identity = {field: cfg.get(field) for field in fields}
+        invalid = []
+        for field, value in identity.items():
+            if not isinstance(value, str) or not value:
+                invalid.append(field)
+            elif field.endswith("_sha256") and not re.fullmatch(r"[0-9a-f]{64}", value):
+                invalid.append(field)
+        if invalid:
+            raise ValueError(f"Benchmark run {root} has missing or invalid fields: {', '.join(invalid)}")
+        if digest(root / "plan.json") != identity["plan_sha256"]:
+            raise ValueError(f"Benchmark run {root} has a changed plan.json")
+        if expected is None:
+            expected = identity
         else:
-            run_benchmarks.append(compute_run_benchmark(root))
+            mismatches = [field for field in fields if identity[field] != expected[field]]
+            if mismatches:
+                raise ValueError(
+                    f"Benchmark run {root} differs from {roots[0]}: {', '.join(mismatches)}"
+                )
 
-    if not run_benchmarks:
-        raise ValueError("No benchmark runs supplied")
+
+def aggregate_multi_run_benchmarks(roots):
+    roots = [Path(root).expanduser().resolve() for root in roots]
+    if len(roots) < 2:
+        raise ValueError("Multi-run benchmarks require at least two runs")
+    validate_benchmark_runs(roots)
+    # Recompute from the ledger, preserving the single-run gate's authoritative verdict.
+    run_benchmarks = [compute_run_benchmark(root) for root in roots]
+    k = len(run_benchmarks)
 
     case_Rollup = {}
     mode_Rollup = {}
@@ -1201,6 +1610,9 @@ def aggregate_multi_run_benchmarks(roots):
                 "runs": e["runs"],
                 "passes": e["passes"],
                 "pass_rate": round(e["passes"] / e["runs"], 4) if e["runs"] else 0.0,
+                "pass_at_k": e["passes"] > 0,
+                "pass_all_k": e["passes"] == k,
+                "flaky": 0 < e["passes"] < k,
                 "mean_turns": t_stat["mean"],
                 "mean_actions": a_stat["mean"],
                 "mean_elapsed_ms": lat["mean"],
@@ -1229,17 +1641,29 @@ def aggregate_multi_run_benchmarks(roots):
     run_turns = [rb["summary"]["total_interaction_turns"] for rb in run_benchmarks]
     run_actions = [rb["summary"]["total_actions_executed"] for rb in run_benchmarks]
     run_elapsed = [rb["summary"]["total_command_elapsed_ms"] for rb in run_benchmarks]
+    case_count = len(cases_summary)
 
     return {
         "schema_version": 1,
         "generated_at": now(),
-        "runs_count": len(run_benchmarks),
+        "runs_count": k,
         "candidates": [rb.get("candidate") for rb in run_benchmarks],
         "summary": {
-            "runs_count": len(run_benchmarks),
+            "runs_count": k,
             "full_pass_runs": sum(1 for r in run_rates if r == 1.0),
             "mean_success_rate": round(sum(run_rates) / len(run_rates), 4),
             "mean_workflow_success_rate": round(sum(wf_rates) / len(wf_rates), 4),
+            "pass_at_k_overall": (
+                round(sum(c["pass_at_k"] for c in cases_summary) / case_count, 4)
+                if case_count
+                else 0.0
+            ),
+            "pass_all_k_overall": (
+                round(sum(c["pass_all_k"] for c in cases_summary) / case_count, 4)
+                if case_count
+                else 0.0
+            ),
+            "flaky_ids": [c["id"] for c in cases_summary if c["flaky"]],
             "interaction_turns": stats_summary(run_turns),
             "actions_executed": stats_summary(run_actions),
             "command_elapsed_ms": stats_summary(run_elapsed),
@@ -1262,6 +1686,8 @@ def render_multi_run_markdown(agg):
         f"| 全量 100% 通过轮次数 (`full_pass_runs`) | {s['full_pass_runs']} / {s['runs_count']} |",
         f"| 平均总通过率 (`mean_success_rate`) | **{s['mean_success_rate'] * 100:.2f}%** |",
         f"| 平均工作流通过率 (`mean_workflow_success_rate`) | **{s['mean_workflow_success_rate'] * 100:.2f}%** |",
+        f"| 至少通过一轮 (`pass@k`) | {s['pass_at_k_overall'] * 100:.2f}% |",
+        f"| 每轮都通过 (`pass^k`) | {s['pass_all_k_overall'] * 100:.2f}% |",
         f"| 平均每轮总交互轮次 (`interaction_turns`) | {s['interaction_turns']['mean']:.1f} (P50: {s['interaction_turns']['p50']:.1f}, P95: {s['interaction_turns']['p95']:.1f}) |",
         f"| 平均每轮总动作数 (`actions_executed`) | {s['actions_executed']['mean']:.1f} |",
         f"| 平均每轮累计耗时 (`command_elapsed_ms`) | {s['command_elapsed_ms']['mean']:.1f} ms (P50: {s['command_elapsed_ms']['p50']:.1f}, P95: {s['command_elapsed_ms']['p95']:.1f}) |",
@@ -1289,6 +1715,25 @@ def render_multi_run_markdown(agg):
             continue
         lines.append(
             f"| `{c['id']}` | `{c['page_type']}` | {c['runs']} | {c['pass_rate'] * 100:.1f}% | {c['mean_turns']:.1f} | {c['mean_actions']:.1f} | {c['mean_elapsed_ms']:.1f} | {c['p50_elapsed_ms']:.1f} | {c['p95_elapsed_ms']:.1f} |"
+        )
+    flaky_ids = ", ".join(f"`{cid}`" for cid in s["flaky_ids"])
+    lines.extend(
+        [
+            "",
+            "## 4. 场景稳定性 (Case Stability)",
+            "",
+            f"Flaky cases: {flaky_ids or '—'}",
+            "",
+            "| Case ID | Runs | Passes | `pass_rate` | `pass@k` | `pass^k` | Flaky |",
+            "| --- | ---: | ---: | ---: | --- | --- | --- |",
+        ]
+    )
+    for c in agg["cases"]:
+        pass_at_k = "Yes" if c["pass_at_k"] else "No"
+        pass_all_k = "Yes" if c["pass_all_k"] else "No"
+        flaky = "Yes" if c["flaky"] else "No"
+        lines.append(
+            f"| `{c['id']}` | {c['runs']} | {c['passes']} | {c['pass_rate'] * 100:.1f}% | {pass_at_k} | {pass_all_k} | {flaky} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -1469,6 +1914,16 @@ def gate(root):
                         raise ValueError("Missing intermediate assertion")
             if not all(assertion(root, x) for x in r["checks"]):
                 raise ValueError("Oracle assertion failed")
+            if c.get("nested_menu_contract"):
+                verify_nested_menu_contract(
+                    [read_record(root, k) for k in records],
+                    c["nested_menu_contract"],
+                )
+            if c.get("slotted_list_contract"):
+                verify_slotted_list_contract(
+                    [read_record(root, k) for k in records],
+                    c["slotted_list_contract"],
+                )
             if c.get("negative"):
                 negative_records.update(records)
                 # For commands executed inside a negative case that succeeded as setup

@@ -1,13 +1,42 @@
 // Pair only the daemon and extension profile owned by a browser regression.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { cp, readFile, writeFile } from "node:fs/promises";
+import { cp, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-export async function copyPairingExtension(source, destination, port) {
+async function rewriteIsolatedWsPort(directory, port) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await rewriteIsolatedWsPort(fullPath, port);
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith(".js")) continue;
+    const source = await readFile(fullPath, "utf8");
+    const rewritten = source.replace(/ws:\/\/127\.0\.0\.1:\d+/g, `ws://127.0.0.1:${port}`);
+    if (rewritten !== source) {
+      await writeFile(fullPath, rewritten);
+    }
+  }
+}
+
+export async function copyIsolatedExtension(source, destination, port) {
   assert(Number.isInteger(port) && port > 0 && port <= 65535);
   await cp(source, destination, { recursive: true });
+  await rewriteIsolatedWsPort(destination, port);
+  const backgroundPath = path.join(destination, "background.js");
+  const background = await readFile(backgroundPath, "utf8");
+  assert(
+    background.includes(`ws://127.0.0.1:${port}`),
+    `Expected copied extension background.js to contain ws://127.0.0.1:${port}`,
+  );
+  return destination;
+}
+
+export async function copyPairingExtension(source, destination, port) {
+  await copyIsolatedExtension(source, destination, port);
   const backgroundPath = path.join(destination, "background.js");
   const background = await readFile(backgroundPath, "utf8");
   // Seed only this regression's fresh profile before the controller starts.

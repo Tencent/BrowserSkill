@@ -1,6 +1,7 @@
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import v from "../../../../crates/bsk-protocol/tests/fixtures/local-auth-v1.json";
+import { DEFAULT_DAEMON_WS_URL, LOCAL_PAIRING_FRAGMENT_PREFIX } from "./generated/methods";
 import { authenticateLocal, createLocalAuthenticator } from "./local-auth";
 import { encodeBytes, prove, transcript } from "./local-auth-crypto";
 import { MAX_AUTH_CREDENTIALS } from "./local-auth-protocol";
@@ -8,12 +9,12 @@ import type { LocalCredential } from "./local-credentials";
 import * as credentials from "./local-credentials";
 import { verifyLocalPairing } from "./pairing-verifier";
 
-const link = `ws://127.0.0.1:52800/#bsk-local.v1.${v.daemon_id}.${v.device_id}.${v.key}`;
+const link = `${DEFAULT_DAEMON_WS_URL}/#${LOCAL_PAIRING_FRAGMENT_PREFIX}${v.daemon_id}.${v.device_id}.${v.key}`;
 const origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
 const instanceId = "a1b2c3d4";
 class Socket extends EventTarget {
   readyState = 1;
-  url = "ws://127.0.0.1:52800/";
+  url = `${DEFAULT_DAEMON_WS_URL}/`;
   sent: Record<string, unknown>[] = [];
   handler: (frame: any) => void | Promise<void> = () => {};
   send(raw: string) {

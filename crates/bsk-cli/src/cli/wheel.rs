@@ -48,12 +48,16 @@ pub struct WheelArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch(args: WheelArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: WheelArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     validate_deltas(args.delta_x, args.delta_y)?;
     let (ref_, selector) = split_optional_target(args.target, args.ref_, args.selector)?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = WheelParams {
         session_id: args.session.unwrap_or_default(),
@@ -68,8 +72,12 @@ pub fn dispatch(args: WheelArgs, format: Format) -> Result<(), CliError> {
             Some(modifiers)
         },
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
-    let reply: WheelResult = crate::cli::business_rpc::call(
+    let reply: WheelResult = op_ctx.call(
         info.sock_path,
         "wheel-1",
         Method::ToolWheel,
@@ -202,7 +210,11 @@ mod tests {
                 panic!("wheel");
             };
             assert!(matches!(
-                dispatch(args, Format::Json),
+                dispatch(
+                    args,
+                    &crate::cli::business_rpc::ClientContext::default(),
+                    Format::Json
+                ),
                 Err(CliError::Local(_))
             ));
         }

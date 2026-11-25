@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConsoleParams {
     pub session_id: String,
     /// Optional target tab. Defaults to the Agent Window's currently active tab.
@@ -23,6 +24,9 @@ pub struct ConsoleParams {
     /// Include structured stack frames. Defaults to false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_stack: Option<bool>,
+    /// Optional cooperation context validated by the extension without renewing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -99,6 +103,7 @@ mod tests {
             limit: None,
             max_text_chars: None,
             include_stack: None,
+            context_id: None,
         };
         let value = serde_json::to_value(&params).unwrap();
         assert_eq!(value["session_id"], "aa11");

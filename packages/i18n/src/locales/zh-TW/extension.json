@@ -112,7 +112,11 @@
       "readFailed": "無法讀取自動化設定，請重新開啟擴充功能。",
       "writeFailed": "儲存失敗，設定未變更，請再試一次。",
       "confirmTabBorrowInfoLabel": "借用分頁確認說明",
-      "requestHelpEnabledInfoLabel": "人工協助說明"
+      "requestHelpEnabledInfoLabel": "人工協助說明",
+      "openAgentWindowMinimized": "最小化開啟 Agent 視窗",
+      "openAgentWindowMinimizedHint": "開啟時，新建的背景 Agent 視窗直接以最小化狀態建立，不在畫面上閃出視窗；關閉時，以一般背景視窗開啟。",
+      "openAgentWindowMinimizedScope": "自動儲存至目前瀏覽器設定檔，對新建的背景 Agent 視窗生效；明確以前景開啟的工作階段與操作錄製仍會正常顯示視窗。",
+      "openAgentWindowMinimizedInfoLabel": "最小化開啟 Agent 視窗說明"
     },
     "remoteLocal": "切換至本機",
     "remotePairing": "配對連結",
@@ -154,7 +158,7 @@
       "unavailableHint": "將此瀏覽器設定檔連線到 bsk 後即可複製指令。",
       "copyButton": "複製指令",
       "copyFailed": "無法複製指令，請再試一次。",
-      "promptTemplate": "本次工作使用 BrowserSkill 的瀏覽器 {{name}}（實例 ID：{{instanceId}}）。每次為本工作建立新工作階段時，請依使用的介面執行：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n使用 DeepSeek Harness 時，請呼叫上述工具，不要另外執行 CLI 指令。\n若此實例未連線，請停止並要求我重新連線此設定檔。請勿省略 --browser / browser，也不要切換至其他實例。",
+      "promptTemplate": "本次工作使用 BrowserSkill 的瀏覽器 {{name}}（實例 ID：{{instanceId}}）。每次為本工作建立新工作階段時，請依使用的介面執行：\nCLI：{{command}}\nMCP：{{toolCall}}\n使用 MCP 工具時，請呼叫上述工具，不要另外執行 CLI 指令。\n若此實例未連線，請停止並要求我重新連線此設定檔。請勿省略 --browser / browser，也不要切換至其他實例。",
       "title": "目前瀏覽器",
       "unnamed": "未命名瀏覽器"
     },
@@ -389,7 +393,21 @@
       "recordStop": "結束操作錄製",
       "recordAwait": "等待錄製完成",
       "resize": "調整視窗大小",
-      "emulate": "調整瀏覽器模擬設定"
+      "emulate": "調整瀏覽器模擬設定",
+      "cooperate": "同步協作狀態",
+      "sessionStart": "啟動工作階段",
+      "sessionStop": "停止工作階段",
+      "screenshotFullPage": "擷取完整頁面截圖",
+      "screenshotRead": "讀取截圖",
+      "screenshotRelease": "釋放截圖",
+      "debug": "執行偵錯操作",
+      "video": "管理影片錄製",
+      "dialogStatus": "檢查對話框狀態",
+      "dialogAccept": "確認對話框",
+      "dialogDismiss": "關閉對話框",
+      "waitForElement": "等待元素出現",
+      "operationAwait": "等待操作完成",
+      "operationCancel": "取消操作"
     }
   },
   "debug": {
