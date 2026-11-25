@@ -194,29 +194,33 @@ mod tests {
         assert!(validate_deltas(0.0, f64::NAN).is_err());
     }
 
+    /// A target conflict is caller-side validation (exit code 1); the other
+    /// rejected flags keep the transport-class local exit code 2.
     #[test]
     fn rejects_invalid_commands_before_starting_the_daemon() {
         use crate::cli::{Cli, Command};
         use clap::Parser;
-        for options in [
-            vec![],
-            vec!["--delta-y", "120", "--ref", ""],
-            vec!["--delta-y", "120", "--ref", "e3", "--selector", "#panel"],
-            vec!["--delta-y", "120", "--modifiers", "invalid"],
+        for (options, expected_exit) in [
+            (vec![], 2),
+            (vec!["--delta-y", "120", "--ref", ""], 2),
+            (
+                vec!["--delta-y", "120", "--ref", "e3", "--selector", "#panel"],
+                1,
+            ),
+            (vec!["--delta-y", "120", "--modifiers", "invalid"], 2),
         ] {
             let mut argv = vec!["bsk", "wheel", "--session", "s1"];
-            argv.extend(options);
+            argv.extend(options.clone());
             let Command::Wheel(args) = Cli::try_parse_from(argv).unwrap().command else {
                 panic!("wheel");
             };
-            assert!(matches!(
-                dispatch(
-                    args,
-                    &crate::cli::business_rpc::ClientContext::default(),
-                    Format::Json
-                ),
-                Err(CliError::Local(_))
-            ));
+            let error = dispatch(
+                args,
+                &crate::cli::business_rpc::ClientContext::default(),
+                Format::Json,
+            )
+            .expect_err("invalid wheel flags must fail locally");
+            assert_eq!(error.exit_code(), expected_exit, "{options:?}");
         }
     }
 }

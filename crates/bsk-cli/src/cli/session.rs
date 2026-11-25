@@ -203,6 +203,11 @@ pub fn dispatch(
     ctx: &crate::cli::business_rpc::ClientContext,
     format: Format,
 ) -> Result<(), CliError> {
+    // Validate local start flags before daemon discovery, like `bsk open`, so a
+    // bad flag pair never starts the daemon or runs the skill sync first.
+    if let SessionSub::Start(args) = &cmd.sub {
+        validate_start_args(args)?;
+    }
     let info = ensure_daemon().context("ensure daemon is running")?;
     match cmd.sub {
         SessionSub::Start(args) => {
@@ -241,6 +246,16 @@ pub fn dispatch(
     }
 }
 
+/// Reject inconsistent local start flags before the daemon is contacted.
+fn validate_start_args(args: &SessionStartArgs) -> Result<(), CliError> {
+    if args.width.is_some() != args.height.is_some() {
+        return Err(CliError::invalid_params(anyhow::anyhow!(
+            "--width and --height must be given together"
+        )));
+    }
+    Ok(())
+}
+
 fn run_start(
     sock: PathBuf,
     ctx: &crate::cli::business_rpc::ClientContext,
@@ -250,11 +265,6 @@ fn run_start(
     let op_ctx = ctx.with_scope(args.scope.as_deref());
     if args.unattended {
         crate::cli::interaction_policy::warn_legacy_override("--unattended");
-    }
-    if args.width.is_some() != args.height.is_some() {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "--width and --height must be given together"
-        )));
     }
     // The daemon may hold `session.start` open for up to
     // `EXTENSION_CONNECT_WAIT` while a just-woken service worker

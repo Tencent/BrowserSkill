@@ -153,11 +153,11 @@ pub fn dispatch(
         && args.out.is_none()
         && matches!(format, Format::Json)
     {
-        return Err(CliError::Local(anyhow::anyhow!(
+        return Err(CliError::invalid_params(anyhow::anyhow!(
             "--json with --format csv requires --out; otherwise stdout is CSV"
         )));
     }
-    let params = params(&args).map_err(CliError::Local)?;
+    let params = params(&args).map_err(CliError::invalid_params)?;
     if let Some(path) = &args.out {
         atomic_output::preflight_destination(path)?;
         preflight(path, args.overwrite).map_err(CliError::Local)?;

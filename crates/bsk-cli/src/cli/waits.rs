@@ -445,48 +445,52 @@ mod tests {
         assert_eq!(args.selector.as_deref(), Some(".el-loading-mask"));
     }
 
-    /// Bad flags must fail before a daemon is spawned.
+    /// Bad flags must fail before a daemon is spawned. A target conflict is
+    /// caller-side validation (exit code 1); a rejected budget is still a
+    /// transport-class local error (exit code 2).
     #[test]
     fn dispatch_rejects_bad_flags_before_starting_a_daemon() {
-        for argv in [
+        for (argv, expected_exit) in [
             // 目标一个都没给
-            vec!["bsk", "wait-for-element", "--session", "s1"],
+            (vec!["bsk", "wait-for-element", "--session", "s1"], 1),
             // 目标给了两个
-            vec![
-                "bsk",
-                "wait-for-element",
-                "#a",
-                "--selector",
-                "#b",
-                "--session",
-                "s1",
-            ],
+            (
+                vec![
+                    "bsk",
+                    "wait-for-element",
+                    "#a",
+                    "--selector",
+                    "#b",
+                    "--session",
+                    "s1",
+                ],
+                1,
+            ),
             // poll 为 0
-            vec![
-                "bsk",
-                "wait-for-element",
-                "#a",
-                "--poll-ms",
-                "0",
-                "--session",
-                "s1",
-            ],
+            (
+                vec![
+                    "bsk",
+                    "wait-for-element",
+                    "#a",
+                    "--poll-ms",
+                    "0",
+                    "--session",
+                    "s1",
+                ],
+                2,
+            ),
         ] {
             let cli = crate::cli::Cli::try_parse_from(argv.clone()).unwrap();
             let crate::cli::Command::WaitForElement(args) = cli.command else {
                 panic!("expected wait-for for {argv:?}");
             };
-            assert!(
-                matches!(
-                    dispatch_wait_for_element(
-                        args,
-                        &crate::cli::business_rpc::ClientContext::default(),
-                        Format::Json
-                    ),
-                    Err(CliError::Local(_))
-                ),
-                "{argv:?} should have failed locally"
-            );
+            let error = dispatch_wait_for_element(
+                args,
+                &crate::cli::business_rpc::ClientContext::default(),
+                Format::Json,
+            )
+            .expect_err("bad flags must fail locally");
+            assert_eq!(error.exit_code(), expected_exit, "{argv:?}");
         }
     }
     #[test]
