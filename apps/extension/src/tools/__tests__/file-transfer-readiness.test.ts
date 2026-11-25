@@ -450,3 +450,71 @@ it.each([
     await pending;
   }
 });
+
+it("wakes a hidden background tab before dispatching file-drop drag events", async () => {
+  vi.useFakeTimers();
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 100, initialTabIds: [7] }),
+      remove: async () => {},
+      ensureActiveTab: async () => 7,
+    },
+  });
+  const ctx = await manager.start("drop-readiness");
+  ctx.refStore.set("e1", 123, { tabId: 7 });
+  const paint = deferred<boolean>();
+  const calls: Array<{ method: string; params?: object }> = [];
+  const drags: string[] = [];
+  const cdp: CdpRunner = createStubCdpRunner({
+    send: (async (_tabId, method, params) => {
+      calls.push({ method, params });
+      if (
+        method === "Runtime.evaluate" &&
+        String((params as { expression?: string })?.expression).includes("requestAnimationFrame")
+      ) {
+        return { result: { value: await paint.promise } };
+      }
+      if (method === "Runtime.evaluate") return { result: { value: "hidden" } };
+      if (method === "Page.getLayoutMetrics")
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      if (method === "DOM.getContentQuads") return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+      if (method === "DOM.getNodeForLocation") return { backendNodeId: 123, frameId: "main" };
+      if (method === "DOM.resolveNode") return { object: { objectId: "drop-target" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: true } };
+      if (method === "Input.dispatchDragEvent") drags.push((params as { type: string }).type);
+      return {};
+    }) as CdpRunner["send"],
+  });
+  const tab = { id: 7, windowId: 100, active: false } as chrome.tabs.Tab;
+  const pending = handleUpload(
+    manager,
+    {
+      session_id: ctx.sessionId,
+      ref: "e1",
+      mode: "drop",
+      timeout_ms: 500,
+      files: [{ name: "sample.bin", transfer_id: "ready", staged_path: "/stage/sample.bin" }],
+    },
+    { cdp, tabsApi: { get: async () => tab, query: async () => [tab] } },
+  );
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(drags).toEqual([]);
+    expect(calls).toContainEqual({
+      method: "Emulation.setFocusEmulationEnabled",
+      params: { enabled: true },
+    });
+    paint.resolve(true);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({ tab_id: 7, file_names: ["sample.bin"] });
+    expect(drags).toEqual(["dragEnter", "dragOver", "drop"]);
+    expect(
+      calls.filter((c) => c.method === "Emulation.setFocusEmulationEnabled").map((c) => c.params),
+    ).toEqual([{ enabled: true }, { enabled: false }]);
+  } finally {
+    paint.resolve(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    await pending;
+  }
+});

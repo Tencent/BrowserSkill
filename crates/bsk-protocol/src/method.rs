@@ -1006,16 +1006,49 @@ impl Method {
         self.spec().audit_key.is_some()
     }
 
-    /// Debug reads/teardown remain available after interruption, while explicit
-    /// network interventions and replay are gated like other browser writes.
-    pub fn requires_interrupt_gate_with_params(&self, params: &serde_json::Value) -> bool {
-        let effect = if matches!(self, Method::ToolDebug) {
+    /// Param-aware effect classification. For `tool.debug`, resolves the sub-action's
+    /// effect so mutating debug interventions (`replay`, `rule_add`, `rule_enable`)
+    /// are distinguished from read-only / control-plane queries.
+    pub fn effect_with_params(&self, params: &serde_json::Value) -> MethodEffect {
+        if matches!(self, Method::ToolDebug) {
             parse_debug_action(params)
                 .map(|action| action.effect())
                 .unwrap_or(self.effect())
         } else {
             self.effect()
-        };
+        }
+    }
+
+    /// Param-aware outcome classification. Mutating `tool.debug` sub-actions
+    /// (`replay`, `rule_add`, `rule_enable`, `rule_disable`, `rule_remove`) use
+    /// `EffectAwarePage` so clean pre-dispatch cancellations preserve `effect_state: "none"`
+    /// while timeouts/disconnects emit `effect_state: "unknown"`.
+    pub fn outcome_with_params(&self, params: &serde_json::Value) -> OutcomeKind {
+        if matches!(self, Method::ToolDebug)
+            && parse_debug_action(params).is_some_and(|action| action.cooperation_guarded())
+        {
+            OutcomeKind::EffectAwarePage
+        } else {
+            self.spec().outcome
+        }
+    }
+
+    /// Param-aware deadline-cancellation policy. Mutating `tool.debug` sub-actions
+    /// forward a WS `cancel` frame at the daemon deadline and await bounded cleanup.
+    pub fn cancel_at_deadline_with_params(&self, params: &serde_json::Value) -> bool {
+        if matches!(self, Method::ToolDebug)
+            && parse_debug_action(params).is_some_and(|action| action.cooperation_guarded())
+        {
+            true
+        } else {
+            self.spec().cancel_at_deadline
+        }
+    }
+
+    /// Debug reads/teardown remain available after interruption, while explicit
+    /// network interventions and replay are gated like other browser writes.
+    pub fn requires_interrupt_gate_with_params(&self, params: &serde_json::Value) -> bool {
+        let effect = self.effect_with_params(params);
         (matches!(self, Method::ToolVideo)
             && parse_video_action(params).is_some_and(VideoAction::interrupt_gated))
             || matches!(
@@ -1087,6 +1120,17 @@ impl Method {
     /// Whether this RPC drives browser/page state in the traditional sense.
     pub fn is_mutating(&self) -> bool {
         self.effect() == MethodEffect::BrowserMutation
+    }
+
+    /// Param-aware mutating classification. Includes all cooperation-guarded
+    /// `tool.debug` sub-actions (`replay`, `rule_add`, `rule_enable`,
+    /// `rule_disable`, `rule_remove`) that modify active network/interception state.
+    pub fn is_mutating_with_params(&self, params: &serde_json::Value) -> bool {
+        if matches!(self, Method::ToolDebug) {
+            parse_debug_action(params).is_some_and(|action| action.cooperation_guarded())
+        } else {
+            self.effect_with_params(params) == MethodEffect::BrowserMutation
+        }
     }
 
     /// Whether a pending user interrupt should reject this method.
@@ -1165,6 +1209,38 @@ mod tests {
         assert!(Method::ToolDebug.wal_tracked_with_params(&json!({"action": "rule_add"})));
         assert!(Method::ToolDebug.wal_tracked_with_params(&json!({"action": "rule_enable"})));
         assert!(!Method::ToolDebug.wal_tracked_with_params(&json!({"action": "request"})));
+        for action in [
+            "replay",
+            "rule_add",
+            "rule_enable",
+            "rule_disable",
+            "rule_remove",
+        ] {
+            let params = json!({"action": action});
+            assert_eq!(
+                Method::ToolDebug.outcome_with_params(&params),
+                OutcomeKind::EffectAwarePage,
+                "{action} must use EffectAwarePage outcome"
+            );
+            assert!(
+                Method::ToolDebug.cancel_at_deadline_with_params(&params),
+                "{action} must cancel at deadline"
+            );
+            assert!(
+                Method::ToolDebug.is_mutating_with_params(&params),
+                "{action} must classify as mutating"
+            );
+        }
+        for action in ["request", "requests", "rules", "status", "stop", "export"] {
+            let params = json!({"action": action});
+            assert_eq!(
+                Method::ToolDebug.outcome_with_params(&params),
+                OutcomeKind::Ordinary,
+                "{action} must stay Ordinary"
+            );
+            assert!(!Method::ToolDebug.cancel_at_deadline_with_params(&params));
+            assert!(!Method::ToolDebug.is_mutating_with_params(&params));
+        }
         assert!(Method::ToolVideo.dialog_gated_with_params(&json!({"action": "start"})));
         assert!(!Method::ToolVideo.dialog_gated_with_params(&json!({"action": "stop"})));
         assert!(Method::ToolDownload.wal_tracked_with_params(&json!({})));

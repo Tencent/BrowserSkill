@@ -7,7 +7,13 @@ import { isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
 import { rpcError, transferError } from "./errors";
 import type { ResolvedActionTarget } from "./interaction";
-import { type CdpRunner, isRpcError, sendToFrameHandle, withRemoteObject } from "./shared";
+import {
+  type CdpDispatchGuard,
+  type CdpRunner,
+  isRpcError,
+  sendToFrameHandle,
+  withRemoteObject,
+} from "./shared";
 import { BoundedWaitError, remainingMs, waitBounded } from "./transfer-transaction";
 
 const CLEANUP_TIMEOUT_MS = 1_000;
@@ -92,14 +98,21 @@ async function callOnTrigger<T = RuntimeReply>(
   functionDeclaration: string,
   args: unknown[],
   returnByValue: boolean,
+  guard?: CdpDispatchGuard,
 ): Promise<T> {
-  return sendToFrameHandle<T>(cdp, handle, "Runtime.callFunctionOn", {
-    objectId,
-    functionDeclaration,
-    arguments: args.map((value) => ({ value })),
-    returnByValue,
-    awaitPromise: false,
-  });
+  return sendToFrameHandle<T>(
+    cdp,
+    handle,
+    "Runtime.callFunctionOn",
+    {
+      objectId,
+      functionDeclaration,
+      arguments: args.map((value) => ({ value })),
+      returnByValue,
+      awaitPromise: false,
+    },
+    guard,
+  );
 }
 
 export async function uploadThroughActivatedFileInput(
@@ -133,25 +146,45 @@ export async function uploadThroughActivatedFileInput(
       chooserEvents.push(event);
     });
 
+    const armInterceptionAbort = new AbortController();
+    const forwardArmAbort = () => armInterceptionAbort.abort();
+    options.signal?.addEventListener("abort", forwardArmAbort, { once: true });
+    if (options.signal?.aborted) armInterceptionAbort.abort();
     try {
       if (handle.frameId && options.cdp.hasOwnFrameTarget(handle.tabId, handle.frameId)) {
         await waitBounded(
-          sendToFrameHandle(options.cdp, handle, "Page.enable", {}),
+          sendToFrameHandle(
+            options.cdp,
+            handle,
+            "Page.enable",
+            {},
+            { signal: armInterceptionAbort.signal },
+          ),
           deadline,
           options.signal,
           "enabling frame Page domain timed out",
         );
       }
       await waitBounded(
-        sendToFrameHandle(options.cdp, handle, "Page.setInterceptFileChooserDialog", {
-          enabled: true,
-        }),
+        sendToFrameHandle(
+          options.cdp,
+          handle,
+          "Page.setInterceptFileChooserDialog",
+          { enabled: true },
+          {
+            signal: armInterceptionAbort.signal,
+            onDispatch: () => {
+              interceptionArmed = true;
+            },
+          },
+        ),
         deadline,
         options.signal,
         "arming native file chooser interception timed out",
       );
-      interceptionArmed = true;
     } catch (err) {
+      if (!interceptionArmed) armInterceptionAbort.abort();
+      if (!(err instanceof BoundedWaitError)) interceptionArmed = false;
       outcome = isStaleFrameHandleError(err)
         ? enrichFailure(
             rpcError("not_found", "ref_not_found", err.message),
@@ -159,13 +192,19 @@ export async function uploadThroughActivatedFileInput(
             "arm_interception",
           )
         : transferFailure(
-            err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+            err instanceof BoundedWaitError
+              ? err.kind === "aborted"
+                ? "cancelled"
+                : "timeout"
+              : "cdp_failed",
             "file_input_probe_failed",
             err instanceof Error ? err.message : String(err),
             "none",
             "arm_interception",
           );
       return outcome;
+    } finally {
+      options.signal?.removeEventListener("abort", forwardArmAbort);
     }
 
     const commitFiles = async (
@@ -224,12 +263,19 @@ export async function uploadThroughActivatedFileInput(
       triggerObjectId = resolved.object?.objectId;
       if (!triggerObjectId) throw new Error("DOM.resolveNode returned no trigger objectId");
 
-      const armed = await waitBounded(
-        callOnTrigger<RuntimeReply>(
-          options.cdp,
-          handle,
-          triggerObjectId,
-          `function(key) {
+      const armProbeAbort = new AbortController();
+      const forwardProbeAbort = () => armProbeAbort.abort();
+      options.signal?.addEventListener("abort", forwardProbeAbort, { once: true });
+      if (options.signal?.aborted) armProbeAbort.abort();
+      const probeTtlMs = Math.max(1_000, remainingMs(deadline) + CLEANUP_TIMEOUT_MS);
+      let armed: RuntimeReply;
+      try {
+        armed = await waitBounded(
+          callOnTrigger<RuntimeReply>(
+            options.cdp,
+            handle,
+            triggerObjectId,
+            `function(key, ttlMs) {
             if (this.nodeType === 1 && this.localName === "input" && this.type === "file") {
               if (!this.isConnected) return { direct: "detached" };
               if (
@@ -244,9 +290,24 @@ export async function uploadThroughActivatedFileInput(
             const doc = this.ownerDocument;
             const owner = doc.defaultView;
             if (!owner) return false;
-            const state = { inputs: [], listener: null };
+            const state = { inputs: [], listener: null, timer: null, expiresAt: Date.now() + ttlMs };
+            const cleanup = () => {
+              if (state.timer !== null) {
+                owner.clearTimeout(state.timer);
+                state.timer = null;
+              }
+              if (state.listener) {
+                doc.removeEventListener("click", state.listener, true);
+                state.listener = null;
+              }
+              if (owner[key] === state) delete owner[key];
+            };
             Object.defineProperty(owner, key, { value: state, configurable: true });
             state.listener = event => {
+              if (Date.now() > state.expiresAt) {
+                cleanup();
+                return;
+              }
               const path = typeof event.composedPath === "function" ? event.composedPath() : [];
               const candidate = path[0] || event.target;
               if (candidate && candidate.nodeType === 1 &&
@@ -255,26 +316,45 @@ export async function uploadThroughActivatedFileInput(
                 event.preventDefault();
               }
             };
+            state.timer = owner.setTimeout(cleanup, ttlMs);
             doc.addEventListener("click", state.listener, true);
             return true;
           }`,
-          [stateKey],
-          true,
-        ),
-        deadline,
-        options.signal,
-        "arming frame-scoped file input probe timed out",
-      );
+            [stateKey, probeTtlMs],
+            true,
+            {
+              signal: armProbeAbort.signal,
+              onDispatch: () => {
+                probeArmed = true;
+              },
+            },
+          ),
+          deadline,
+          options.signal,
+          "arming frame-scoped file input probe timed out",
+        );
+      } catch (err) {
+        // Only abort queued pre-dispatch waits; aborting an already-dispatched
+        // Runtime.callFunctionOn can trip CdpReadGate and block finally cleanup.
+        if (!probeArmed) armProbeAbort.abort();
+        throw err;
+      } finally {
+        options.signal?.removeEventListener("abort", forwardProbeAbort);
+      }
       const armError = runtimeError(armed, "failed to arm file input probe");
-      if (armError) throw armError;
+      if (armError) {
+        probeArmed = false;
+        throw armError;
+      }
       if (armed.result?.value && typeof armed.result.value === "object") {
+        probeArmed = false;
         directInput = armed.result.value as { direct?: string; multiple?: boolean };
-      } else if (armed.result?.value === true) {
-        probeArmed = true;
-      } else {
+      } else if (armed.result?.value !== true) {
+        probeArmed = false;
         throw new Error("file input probe did not arm");
       }
     } catch (err) {
+      if (!(err instanceof BoundedWaitError)) probeArmed = false;
       outcome = isStaleFrameHandleError(err)
         ? enrichFailure(
             rpcError("not_found", "ref_not_found", err.message),
@@ -282,7 +362,11 @@ export async function uploadThroughActivatedFileInput(
             "arm_input_probe",
           )
         : transferFailure(
-            err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+            err instanceof BoundedWaitError
+              ? err.kind === "aborted"
+                ? "cancelled"
+                : "timeout"
+              : "cdp_failed",
             "file_input_probe_failed",
             err instanceof Error ? err.message : String(err),
             "none",
@@ -483,6 +567,7 @@ export async function uploadThroughActivatedFileInput(
               `function(key) {
                 const owner = this.ownerDocument.defaultView;
                 const state = owner?.[key];
+                if (state?.timer != null) owner.clearTimeout(state.timer);
                 if (state?.listener) this.ownerDocument.removeEventListener("click", state.listener, true);
                 if (owner) delete owner[key];
               }`,

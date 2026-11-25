@@ -571,13 +571,18 @@ export class DebugNetworkStore {
         },
       };
     }
+    const existing = this.annotations.get(key);
+    if (existing) this.annotations.delete(key);
     this.annotations.set(key, {
-      value: annotation,
-      requestBody,
-      responseBody,
-      responseHeaders,
-      headersTruncated: headers.truncated,
-      urlState,
+      value: { ...(existing?.value ?? {}), ...annotation },
+      requestBody: annotation.effective !== undefined ? requestBody : existing?.requestBody,
+      responseBody: annotation.mock !== undefined ? responseBody : existing?.responseBody,
+      responseHeaders: annotation.mock !== undefined ? responseHeaders : existing?.responseHeaders,
+      headersTruncated:
+        annotation.effective !== undefined
+          ? headers.truncated
+          : (existing?.headersTruncated ?? false),
+      urlState: annotation.effective !== undefined ? urlState : existing?.urlState,
     });
     while (this.annotations.size > 64)
       this.annotations.delete(this.annotations.keys().next().value!);

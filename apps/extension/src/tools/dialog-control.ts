@@ -86,10 +86,12 @@ export async function handleDialog(
         },
       };
     }
-    resolveStarted = true;
     const handled = await cdp.resolveDialog(dialog.id, accept, p.text, {
       signal: options.signal,
-      onDispatch: check,
+      onDispatch: () => {
+        check?.();
+        resolveStarted = true;
+      },
     });
     return { session_id: ctx.sessionId, dialog: handled };
   } catch (error) {
@@ -99,8 +101,15 @@ export async function handleDialog(
     if (options.signal?.aborted) {
       return {
         code: "cancelled",
-        message: "Dialog operation cancelled",
-        data: { effect_state: effect, phase, tab_id: dialog.tab_id },
+        message: resolveStarted
+          ? "Dialog operation cancelled"
+          : "Dialog operation cancelled before dispatch",
+        data: {
+          ...(resolveStarted ? {} : { reason: "cancelled_before_dispatch", dispatched: false }),
+          effect_state: effect,
+          phase,
+          tab_id: dialog.tab_id,
+        },
       };
     }
     return {

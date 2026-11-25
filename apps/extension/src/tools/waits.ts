@@ -91,18 +91,27 @@ export async function handleWaitForNavigation(
   const waitUntil: WaitUntil = params.wait_until ?? "load";
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
   const expected = cdpLifecycleName(waitUntil);
+  const deadline = performance.now() + timeoutMs;
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    await ensureCdpReady(deps.cdp, target.tabId);
+    await beforeDeadline(() => ensureCdpReady(deps.cdp, target.tabId), deadline, deps.signal);
     if (deps.signal?.aborted) {
       return { code: "cancelled", message: "wait_for_navigation aborted" };
+    }
+    const remainingMs = deadline - performance.now();
+    if (remainingMs <= 0) {
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
+        reached: "timeout",
+        error_text: `timed out waiting for lifecycle "${expected}" after ${timeoutMs}ms`,
+      });
     }
     const outcome = await waitForLifecyclePassive(
       deps.cdp,
       target.tabId,
       expected,
-      timeoutMs,
+      remainingMs,
       deps.signal,
       {
         // Chrome exposes a started but uncommitted navigation as `pendingUrl`.
@@ -133,10 +142,17 @@ export async function handleWaitForNavigation(
       }`,
     });
   } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
+    if (deps.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+      return { code: "cancelled", message: "wait_for_navigation aborted" };
+    }
+    if (err instanceof ElementWaitTimeout) {
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
+        reached: "timeout",
+        error_text: `timed out waiting for lifecycle "${expected}" after ${timeoutMs}ms`,
+      });
+    }
+    return cdpError(err);
   }
 }
 
@@ -219,7 +235,12 @@ async function beforeDeadline<T>(
       onAbort = () => reject(new DOMException("wait-for-element aborted", "AbortError"));
       signal?.addEventListener("abort", onAbort, { once: true });
     });
-    const result = await Promise.race([run(), interrupted]);
+    const pending = run();
+    // Consume late rejections on whichever racer loses so timeout/abort never
+    // leaves an unhandled rejection when the in-flight CDP call later settles.
+    void pending.catch(() => {});
+    void interrupted.catch(() => {});
+    const result = await Promise.race([pending, interrupted]);
     checkBudget(deadline, signal);
     return result;
   } catch (error) {
@@ -406,6 +427,7 @@ export async function handleWaitForElement(
     });
 
   const waitCleanup = new AbortController();
+  const rootFrameCache: { id?: string } = {};
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     for (;;) {
@@ -420,6 +442,7 @@ export async function handleWaitForElement(
             objectHandles,
             deadline,
             waitCleanup.signal,
+            rootFrameCache,
           ),
         deadline,
         deps.signal,
@@ -485,6 +508,7 @@ async function probeState(
   objectHandles: Map<string, FrameDocumentHandle>,
   deadline: number,
   stopSignal: AbortSignal,
+  rootFrameCache: { id?: string },
 ): Promise<Probe | RpcError | null> {
   const node = await resolveBackendNode(cdp, ctx, target, params, "wait-for-element", false, {
     childTimeoutMs: Math.max(1, Math.ceil(deadline - performance.now())),
@@ -561,10 +585,140 @@ async function probeState(
   }
   // The selected node can also detach after its remote object was resolved.
   if (params.selector && !value.attached) return null;
+  let visible = value.visible === true;
+  if (
+    (params.state === "visible" || params.state === "hidden") &&
+    value.attached &&
+    visible &&
+    isChildFrame &&
+    node.handle.frameId !== rootFrameCache.id
+  ) {
+    try {
+      // Resolve the main frame ID cheaply (root target only) before querying the
+      // full frame graph so an unrelated slow iframe never stalls a main-doc ref.
+      if (!rootFrameCache.id) {
+        const main = await cdp.getMainFrameHandle(target.tabId, stopSignal);
+        if (main.frameId) rootFrameCache.id = main.frameId;
+      }
+      if (node.handle.frameId !== rootFrameCache.id) {
+        const ancestorsVisible = await areAncestorFramesVisible(
+          cdp,
+          target.tabId,
+          node.handle.frameId,
+          objectGroup,
+          objectHandles,
+          deadline,
+          stopSignal,
+          rootFrameCache,
+        );
+        // Incomplete/vanishing frame ancestry is inconclusive — retry on the next
+        // poll instead of claiming visible: true on an unverified chain.
+        if (ancestorsVisible === null) return null;
+        visible = ancestorsVisible;
+      }
+    } catch (error) {
+      if (params.selector && isTransientChildFrameNavigation(error, true)) return null;
+      throw error;
+    }
+  }
   return {
     attached: value.attached,
-    visible: value.visible === true,
+    visible,
   };
+}
+
+/** An element inside a hidden/zero-size iframe still reports visible in its own
+ * document; verify every enclosing `<iframe>` owner up to the root document. */
+async function areAncestorFramesVisible(
+  cdp: CdpRunner,
+  tabId: number,
+  frameId: string,
+  objectGroup: string,
+  objectHandles: Map<string, FrameDocumentHandle>,
+  deadline: number,
+  stopSignal: AbortSignal,
+  rootFrameCache: { id?: string },
+): Promise<boolean | null> {
+  const remainingMs = Math.max(1, Math.ceil(deadline - performance.now()));
+  const graph = await cdp.getFrameDocuments(tabId, stopSignal, {
+    includeOwners: true,
+    skipQuietWaitWhenIdle: true,
+    childReadTimeoutMs: Math.min(remainingMs, 1_500),
+  });
+  if (graph.rootFrameId) rootFrameCache.id = graph.rootFrameId;
+  if (graph.rootFrameId && frameId === graph.rootFrameId) return true;
+  const frames = new Map(graph.frames.map((frame) => [frame.frameId, frame]));
+  let current = frames.get(frameId);
+  if (!current) return null;
+  if (!current.parentFrameId) {
+    return !graph.rootFrameId || current.frameId === graph.rootFrameId ? true : null;
+  }
+  const seen = new Set<string>();
+  while (current.parentFrameId) {
+    if (seen.has(current.frameId)) return null;
+    seen.add(current.frameId);
+    const parent = frames.get(current.parentFrameId);
+    if (!parent || current.ownerBackendNodeId === undefined) return null;
+    const ownerHandle: FrameNodeHandle = {
+      ...parent.handle,
+      backendNodeId: current.ownerBackendNodeId,
+    };
+    const ownerDocHandle: FrameDocumentHandle = {
+      tabId: parent.handle.tabId,
+      frameId: parent.handle.frameId,
+      loaderId: parent.handle.loaderId,
+      ...(parent.handle.documentElementBackendNodeId !== undefined
+        ? { documentElementBackendNodeId: parent.handle.documentElementBackendNodeId }
+        : {}),
+    };
+    let ownerObjectId: string | undefined;
+    try {
+      const resolved = await sendToFrameHandle<{ object?: { objectId?: string } }>(
+        cdp,
+        ownerHandle,
+        "DOM.resolveNode",
+        { backendNodeId: ownerHandle.backendNodeId, objectGroup },
+        { signal: stopSignal },
+      );
+      ownerObjectId = resolved.object?.objectId;
+      if (ownerObjectId) {
+        objectHandles.set(
+          `${ownerDocHandle.tabId}:${ownerDocHandle.frameId}:${ownerDocHandle.loaderId}`,
+          ownerDocHandle,
+        );
+      }
+    } catch (error) {
+      if (isMissingNode(error)) return false;
+      throw error;
+    }
+    if (!ownerObjectId) return false;
+    const reply = await sendToFrameHandle<{
+      result?: { value?: { attached?: boolean; visible?: boolean } };
+      exceptionDetails?: { text?: string };
+    }>(
+      cdp,
+      ownerHandle,
+      "Runtime.callFunctionOn",
+      {
+        objectId: ownerObjectId,
+        functionDeclaration: STATE_PROBE,
+        returnByValue: true,
+      },
+      { signal: stopSignal },
+    );
+    const ownerState = reply.result?.value;
+    if (
+      reply.exceptionDetails ||
+      !ownerState ||
+      typeof ownerState.attached !== "boolean" ||
+      typeof ownerState.visible !== "boolean"
+    ) {
+      return null;
+    }
+    if (!ownerState.attached || !ownerState.visible) return false;
+    current = parent;
+  }
+  return !graph.rootFrameId || current.frameId === graph.rootFrameId ? true : null;
 }
 
 export const __testing__ = {

@@ -308,6 +308,32 @@ async fn dispatch_envelope_rpc(
     mut params: Value,
     req_meta: IpcRequestMeta,
 ) -> (ResponseBody, IpcResponseMeta) {
+    if state.config.server.is_some()
+        && (!method.spec().remote_allowed
+            || matches!(
+                method,
+                Method::TransferBegin
+                    | Method::TransferChunk
+                    | Method::TransferFinish
+                    | Method::TransferRead
+            ))
+    {
+        let label = match method {
+            Method::TransferBegin | Method::TransferChunk | Method::TransferFinish => {
+                Method::ToolUpload.wire_name()
+            }
+            Method::TransferRead => Method::ToolDownload.wire_name(),
+            _ => method.wire_name(),
+        };
+        return (
+            ResponseBody::Err(RpcError {
+                code: ErrorCode::Unsupported,
+                message: format!("{label} is not supported for remote browsers"),
+                data: None,
+            }),
+            IpcResponseMeta::default(),
+        );
+    }
     if let Err(err) = super::tool_pipeline::prepare_implicit_session_and_evidence(
         &state,
         &method,

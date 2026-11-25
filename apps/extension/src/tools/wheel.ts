@@ -172,49 +172,54 @@ export async function handleWheel(
       const node = await resolveBackendNode(cdp, ctx, target, { ref: params.ref }, "wheel");
       if (isRpcError(node)) return node;
     }
-    return await withInputReady(ctx, target.tabId, { ...deps, deadline }, async (input) => {
-      const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
-      cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-      const point = await resolveWheelPoint(cdp, ctx, target, params, deadline);
-      checkActive();
-      if (isRpcError(point)) return point;
+    return await withInputReady(
+      ctx,
+      target.tabId,
+      { ...deps, deadline, preserveWindowFocus: true },
+      async (input) => {
+        const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
+        cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+        const point = await resolveWheelPoint(cdp, ctx, target, params, deadline);
+        checkActive();
+        if (isRpcError(point)) return point;
 
-      if (deps.bypassOverlay) {
-        bypassTab = target.tabId;
-        await deps.bypassOverlay(target.tabId, true);
-      }
-      const modifiers = modifiersBitfield(params.modifiers);
-      await cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        x: point.x,
-        y: point.y,
-        modifiers,
-      });
-      // markSent checks cancellation/deadline. Dispatch directly so a second
-      // guard cannot reject between recording the attempt and sending the wheel.
-      input.markSent();
-      await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-        type: "mouseWheel",
-        x: point.x,
-        y: point.y,
-        deltaX,
-        deltaY,
-        modifiers,
-      });
-      // Wheel acknowledgement precedes compositor scrolling. Keep the hidden renderer
-      // awake until its resulting frame is available, then restore focus.
-      if (input.hidden) await waitForInputPaint(cdp, target.tabId, deps.signal, deadline);
-      checkActive();
-      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-        tab_id: target.tabId,
-        used_ref: point.usedRef,
-        used_selector: point.usedSelector,
-        x: point.x,
-        y: point.y,
-        delta_x: deltaX,
-        delta_y: deltaY,
-      });
-    });
+        if (deps.bypassOverlay) {
+          bypassTab = target.tabId;
+          await deps.bypassOverlay(target.tabId, true);
+        }
+        const modifiers = modifiersBitfield(params.modifiers);
+        await cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: point.x,
+          y: point.y,
+          modifiers,
+        });
+        // markSent checks cancellation/deadline. Dispatch directly so a second
+        // guard cannot reject between recording the attempt and sending the wheel.
+        input.markSent();
+        await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: point.x,
+          y: point.y,
+          deltaX,
+          deltaY,
+          modifiers,
+        });
+        // Wheel acknowledgement precedes compositor scrolling. Keep the hidden renderer
+        // awake until its resulting frame is available, then restore focus.
+        if (input.hidden) await waitForInputPaint(cdp, target.tabId, deps.signal, deadline);
+        checkActive();
+        return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+          tab_id: target.tabId,
+          used_ref: point.usedRef,
+          used_selector: point.usedSelector,
+          x: point.x,
+          y: point.y,
+          delta_x: deltaX,
+          delta_y: deltaY,
+        });
+      },
+    );
   } catch (error) {
     if (deps.signal?.aborted) return { code: "cancelled", message: "wheel aborted" };
     if (Date.now() >= deadline) return { code: "timeout", message: "wheel timed out" };

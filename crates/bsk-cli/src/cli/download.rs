@@ -45,6 +45,7 @@ pub fn dispatch(
     ctx: &crate::cli::business_rpc::ClientContext,
     format: Format,
 ) -> Result<(), CliError> {
+    atomic_output::preflight_destination(&args.out)?;
     if args.out.exists() && !args.overwrite {
         return Err(output_exists(&args.out));
     }

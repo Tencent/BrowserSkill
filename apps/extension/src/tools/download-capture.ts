@@ -5,7 +5,7 @@
 // no CDP intent on the clicked target, so a navigation target that the clicked
 // tab opens after mouse press supplies the intent URL instead.
 
-import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
+import type { FrameDocumentGraph, FrameDocumentHandle } from "@/browser-driver/frame-handles";
 import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
 import { transferError } from "./errors";
 import { type CdpRunner, isRpcError } from "./shared";
@@ -96,6 +96,7 @@ interface DownloadCandidate {
   suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void;
   suggested: boolean;
   afterDispatch: boolean;
+  graceExpired?: boolean;
   graceTimer: ReturnType<typeof setTimeout>;
 }
 
@@ -214,10 +215,10 @@ export async function captureBrowserDownload(
   };
   const matchesCdpIntent = (candidate: DownloadCandidate): boolean =>
     intent !== undefined && matchesIntent(candidate.item, intent);
-  // Pre-dispatch candidates cannot come from the popup opened by this click.
+  // Pre-dispatch candidates cannot come from the click or popup triggered here.
   const attributable = (candidate: DownloadCandidate): boolean =>
-    matchesCdpIntent(candidate) ||
-    (candidate.afterDispatch && matchesPopupUrl(candidate.item, popupUrls));
+    candidate.afterDispatch &&
+    (matchesCdpIntent(candidate) || matchesPopupUrl(candidate.item, popupUrls));
   const matchingCandidates = (): DownloadCandidate[] =>
     [...candidates.values()].filter((candidate) => !candidate.suggested && attributable(candidate));
 
@@ -236,6 +237,14 @@ export async function captureBrowserDownload(
     candidate.suggested = true;
     clearTimeout(candidate.graceTimer);
     capturedId = candidate.item.id;
+    // Release any other unrelated concurrent downloads immediately instead of
+    // stalling their Chrome filename suggestion until this transfer finishes.
+    for (const other of [...candidates.values()]) {
+      if (other.item.id === candidate.item.id) continue;
+      clearTimeout(other.graceTimer);
+      suggestDefault(other);
+      candidates.delete(other.item.id);
+    }
     const filename =
       intent && matchesCdpIntent(candidate) ? intent.suggestedFilename : candidate.item.filename;
     candidate.suggest({
@@ -267,6 +276,19 @@ export async function captureBrowserDownload(
     }
   };
 
+  let pendingHierarchyChecks = 0;
+  const expireCandidate = (candidate: DownloadCandidate) => {
+    if (settled || capturedId !== undefined || !candidates.has(candidate.item.id)) return;
+    if (pendingHierarchyChecks > 0) {
+      candidate.graceExpired = true;
+      return;
+    }
+    suggestDefault(candidate);
+    candidates.delete(candidate.item.id);
+    if (attributable(candidate) && capturedId === undefined) {
+      fail(new Error("download correlation grace elapsed before unique attribution"));
+    }
+  };
   const determiningListener: DeterminingFilenameListener = (item, suggest) => {
     if (settled || capturedId !== undefined) {
       suggest();
@@ -277,13 +299,7 @@ export async function captureBrowserDownload(
       suggest,
       suggested: false,
       afterDispatch: dispatched,
-      graceTimer: setTimeout(() => {
-        suggestDefault(candidate);
-        candidates.delete(item.id);
-        if (attributable(candidate) && capturedId === undefined) {
-          fail(new Error("download correlation grace elapsed before unique attribution"));
-        }
-      }, CORRELATION_GRACE_MS),
+      graceTimer: setTimeout(() => expireCandidate(candidate), CORRELATION_GRACE_MS),
     };
     candidates.set(item.id, candidate);
     reconcile();
@@ -329,26 +345,121 @@ export async function captureBrowserDownload(
     popupUrls.add(details.url);
     reconcile();
   };
-  const cdpSubscription = options.cdp.onEvent(options.handle.tabId, (source, method, raw) => {
-    if (settled || method !== "Page.downloadWillBegin") return;
-    if (!options.cdp.isEventFromFrame(source, options.handle)) return;
-    if (capturedId !== undefined && options.inputSignal?.aborted) return;
-    const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
-    if (typeof event.url !== "string" || typeof event.suggestedFilename !== "string") return;
-    if (options.expectedFrameId && event.frameId !== options.expectedFrameId) {
-      fail(new Error("download originated from a different frame"));
-      return;
+  const targetFrameId = options.expectedFrameId || options.handle.frameId || undefined;
+  const frameParents = new Map<string, string>();
+  let hierarchyGraphPromise: Promise<FrameDocumentGraph | undefined> | undefined;
+  const isDescendantOf = (frameId: string, ancestorId: string): boolean => {
+    const seen = new Set<string>();
+    let current: string | undefined = frameId;
+    while (current && !seen.has(current)) {
+      if (current === ancestorId) return true;
+      seen.add(current);
+      current = frameParents.get(current);
     }
+    return false;
+  };
+  const recordIntent = (nextIntent: DownloadIntent) => {
+    if (settled) return;
+    if (capturedId !== undefined && options.inputSignal?.aborted) return;
     if (intent) {
       fail(new Error("download trigger produced more than one browser download intent"));
       return;
     }
-    intent = {
+    intent = nextIntent;
+    reconcile();
+  };
+  const loadFrameHierarchy = (refresh = false): Promise<FrameDocumentGraph | undefined> => {
+    if (refresh || !hierarchyGraphPromise) {
+      const remaining = Math.max(1, deadline - Date.now());
+      const budget = Math.min(remaining, 1_500);
+      hierarchyGraphPromise = waitBounded(
+        options.cdp.getFrameDocuments(options.handle.tabId, options.signal, {
+          includeOwners: false,
+          skipQuietWaitWhenIdle: true,
+          childReadTimeoutMs: Math.min(budget, 500),
+        }),
+        Date.now() + budget,
+        options.signal,
+        "resolving download frame hierarchy timed out",
+      )
+        .then((graph) => {
+          for (const frame of graph.frames) {
+            if (frame.parentFrameId) frameParents.set(frame.frameId, frame.parentFrameId);
+          }
+          for (const unavailable of graph.unavailableFrames ?? []) {
+            if (unavailable.parentFrameId) {
+              frameParents.set(unavailable.frameId, unavailable.parentFrameId);
+            }
+          }
+          return graph;
+        })
+        .catch(() => undefined);
+    }
+    return hierarchyGraphPromise;
+  };
+  const cdpSubscription = options.cdp.onEvent(options.handle.tabId, (source, method, raw) => {
+    if (settled || source.tabId !== options.handle.tabId) return;
+    if (method === "Page.frameAttached") {
+      const attached = raw as { frameId?: unknown; parentFrameId?: unknown };
+      if (typeof attached.frameId === "string" && typeof attached.parentFrameId === "string") {
+        frameParents.set(attached.frameId, attached.parentFrameId);
+      }
+      return;
+    }
+    if (method !== "Page.downloadWillBegin") return;
+    if (!dispatched) return;
+    if (capturedId !== undefined && options.inputSignal?.aborted) return;
+    const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
+    if (typeof event.url !== "string" || typeof event.suggestedFilename !== "string") return;
+    const eventFrameId =
+      typeof event.frameId === "string" && event.frameId.length > 0 ? event.frameId : undefined;
+    const parsedIntent: DownloadIntent = {
       url: event.url,
       suggestedFilename: event.suggestedFilename,
-      ...(typeof event.frameId === "string" ? { frameId: event.frameId } : {}),
+      ...(eventFrameId ? { frameId: eventFrameId } : {}),
     };
-    reconcile();
+    const exactFrame =
+      options.cdp.isEventFromFrame(source, options.handle) &&
+      (!targetFrameId || !eventFrameId || eventFrameId === targetFrameId);
+    if (
+      exactFrame ||
+      !targetFrameId ||
+      (eventFrameId !== undefined && isDescendantOf(eventFrameId, targetFrameId))
+    ) {
+      recordIntent(parsedIntent);
+      return;
+    }
+    // Hidden download iframes (<iframe src="/export">, <form target="hidden-iframe">)
+    // and cross-origin CDN download iframes may already exist before this click or
+    // run in a child OOPIF target. Resolve the tab's frame hierarchy lazily and accept
+    // downloads from targetFrameId's subtree (or any frame in the tab when triggered
+    // from the root main document), while still ignoring unrelated sibling frames.
+    pendingHierarchyChecks++;
+    void loadFrameHierarchy()
+      .then(async (graph) => {
+        if (settled || !graph) return;
+        let accepted =
+          graph.rootFrameId === targetFrameId ||
+          (eventFrameId !== undefined && isDescendantOf(eventFrameId, targetFrameId));
+        if (!accepted && eventFrameId !== undefined && !frameParents.has(eventFrameId)) {
+          const refreshed = await loadFrameHierarchy(true);
+          if (settled || !refreshed) return;
+          accepted =
+            refreshed.rootFrameId === targetFrameId || isDescendantOf(eventFrameId, targetFrameId);
+        }
+        if (accepted) recordIntent(parsedIntent);
+      })
+      .finally(() => {
+        pendingHierarchyChecks = Math.max(0, pendingHierarchyChecks - 1);
+        if (pendingHierarchyChecks === 0 && !settled && capturedId === undefined) {
+          for (const candidate of [...candidates.values()]) {
+            if (candidate.graceExpired && !attributable(candidate)) {
+              expireCandidate(candidate);
+            }
+          }
+          reconcile();
+        }
+      });
   });
   let releaseTabAttachment: (() => void) | undefined;
 

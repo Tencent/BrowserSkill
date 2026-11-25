@@ -872,4 +872,48 @@ describe("handleSessionStop window release (issue #57)", () => {
     expect(aw.remove).toHaveBeenCalledWith(agentWindowId);
     expect(sm.has("aa11")).toBe(false);
   });
+
+  it("still returns a borrowed tab that was replaced via onReplaced while an earlier tab was returning", async () => {
+    const aw = fakeAgentWindow([agentWindowId]);
+    aw.ensureActiveTab = vi.fn(async () => 10);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(301, { tabId: 301, originalWindowId: 1, originalIndex: 0 });
+    ctx.borrowedTabs.set(302, { tabId: 302, originalWindowId: 1, originalIndex: 1 });
+
+    const state: FakeState = {
+      tabs: new Map([
+        [10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab],
+        [301, { id: 301, windowId: agentWindowId } as chrome.tabs.Tab],
+        [302, { id: 302, windowId: agentWindowId } as chrome.tabs.Tab],
+      ]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+    const origMove = tabs.move;
+    tabs.move = vi.fn(async (tabId: number, moveProps: chrome.tabs.MoveProperties) => {
+      const moved = await origMove(tabId, moveProps);
+      if (tabId === 301) {
+        // While 301 is being returned, Chrome replaces borrowed tab 302 -> 399.
+        state.tabs.delete(302);
+        state.tabs.set(399, { id: 399, windowId: agentWindowId } as chrome.tabs.Tab);
+        sm.replaceTab(399, 302);
+      }
+      return moved;
+    }) as typeof tabs.move;
+    const query = makeQuery(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.returned_tab_ids).toEqual([301, 399]);
+    expect(res.return_failures).toBeUndefined();
+    expect(state.tabs.get(301)?.windowId).toBe(1);
+    expect(state.tabs.get(399)?.windowId).toBe(1);
+    expect(sm.has("aa11")).toBe(false);
+  });
 });

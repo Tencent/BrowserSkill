@@ -19,6 +19,8 @@ pub struct DebugArgs {
     #[arg(long)]
     pub session: Option<String>,
     #[arg(long)]
+    pub scope: Option<String>,
+    #[arg(long)]
     pub tab_id: Option<i64>,
     #[arg(long)]
     pub run_id: Option<String>,
@@ -95,12 +97,6 @@ impl DebugArgs {
     fn params(self) -> Result<DebugParams, CliError> {
         let action: DebugAction = serde_json::from_value(serde_json::Value::String(self.action))
             .context("invalid debug action")?;
-        if action != DebugAction::Capabilities && self.session.as_deref().is_none_or(str::is_empty)
-        {
-            return Err(
-                anyhow::anyhow!("--session is required except for offline capabilities").into(),
-            );
-        }
         if matches!(
             action,
             DebugAction::Request
@@ -238,15 +234,18 @@ pub fn dispatch(
     _format: Format,
 ) -> Result<(), CliError> {
     let output = args.output.clone();
+    let scope = args.scope.clone();
+    let op_ctx = ctx.with_scope(scope.as_deref());
     let params = args.params()?;
-    if params.action != DebugAction::Replay
-        && (ctx.verification_requested() || ctx.context_id.is_some())
-    {
+    if !params.action.cooperation_guarded() && op_ctx.has_any_action_metadata() {
         return Err(CliError::invalid_params(anyhow::anyhow!(
-            "context, depends_on, observation, and expect on debug apply only to replay"
+            "context, depends_on, observation, and expect on debug apply only to guarded debug actions (rule_add, rule_enable, rule_disable, rule_remove, replay)"
         )));
     }
-    if params.action == DebugAction::Capabilities && params.session_id.is_empty() {
+    if params.action == DebugAction::Capabilities
+        && params.session_id.is_empty()
+        && op_ctx.scope.is_none()
+    {
         println!(
             "{}",
             serde_json::to_string_pretty(&offline_capabilities_value())
@@ -258,7 +257,7 @@ pub fn dispatch(
     let export = params.action == DebugAction::Export;
     let budget = params.budget.unwrap_or(65536) as usize;
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let mut result: DebugResult = ctx.call(
+    let mut result: DebugResult = op_ctx.call(
         info.sock_path,
         "debug",
         Method::ToolDebug,
@@ -286,7 +285,7 @@ pub(crate) fn offline_capabilities_value() -> serde_json::Value {
         "cli": cli_identity(),
         "extension": null,
         "discovery": "cli_schema_only",
-        "hint": "Pass session to discover the connected extension's actual capabilities and limits",
+        "hint": "Pass session or scope to discover the connected extension's actual capabilities and limits",
         "parameters": bsk_protocol::tools::debug_parameter_schema(),
     })
 }
@@ -431,7 +430,9 @@ mod tests {
     #[test]
     fn reliability_options_are_discoverable_and_bounded() {
         assert!(parse(&["bsk", "debug", "capabilities"]).is_ok());
-        assert!(parse(&["bsk", "debug", "activity"]).is_err());
+        let activity = parse(&["bsk", "debug", "activity"]).unwrap();
+        assert_eq!(activity.action, DebugAction::Activity);
+        assert!(activity.session_id.is_empty());
         let p = parse(&[
             "bsk",
             "debug",

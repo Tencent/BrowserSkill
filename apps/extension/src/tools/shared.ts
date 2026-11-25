@@ -581,7 +581,11 @@ export function cdpRunnerForFrame(
           buildFrameCleanupGuard(guard, undefined),
         );
       }
-      const effectiveGuard = signal && !guard?.signal ? { ...guard, signal } : guard;
+      const mergedSignal =
+        signal && guard?.signal && signal !== guard.signal
+          ? AbortSignal.any([guard.signal, signal])
+          : (signal ?? guard?.signal);
+      const effectiveGuard = mergedSignal ? { ...guard, signal: mergedSignal } : guard;
       if (effectiveGuard !== undefined) {
         return cdp.sendToFrame<T>(handle, method, params, effectiveGuard);
       }
@@ -604,12 +608,16 @@ export function cdpRunnerForFrame(
           buildFrameCleanupGuard(guard, callGuard),
         );
       }
+      const mergedSignal =
+        callGuard?.signal && guard?.signal && callGuard.signal !== guard.signal
+          ? AbortSignal.any([guard.signal, callGuard.signal])
+          : (callGuard?.signal ?? guard?.signal);
       const mergedGuard =
         guard || callGuard
           ? {
               ...guard,
               ...callGuard,
-              signal: callGuard?.signal ?? guard?.signal,
+              ...(mergedSignal ? { signal: mergedSignal } : {}),
             }
           : undefined;
       if (mergedGuard !== undefined) {
@@ -620,6 +628,22 @@ export function cdpRunnerForFrame(
         : cdp.sendToFrame<T>(remapped, method);
     },
   });
+}
+
+const REMOTE_OBJECT_RELEASE_TIMEOUT_MS = 1_000;
+
+async function awaitBoundedRelease(work: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      work.catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, REMOTE_OBJECT_RELEASE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -640,11 +664,13 @@ export async function withObjectGroup<T>(
     return await fn(objectGroup);
   } finally {
     try {
-      await cleanup.sendToFrame(
-        handle,
-        "Runtime.releaseObjectGroup",
-        { objectGroup },
-        { allowReattach: false },
+      await awaitBoundedRelease(
+        cleanup.sendToFrame(
+          handle,
+          "Runtime.releaseObjectGroup",
+          { objectGroup },
+          { allowReattach: false },
+        ),
       );
     } catch {
       // Never let cleanup failures (detached tab, unowned tab, or navigated frame) mask caller outcome.
@@ -669,11 +695,13 @@ export async function withRemoteObject<T>(
     return await fn(objectId);
   } finally {
     try {
-      await cleanup.sendToFrame(
-        handle,
-        "Runtime.releaseObject",
-        { objectId },
-        { allowReattach: false },
+      await awaitBoundedRelease(
+        cleanup.sendToFrame(
+          handle,
+          "Runtime.releaseObject",
+          { objectId },
+          { allowReattach: false },
+        ),
       );
     } catch {
       // Never let cleanup failures (detached tab, unowned tab, or navigated frame) mask caller outcome.
@@ -684,6 +712,7 @@ export async function withRemoteObject<T>(
 export { toFrameDocumentHandle, toRootFrameHandle };
 
 const sessionRunners = new WeakMap<object, Map<string, CdpRunner>>();
+const sessionRunnerUnwrap = new WeakMap<object, object>();
 const TAB_SCOPED_CDP_METHODS = new Set<PropertyKey>([
   "getFrameDocuments",
   "getMainFrameHandle",
@@ -697,6 +726,19 @@ const TAB_SCOPED_CDP_METHODS = new Set<PropertyKey>([
   "setTouchEmulationEnabled",
 ]);
 
+/** Evict a stopped session's cached CDP runner wrapper so closures and session refs can be GC'd. */
+export function evictSessionCdpRunner(cdp: object | undefined, sessionId: string): void {
+  if (!cdp) return;
+  const root = sessionRunnerUnwrap.get(cdp) ?? cdp;
+  const bySession = sessionRunners.get(root);
+  const wrapper = bySession?.get(sessionId);
+  bySession?.delete(sessionId);
+  if (wrapper) {
+    sessionRunners.delete(wrapper);
+    sessionRunnerUnwrap.delete(wrapper);
+  }
+}
+
 /**
  * Bind a CDP runner to `sessionId` so any tab-attaching command automatically
  * records session ownership before touching the tab's debugger connection.
@@ -706,17 +748,18 @@ export function sessionCdpRunner<T extends CdpRunner>(
   sessionId: string,
   isLive?: () => boolean,
 ): T {
-  let bySession = sessionRunners.get(cdp);
+  const root = (sessionRunnerUnwrap.get(cdp) as T | undefined) ?? cdp;
+  let bySession = sessionRunners.get(root);
   const existing = bySession?.get(sessionId);
   if (existing) return existing as T;
 
   const track = (tabId: number) => {
     if (typeof tabId === "number" && (!isLive || isLive())) {
-      cdp.trackSessionTab(sessionId, tabId);
+      root.trackSessionTab(sessionId, tabId);
     }
   };
   const wrapper = delegateCdpRunner<T>(
-    cdp,
+    root,
     {
       send: <R = unknown>(
         tabId: number,
@@ -726,11 +769,11 @@ export function sessionCdpRunner<T extends CdpRunner>(
       ): Promise<R> => {
         track(tabId);
         if (signal !== undefined) {
-          return cdp.send<R>(tabId, method, params, signal);
+          return root.send<R>(tabId, method, params, signal);
         }
         return params !== undefined
-          ? cdp.send<R>(tabId, method, params)
-          : cdp.send<R>(tabId, method);
+          ? root.send<R>(tabId, method, params)
+          : root.send<R>(tabId, method);
       },
       sendToFrame: <R = unknown>(
         handle: FrameDocumentHandle | FrameNodeHandle,
@@ -742,11 +785,11 @@ export function sessionCdpRunner<T extends CdpRunner>(
           track(handle.tabId);
         }
         if (guard !== undefined) {
-          return cdp.sendToFrame<R>(handle, method, params, guard);
+          return root.sendToFrame<R>(handle, method, params, guard);
         }
         return params !== undefined
-          ? cdp.sendToFrame<R>(handle, method, params)
-          : cdp.sendToFrame<R>(handle, method);
+          ? root.sendToFrame<R>(handle, method, params)
+          : root.sendToFrame<R>(handle, method);
       },
     },
     {
@@ -765,10 +808,11 @@ export function sessionCdpRunner<T extends CdpRunner>(
   );
   if (!bySession) {
     bySession = new Map();
-    sessionRunners.set(cdp, bySession);
+    sessionRunners.set(root, bySession);
   }
   bySession.set(sessionId, wrapper);
   sessionRunners.set(wrapper, new Map([[sessionId, wrapper]]));
+  sessionRunnerUnwrap.set(wrapper, root);
   return wrapper;
 }
 

@@ -282,7 +282,7 @@ it("leaves cross-window popups unclaimed, borrowable and safe from the original 
   expect(f.tabs.get(20)?.windowId).toBe(11);
 });
 
-it("requires a main-frame source event and rejects another task's source", async () => {
+it("adopts same-window iframe popups non-destructively and rejects another task's source", async () => {
   const f = await fixture();
   const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
     input(10);
@@ -291,7 +291,17 @@ it("requires a main-frame source event and rejects another task's source", async
   });
   await vi.advanceTimersByTimeAsync(100);
   await work;
-  expect(f.task.observedTabs?.size ?? 0).toBe(0);
+  expect(f.task.observedTabs).toEqual(new Set([20]));
+  expect(isAgentControlledTab(f.task, 20)).toBe(true);
+  expect(isAgentControlledTab(f.task, 21)).toBe(false);
+  expect(f.task.agentCreatedTabs.has(20)).toBe(false);
+  const stopped = await handleSessionStop(
+    f.manager,
+    { session_id: "one" },
+    { tabManagement: f.deps, tabsQuery: f.api },
+  );
+  expect(stopped).toMatchObject({ window_released: true });
+  expect(f.tabs.has(20)).toBe(true);
 });
 
 it.each([

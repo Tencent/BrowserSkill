@@ -13,6 +13,7 @@ vi.mock("../remote-storage", () => ({
   REMOTE_CONNECTION_REVISION: "revision",
   REMOTE_CONNECTION_MODE: "mode",
   readRemoteConnection: async () => values["bsk_remote_endpoint"],
+  readSavedRemoteConnection: async () => values["bsk_remote_endpoint"],
   writeRemoteConnection: async (endpoint: unknown) => {
     values["bsk_remote_endpoint"] = structuredClone(endpoint);
   },
@@ -191,4 +192,46 @@ it("L20: a renewal failure cannot switch a newly paired local connection back to
   reject(new Error("offline"));
   await failed;
   expect(values[REMOTE_ENDPOINT_KEY]).toBeNull();
+});
+
+it("invokes onAuthorized when remote pairing or resume succeeds via runtime message", async () => {
+  const popupUrl = "chrome-extension://test-ext/popup.html";
+  Object.assign(chrome.runtime, {
+    id: "test-ext",
+    getURL: (path: string) => `chrome-extension://test-ext/${path}`,
+  });
+  let onRuntimeMessage!: (
+    message: unknown,
+    sender: chrome.runtime.MessageSender,
+    reply: (response?: unknown) => void,
+  ) => unknown;
+  vi.mocked(chrome.runtime.onMessage.addListener).mockImplementation((listener) => {
+    onRuntimeMessage = listener as typeof onRuntimeMessage;
+  });
+  const onAuthorized = vi.fn();
+  const watcher = watchRemoteAuthorization({ onAuthorized });
+  try {
+    const reply = vi.fn();
+    onRuntimeMessage(
+      {
+        kind: "bsk-remote-authorization",
+        pairing: `${endpoint.url}#${endpoint.token}`,
+      },
+      { id: "test-ext", url: popupUrl } as chrome.runtime.MessageSender,
+      reply,
+    );
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({ url: endpoint.url }));
+    expect(onAuthorized).toHaveBeenCalledTimes(1);
+
+    const resumeReply = vi.fn();
+    onRuntimeMessage(
+      { kind: "bsk-remote-authorization", resume: true },
+      { id: "test-ext", url: popupUrl } as chrome.runtime.MessageSender,
+      resumeReply,
+    );
+    await vi.waitFor(() => expect(resumeReply).toHaveBeenCalledWith({ url: endpoint.url }));
+    expect(onAuthorized).toHaveBeenCalledTimes(2);
+  } finally {
+    watcher.dispose();
+  }
 });

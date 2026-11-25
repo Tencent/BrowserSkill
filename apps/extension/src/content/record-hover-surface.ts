@@ -15,7 +15,7 @@ export interface HoverSurfaceState {
   signature: string;
 }
 
-const HOVER_SURFACE_SELECTOR = [
+export const HOVER_SURFACE_SELECTOR = [
   '[role="menu"]',
   '[role="menubar"]',
   '[role="listbox"]',
@@ -27,6 +27,62 @@ const HOVER_SURFACE_SELECTOR = [
   "[data-headlessui-state]",
   "[data-radix-popper-content-wrapper]",
 ].join(",");
+
+const MAX_LOCAL_CONTAINER_CHILDREN = 24;
+
+export function collectScopedHoverSurfaceCandidates(
+  trigger?: Element,
+  mutated?: Iterable<Element>,
+  tracked?: Iterable<Element>,
+): Element[] {
+  const candidates = new Set<Element>();
+  const addCandidate = (el: Element | null | undefined) => {
+    if (el?.isConnected && !isExtensionOverlayElement(el)) candidates.add(el);
+  };
+  const addDirectChildrenIfSmall = (container: Element | null | undefined) => {
+    if (
+      !container ||
+      container === document.documentElement ||
+      container.children.length > MAX_LOCAL_CONTAINER_CHILDREN
+    ) {
+      return;
+    }
+    for (let i = 0; i < container.children.length; i += 1) {
+      addCandidate(container.children[i]);
+    }
+  };
+
+  if (tracked) {
+    for (const el of tracked) addCandidate(el);
+  }
+  for (const el of document.querySelectorAll(HOVER_SURFACE_SELECTOR)) {
+    addCandidate(el);
+  }
+  if (trigger?.isConnected) {
+    for (const attr of ["aria-controls", "aria-owns", "popovertarget"] as const) {
+      const ids = trigger.getAttribute(attr);
+      if (!ids) continue;
+      for (const id of ids.trim().split(/\s+/)) {
+        if (id) addCandidate(document.getElementById(id));
+      }
+    }
+    let container: Element | null = trigger;
+    for (let depth = 0; depth < 3 && container; depth += 1) {
+      if (container === document.body || container === document.documentElement) break;
+      addDirectChildrenIfSmall(container);
+      container = container.parentElement;
+    }
+  }
+  if (mutated) {
+    for (const el of mutated) {
+      if (!el.isConnected || isExtensionOverlayElement(el)) continue;
+      addCandidate(el);
+      addCandidate(closestHoverSurfaceCandidate(el));
+      addDirectChildrenIfSmall(el);
+    }
+  }
+  return [...candidates];
+}
 
 const HOVER_SURFACE_WORD_RE =
   /(^|[^a-z0-9])(dropdown-menu|drop-down-menu|menu-list|popover__(popper|content|content-body)|popover-content|popper|popup|flyout|submenu|submenu-wrapper|context-menu|account-menu|user-menu|avatar-menu)(?=[^a-z0-9]|$)/i;
@@ -60,7 +116,7 @@ export function isRecognizedHoverSurfaceElement(el: Element): boolean {
   return false;
 }
 
-function isVisibleSurfaceElement(el: Element): boolean {
+export function isVisibleSurfaceElement(el: Element): boolean {
   if (!(el instanceof HTMLElement)) return false;
   const style = getComputedStyle(el);
   if (style.pointerEvents === "none" || style.visibility === "hidden" || style.display === "none") {
@@ -122,7 +178,7 @@ function closestFloatingSurface(clickElement: Element): Element | null {
   return null;
 }
 
-function hoverSurfaceSignature(el: Element): string {
+export function hoverSurfaceSignature(el: Element): string {
   const rect = rectFor(el);
   return [
     rect
