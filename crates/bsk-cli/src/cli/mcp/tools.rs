@@ -1772,6 +1772,9 @@ async fn inspect(
                     )));
                 }
             };
+            if let Some(ref out) = args.out {
+                crate::cli::atomic_output::preflight_destination(out)?;
+            }
             let out = args.out.unwrap_or_else(screenshot::default_out_path);
             if !overwrite && out.exists() {
                 return Err(download::output_exists(&out));
@@ -1877,11 +1880,11 @@ async fn inspect(
                 "context",
             ],
         )?;
-        if let Some(ref out) = args.out
-            && !overwrite
-            && out.exists()
-        {
-            return Err(download::output_exists(out));
+        if let Some(ref out) = args.out {
+            crate::cli::atomic_output::preflight_destination(out)?;
+            if !overwrite && out.exists() {
+                return Err(download::output_exists(out));
+            }
         }
         let params = protocol::<ScreenshotParams>(
             arguments,
@@ -1940,11 +1943,17 @@ async fn inspect(
         {
             return Err(invalid("discover accepts JSON output only"));
         }
-        if let Some(ref out) = args.out
-            && !overwrite
-            && out.exists()
-        {
-            return Err(download::output_exists(out));
+        if let Some(ref out) = args.out {
+            crate::cli::atomic_output::preflight_destination(out)?;
+            if !overwrite && out.exists() {
+                return Err(download::output_exists(out));
+            }
+            if output_format == extract::OutputFormat::Csv {
+                let meta = extract::metadata_path(out);
+                if !overwrite && meta.exists() {
+                    return Err(download::output_exists(&meta));
+                }
+            }
         }
         let mut input = arguments.as_object().cloned().unwrap();
         input.remove("extract_action");
@@ -2339,6 +2348,7 @@ fn interact_prepare(args: InteractArgs, conn_scope: Option<&str>) -> Result<Prep
             }
             let input: DownloadInput = serde_json::from_value(Value::Object(args.params))
                 .map_err(|err| invalid(format!("invalid download params: {err}")))?;
+            crate::cli::atomic_output::preflight_destination(&input.out)?;
             if !input.overwrite && input.out.exists() {
                 return Err(download::output_exists(&input.out));
             }
@@ -3232,11 +3242,11 @@ async fn assist(
                 return Err(invalid("overwrite requires out"));
             }
             let overwrite = args.overwrite.unwrap_or(false);
-            if let Some(ref out) = args.out
-                && !overwrite
-                && out.exists()
-            {
-                return Err(download::output_exists(out));
+            if let Some(ref out) = args.out {
+                crate::cli::atomic_output::preflight_destination(out)?;
+                if !overwrite && out.exists() {
+                    return Err(download::output_exists(out));
+                }
             }
             let wait_ms = args.wait_ms.unwrap_or(10_000);
             if wait_ms > 60_000 {
@@ -3878,6 +3888,7 @@ async fn run_video(
             })
         }
     };
+    video::preflight_command(&command)?;
     let link = connect(daemon, control).await?;
     let (value, failed) = link
         .blocking(move |rpc| {
@@ -5106,5 +5117,86 @@ pub(crate) mod tests {
             "inner oneOf null branch must survive: {inner:?}"
         );
         assert!(inner.contains(&json!({ "type": "null" })));
+    }
+
+    #[tokio::test]
+    async fn mcp_output_tools_preflight_destination_before_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir").join("out.bin");
+        let existing_dir = dir.path().join("existing-dir");
+        std::fs::create_dir(&existing_dir).unwrap();
+        let daemon = Daemon::Fixed {
+            sock: PathBuf::from("/nonexistent/bsk-mcp-out-preflight.sock"),
+            protocol: "2.0".into(),
+        };
+        let control = Arc::new(CallControl::default());
+
+        for (target, expected_code) in [
+            (missing.to_str().unwrap(), "not_found"),
+            (existing_dir.to_str().unwrap(), "invalid_params"),
+        ] {
+            for (tool, args) in [
+                (
+                    "bsk_inspect",
+                    json!({"action":"screenshot","session":"s1","out":target}),
+                ),
+                (
+                    "bsk_inspect",
+                    json!({"action":"screenshot","session":"s1","full_page":true,"out":target}),
+                ),
+                (
+                    "bsk_inspect",
+                    json!({"action":"extract","session":"s1","extract_action":"table","selector":"table","out":target}),
+                ),
+                (
+                    "bsk_interact",
+                    json!({"action":"download","session":"s1","params":{"ref":"@e1","out":target}}),
+                ),
+                (
+                    "bsk_video",
+                    json!({"action":"stop","recording":"vid_0123456789abcdef0123456789abcdef","out":target}),
+                ),
+                (
+                    "bsk_video",
+                    json!({"action":"save","recording":"vid_0123456789abcdef0123456789abcdef","out":target}),
+                ),
+                (
+                    "bsk_assist",
+                    json!({"action":"operation_await","session":"s1","operation_id":"op-1","out":target}),
+                ),
+            ] {
+                let reply = call(&daemon, &control, None, tool, args.clone()).await;
+                assert_eq!(reply["isError"], true, "{tool} {args}: {reply}");
+                let body: Value =
+                    serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+                assert_eq!(body["code"], expected_code, "{tool} {args}: {body}");
+                assert_eq!(body["data"]["reason"], "local_file_error", "{tool}: {body}");
+            }
+        }
+
+        // CSV extract also rejects an existing `.meta.json` sidecar before connecting.
+        let csv = dir.path().join("rows.csv");
+        let meta = extract::metadata_path(&csv);
+        std::fs::write(&meta, b"{}").unwrap();
+        let reply = call(
+            &daemon,
+            &control,
+            None,
+            "bsk_inspect",
+            json!({
+                "action": "extract",
+                "session": "s1",
+                "extract_action": "table",
+                "selector": "table",
+                "format": "csv",
+                "out": csv.to_str().unwrap(),
+            }),
+        )
+        .await;
+        assert_eq!(reply["isError"], true, "{reply}");
+        let body: Value =
+            serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["code"], "invalid_params", "{body}");
+        assert_eq!(body["data"]["reason"], "local_file_error", "{body}");
     }
 }

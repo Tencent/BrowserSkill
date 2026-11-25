@@ -177,6 +177,9 @@ pub fn dispatch_operation(
             None,
         ),
     };
+    if let Some((out, _)) = &output {
+        super::atomic_output::preflight_destination(out)?;
+    }
     let timeout = Duration::from_millis(params.wait_ms.unwrap_or(0) as u64 + 10000);
     let info = ensure_daemon()?;
     let mut value: Value = op_ctx.call(

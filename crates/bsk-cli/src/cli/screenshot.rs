@@ -59,6 +59,11 @@ pub fn dispatch(
     ctx: &crate::cli::business_rpc::ClientContext,
     format: Format,
 ) -> Result<(), CliError> {
+    // A viewport crop is one round trip, but a full-page capture can run for
+    // minutes. Reject an unusable destination before either starts.
+    if let Some(out) = args.out.as_deref() {
+        crate::cli::atomic_output::preflight_destination(out)?;
+    }
     let info = ensure_daemon().context("ensure daemon is running")?;
     run(info.sock_path, args, ctx, format)
 }
