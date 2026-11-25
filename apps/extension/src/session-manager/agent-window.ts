@@ -149,6 +149,23 @@ export const chromeAgentWindowApi: AgentWindowApi = {
       }
       return first.id;
     }
+    // This runs immediately after `windows.create(AGENT_WINDOW_HOME, …)` on a
+    // brand-new window, so a bare `about:blank` tab found here is the seed our
+    // own create call opened — some Chromium forks just fail to carry its id
+    // in the creation result. Adopt it as the home tab instead of stacking a
+    // second blank tab: an untracked seed would be miscounted as a user tab
+    // during session stop and keep the Agent Window open forever (issue #826).
+    // A tab the user opened themselves points at the new-tab page or a real
+    // URL, never at `about:blank`, so those still get their own home tab below.
+    const seed = tabs.find(
+      (t) => t.id !== undefined && !ownedTabIds.has(t.id) && t.url === AGENT_WINDOW_HOME,
+    );
+    if (seed?.id !== undefined) {
+      if (!seed.active) {
+        await chrome.tabs.update(seed.id, { active: true });
+      }
+      return seed.id;
+    }
     // Creating an active tab directly in a background window steals OS window focus on macOS Chromium.
     const created = await chrome.tabs.create({ windowId, url, active: false });
     if (typeof created?.id !== "number") {

@@ -917,3 +917,106 @@ describe("handleSessionStop window release (issue #57)", () => {
     expect(sm.has("aa11")).toBe(false);
   });
 });
+
+describe("handleSessionStop blank seed residue (issue #826)", () => {
+  const agentWindowId = 100;
+
+  /**
+   * Simulate the reported fork quirk: `windows.create` resolved without a
+   * usable `tabs` array, so `manager.start` only tracks the home tab that
+   * `ensureActiveTab` created (8) while the original blank seed (7) stays
+   * in the Agent Window untracked.
+   */
+  async function startQuirkSession(): Promise<{
+    sm: SessionManager;
+    aw: ReturnType<typeof fakeAgentWindow>;
+  }> {
+    const aw = fakeAgentWindow([agentWindowId]);
+    aw.ensureActiveTab = vi.fn(async () => 8);
+    const sm = new SessionManager({ agentWindow: aw });
+    await sm.start("aa11");
+    const ctx = sm.get("aa11");
+    if (!ctx) throw new Error("session missing");
+    expect(ctx.agentCreatedTabs.has(8)).toBe(true);
+    expect(ctx.agentCreatedTabs.has(7)).toBe(false);
+    return { sm, aw };
+  }
+
+  function quirkState(): FakeState {
+    return {
+      tabs: new Map([
+        [7, { id: 7, windowId: agentWindowId, url: "about:blank" } as chrome.tabs.Tab],
+        [8, { id: 8, windowId: agentWindowId, url: "about:blank" } as chrome.tabs.Tab],
+      ]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+  }
+
+  it("closes the Agent Window when an untracked blank seed tab is all that remains", async () => {
+    const { sm, aw } = await startQuirkSession();
+    const state = quirkState();
+    const { tabs, windows } = makeApis(state);
+    const query = makeQuery(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    // A leftover blank seed is startup residue, not a user tab; the window
+    // must be destroyed instead of idling as a blank “New Tab” forever.
+    expect(res.window_released).toBeFalsy();
+    expect(aw.remove).toHaveBeenCalledWith(agentWindowId);
+    expect(sm.has("aa11")).toBe(false);
+  });
+
+  it("still releases the window when a genuine user tab remains next to the blank seed", async () => {
+    const { sm, aw } = await startQuirkSession();
+    const state = quirkState();
+    state.tabs.set(99, {
+      id: 99,
+      windowId: agentWindowId,
+      url: "https://example.com/",
+    } as chrome.tabs.Tab);
+    const { tabs, windows } = makeApis(state);
+    const query = makeQuery(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.window_released).toBe(true);
+    expect(aw.remove).not.toHaveBeenCalled();
+    // The user's real page survives; the blank residue may stay in the
+    // released window rather than risk removing a tab the user sees.
+    expect([...state.tabs.keys()].sort()).toEqual([7, 99]);
+    expect(sm.has("aa11")).toBe(false);
+  });
+
+  it("still releases the window when the user opened a new-tab page (Ctrl+T)", async () => {
+    const { sm, aw } = await startQuirkSession();
+    const state = quirkState();
+    state.tabs.set(99, {
+      id: 99,
+      windowId: agentWindowId,
+      url: "chrome://newtab/",
+    } as chrome.tabs.Tab);
+    const { tabs, windows } = makeApis(state);
+    const query = makeQuery(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.window_released).toBe(true);
+    expect(aw.remove).not.toHaveBeenCalled();
+    expect([...state.tabs.keys()].sort()).toEqual([7, 99]);
+    expect(sm.has("aa11")).toBe(false);
+  });
+});

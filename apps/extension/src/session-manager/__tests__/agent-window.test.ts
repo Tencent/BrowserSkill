@@ -57,6 +57,47 @@ describe("chromeAgentWindowApi.ensureActiveTab", () => {
     expect(update).toHaveBeenCalledWith(8, { active: true });
   });
 
+  it("adopts the seed about:blank tab when the creation result carried no tab ids (issue #826)", async () => {
+    // Chromium forks may resolve `windows.create` without a usable `tabs`
+    // array even though they did open the seed `about:blank` tab. This runs
+    // immediately after window creation, so the blank tab in the window is
+    // our own startup seed and must be adopted instead of stacking a second
+    // blank tab that would later keep the window open after session stop.
+    query.mockResolvedValue([{ id: 7, url: "about:blank", active: false }]);
+    update.mockResolvedValue({});
+
+    const home = await chromeAgentWindowApi.ensureActiveTab(100, AGENT_WINDOW_HOME, new Set());
+
+    expect(home).toBe(7);
+    expect(update).toHaveBeenCalledWith(7, { active: true });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("still creates its own home tab when the only untracked tab is a real page", async () => {
+    query.mockResolvedValue([{ id: 99, url: "https://example.com/", active: true }]);
+    create.mockResolvedValue({ id: 8 });
+    update.mockResolvedValue({});
+
+    const home = await chromeAgentWindowApi.ensureActiveTab(100, AGENT_WINDOW_HOME, new Set());
+
+    expect(home).toBe(8);
+    expect(create).toHaveBeenCalledWith({ windowId: 100, url: AGENT_WINDOW_HOME, active: false });
+    expect(update).toHaveBeenCalledWith(8, { active: true });
+  });
+
+  it("still creates its own home tab when the only untracked tab is the browser new-tab page", async () => {
+    // A tab the user opened via Ctrl+T points at the browser's new-tab page,
+    // never at a bare `about:blank`, so it keeps the user-tab guarantee.
+    query.mockResolvedValue([{ id: 99, url: "chrome://newtab/", active: true }]);
+    create.mockResolvedValue({ id: 8 });
+    update.mockResolvedValue({});
+
+    const home = await chromeAgentWindowApi.ensureActiveTab(100, AGENT_WINDOW_HOME, new Set());
+
+    expect(home).toBe(8);
+    expect(create).toHaveBeenCalledWith({ windowId: 100, url: AGENT_WINDOW_HOME, active: false });
+  });
+
   it("removes a newly created home tab if activating it fails", async () => {
     query.mockResolvedValue([]);
     create.mockResolvedValue({ id: 8 });
