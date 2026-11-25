@@ -37,6 +37,24 @@ You can also run the bundled CLI installer manually at any time:
 npx --package @wxg-prc-cpg/browser-skill-dsh-plugin bsk-dsh-install
 ```
 
+## Windows GUI hosts and the daemon
+
+On Windows, a GUI host can run DSH (or another agent) inside a Job Object that forbids breakaway. `bsk`'s normal automatic daemon startup needs that breakaway, so the first browser command fails with:
+
+```text
+ensure daemon is running: automatic daemon startup failed: cannot start an independent Windows daemon; the Job Object of this process does not allow breakaway ...
+```
+
+This is expected in this host, not a broken installation: an already running daemon is still reused. Start it from the host's managed background task and keep that task alive across commands:
+
+```text
+bsk daemon start --foreground
+```
+
+The host must launch it **without allocating a visible console window** — for example Node's `child_process.spawn` with `windowsHide: true`. Do not substitute `Start-Process`, `cmd /c start`, WMI process creation, or a Scheduled Task: those allocate a visible console, and closing that console kills the daemon together with every active browser session.
+
+Verify the daemon from a separate call, then use `BSK_AUTO_START=0` for later `bsk` commands so they reuse it instead of trying to start their own. The full contract — shared `BSK_HOME`, `BSK_AUTO_START=0`, and the independent-terminal fallback when the host cannot keep a task alive — is in [Running in a sandboxed agent](https://github.com/Tencent/BrowserSkill/blob/main/docs/sandboxed-agents.md).
+
 ## Configuration
 
 The plugin exposes one optional setting in `cordis.patch.yml` and the DSH Web UI settings form:

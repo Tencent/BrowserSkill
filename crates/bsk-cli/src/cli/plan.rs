@@ -268,6 +268,7 @@ fn is_strict(kind: step::Action, params: &Value) -> bool {
 fn effect_state(error: &CliError) -> Value {
     let data = error.data();
     match data {
+        Some(data) if data["dispatched"] == false => "none".into(),
         Some(data) if data["effect_state"].is_string() => data["effect_state"].clone(),
         Some(data) if data["reason"] == "cancelled_before_dispatch" => "none".into(),
         // Without evidence that nothing was sent, the caller must not assume so.
@@ -865,5 +866,19 @@ mod tests {
         let untargeted = json!([{"action":"press","key":"Tab"}]);
         let error = Plan::prepare("s".into(), &untargeted, Some("c".into()), None).unwrap_err();
         assert!(error.to_string().contains("observation_id"));
+    }
+
+    #[test]
+    fn dispatched_false_overrides_generic_unknown_effect_state() {
+        let err = CliError::from_rpc(RpcError {
+            code: ErrorCode::CdpFailed,
+            message: "clock unavailable".into(),
+            data: Some(json!({
+                "reason": "input_clock_unavailable",
+                "effect_state": "unknown",
+                "dispatched": false
+            })),
+        });
+        assert_eq!(effect_state(&err), json!("none"));
     }
 }

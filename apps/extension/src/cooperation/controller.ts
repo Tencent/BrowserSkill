@@ -2090,12 +2090,22 @@ export class CooperationController implements ControlAuthority {
     let actionTarget: ResolvedActionTarget | undefined;
     let destinationTarget: typeof actionTarget;
     let checkFailure: RpcError | undefined;
-    // Preparation such as scrolling counts as an effect, so a click can be `unknown`
-    // without having been pressed. Only that distinction makes it safe to try again.
-    const unpressed = (effect: unknown) =>
-      effect === "unknown" && req.method === "tool.click" && !nativeInputStarted
-        ? { press_sent: false }
-        : {};
+    // Preparation such as scrolling or pointer positioning counts as an effect, so an
+    // action can be `unknown` without having dispatched its native input. Recording
+    // `press_sent: false` (click) or `dispatched: false` (wheel/drag/press/transfer
+    // without focus side effects) lets callers and the daemon WAL distinguish a safe retry.
+    const undispatched = (effect: unknown) => {
+      if (effect !== "unknown" || nativeInputStarted) return {};
+      if (req.method === "tool.click") return { press_sent: false };
+      if (
+        !preparationFocus &&
+        ["tool.wheel", "tool.drag", "tool.press", "tool.download", "tool.upload"].includes(
+          req.method,
+        )
+      )
+        return { dispatched: false };
+      return {};
+    };
     const describeFailure = (message: string, effect: "none" | "unknown"): RpcError => {
       if (
         checkFailure?.data?.reason === "input_clock_unavailable" &&
@@ -2104,7 +2114,7 @@ export class CooperationController implements ControlAuthority {
       )
         return {
           ...checkFailure,
-          data: { ...checkFailure.data, effect_state: effect, ...unpressed(effect) },
+          data: { ...checkFailure.data, effect_state: effect, ...undispatched(effect) },
         };
       const diagnosis = observed
         ? {
@@ -2124,7 +2134,7 @@ export class CooperationController implements ControlAuthority {
           ...refused,
           data: {
             ...refused.data,
-            ...unpressed(effect),
+            ...undispatched(effect),
             ...diagnosis,
             ...(idleResumable
               ? {
@@ -2170,7 +2180,7 @@ export class CooperationController implements ControlAuthority {
         data: {
           ...issue.data,
           effect_state: effect,
-          ...unpressed(effect),
+          ...undispatched(effect),
           ...diagnosis,
           ...(effect === "unknown"
             ? {
@@ -2783,7 +2793,9 @@ export class CooperationController implements ControlAuthority {
           },
           dispatch: (startsInput, method, stepParams) => {
             assert(!startsInput && boundObjectCompletion(undefined, method, stepParams));
-            sent = true;
+            // Temporary focus emulation wakes a hidden/occluded tab and is restored
+            // in finally; it is not an irreversible page mutation on its own.
+            if (method !== "Emulation.setFocusEmulationEnabled") sent = true;
             if (!startsInput && PREPARATION_METHODS.has(method)) {
               preparationSent = true;
               preparationFocus ||= method === "DOM.focus";
@@ -2888,16 +2900,22 @@ export class CooperationController implements ControlAuthority {
       // Even a successful CDP reply does not authorize a stale next step.
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) {
-        const effect = sent ? "unknown" : "none";
-        if (targetPolicy && sent) state.context = undefined;
+        const effect =
+          sent ||
+          detachedByHandler ||
+          (isRpcError(result) && result.data?.effect_state === "unknown")
+            ? "unknown"
+            : "none";
+        if (targetPolicy && effect === "unknown") state.context = undefined;
         else maybeRestoreObservation(effect);
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
           data: {
             effect_state: effect,
-            phase: sent ? "execution" : "precondition",
-            ...(sent ? { tab_id: state.tabId } : {}),
+            ...undispatched(effect),
+            phase: effect === "unknown" ? "execution" : "precondition",
+            ...(effect === "unknown" ? { tab_id: state.tabId } : {}),
           },
         };
       }
@@ -2939,7 +2957,7 @@ export class CooperationController implements ControlAuthority {
           data: {
             ...result.data,
             effect_state: effect,
-            ...unpressed(effect),
+            ...undispatched(effect),
             phase: result.data?.phase ?? "execution",
             recovery:
               result.data?.recovery ??
@@ -2953,16 +2971,17 @@ export class CooperationController implements ControlAuthority {
     } catch (error) {
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) {
-        const effect = sent ? "unknown" : "none";
-        if (targetPolicy && sent) state.context = undefined;
+        const effect = sent || detachedByHandler ? "unknown" : "none";
+        if (targetPolicy && effect === "unknown") state.context = undefined;
         else maybeRestoreObservation(effect);
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
           data: {
             effect_state: effect,
-            phase: sent ? "execution" : "precondition",
-            ...(sent ? { tab_id: state.tabId } : {}),
+            ...undispatched(effect),
+            phase: effect === "unknown" ? "execution" : "precondition",
+            ...(effect === "unknown" ? { tab_id: state.tabId } : {}),
           },
         };
       }
@@ -3037,7 +3056,10 @@ export class CooperationController implements ControlAuthority {
         if (error instanceof ActionCheckError) checkFailure = error.rpcError;
         const effect = sent ? "unknown" : "none";
         maybeRestoreObservation(effect);
-        if (error instanceof FrameCollectionError) return error.toRpcError(effect);
+        if (error instanceof FrameCollectionError) {
+          const rpc = error.toRpcError(effect);
+          return { ...rpc, data: { ...rpc.data, ...undispatched(effect) } };
+        }
         return reportFailure(error instanceof Error ? error.message : String(error), effect);
       }
     } finally {
