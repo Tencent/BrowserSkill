@@ -35,6 +35,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- 修复 `bsk fill` 在空的 ProseMirror 富文本编辑器（空段落内含不可编辑 `.ProseMirror-widget[contenteditable="false"]` 占位符及可选空 `img.ProseMirror-separator`、单个尾随 `<br>`）上误读占位符文本或因光标规范化报 `fill_focus_lost` 的问题：`handleFill` 现将此类装饰性空段落按空值处理并接受段落内的规范化光标位置，同时继续拒绝含真实文本、正文图片或多行 `<br>` 的段落。
 - CLI 带 `--out` 参数的命令（`screenshot`、`get-html`、`download`、`extract`、`video stop`/`save`、`operation await`、`recipe draft`）及对应 MCP 工具（`bsk_inspect` 的 `screenshot`/`extract`、`bsk_interact` 的 `download`、`bsk_video` 的 `stop`/`save`、`bsk_assist` 的 `operation_await`）现在会在连接守护进程或启动采集之前拒绝不可用的输出路径（空路径、目录/尾分隔符路径、父目录不存在或父路径为普通文件），统一返回 `local file validation failed` 与 `--out` 恢复提示，同时保留各命令对既有普通文件的 `--overwrite` 覆写语义（含 MCP CSV `extract` 的 `.meta.json` 伴生文件冲突前置校验）。
 - `bsk extract` 现在会按页面 CSS `text-transform` 输出下拉框选中项的文本，报告用户实际看到的标签（`PAID`）而不是原始选项文本（`paid`）；表格单元格与 `input`/`textarea` 值此前已按此处理。
 - 修复默认人机共驾模式下后台未选中标签页与被遮挡非聚焦窗口（如 macOS `--no-focus` Agent 窗口）执行 `bsk screenshot --full-page` 报 `page_hidden` 的问题：在 `guardedRunner` 剥离持久后台执行租约的场景下，`handleFullPageScreenshot` 现为非最小化且未持有持久租约的标签页临时启用 `Emulation.setFocusEmulationEnabled` 并在完成后有界释放（清理失败时通过 `detach` 围栏隔离），同时 `ChromiumCdp` 会保护活跃持久租约（如视频录制）不被临时释放误关，显式最小化窗口仍按预期以 `page_hidden` 拒绝。

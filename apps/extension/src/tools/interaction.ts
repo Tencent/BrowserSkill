@@ -1060,12 +1060,37 @@ const FILL_SENSITIVE_FUNCTION = `function() {
 // line edges is source formatting rather than text.
 const FILL_COLLAPSES_WHITESPACE = `['normal', 'nowrap'].includes(getComputedStyle(this).whiteSpace)`;
 
+// ProseMirror renders empty paragraphs with view-only widget decorations and a
+// separator image. They are not document text or additional insertion positions.
+const FILL_EMPTY_DECORATED_PARAGRAPH_FUNCTION = `function() {
+  if (!this.matches('.ProseMirror') || this.childNodes.length !== 1 ||
+      this.firstChild.nodeType !== Node.ELEMENT_NODE || this.firstChild.nodeName !== 'P') return false;
+  let hasWidget = false;
+  let breaks = 0;
+  for (const node of this.firstChild.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node.length !== 0) return false;
+      continue;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return false;
+    if (node.nodeName === 'BR') {
+      if (++breaks > 1) return false;
+    } else if (node.matches('.ProseMirror-widget[contenteditable="false"]')) {
+      hasWidget = true;
+    } else if (!node.matches('img.ProseMirror-separator') || node.hasAttribute('src') || node.alt) {
+      return false;
+    }
+  }
+  return hasWidget;
+}`;
+
 // Typing produces text nodes, <br>, and direct <div> lines. Read that layout
 // literally: innerText collapses whitespace and counts the <br> that only holds
 // a line open. Other rich structures keep their rendered text. Normalize NBSP
 // only in the read value; never rewrite the user's DOM characters.
 const FILL_VALUE_FUNCTION = `function() {
   if (this.matches('input,textarea')) return this.value;
+  if ((${FILL_EMPTY_DECORATED_PARAGRAPH_FUNCTION}).call(this)) return '';
   const collapses = ${FILL_COLLAPSES_WHITESPACE};
   const isInline = node => node.nodeType === Node.TEXT_NODE || node.nodeName === 'BR';
   const isLine = node => node.nodeName === 'DIV' && getComputedStyle(node).display === 'block' &&
@@ -1379,7 +1404,8 @@ export async function handleFill(
                   if (offset !== node.length) return 'fill_focus_lost';
                 } else if (node.nodeType === Node.ELEMENT_NODE) {
                   if (!node.isContentEditable || node.matches('input,textarea,select,button,img,br,hr,iframe,object,embed,canvas,video,audio')) return 'fill_focus_lost';
-                  if (offset !== node.childNodes.length) {
+                  if (offset !== node.childNodes.length &&
+                      !(node === this.firstChild && (${FILL_EMPTY_DECORATED_PARAGRAPH_FUNCTION}).call(this))) {
                     const inlineHost = node === this && [...node.childNodes].every(child =>
                       child.nodeType === Node.TEXT_NODE || child.nodeName === 'BR');
                     if (paddingBreak || offset !== node.childNodes.length - 1 ||
