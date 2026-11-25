@@ -104,13 +104,23 @@ function startFrameRead(
               throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
             let repair = repairs.get(frame.documentId);
             if (!repair) {
-              repair = chrome.scripting
-                .executeScript({
-                  target: { tabId, documentIds: [frame.documentId] },
-                  files: ["content-scripts/cooperation.js"],
-                  injectImmediately: true,
-                })
-                .then(() => {});
+              let started!: Promise<void>;
+              started = (async () => {
+                try {
+                  await chrome.scripting.executeScript({
+                    target: { tabId, documentIds: [frame.documentId] },
+                    files: ["content-scripts/cooperation.js"],
+                    injectImmediately: true,
+                  });
+                } catch (error) {
+                  if (repairs.get(frame.documentId) === started) {
+                    repairs.delete(frame.documentId);
+                  }
+                  throw error;
+                }
+              })();
+              void started.catch(() => {});
+              repair = started;
               repairs.set(frame.documentId, repair);
             }
             try {
@@ -379,10 +389,15 @@ const ARM_FRAME_TIMEOUT = Symbol("arm_frame_timeout");
 function sendArmFrameBounded(
   tabId: number,
   target: { documentId: string } | { frameId: number },
+  lease?: string,
 ): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
-    chrome.tabs.sendMessage(tabId, { kind: COOPERATION_ARM_FRAME }, target),
+    chrome.tabs.sendMessage(
+      tabId,
+      { kind: COOPERATION_ARM_FRAME, ...(lease !== undefined ? { lease } : {}) },
+      target,
+    ),
     new Promise<typeof ARM_FRAME_TIMEOUT>((resolve) => {
       timer = setTimeout(() => resolve(ARM_FRAME_TIMEOUT), FRAME_REPLY_TIMEOUT_MS);
     }),
@@ -397,12 +412,21 @@ export function attachCooperation(
     details: chrome.webNavigation.WebNavigationTransitionCallbackDetails,
   ) => void,
 ): CooperationController {
+  const tabLeases = new Map<number, string>();
+  const tabArmGenerations = new Map<number, number>();
+  const lastReleasedLeases = new Map<number, string>();
+  const invalidateTabArming = (tabId: number, releasedLease?: string) => {
+    tabLeases.delete(tabId);
+    tabArmGenerations.set(tabId, (tabArmGenerations.get(tabId) ?? 0) + 1);
+    if (releasedLease !== undefined) lastReleasedLeases.set(tabId, releasedLease);
+  };
   const controller = new CooperationController({
     sessions,
     changed,
     sessionActivity,
-    readFrames: (tabId, input, lease, repairs, hidden, replyTimeoutMs, signal) =>
-      collectCooperationFrames(
+    readFrames: (tabId, input, lease, repairs, hidden, replyTimeoutMs, signal) => {
+      tabLeases.set(tabId, lease);
+      return collectCooperationFrames(
         tabId,
         input ? COOPERATION_ARM : COOPERATION_READ,
         lease,
@@ -412,8 +436,10 @@ export function attachCooperation(
         false,
         replyTimeoutMs,
         signal,
-      ),
+      );
+    },
     resumeFrames: async (tabId, lease, repairs, hidden, replyTimeoutMs, signal) => {
+      tabLeases.set(tabId, lease);
       await collectCooperationFrames(
         tabId,
         COOPERATION_RESUME,
@@ -427,6 +453,7 @@ export function attachCooperation(
       );
     },
     releaseFrames: async (tabId, lease) => {
+      invalidateTabArming(tabId, lease);
       await collectCooperationFrames(tabId, COOPERATION_DISABLE, lease);
     },
   });
@@ -456,8 +483,21 @@ export function attachCooperation(
             if (!sessions.findControllingSession?.(tabId)) return;
           }
           if (shouldInject) {
-            await injectCooperationAllFrames(tabId);
-            if (!sessions.findControllingSession?.(tabId)) return;
+            const armGen = tabArmGenerations.get(tabId) ?? 0;
+            const armLease = tabLeases.get(tabId);
+            const isStillActive = () =>
+              (tabArmGenerations.get(tabId) ?? 0) === armGen &&
+              Boolean(sessions.findControllingSession?.(tabId));
+            await injectCooperationAllFrames(tabId, {
+              lease: armLease,
+              isActive: isStillActive,
+            });
+            if (!sessions.findControllingSession?.(tabId)) {
+              const cleanupLease = lastReleasedLeases.get(tabId) ?? armLease ?? crypto.randomUUID();
+              await collectCooperationFrames(tabId, COOPERATION_DISABLE, cleanupLease);
+              return;
+            }
+            if (!isStillActive()) return;
           }
           await controller.observeTab(tabId);
         })().catch(() => {});
@@ -468,6 +508,17 @@ export function attachCooperation(
     details: chrome.webNavigation.WebNavigationTransitionCallbackDetails,
   ) => {
     if (!sessions.findControllingSession?.(details.tabId)) return;
+    const armGen = tabArmGenerations.get(details.tabId) ?? 0;
+    const armLease = tabLeases.get(details.tabId);
+    const isStaleArm = () =>
+      (tabArmGenerations.get(details.tabId) ?? 0) !== armGen ||
+      !sessions.findControllingSession?.(details.tabId);
+    const disarmStaleFrame = () => {
+      const cleanupLease = lastReleasedLeases.get(details.tabId) ?? armLease ?? crypto.randomUUID();
+      return chrome.tabs
+        .sendMessage(details.tabId, { kind: COOPERATION_DISABLE, lease: cleanupLease }, target)
+        .catch(() => {});
+    };
     const target = details.documentId
       ? { documentId: details.documentId }
       : { frameId: details.frameId };
@@ -479,14 +530,21 @@ export function attachCooperation(
     const armTask = (async () => {
       try {
         let needsInject = false;
+        let armed = false;
         try {
-          const ack = await sendArmFrameBounded(details.tabId, target);
+          const ack = await sendArmFrameBounded(details.tabId, target, armLease);
           needsInject = ack === undefined;
+          armed = typeof ack === "object" && ack !== null && (ack as { ok?: unknown }).ok === true;
         } catch (error) {
           needsInject = missingReceiver(error);
         }
+        if (armed && isStaleArm()) {
+          await disarmStaleFrame();
+          return;
+        }
         if (
           needsInject &&
+          !isStaleArm() &&
           details.documentId &&
           typeof chrome.scripting?.executeScript === "function"
         ) {
@@ -496,16 +554,23 @@ export function attachCooperation(
               files: ["content-scripts/cooperation.js"],
               injectImmediately: true,
             });
-            if (injected) await sendArmFrameBounded(details.tabId, target);
+            if (injected && !isStaleArm()) {
+              const ack = await sendArmFrameBounded(details.tabId, target, armLease);
+              if (
+                typeof ack === "object" &&
+                ack !== null &&
+                (ack as { ok?: unknown }).ok === true &&
+                isStaleArm()
+              ) {
+                await disarmStaleFrame();
+              }
+            }
           } catch {
             // Restricted or replaced documents are handled during frame collection.
           }
         }
       } finally {
-        if (
-          (details.frameId === 0 || details.frameType === "outermost_frame") &&
-          sessions.findControllingSession?.(details.tabId)
-        ) {
+        if ((details.frameId === 0 || details.frameType === "outermost_frame") && !isStaleArm()) {
           onOutermostFrameArmed?.(details);
         }
       }
@@ -553,12 +618,18 @@ export function attachCooperation(
     clearObserveTimer(tabId);
     subframeNeedsInject.delete(tabId);
     pendingArms.delete(tabId);
+    invalidateTabArming(tabId);
+    tabArmGenerations.delete(tabId);
+    lastReleasedLeases.delete(tabId);
     controller.releaseTab(tabId);
   });
   chrome.tabs.onDetached.addListener((tabId) => {
     clearObserveTimer(tabId);
     subframeNeedsInject.delete(tabId);
     pendingArms.delete(tabId);
+    invalidateTabArming(tabId);
+    tabArmGenerations.delete(tabId);
+    lastReleasedLeases.delete(tabId);
     controller.detachTab(tabId);
   });
   return controller;

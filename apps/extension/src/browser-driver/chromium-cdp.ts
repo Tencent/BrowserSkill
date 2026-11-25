@@ -29,7 +29,12 @@ import type {
   PendingJavaScriptDialog,
 } from "@/transport/types";
 import { BackgroundExecution } from "./background-execution";
-import { CdpReadGate, CdpReadTimeoutError, READ_TIMEOUT_MS } from "./command-deadline";
+import {
+  CdpReadGate,
+  CdpReadTimeoutError,
+  READ_TIMEOUT_MS,
+  waitForAbort,
+} from "./command-deadline";
 import {
   buildFrameGraph,
   type CdpFrameGraph,
@@ -154,6 +159,8 @@ const MAX_NETWORK_FIELD_LENGTH = 4096;
 const MAX_NETWORK_REQUEST_META = 1024;
 const FRAME_DISCOVERY_TIMEOUT_MS = 1000;
 const FRAME_DISCOVERY_QUIET_MS = 20;
+export const DEBUGGER_ATTACH_TIMEOUT_MS = 10_000;
+export const DEBUGGER_ATTACH_FENCE_WAIT_MS = 1_000;
 
 interface ParsedDialogOpening {
   type: JavaScriptDialogType;
@@ -322,6 +329,7 @@ export type TabAttachment =
       version: number;
       snapshot: SoftDetachSnapshot;
       detachInFlight?: Promise<void>;
+      fencedAttach?: Promise<void>;
       leases: Set<TabLease>;
       eventListeners: Set<TabEventListener>;
       history: TabHistoryState;
@@ -486,6 +494,7 @@ export class ChromiumCdp {
   private readonly dialogListeners = new Set<
     (tabId: number, dialog: PendingJavaScriptDialog | null, reason?: "decision_timeout") => void
   >();
+  private nextTabVersion = 1;
   private syncGeneration = 0;
   private eventSubscription: { dispose(): void } | null = null;
   private detachSubscription: { dispose(): void } | null = null;
@@ -504,7 +513,7 @@ export class ChromiumCdp {
     if (existing) return existing;
     const created: TabAttachment = {
       kind: "detached",
-      version: 0,
+      version: this.nextTabVersion++,
       leases: new Set(),
       eventListeners: new Set(),
       history: createHistoryState(),
@@ -517,7 +526,6 @@ export class ChromiumCdp {
     const entry = this.tabs.get(tabId);
     if (!entry || entry.kind !== "detached") return;
     if (
-      entry.version === 0 &&
       !entry.detachInFlight &&
       !entry.fencedAttach &&
       entry.leases.size === 0 &&
@@ -650,6 +658,17 @@ export class ChromiumCdp {
     this.touchTabActivity(tabId);
   }
 
+  /** Wait for shared debugger attach while letting a cancelled caller exit immediately. */
+  private async waitForAttach(tabId: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const attach = this.ensureAttached(tabId);
+    if (!signal) {
+      await attach;
+      return;
+    }
+    await waitForAbort(attach, signal);
+  }
+
   /** `CdpRunner` entry point used by passive read/extract/observation tools. */
   async ensureAttachedToUrl(tabId: number, _expectedUrl?: string): Promise<void> {
     await this.ensureAttached(tabId);
@@ -709,9 +728,19 @@ export class ChromiumCdp {
       await entry.detachInFlight;
       entry = this.tabs.get(tabId);
     }
-    if (entry?.kind === "detached" && entry.fencedAttach) {
-      await entry.fencedAttach;
-      return;
+    if ((entry?.kind === "detached" || entry?.kind === "soft_detached") && entry.fencedAttach) {
+      const fencedAttach = entry.fencedAttach;
+      if (!(await cleanupWait(fencedAttach, DEBUGGER_ATTACH_FENCE_WAIT_MS))) {
+        throw new Error(
+          `A previous debugger attachment to tab ${tabId} is still settling. Wait for the browser to reconnect and retry.`,
+        );
+      }
+      entry = this.tabs.get(tabId);
+      if (entry?.kind === "attached") {
+        await this.verifyRootDocumentAfterDialog(tabId);
+        this.touchTabActivity(tabId);
+        return;
+      }
     }
     if (entry?.kind === "attaching") {
       await entry.attachInFlight;
@@ -760,8 +789,53 @@ export class ChromiumCdp {
       }
     };
 
+    let attachTimedOut = false;
+    let lateAttachCleanupSettled = false;
+    let lateAttachCleanup: Promise<void> | undefined;
     try {
-      await this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
+      const rawAttach = this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
+      lateAttachCleanup = rawAttach
+        .then(
+          async () => {
+            if (!attachTimedOut) return;
+            try {
+              await this.api.detach({ tabId });
+            } catch (detachErr) {
+              console.debug("[bsk cdp] late attach rollback failed", { tabId, detachErr });
+            }
+          },
+          () => {},
+        )
+        .then(() => {
+          lateAttachCleanupSettled = true;
+          const current = this.tabs.get(tabId);
+          if (
+            (current?.kind === "detached" || current?.kind === "soft_detached") &&
+            current.fencedAttach === lateAttachCleanup
+          ) {
+            current.fencedAttach = undefined;
+            this.maybePruneDetachedEntry(tabId);
+          }
+        });
+
+      let attachTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          rawAttach,
+          new Promise<never>((_, reject) => {
+            attachTimer = setTimeout(() => {
+              attachTimedOut = true;
+              reject(
+                new Error(
+                  `Chrome did not respond to debugger.attach within ${DEBUGGER_ATTACH_TIMEOUT_MS}ms.`,
+                ),
+              );
+            }, DEBUGGER_ATTACH_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        clearTimeout(attachTimer);
+      }
       attachingEntry.rawAttached = true;
       try {
         check();
@@ -933,6 +1007,9 @@ export class ChromiumCdp {
                 kind: "soft_detached",
                 version: attachingEntry.version,
                 snapshot: previousSoftDetach,
+                ...(attachTimedOut && lateAttachCleanup && !lateAttachCleanupSettled
+                  ? { fencedAttach: lateAttachCleanup }
+                  : {}),
                 leases: attachingEntry.leases,
                 eventListeners: attachingEntry.eventListeners,
                 history: attachingEntry.history,
@@ -940,14 +1017,23 @@ export class ChromiumCdp {
             : {
                 kind: "detached",
                 version: attachingEntry.version,
+                ...(attachTimedOut && lateAttachCleanup && !lateAttachCleanupSettled
+                  ? { fencedAttach: lateAttachCleanup }
+                  : {}),
                 leases: attachingEntry.leases,
                 eventListeners: attachingEntry.eventListeners,
                 history: attachingEntry.history,
               },
         );
         this.maybePruneDetachedEntry(tabId);
-      } else if (latest?.kind === "detached" && latest.fencedAttach === attachInFlight) {
-        latest.fencedAttach = undefined;
+      } else if (
+        (latest?.kind === "detached" || latest?.kind === "soft_detached") &&
+        latest.fencedAttach === attachInFlight
+      ) {
+        latest.fencedAttach =
+          attachTimedOut && lateAttachCleanup && !lateAttachCleanupSettled
+            ? lateAttachCleanup
+            : undefined;
         this.maybePruneDetachedEntry(tabId);
       }
       void attachInFlight.catch(() => {});
@@ -969,10 +1055,26 @@ export class ChromiumCdp {
     signal?: AbortSignal,
   ): Promise<T> {
     signal?.throwIfAborted();
-    await this.ensureAttached(tabId);
+    await this.waitForAttach(tabId, signal);
     signal?.throwIfAborted();
+    // Do not let an ad-hoc focus-emulation teardown (e.g. from guarded input or
+    // full-page screenshot) disable a tab's active persistent lease (e.g. video).
+    if (
+      method === "Emulation.setFocusEmulationEnabled" &&
+      (params as { enabled?: boolean } | undefined)?.enabled === false &&
+      this.backgroundExecution.hasAny(tabId)
+    ) {
+      return {} as T;
+    }
     try {
-      const result = await this.command({ tabId }, method, params ?? {});
+      const result = await this.command(
+        { tabId },
+        method,
+        params ?? {},
+        undefined,
+        undefined,
+        signal,
+      );
       return result as T;
     } catch (err) {
       throw normalizeError(err);
@@ -1001,7 +1103,7 @@ export class ChromiumCdp {
   ): Promise<T> {
     guard.signal?.throwIfAborted();
     if (guard.attachmentId === undefined && guard.allowReattach !== false) {
-      await this.ensureAttached(target.tabId);
+      await this.waitForAttach(target.tabId, guard.signal);
     } else if (guard.allowReattach === false && !this.isAttached(target.tabId)) {
       throw new Error("debugger detached");
     }
@@ -1049,7 +1151,11 @@ export class ChromiumCdp {
     const currentBefore = this.tabs.get(tabId);
     if (currentBefore?.kind === "attaching") {
       if (!allowReattach) throw new Error("debugger detached");
-      await currentBefore.attachInFlight;
+      if (guard?.signal) {
+        await waitForAbort(currentBefore.attachInFlight, guard.signal);
+      } else {
+        await currentBefore.attachInFlight;
+      }
     }
     guard?.signal?.throwIfAborted();
 
@@ -1060,7 +1166,7 @@ export class ChromiumCdp {
         state?.kind === "soft_detached" &&
         state.snapshot.attachmentId === guard.attachmentId
       ) {
-        await this.ensureAttached(tabId);
+        await this.waitForAttach(tabId, guard.signal);
       } else if (state?.kind === "attached") {
         if (allowReattach) {
           if (state.deferredRootCheck && !state.openDialog) {
@@ -1076,12 +1182,20 @@ export class ChromiumCdp {
     } else if (!allowReattach) {
       if (!this.isAttached(tabId)) throw new Error("debugger detached");
     } else {
-      await this.ensureAttached(tabId);
+      await this.waitForAttach(tabId, guard?.signal);
       guard?.signal?.throwIfAborted();
     }
 
     // Root shorthand (`frameId === ""` and `loaderId === ""`) routes directly to `{ tabId }`.
     if (!handle.frameId && !handle.loaderId) {
+      if (
+        method === "Emulation.setFocusEmulationEnabled" &&
+        (params as { enabled?: boolean } | undefined)?.enabled === false &&
+        this.backgroundExecution.hasAny(tabId)
+      ) {
+        guard?.onDispatch?.();
+        return {} as T;
+      }
       if (guard) {
         return this.sendGuarded<T>({ tabId }, method, params, guard);
       }
@@ -1241,7 +1355,10 @@ export class ChromiumCdp {
       tabId,
       ...(route.sessionId ? { sessionId: route.sessionId } : {}),
     };
-    const isTargetRoot = !route.parentFrameId || route.sessionId !== undefined;
+    const entry = this.tabs.get(tabId);
+    const isTargetRoot = route.sessionId
+      ? isActiveAttachment(entry) && entry.frameDiscovery.frameIds.get(route.sessionId) === frameId
+      : !route.parentFrameId;
     if (isTargetRoot) {
       try {
         const doc = (await this.command(
@@ -1472,7 +1589,7 @@ export class ChromiumCdp {
   /** Resolve the tab's current root `FrameDocumentHandle` (attaching or reattaching if needed). */
   async getMainFrameHandle(tabId: number, signal?: AbortSignal): Promise<FrameDocumentHandle> {
     signal?.throwIfAborted();
-    await this.ensureAttached(tabId);
+    await this.waitForAttach(tabId, signal);
     signal?.throwIfAborted();
     const entry = this.tabs.get(tabId);
     if (entry?.kind === "attached" && entry.frameDiscovery.rootFrameId) {
@@ -1565,7 +1682,7 @@ export class ChromiumCdp {
     options?: FrameDocumentGraphOptions,
   ): Promise<CdpFrameGraph> {
     signal?.throwIfAborted();
-    await this.ensureAttached(tabId);
+    await this.waitForAttach(tabId, signal);
     const attachmentId = this.getAttachmentId(tabId);
     const check = () => {
       signal?.throwIfAborted();
@@ -1583,7 +1700,7 @@ export class ChromiumCdp {
     ): Promise<T> => {
       check();
       try {
-        const result = await this.command(target, method, params, timeoutMs, check);
+        const result = await this.command(target, method, params, timeoutMs, check, signal);
         check();
         return result as T;
       } catch (error) {
@@ -1749,7 +1866,7 @@ export class ChromiumCdp {
   async ensureConsoleCapture(tabId: number, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     if (!this.isAttached(tabId)) {
-      await this.ensureAttached(tabId);
+      await this.waitForAttach(tabId, signal);
     }
     signal?.throwIfAborted();
     await this.enableConsoleDomains(tabId, signal);
@@ -1847,7 +1964,7 @@ export class ChromiumCdp {
     if (!entry) return;
 
     this.clearIdleTimer(tabId);
-    const nextVersion = entry.version + 1;
+    const nextVersion = this.nextTabVersion++;
     const wasAttached = entry.kind === "attached";
     const wasSoftDetached = entry.kind === "soft_detached";
     const existingDetach =
@@ -1858,7 +1975,7 @@ export class ChromiumCdp {
     const existingFencedAttach =
       entry.kind === "attaching"
         ? entry.attachInFlight
-        : entry.kind === "detached"
+        : entry.kind === "detached" || entry.kind === "soft_detached"
           ? entry.fencedAttach
           : undefined;
 
@@ -2031,7 +2148,8 @@ export class ChromiumCdp {
     const inFlightDetaches: Promise<void>[] = [];
 
     for (const [tabId, entry] of this.tabs) {
-      if (entry.kind === "attached") {
+      const wasAttached = entry.kind === "attached";
+      if (wasAttached) {
         attachedTabIds.push(tabId);
         notifyTabIds.push(tabId);
       } else if (entry.kind === "soft_detached") {
@@ -2047,18 +2165,18 @@ export class ChromiumCdp {
       this.resetDiagnosticHistory(entry.history);
       this.tabs.set(tabId, {
         kind: "detached",
-        version: entry.version + 1,
+        version: this.nextTabVersion++,
         fencedAttach:
           entry.kind === "attaching"
             ? entry.attachInFlight
-            : entry.kind === "detached"
+            : entry.kind === "detached" || entry.kind === "soft_detached"
               ? entry.fencedAttach
               : undefined,
         leases: entry.leases,
         eventListeners: entry.eventListeners,
         history: entry.history,
       });
-      this.maybePruneDetachedEntry(tabId);
+      if (!wasAttached) this.maybePruneDetachedEntry(tabId);
     }
 
     this.backgroundExecution.clear();
@@ -2070,11 +2188,22 @@ export class ChromiumCdp {
     await Promise.all([
       ...inFlightDetaches.map((detach) => cleanupWait(detach)),
       ...attachedTabIds.map(async (tabId) => {
-        try {
-          await this.api.detach({ tabId });
-        } catch (err) {
-          console.debug("[bsk cdp] detachAll: tab already gone", { tabId, err });
-        }
+        const detachWork = (async () => {
+          try {
+            await this.api.detach({ tabId });
+          } catch (err) {
+            console.debug("[bsk cdp] detachAll: tab already gone", { tabId, err });
+          }
+        })().finally(() => {
+          const current = this.tabs.get(tabId);
+          if (current?.kind === "detached" && current.detachInFlight === detachWork) {
+            current.detachInFlight = undefined;
+            this.maybePruneDetachedEntry(tabId);
+          }
+        });
+        const current = this.tabs.get(tabId);
+        if (current?.kind === "detached") current.detachInFlight = detachWork;
+        await cleanupWait(detachWork);
       }),
     ]);
   }
@@ -2493,7 +2622,7 @@ export class ChromiumCdp {
 
     const softDetachedEntry: Extract<TabAttachment, { kind: "soft_detached" }> = {
       kind: "soft_detached",
-      version: liveEntry.version + 1,
+      version: this.nextTabVersion++,
       snapshot: {
         attachmentId: liveEntry.attachmentId,
         rootSignature: preDetachDoc,
@@ -2575,6 +2704,11 @@ export class ChromiumCdp {
     const rootEpochBefore = discoveryBefore?.rootNavigationEpoch;
     const version = entryBefore?.version ?? 0;
     const processKey = this.processKeyForTarget(target);
+    // An async JS Promise (`awaitPromise: true`) yields the renderer immediately
+    // and may stay unresolved indefinitely without blocking subsequent CDP calls.
+    const awaitsPromise =
+      (method === "Runtime.evaluate" || method === "Runtime.callFunctionOn") &&
+      (params as { awaitPromise?: unknown }).awaitPromise === true;
     const result = await this.readGate.run(
       target,
       method,
@@ -2585,6 +2719,7 @@ export class ChromiumCdp {
       readTimeoutMs,
       signal,
       processKey,
+      !awaitsPromise,
     );
     if (discoveryBefore && typeof tabId === "number") {
       const entryAfter = this.tabs.get(tabId);
@@ -3239,22 +3374,23 @@ export class ChromiumCdp {
   }
 
   private handleConsoleEvent(tabId: number, method: string, params: unknown): void {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return;
     switch (method) {
       case "Runtime.consoleAPICalled":
-        this.appendConsole(tabId, parseConsoleApiCalled(params));
+        this.appendConsole(entry, parseConsoleApiCalled(params));
         break;
       case "Runtime.exceptionThrown":
-        this.appendConsole(tabId, parseExceptionThrown(params));
+        this.appendConsole(entry, parseExceptionThrown(params));
         break;
       case "Log.entryAdded":
-        this.appendConsole(tabId, parseLogEntry(params));
+        this.appendConsole(entry, parseLogEntry(params));
         break;
     }
   }
 
-  private appendConsole(tabId: number, parsed: ParsedConsoleEntry | null): void {
+  private appendConsole(entry: ActiveTabAttachment, parsed: ParsedConsoleEntry | null): void {
     if (!parsed) return;
-    const entry = this.ensureTabEntry(tabId);
     const waterMark = entry.history.softDetachConsoleWaterMark;
     if (
       waterMark !== undefined &&
@@ -3269,19 +3405,21 @@ export class ChromiumCdp {
   }
 
   private handleNetworkEvent(tabId: number, method: string, params: unknown): void {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return;
     switch (method) {
       case "Network.requestWillBeSent":
         this.rememberNetworkRequest(tabId, params);
         break;
       case "Network.responseReceived":
         this.appendNetwork(
-          tabId,
+          entry,
           parseNetworkResponse(this.getNetworkRequest(tabId, params), params),
         );
         break;
       case "Network.loadingFailed":
         this.appendNetwork(
-          tabId,
+          entry,
           parseNetworkFailure(this.getNetworkRequest(tabId, params, true), params),
         );
         break;
@@ -3291,9 +3429,8 @@ export class ChromiumCdp {
     }
   }
 
-  private appendNetwork(tabId: number, parsed: ParsedNetworkEntry | null): void {
+  private appendNetwork(entry: ActiveTabAttachment, parsed: ParsedNetworkEntry | null): void {
     if (!parsed) return;
-    const entry = this.ensureTabEntry(tabId);
     const sequence = entry.history.networkSequence + 1;
     entry.history.networkSequence = sequence;
     appendBoundedList(entry.history.networkBuffer, { ...parsed, sequence }, MAX_NETWORK_BUFFER);
@@ -3369,7 +3506,7 @@ export class ChromiumCdp {
         this.resetDiagnosticHistory(entry.history);
         this.tabs.set(tabId, {
           kind: "detached",
-          version: entry.version + 1,
+          version: this.nextTabVersion++,
           detachInFlight:
             entry.kind === "detached" || entry.kind === "soft_detached"
               ? entry.detachInFlight
@@ -3377,7 +3514,7 @@ export class ChromiumCdp {
           fencedAttach:
             entry.kind === "attaching"
               ? entry.attachInFlight
-              : entry.kind === "detached"
+              : entry.kind === "detached" || entry.kind === "soft_detached"
                 ? entry.fencedAttach
                 : undefined,
           leases: entry.leases,
@@ -3437,9 +3574,93 @@ export class ChromiumCdp {
       entry.eventListeners.clear();
       entry.history.claims.clear();
       entry.history.owners.clear();
+      this.resetDiagnosticHistory(entry.history);
     }
     this.backgroundExecution.forget(tabId);
     void this.detach(tabId);
+  }
+
+  /** Transfer session ownership across Chrome Memory Saver / prerender tab replacement. */
+  replaceTab(addedTabId: number, removedTabId: number): void {
+    if (addedTabId === removedTabId) return;
+    const removed = this.tabs.get(removedTabId);
+    if (removed) {
+      for (const sessionId of removed.history.owners) {
+        this.trackSessionTab(sessionId, addedTabId);
+      }
+    }
+    this.backgroundExecution.replaceTab(addedTabId, removedTabId);
+    this.forgetClosedTab(removedTabId);
+  }
+
+  /**
+   * Detach orphaned `chrome.debugger` tab attachments surviving an MV3 Service Worker
+   * restart. Skips any tab already owned by an active session in this worker, and
+   * ignores targets attached by DevTools or another extension (where Chrome rejects
+   * `detach` without affecting the other debugger).
+   */
+  async reconcileOrphanedAttachments(
+    isActiveTab: (tabId: number) => boolean = () => false,
+  ): Promise<number[]> {
+    if (!this.api.getTargets) return [];
+    let targets: chrome.debugger.TargetInfo[];
+    try {
+      targets = await this.api.getTargets();
+    } catch (err) {
+      console.debug("[bsk cdp] orphan debugger getTargets failed", err);
+      return [];
+    }
+    const candidateTabIds = new Set<number>();
+    for (const target of targets) {
+      if (target.attached && typeof target.tabId === "number") {
+        candidateTabIds.add(target.tabId);
+      }
+    }
+    const detachedTabIds: number[] = [];
+    await Promise.all(
+      [...candidateTabIds].map(async (tabId) => {
+        const existing = this.tabs.get(tabId);
+        if (
+          isActiveTab(tabId) ||
+          existing?.kind === "attached" ||
+          existing?.kind === "attaching" ||
+          (existing && (existing.history.owners.size > 0 || existing.history.claims.size > 0))
+        ) {
+          return;
+        }
+        const entry = this.ensureTabEntry(tabId);
+        if (entry.kind !== "detached") return;
+        const previousDetach = entry.detachInFlight;
+        const detachWork = (async () => {
+          if (previousDetach) await cleanupWait(previousDetach);
+          const live = this.tabs.get(tabId);
+          if (
+            isActiveTab(tabId) ||
+            live?.kind === "attached" ||
+            live?.kind === "attaching" ||
+            (live && (live.history.owners.size > 0 || live.history.claims.size > 0))
+          ) {
+            return;
+          }
+          try {
+            await this.api.detach({ tabId });
+            detachedTabIds.push(tabId);
+          } catch (err) {
+            // Expected when DevTools or another extension owns the attachment.
+            console.debug("[bsk cdp] orphan debugger detach skipped", { tabId, err });
+          }
+        })().finally(() => {
+          const current = this.tabs.get(tabId);
+          if (current?.kind === "detached" && current.detachInFlight === detachWork) {
+            current.detachInFlight = undefined;
+            this.maybePruneDetachedEntry(tabId);
+          }
+        });
+        entry.detachInFlight = detachWork;
+        await cleanupWait(detachWork);
+      }),
+    );
+    return detachedTabIds;
   }
 
   /** Reconcile debugger attachments with the current set of live sessions. */
@@ -3801,7 +4022,11 @@ function normalizeError(err: unknown): Error {
   if (err instanceof Error) return err;
   if (typeof err === "string") return new Error(err);
   if (err && typeof err === "object" && "message" in err) {
-    return new Error(String((err as { message: unknown }).message));
+    const normalized = new Error(String((err as { message: unknown }).message));
+    if ("name" in err && typeof (err as { name: unknown }).name === "string") {
+      normalized.name = (err as { name: string }).name;
+    }
+    return normalized;
   }
   return new Error("unknown chrome.debugger error");
 }

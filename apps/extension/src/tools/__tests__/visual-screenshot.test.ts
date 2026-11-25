@@ -521,6 +521,53 @@ describe("visual screenshot", () => {
     expect(result).toMatchObject({ width: 100, height: 40, format: "png" });
     expect(sendToTab).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    "dom-replacement",
+    "visual-replacement",
+  ] as const)("rejects a visual ref replaced during attach (%s) without capturing the stale candidate", async (kind) => {
+    const f = fixture();
+    const manager = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 100, initialTabIds: [] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 4,
+      },
+    });
+    const ctx = await manager.start("race");
+    ctx.refStore.replace([["e1", { kind: "visual-region", candidate: f.candidate }]]);
+    const tab = {
+      id: 4,
+      windowId: 100,
+      active: true,
+      url: "https://example.test/",
+    } as chrome.tabs.Tab;
+    const tabsApi = { get: async () => tab, query: async () => [tab] };
+    f.cdp.ensureAttachedToUrl = vi.fn(async () => {
+      if (kind === "dom-replacement") {
+        ctx.refStore.replace([["e1", { backendNodeId: 777, tabId: 4 }]]);
+      } else {
+        ctx.refStore.replace([
+          ["e1", { kind: "visual-region", candidate: { ...f.candidate, backendNodeId: 888 } }],
+        ]);
+      }
+    });
+    const result = await handleScreenshot(
+      manager,
+      { session_id: "race", ref: "e1" },
+      {
+        cdp: f.cdp,
+        tabsApi,
+        captureApi: { ...tabsApi, captureVisibleTab: vi.fn() },
+        sendToTab: vi.fn(async () => ({})),
+      },
+    );
+    expect(result).toMatchObject({
+      code: "not_found",
+      data: { reason: "visual_target_changed" },
+    });
+    expect(f.send.mock.calls.some((c) => c[1] === "Page.captureScreenshot")).toBe(false);
+  });
 });
 
 async function pointFixture(child = false, oopif = false) {

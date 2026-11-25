@@ -50,6 +50,11 @@ pub fn dispatch(
     ctx: &crate::cli::business_rpc::ClientContext,
     format: Format,
 ) -> Result<(), CliError> {
+    // The dump itself needs a live extension round trip; fail on an unusable
+    // destination first, like `bsk download` and `bsk extract` do.
+    if let Some(out) = args.out.as_deref() {
+        crate::cli::atomic_output::preflight_destination(out)?;
+    }
     let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     run(info.sock_path, &op_ctx, args, format)

@@ -9,6 +9,7 @@ import { nodeContentRegion, scrollNodeIntoView } from "./element-geometry";
 import { rpcError } from "./errors";
 import {
   clipPolygon,
+  type GeometryProjection,
   type Point,
   type Polygon,
   polygonArea,
@@ -17,6 +18,7 @@ import {
   type Region,
   rectPolygon,
   regionBounds,
+  unprojectPoint,
   type ViewportRect,
 } from "./geometry";
 import type { CssViewport } from "./geometry/coordinate-types";
@@ -102,6 +104,11 @@ export async function scrollElementAndFramesIntoView(
   }
 }
 
+function cleanProjectedCoord(value: number): number {
+  const snapped = Math.round(value * 1e6) / 1e6;
+  return Math.abs(value - snapped) < 1e-9 ? snapped : value;
+}
+
 function largestRegion(regions: Region): Polygon | null {
   let largest: { polygon: Polygon; area: number } | null = null;
   for (const polygon of regions) {
@@ -162,31 +169,12 @@ export async function resolveNodeGeometry(
 
     const isOopifTarget = Boolean(frame?.isOutOfProcess);
     let topVisibleRegions: Region;
-    let targetActionPoint: Point | null = null;
+    let projection: GeometryProjection | null = null;
     if (address.frameId && graph && frame) {
-      const projection = await context.targetProjection(address.frameId);
+      projection = await context.targetProjection(address.frameId);
       if (!projection)
         return geometryError(`could not resolve frame geometry for ${address.frameId}`);
       topVisibleRegions = projectRegionToViewport(localRegion, projection);
-      if (isOopifTarget) {
-        const localViewport = await context.targetViewport(address.frameId);
-        if (!localViewport) return geometryError("could not resolve target viewport geometry");
-        const localVisibleRegions = localRegion
-          .map((polygon) =>
-            clipPolygon(
-              polygon,
-              rectPolygon({
-                x: 0,
-                y: 0,
-                w: localViewport.width,
-                h: localViewport.height,
-              }),
-            ),
-          )
-          .filter((polygon) => polygon.length >= 3);
-        const localActionRegion = largestRegion(localVisibleRegions);
-        targetActionPoint = localActionRegion ? polygonCentroid(localActionRegion) : null;
-      }
     } else {
       const viewport = await context.viewport(rootProcessBoundary(tabId));
       if (!viewport) return geometryError("could not resolve top viewport geometry");
@@ -201,12 +189,31 @@ export async function resolveNodeGeometry(
     const actionRegion = largestRegion(topVisibleRegions);
     const actionPoint = actionRegion ? polygonCentroid(actionRegion) : null;
     if (!topBounds || !actionPoint) {
-      return { code: "permission_denied", message: "element not visible" };
+      return rpcError("permission_denied", "element_not_visible", "element not visible");
     }
-    if (isOopifTarget && !targetActionPoint) {
-      return { code: "permission_denied", message: "element not visible in its target" };
+    // Derive the OOPIF-local point by unprojecting the already top/ancestor-clipped
+    // actionPoint back through every target boundary, so parent viewport clips and
+    // nested iframe clips are preserved consistently with pointReachesTarget.
+    let targetActionPoint: Point = actionPoint;
+    if (isOopifTarget) {
+      let local: Point | null = projection ? actionPoint : null;
+      if (projection) {
+        for (let index = projection.edges.length - 1; index >= 0 && local; index--) {
+          local = unprojectPoint(local, projection.edges[index]);
+        }
+      }
+      if (!local) {
+        return rpcError(
+          "permission_denied",
+          "element_not_visible",
+          "element not visible in its target",
+        );
+      }
+      targetActionPoint = {
+        x: cleanProjectedCoord(local.x),
+        y: cleanProjectedCoord(local.y),
+      };
     }
-    targetActionPoint ??= actionPoint;
     return {
       topVisibleRegions,
       topBounds,

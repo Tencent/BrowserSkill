@@ -1,6 +1,7 @@
 //! `bsk record start|stop` — capture user actions in the Agent Window.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::tools::{
@@ -14,19 +15,21 @@ use crate::cli::TOOL_IPC_TIMEOUT;
 
 pub(crate) mod export;
 
-use crate::cli::business_rpc::{ClientContext, ipc_timeout};
+use crate::cli::business_rpc::{self, ClientContext, ipc_timeout};
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::record_recovery;
 use crate::cli::record_state;
 use crate::cli::session::{
     SessionStartOptions, start_session_with_context, stop_record_session_with_context,
-    stop_session_with_context,
 };
 use export::{ExportMeta, export_with_recovery, trace_json_path, validate_record_output};
 
 /// Max wait for the user to click 结束 in the browser (24 hours).
 pub(crate) const RECORD_AWAIT_TIMEOUT_MS: u32 = 86_400_000;
+
+/// Bounded timeout for cancellation-independent recording teardown.
+const RECORD_CANCEL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `bsk record …` subcommand tree.
 #[derive(Debug, Clone, Args)]
@@ -133,13 +136,23 @@ fn dispatch_start(
     let start_result = match start_result {
         Ok(result) => result,
         Err(err) => {
-            let _ = stop_session_with_context(info.sock_path, ctx, &session.session_id);
+            let _ = stop_record_session_uncancelled(
+                info.sock_path,
+                &session.session_id,
+                false,
+                RECORD_CANCEL_STOP_TIMEOUT,
+            );
             return Err(annotate_default_start_page_error(err, args.url.as_deref()));
         }
     };
 
     if let Err(err) = record_state::write(&session.session_id) {
-        let _ = stop_session_with_context(info.sock_path.clone(), ctx, &session.session_id);
+        let _ = stop_record_session_uncancelled(
+            info.sock_path.clone(),
+            &session.session_id,
+            false,
+            RECORD_CANCEL_STOP_TIMEOUT,
+        );
         return Err(CliError::Local(err));
     }
 
@@ -186,15 +199,32 @@ fn dispatch_stop(
         let params = RecordStopParams {
             session_id: session_id.clone(),
         };
-        let result = ctx
-            .call::<RecordStopParams, RecordStopResult>(
-                info.sock_path.clone(),
-                "record-stop",
-                Method::ToolRecordStop,
-                Some(params),
-                TOOL_IPC_TIMEOUT,
-            )
-            .map_err(|err| forget_stale_recording(err, &session_id))?;
+        let result = match ctx.call::<RecordStopParams, RecordStopResult>(
+            info.sock_path.clone(),
+            "record-stop",
+            Method::ToolRecordStop,
+            Some(params),
+            TOOL_IPC_TIMEOUT,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                if err.code() == Some(ErrorCode::NotFound) {
+                    // Recording may have already ended while its Agent Window stayed alive
+                    // after a prior teardown failure; close the session before clearing state.
+                    let session_stop = stop_record_session_uncancelled(
+                        info.sock_path.clone(),
+                        &session_id,
+                        false,
+                        RECORD_CANCEL_STOP_TIMEOUT,
+                    );
+                    if should_clear_record_state(&session_stop) {
+                        return Err(forget_stale_recording(err, &session_id));
+                    }
+                    return Err(session_stop.unwrap_err());
+                }
+                return Err(err);
+            }
+        };
 
         return finish_recording(
             info.sock_path,
@@ -229,12 +259,122 @@ fn finish_recording(
         Ok((trace, exported))
     });
     // Preserve the trace before teardown, even if cleanup later fails.
-    let stopped = stop_record_session_with_context(sock, ctx, session_id);
-    record_state::clear_session(session_id);
+    let stopped = if business_rpc::cancel_requested() {
+        stop_record_session_uncancelled(sock, session_id, false, RECORD_CANCEL_STOP_TIMEOUT)
+    } else {
+        stop_record_session_with_context(sock, ctx, session_id)
+    };
+    if should_clear_record_state(&stopped) {
+        record_state::clear_session(session_id);
+    }
 
     let (trace, exported) = bundle?;
     stopped?;
     render_finish(&trace, output, &exported, format)
+}
+
+const SESSION_BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Dispatch `session.stop` directly over IPC without checking `business_rpc::cancel_requested()`
+/// so Ctrl-C / parent cancellation during `bsk record start` still closes the recording window.
+/// Retries transient `session_busy` replies with short backoff until `timeout` so cleanup
+/// bridges the gap between client `CANCEL_RESPONSE_GRACE` and daemon `CANCEL_CLEANUP_TIMEOUT`.
+fn stop_record_session_uncancelled(
+    sock: PathBuf,
+    session_id: &str,
+    recording: bool,
+    timeout: Duration,
+) -> Result<(), CliError> {
+    let params = if recording {
+        serde_json::json!({ "session_id": session_id, "all": false, "recording": true })
+    } else {
+        serde_json::json!({ "session_id": session_id, "all": false })
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime for record cleanup")
+        .map_err(CliError::Local)?;
+    let reply = runtime.block_on(async move {
+        let mut client = crate::ipc_client::IpcClient::connect(&sock)
+            .await
+            .map_err(CliError::Local)?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut attempt: u32 = 0;
+        let mut last_busy: Option<CliError> = None;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(last_busy.unwrap_or_else(|| CliError::Rpc {
+                    code: ErrorCode::Timeout,
+                    message: format!("session {session_id} stayed busy during recording cleanup"),
+                    data: Some(serde_json::json!({
+                        "reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str(),
+                    })),
+                    source: None,
+                }));
+            }
+            attempt = attempt.saturating_add(1);
+            let (res, _) = client
+                .call_envelope::<serde_json::Value, serde_json::Value>(
+                    format!("record-cleanup-stop-{attempt}"),
+                    Method::SessionStop,
+                    Some(params.clone()),
+                    crate::ipc_client::IpcRequestMeta::default(),
+                    remaining,
+                )
+                .await
+                .map_err(CliError::Local)?;
+            match res.map_err(CliError::from_rpc) {
+                Ok(reply) => return Ok(reply),
+                Err(err) if err.is_session_busy() => {
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if left.is_zero() {
+                        return Err(err);
+                    }
+                    last_busy = Some(err);
+                    tokio::time::sleep(SESSION_BUSY_RETRY_INTERVAL.min(left)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    })?;
+    if let Some(failure) = reply
+        .get("failed")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|arr| arr.first())
+    {
+        let code = failure
+            .get("code")
+            .cloned()
+            .and_then(|v| serde_json::from_value::<ErrorCode>(v).ok())
+            .unwrap_or(ErrorCode::ProtocolError);
+        let message = failure
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("failed to stop recording session")
+            .to_owned();
+        return Err(CliError::Rpc {
+            code,
+            message,
+            data: Some(serde_json::json!({
+                "session_id": session_id,
+                "return_failures": reply.get("return_failures").cloned().unwrap_or(serde_json::Value::Null),
+            })),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+/// Clear `record-session.json` only when teardown confirmed the session stopped
+/// or is already gone (`NotFound`), preserving the pointer if cleanup failed
+/// while the browser recording session may still be running.
+fn should_clear_record_state(stop_res: &Result<(), CliError>) -> bool {
+    match stop_res {
+        Ok(()) => true,
+        Err(err) => err.code() == Some(ErrorCode::NotFound),
+    }
 }
 
 /// A `not_found` stop means the session or its recording is gone, so the

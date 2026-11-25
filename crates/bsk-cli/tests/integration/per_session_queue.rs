@@ -986,12 +986,107 @@ async fn native_input_retains_terminal_reason_after_user_moves_tab() {
 }
 
 #[tokio::test]
-async fn snapshot_outer_timeout_preserves_terminal_reason_without_extending_wait() {
+async fn snapshot_late_cancel_allows_cleanup_and_preserves_terminal_reason() {
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = connect_ext(handle.ws_addr()).await;
     let _ = handshake_as_ext(&mut ws).await;
     let state = handle.state();
     let browser_id = bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into());
+
+    // Part 1: cancelling a non-`cancel_at_deadline` tool in the last ~1s before
+    // timeout lets the inner 2s cancel cleanup finish instead of timing out the
+    // outer wait early while the worker stays `busy` (causing `session_busy`).
+    {
+        let sid = state
+            .sessions
+            .reserve_id(browser_id.clone(), 8, || 0)
+            .unwrap();
+        state.tool_queues.spawn(sid.clone());
+        let guard = state
+            .tool_inflight
+            .register("snapshot-clean".into(), sid.clone())
+            .unwrap();
+        let task = {
+            let queues = Arc::clone(&state.tool_queues);
+            let sid = sid.clone();
+            let inflight = guard.entry();
+            tokio::spawn(async move {
+                queues
+                    .dispatch(
+                        &sid,
+                        Method::ToolSnapshot,
+                        json!({"session_id": sid.0, "tab_id": 42}),
+                        Duration::from_millis(1500),
+                        Some(inflight),
+                    )
+                    .await
+            })
+        };
+        let request = next_request(&mut ws).await;
+        assert_eq!(request.method, Method::ToolSnapshot);
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(1200)).await;
+        tokio::task::yield_now().await;
+        tokio::time::resume();
+        assert!(!task.is_finished());
+
+        ws.send(Message::Text(
+            json!({
+                "event": "session.user_interrupt",
+                "payload": {"session_id": sid.0},
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let cancel = next_request(&mut ws).await;
+        assert_eq!(cancel.method, Method::Cancel);
+        assert_eq!(cancel.params.unwrap()["rpc_id"], request.id);
+
+        // Advance past the old `timeout + 1s = 2.5s` outer deadline, still
+        // inside the 2s cancel-cleanup window (`1.2s + 2.0s = 3.2s`).
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(1400)).await;
+        tokio::task::yield_now().await;
+        tokio::time::resume();
+        assert!(
+            !task.is_finished(),
+            "outer wait must allow the inner 2s cancel cleanup to finish"
+        );
+
+        // Extension completes cancel cleanup at 2.6s: caller gets UserAborted
+        // and the queue worker immediately clears `busy`.
+        ws.send(Message::Text(
+            json!({
+                "id": request.id,
+                "error": {
+                    "code": "cancelled",
+                    "message": "snapshot cleanup completed",
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .into_rpc();
+        assert_eq!(error.code, ErrorCode::UserAborted);
+        assert_eq!(
+            state.tool_queues.activity(&sid).unwrap().state,
+            "idle",
+            "worker must not remain busy after cancel cleanup finishes"
+        );
+        drop(guard);
+        state.teardown_session(&sid, "session_stopped");
+    }
+
+    // Part 2: when extension cleanup itself exceeds the 2s cleanup budget, the
+    // worker cancels the pending waiter, clears `busy`, and preserves any
+    // terminal session-end reason (`user_moved_tab`).
     for end_session in [false, true] {
         let sid = state
             .sessions
@@ -1020,8 +1115,6 @@ async fn snapshot_outer_timeout_preserves_terminal_reason_without_extending_wait
         };
         let request = next_request(&mut ws).await;
         assert_eq!(request.method, Method::ToolSnapshot);
-        // Cancellation at 1.2s pushes worker cleanup to ~3.2s, past the
-        // ordinary outer dispatch deadline of 1.5s + 1s.
         tokio::time::pause();
         tokio::time::advance(Duration::from_millis(1200)).await;
         tokio::task::yield_now().await;
@@ -1047,7 +1140,7 @@ async fn snapshot_outer_timeout_preserves_terminal_reason_without_extending_wait
             assert_eq!(cancel.params.unwrap()["rpc_id"], request.id);
         }
         tokio::time::pause();
-        tokio::time::advance(Duration::from_millis(1400)).await;
+        tokio::time::advance(Duration::from_millis(2100)).await;
         tokio::task::yield_now().await;
         tokio::time::resume();
         let error = tokio::time::timeout(Duration::from_secs(5), task)
@@ -1057,11 +1150,12 @@ async fn snapshot_outer_timeout_preserves_terminal_reason_without_extending_wait
             .unwrap_err()
             .into_rpc();
         assert_eq!(error.code, ErrorCode::Timeout);
-        assert_eq!(error.message, "tool dispatch timed out");
-        // An outstanding extension waiter proves dispatch returned before
-        // worker cleanup. Resolve it now instead of using a narrow elapsed bound.
+        assert_eq!(
+            error.message,
+            "cancelled tool did not finish cleanup within 2s"
+        );
         assert!(
-            state
+            !state
                 .browsers
                 .get(&browser_id)
                 .unwrap()
@@ -1072,11 +1166,11 @@ async fn snapshot_outer_timeout_preserves_terminal_reason_without_extending_wait
                     id: request.id,
                     body: ResponseBody::Err(bsk_protocol::RpcError {
                         code: ErrorCode::Cancelled,
-                        message: "snapshot cleanup completed".into(),
+                        message: "late cleanup response".into(),
                         data: None,
                     }),
                 }),
-            "the outer timeout must not wait for the worker's cleanup deadline"
+            "worker cleanup timeout must have already cancelled the pending waiter"
         );
         let rendered = bsk::cli::render_error::info_for_error(error.code, error.data.as_ref());
         if end_session {
@@ -1096,10 +1190,14 @@ async fn snapshot_outer_timeout_preserves_terminal_reason_without_extending_wait
             );
             assert!(state.sessions.get(&sid).is_none());
         } else {
-            assert!(error.data.is_none());
+            assert_eq!(
+                error.data,
+                Some(json!({"reason": "cancel_cleanup_timeout"}))
+            );
             assert!(!rendered.hint.unwrap_or_default().contains("cannot resume"));
             assert!(state.sessions.end_info(&sid).is_none());
             assert!(state.sessions.get(&sid).is_some());
+            assert_eq!(state.tool_queues.activity(&sid).unwrap().state, "idle");
         }
     }
     drop(ws);

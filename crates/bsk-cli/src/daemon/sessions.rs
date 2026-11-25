@@ -68,10 +68,26 @@ impl Session {
     }
 }
 
+/// Deferred blocking audit finalization returned by [`SessionRegistry::teardown_in_memory`].
+pub(super) struct PendingAuditEnd {
+    pub(super) audit: Arc<super::audit::AuditStore>,
+    pub(super) live_id: u64,
+    pub(super) status: &'static str,
+}
+
+#[derive(Debug, Default)]
+struct SessionMapState {
+    sessions: HashMap<SessionId, Session>,
+    /// Set atomically by [`SessionRegistry::try_begin_handover`] once zero
+    /// sessions are active so a concurrent `session.start` cannot slip in
+    /// while the daemon is handing over to an updated binary.
+    handover_draining: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
     audit: Option<Arc<super::audit::AuditStore>>,
-    inner: Mutex<HashMap<SessionId, Session>>,
+    inner: Mutex<SessionMapState>,
     /// Operational metadata kept outside the public `Session` wire/domain
     /// shape so idle enforcement does not break external struct users.
     last_activity: Mutex<HashMap<SessionId, SessionActivity>>,
@@ -129,6 +145,7 @@ impl Drop for SessionActivityGuard {
             .inner
             .lock()
             .expect("session registry poisoned")
+            .sessions
             .contains_key(&self.id);
         if !live {
             return;
@@ -157,7 +174,8 @@ impl SessionRegistry {
         const COLORS: [&str; 6] = [
             "#2563eb", "#9333ea", "#0f766e", "#be185d", "#b45309", "#4d7c0f",
         ];
-        let mut sessions = self.inner.lock().expect("session registry poisoned");
+        let mut guard = self.inner.lock().expect("session registry poisoned");
+        let sessions = &mut guard.sessions;
         if let Some(info) = &mut controller
             && info.color.is_none()
         {
@@ -196,23 +214,57 @@ impl SessionRegistry {
         self.inner
             .lock()
             .expect("session registry poisoned")
+            .sessions
             .values()
             .cloned()
             .collect()
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("session registry poisoned").len()
+        self.inner
+            .lock()
+            .expect("session registry poisoned")
+            .sessions
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    pub fn contains(&self, id: &SessionId) -> bool {
+        self.inner
+            .lock()
+            .expect("session registry poisoned")
+            .sessions
+            .contains_key(id)
+    }
+
+    /// Atomically claim the handover drain gate if and only if zero sessions
+    /// are currently active or reserved. While armed, new `session.start`
+    /// reservations are rejected so an update handover cannot kill a newly
+    /// started session.
+    pub fn try_begin_handover(&self) -> bool {
+        let mut guard = self.inner.lock().expect("session registry poisoned");
+        if !guard.sessions.is_empty() || guard.handover_draining {
+            return false;
+        }
+        guard.handover_draining = true;
+        true
+    }
+
+    pub fn cancel_handover(&self) {
+        self.inner
+            .lock()
+            .expect("session registry poisoned")
+            .handover_draining = false;
+    }
+
     pub fn count_for_browser(&self, browser_id: &BrowserId) -> u32 {
         self.inner
             .lock()
             .expect("session registry poisoned")
+            .sessions
             .values()
             .filter(|s| &s.browser_id == browser_id)
             .count() as u32
@@ -220,8 +272,8 @@ impl SessionRegistry {
 
     pub fn insert(&self, session: Session) {
         let session_id = session.id.clone();
-        let mut sessions = self.inner.lock().expect("session registry poisoned");
-        sessions.insert(session_id.clone(), session);
+        let mut guard = self.inner.lock().expect("session registry poisoned");
+        guard.sessions.insert(session_id.clone(), session);
         // The id is alive again: any tombstone from an earlier same-id
         // session must stop influencing later dispatch errors.
         self.ended
@@ -254,13 +306,26 @@ impl SessionRegistry {
         max_attempts: u32,
         now_ms_fn: impl Fn() -> i64,
     ) -> Option<SessionId> {
+        self.reserve_id_checked(browser_id, max_attempts, now_ms_fn)
+            .ok()
+    }
+
+    fn reserve_id_checked(
+        &self,
+        browser_id: BrowserId,
+        max_attempts: u32,
+        now_ms_fn: impl Fn() -> i64,
+    ) -> Result<SessionId, StartSessionError> {
         let mut guard = self.inner.lock().expect("session registry poisoned");
+        if guard.handover_draining {
+            return Err(StartSessionError::DaemonRestarting);
+        }
         for _ in 0..max_attempts {
             let candidate = SessionId::random();
             // A tombstoned id still means "recently ended": reusing it
             // would immediately look like a crash/stop to clients that
             // dispatch against the old id (see `SessionEnd`).
-            if guard.contains_key(&candidate)
+            if guard.sessions.contains_key(&candidate)
                 || self
                     .ended
                     .lock()
@@ -269,7 +334,7 @@ impl SessionRegistry {
             {
                 continue;
             }
-            guard.insert(
+            guard.sessions.insert(
                 candidate.clone(),
                 Session {
                     controller: None,
@@ -284,9 +349,32 @@ impl SessionRegistry {
                 .lock()
                 .expect("session activity registry poisoned")
                 .insert(candidate.clone(), SessionActivity::default());
-            return Some(candidate);
+            return Ok(candidate);
         }
-        None
+        Err(StartSessionError::IdExhausted)
+    }
+
+    fn commit_reservation_in_memory(
+        &self,
+        session_id: &SessionId,
+        agent_window_id: Option<i64>,
+    ) -> Option<(Session, Option<Arc<super::audit::AuditStore>>)> {
+        let mut guard = self.inner.lock().expect("session registry poisoned");
+        let session = guard.sessions.get_mut(session_id)?;
+        session.agent_window_id = agent_window_id;
+        let session = session.clone();
+        self.starting.lock().unwrap().remove(session_id);
+        // Register in-memory audit tracking while still holding `self.inner`
+        // (strict lock order `sessions.inner -> audit.inner`, zero disk I/O) so
+        // a concurrent teardown cannot slip between commit and audit registration
+        // and leave a permanently `running` audit entry.
+        let audit_to_start = self
+            .audit
+            .as_ref()
+            .filter(|audit| audit.register_session_in_memory(&session))
+            .cloned();
+        drop(guard);
+        Some((session, audit_to_start))
     }
 
     /// Replace a previously [`reserve_id`](Self::reserve_id) placeholder
@@ -298,14 +386,32 @@ impl SessionRegistry {
         session_id: &SessionId,
         agent_window_id: Option<i64>,
     ) -> Option<Session> {
-        let mut guard = self.inner.lock().expect("session registry poisoned");
-        let session = guard.get_mut(session_id)?;
-        session.agent_window_id = agent_window_id;
-        let session = session.clone();
-        self.starting.lock().unwrap().remove(session_id);
-        drop(guard);
-        if let Some(audit) = &self.audit {
-            audit.session_started(&session);
+        let (session, audit_to_start) =
+            self.commit_reservation_in_memory(session_id, agent_window_id)?;
+        if let Some(audit) = audit_to_start {
+            let sid = session.id.0.clone();
+            let bid = session.browser_id.0.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                drop(handle.spawn_blocking(move || audit.ensure_session_started(&sid, &bid)));
+            } else {
+                audit.ensure_session_started(&sid, &bid);
+            }
+        }
+        Some(session)
+    }
+
+    async fn commit_reservation_async(
+        &self,
+        session_id: &SessionId,
+        agent_window_id: Option<i64>,
+    ) -> Option<Session> {
+        let (session, audit_to_start) =
+            self.commit_reservation_in_memory(session_id, agent_window_id)?;
+        if let Some(audit) = audit_to_start {
+            let sid = session.id.0.clone();
+            let bid = session.browser_id.0.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || audit.ensure_session_started(&sid, &bid)).await;
         }
         Some(session)
     }
@@ -317,6 +423,7 @@ impl SessionRegistry {
         self.inner
             .lock()
             .expect("session registry poisoned")
+            .sessions
             .remove(session_id);
         self.last_activity
             .lock()
@@ -324,21 +431,49 @@ impl SessionRegistry {
             .remove(session_id);
     }
 
-    pub fn remove(&self, id: &SessionId) -> Option<Session> {
+    fn remove_and_prepare_audit_end(
+        &self,
+        id: &SessionId,
+        audit_end_status: &'static str,
+    ) -> (Option<Session>, Option<PendingAuditEnd>) {
         self.starting.lock().unwrap().remove(id);
-        let removed = self
-            .inner
-            .lock()
-            .expect("session registry poisoned")
-            .remove(id);
+        let (removed, audit_end) = {
+            let mut guard = self.inner.lock().expect("session registry poisoned");
+            let removed = guard.sessions.remove(id);
+            let audit_end = self.audit.as_ref().and_then(|audit| {
+                audit
+                    .prepare_session_end(&id.0)
+                    .map(|live_id| PendingAuditEnd {
+                        audit: Arc::clone(audit),
+                        live_id,
+                        status: audit_end_status,
+                    })
+            });
+            (removed, audit_end)
+        };
         self.last_activity
             .lock()
             .expect("session activity registry poisoned")
             .remove(id);
+        (removed, audit_end)
+    }
+
+    pub fn remove(&self, id: &SessionId) -> Option<Session> {
+        let (removed, audit_end) = self.remove_and_prepare_audit_end(id, "ended");
         if removed.is_some()
-            && let Some(audit) = &self.audit
+            && let Some(pending) = audit_end
         {
-            audit.session_ended(&id.0, "ended");
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                drop(handle.spawn_blocking(move || {
+                    pending
+                        .audit
+                        .finish_session_end(pending.live_id, pending.status)
+                }));
+            } else {
+                pending
+                    .audit
+                    .finish_session_end(pending.live_id, pending.status);
+            }
         }
         removed
     }
@@ -377,26 +512,21 @@ impl SessionRegistry {
         self.remove(id)
     }
 
-    /// Close an active audit run gracefully (`"ended"`) before teardown removes
-    /// the session row. Subsequent abnormal audit closure becomes a no-op.
-    pub(super) fn mark_graceful_audit_end(&self, id: &SessionId) {
-        if let Some(audit) = &self.audit {
-            audit.session_ended(&id.0, "ended");
-        }
-    }
-
-    /// Tear down `id` from `SessionRegistry` as part of [`DaemonState::teardown_session`].
-    /// Records `reason` only when `id` was live (never overwriting an earlier
-    /// terminal reason or polluting tombstones with unknown IDs).
-    pub(super) fn teardown(&self, id: &SessionId, reason: &'static str) -> bool {
-        if let Some(audit) = &self.audit {
-            audit.session_ended(&id.0, "interrupted");
-        }
-        if self.remove(id).is_some() {
+    /// Tear down `id` from `SessionRegistry` without blocking on audit disk I/O.
+    /// Returns `(was_live, pending_audit_end)` so callers can run
+    /// [`super::audit::AuditStore::finish_session_end`] on `spawn_blocking`.
+    pub(super) fn teardown_in_memory(
+        &self,
+        id: &SessionId,
+        reason: &'static str,
+        audit_end_status: &'static str,
+    ) -> (bool, Option<PendingAuditEnd>) {
+        let (removed, audit_end) = self.remove_and_prepare_audit_end(id, audit_end_status);
+        if removed.is_some() {
             self.remember_end(id, reason);
-            true
+            (true, audit_end)
         } else {
-            false
+            (false, audit_end)
         }
     }
 
@@ -417,7 +547,11 @@ impl SessionRegistry {
         policy: bsk_protocol::tools::InteractionPolicy,
     ) {
         let mut guard = self.inner.lock().expect("session registry poisoned");
-        if let Some(session) = guard.get_mut(id).filter(|s| &s.browser_id == browser) {
+        if let Some(session) = guard
+            .sessions
+            .get_mut(id)
+            .filter(|s| &s.browser_id == browser)
+        {
             session.interaction = Some(policy);
         }
     }
@@ -426,14 +560,15 @@ impl SessionRegistry {
         self.inner
             .lock()
             .expect("session registry poisoned")
+            .sessions
             .get(id)
             .cloned()
     }
 
     /// Record accepted or completed tool activity for a live session.
     pub fn touch(&self, id: &SessionId) -> bool {
-        let sessions = self.inner.lock().expect("session registry poisoned");
-        if !sessions.contains_key(id) {
+        let guard = self.inner.lock().expect("session registry poisoned");
+        if !guard.sessions.contains_key(id) {
             return false;
         }
         self.last_activity
@@ -450,8 +585,8 @@ impl SessionRegistry {
     /// entry and exit while preventing idle reaping mid-call.
     pub fn begin_activity(self: &Arc<Self>, id: &SessionId) -> Option<SessionActivityGuard> {
         {
-            let sessions = self.inner.lock().expect("session registry poisoned");
-            if !sessions.contains_key(id) {
+            let guard = self.inner.lock().expect("session registry poisoned");
+            if !guard.sessions.contains_key(id) {
                 return None;
             }
             let mut activity = self
@@ -471,8 +606,12 @@ impl SessionRegistry {
     /// Only the owning browser can retain a session while a shared page is live.
     /// Ending collaboration starts a fresh idle interval; normal teardown still applies.
     pub fn update_activity(&self, id: &SessionId, browser: &BrowserId, idle_protected: bool) {
-        let sessions = self.inner.lock().expect("session registry poisoned");
-        if !sessions.get(id).is_some_and(|s| &s.browser_id == browser) {
+        let guard = self.inner.lock().expect("session registry poisoned");
+        if !guard
+            .sessions
+            .get(id)
+            .is_some_and(|s| &s.browser_id == browser)
+        {
             return;
         }
         let mut activity = self
@@ -487,13 +626,14 @@ impl SessionRegistry {
     /// Return sessions whose last tool activity is at least `idle_for`
     /// old. The caller supplies `now` to keep boundary tests deterministic.
     pub fn idle_ids_at(&self, idle_for: Duration, now: Instant) -> Vec<SessionId> {
-        let sessions = self.inner.lock().expect("session registry poisoned");
+        let guard = self.inner.lock().expect("session registry poisoned");
         let activity = self
             .last_activity
             .lock()
             .expect("session activity registry poisoned");
         let starting = self.starting.lock().unwrap();
-        sessions
+        guard
+            .sessions
             .values()
             .filter(|session| {
                 !starting.contains(&session.id)
@@ -511,6 +651,7 @@ impl SessionRegistry {
         self.inner
             .lock()
             .expect("session registry poisoned")
+            .sessions
             .values()
             .filter(|s| &s.browser_id == browser_id)
             .map(|s| s.id.clone())
@@ -607,6 +748,8 @@ pub enum StartSessionError {
     TransportClosed,
     #[error("extension is not responding")]
     ExtensionUnresponsive,
+    #[error("daemon is restarting for an update; retry shortly")]
+    DaemonRestarting,
 }
 
 impl StartSessionError {
@@ -622,6 +765,7 @@ impl StartSessionError {
             StartSessionError::CleanupFailed { .. } => "protocol_error",
             StartSessionError::TransportClosed => "protocol_error",
             StartSessionError::ExtensionUnresponsive => "timeout",
+            StartSessionError::DaemonRestarting => "protocol_error",
             StartSessionError::ExtensionError(err) => match err.code {
                 bsk_protocol::ErrorCode::Timeout => "timeout",
                 bsk_protocol::ErrorCode::Cancelled => "cancelled",
@@ -751,9 +895,8 @@ pub(crate) async fn start_session_recoverable(
     if client.is_unresponsive() {
         return Err(StartSessionError::ExtensionUnresponsive);
     }
-    let session_id = sessions
-        .reserve_id(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)
-        .ok_or(StartSessionError::IdExhausted)?;
+    let session_id =
+        sessions.reserve_id_checked(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)?;
     if preserve_cleanup {
         sessions.starting.lock().unwrap().insert(session_id.clone());
     }
@@ -876,7 +1019,7 @@ pub(crate) async fn start_session_recoverable(
             Ok(parsed) => parsed,
             Err(_) => {
                 if preserve_cleanup {
-                    sessions.commit_reservation(&session_id, None);
+                    sessions.commit_reservation_async(&session_id, None).await;
                     return Err(StartSessionError::CleanupFailed {
                         session_id,
                         agent_window_id: None,
@@ -902,7 +1045,9 @@ pub(crate) async fn start_session_recoverable(
                     .as_ref()
                     .and_then(|d| d.get("resource_id"))
                     .and_then(serde_json::Value::as_i64);
-                sessions.commit_reservation(&session_id, agent_window_id);
+                sessions
+                    .commit_reservation_async(&session_id, agent_window_id)
+                    .await;
                 return Err(StartSessionError::CleanupFailed {
                     session_id,
                     agent_window_id,
@@ -915,12 +1060,13 @@ pub(crate) async fn start_session_recoverable(
     };
     {
         let mut guard = sessions.inner.lock().expect("session registry poisoned");
-        if let Some(session) = guard.get_mut(&session_id) {
+        if let Some(session) = guard.sessions.get_mut(&session_id) {
             session.interaction = session.interaction.or(start_result.interaction);
         }
     }
     let session = sessions
-        .commit_reservation(&session_id, start_result.agent_window_id)
+        .commit_reservation_async(&session_id, start_result.agent_window_id)
+        .await
         .ok_or_else(|| {
             StartSessionError::ExtensionError(RpcError {
                 code: bsk_protocol::ErrorCode::ProtocolError,
@@ -928,10 +1074,13 @@ pub(crate) async fn start_session_recoverable(
                 data: None,
             })
         })?;
-    // Spawn the per-session serial dispatch queue *after* commit so a
-    // failed extension round-trip never leaks an orphan worker
-    // (review M6.5).
-    queues.spawn(session_id.clone());
+    // Spawn the per-session serial dispatch queue *after* commit, atomically
+    // guarded against concurrent teardown (browser disconnect / window close)
+    // so an already-ended session never gains an orphan worker or loses its
+    // `ended` tombstone.
+    if !queues.spawn_if_live(session_id.clone()) {
+        return Err(StartSessionError::TransportClosed);
+    }
     Ok(session)
 }
 
@@ -1045,7 +1194,9 @@ async fn finish_aborted_start(
             StartSessionError::CleanupFailed {
                 agent_window_id, ..
             } => {
-                sessions.commit_reservation(session_id, *agent_window_id);
+                sessions
+                    .commit_reservation_async(session_id, *agent_window_id)
+                    .await;
             }
             _ => {}
         }
@@ -1143,6 +1294,7 @@ pub(super) async fn send_session_stop(
     {
         Ok(value) => {
             let result = serde_json::from_value::<SessionStopResult>(value).map_err(|_| {
+                queues.reopen(session_id);
                 StopSessionError::ExtensionError(RpcError {
                     code: bsk_protocol::ErrorCode::ProtocolError,
                     message: "invalid tool.session_stop payload".into(),
@@ -1213,15 +1365,26 @@ pub async fn stop_session(
 ) -> Result<SessionStopResult, StopSessionError> {
     let (result, graceful_audit) =
         send_session_stop(registry, sessions, queues, session_id, timeout_dur, cancel).await?;
-    if graceful_audit {
-        sessions.mark_graceful_audit_end(session_id);
-    }
-    sessions.teardown(
+    let audit_status = if graceful_audit {
+        "ended"
+    } else {
+        "interrupted"
+    };
+    let (_, audit_end) = sessions.teardown_in_memory(
         session_id,
         bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+        audit_status,
     );
     queues.remove(session_id);
     interrupts.drop_session(session_id);
+    if let Some(pending) = audit_end {
+        let _ = tokio::task::spawn_blocking(move || {
+            pending
+                .audit
+                .finish_session_end(pending.live_id, pending.status)
+        })
+        .await;
+    }
     Ok(result)
 }
 

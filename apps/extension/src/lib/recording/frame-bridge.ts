@@ -29,6 +29,14 @@ export type RecordFramePortMessage =
       commandId: string;
     }
   | {
+      type: "cleanup";
+      requestId: string;
+    }
+  | {
+      type: "cleaned";
+      requestId: string;
+    }
+  | {
       type: "cancel";
       requestId: string;
     }

@@ -15,12 +15,12 @@ use bsk_protocol::system::{
     AuditRequestParams, HandshakeCompat, HandshakeResult, evaluate_handshake_compat,
 };
 use bsk_protocol::{
-    EventFrame, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcError, SessionEndedEvent,
-    SessionUserInterruptEvent, SessionWindowClosedEvent,
+    AuditContextEvent, EventFrame, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcError,
+    RpcId, SessionEndedEvent, SessionUserInterruptEvent, SessionWindowClosedEvent,
 };
 use futures_util::{SinkExt, StreamExt};
 use semver::Version;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
@@ -31,7 +31,7 @@ use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
 use tracing::{debug, info, warn};
 
-use super::browsers::{BrowserClient, BrowserId, BrowserSink, Pending};
+use super::browsers::{BrowserClient, BrowserId, BrowserSink, DisconnectDisposition, Pending};
 use super::peer_authorization::PeerAuthorization;
 use super::state::{DaemonState, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVER_NAME};
 
@@ -39,10 +39,11 @@ use super::state::{DaemonState, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVE
 pub(super) fn origin_allowed(origin: &str) -> bool {
     // MV3 extension ids are 32 a–p characters per Chrome spec.
     let prefix = "chrome-extension://";
-    if let Some(rest) = origin.strip_prefix(prefix) {
-        if rest.len() == 32 && rest.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
-            return true;
-        }
+    if let Some(rest) = origin.strip_prefix(prefix)
+        && rest.len() == 32
+        && rest.bytes().all(|b| (b'a'..=b'p').contains(&b))
+    {
+        return true;
     }
     false
 }
@@ -78,6 +79,100 @@ fn bind_error_message(addr: SocketAddr, err: &std::io::Error) -> String {
     message
 }
 
+pub(super) fn bind_ws_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = match addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+    };
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.set_keepalive(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
+pub(super) fn configure_tcp_keepalive(stream: &TcpStream) {
+    let _ = stream.set_nodelay(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let enable: libc::c_int = 1;
+        let idle_secs: libc::c_int = 30;
+        let interval_secs: libc::c_int = 10;
+        let count: libc::c_int = 3;
+        // SAFETY: `fd` is a valid socket owned by `stream` for the duration of these
+        // `setsockopt` calls, and each pointer/length matches a `libc::c_int`.
+        unsafe {
+            let _ = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                (&enable as *const libc::c_int).cast(),
+                std::mem::size_of_val(&enable) as libc::socklen_t,
+            );
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_KEEPALIVE,
+                (&idle_secs as *const libc::c_int).cast(),
+                std::mem::size_of_val(&idle_secs) as libc::socklen_t,
+            );
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_KEEPIDLE,
+                (&idle_secs as *const libc::c_int).cast(),
+                std::mem::size_of_val(&idle_secs) as libc::socklen_t,
+            );
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "linux",
+                target_os = "android"
+            ))]
+            {
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPINTVL,
+                    (&interval_secs as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&interval_secs) as libc::socklen_t,
+                );
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPCNT,
+                    (&count as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&count) as libc::socklen_t,
+                );
+            }
+        }
+    }
+}
+
+pub(super) fn is_fatal_accept_error(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(
+            err.raw_os_error(),
+            Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK)
+        )
+    }
+    #[cfg(windows)]
+    {
+        matches!(err.raw_os_error(), Some(10009 | 10022 | 10038 | 10093))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = err;
+        false
+    }
+}
+
 pub struct WsServer {
     state: Arc<DaemonState>,
 }
@@ -91,9 +186,8 @@ impl WsServer {
         if self.state.config.server.is_some() {
             return super::remote::bind(self.state, addr).await;
         }
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|err| anyhow!("{}", bind_error_message(addr, &err)))?;
+        let listener =
+            bind_ws_listener(addr).map_err(|err| anyhow!("{}", bind_error_message(addr, &err)))?;
         let local_addr = listener
             .local_addr()
             .with_context(|| "failed to read WS server local addr")?;
@@ -116,15 +210,27 @@ pub struct WsHandle {
 async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdown: Arc<Notify>) {
     info!(addr = %listener.local_addr().unwrap(), "ws server listening");
     let connections = Arc::new(Semaphore::new(MAX_LOCAL_WS_CONNECTIONS));
+    let accept_stop = super::abort::AbortToken::new();
+    let mut active_tasks = tokio::task::JoinSet::new();
+    // Pin and register the shutdown waiter once before entering the loop so a
+    // `notify_waiters()` call arriving while another `select!` branch runs
+    // (such as `active_tasks.join_next()` on client disconnect) can never be lost.
+    let shutdown_notified = shutdown.notified();
+    tokio::pin!(shutdown_notified);
+    shutdown_notified.as_mut().enable();
     loop {
+        while active_tasks.try_join_next().is_some() {}
         tokio::select! {
-            _ = shutdown.notified() => {
+            biased;
+            _ = &mut shutdown_notified => {
                 debug!("ws server shutdown signal received");
                 break;
             }
+            Some(_) = active_tasks.join_next(), if !active_tasks.is_empty() => {}
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
+                        configure_tcp_keepalive(&stream);
                         // Each spawned task pins a slot until the connection
                         // closes — including a client that never completes
                         // the HTTP Upgrade. At the cap, close the fresh TCP
@@ -135,19 +241,44 @@ async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdow
                             continue;
                         };
                         let state = Arc::clone(&state);
-                        tokio::spawn(async move {
+                        let stop = accept_stop.clone();
+                        active_tasks.spawn(async move {
                             let _permit = permit;
-                            if let Err(err) = handle_connection(state, stream, peer).await {
+                            if let Err(err) = handle_connection(state, stream, peer, stop).await {
                                 warn!(error = %err, "ws connection error");
                             }
                         });
                     }
                     Err(err) => {
-                        warn!(error = %err, "accept failed");
+                        if is_fatal_accept_error(&err) {
+                            tracing::error!(error = %err, "fatal ws accept error; stopping listener");
+                            break;
+                        }
+                        warn!(error = %err, "transient ws accept error; backing off");
+                        tokio::select! {
+                            biased;
+                            _ = &mut shutdown_notified => break,
+                            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                        }
                     }
                 }
             }
         }
+    }
+    // Cancel in-flight handshakes BEFORE snapshotting registered browsers, then
+    // drain spawned connection tasks so no late socket can register after
+    // `WsHandle` exits.
+    accept_stop.cancel();
+    for client in state.browsers.snapshot() {
+        client.close();
+    }
+    let drain = async { while active_tasks.join_next().await.is_some() {} };
+    if tokio::time::timeout(Duration::from_secs(2), drain)
+        .await
+        .is_err()
+    {
+        active_tasks.abort_all();
+        while active_tasks.join_next().await.is_some() {}
     }
 }
 
@@ -167,7 +298,11 @@ async fn handle_connection(
     state: Arc<DaemonState>,
     stream: TcpStream,
     peer: SocketAddr,
+    stop: super::abort::AbortToken,
 ) -> anyhow::Result<()> {
+    if stop.is_cancelled() {
+        return Ok(());
+    }
     let captured_origin: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let captured_origin_for_cb = std::sync::Arc::clone(&captured_origin);
@@ -197,32 +332,40 @@ async fn handle_connection(
     };
 
     let (stream, read_limit) = super::local_auth::read_limit::AuthReadLimit::new(stream);
-    let mut ws = match tokio::time::timeout(
-        WS_UPGRADE_TIMEOUT,
-        tokio_tungstenite::accept_hdr_async(stream, callback),
-    )
-    .await
-    {
-        Ok(Ok(ws)) => ws,
-        Ok(Err(err)) => {
-            debug!(?peer, %err, "ws handshake rejected");
-            return Ok(());
-        }
-        Err(_) => {
-            debug!(
-                ?peer,
-                timeout_secs = WS_UPGRADE_TIMEOUT.as_secs(),
-                "ws upgrade timed out; dropping connection"
-            );
-            return Ok(());
-        }
+    let mut ws = tokio::select! {
+        biased;
+        _ = stop.cancelled() => return Ok(()),
+        res = tokio::time::timeout(
+            WS_UPGRADE_TIMEOUT,
+            tokio_tungstenite::accept_hdr_async(stream, callback),
+        ) => match res {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(err)) => {
+                debug!(?peer, %err, "ws handshake rejected");
+                return Ok(());
+            }
+            Err(_) => {
+                debug!(
+                    ?peer,
+                    timeout_secs = WS_UPGRADE_TIMEOUT.as_secs(),
+                    "ws upgrade timed out; dropping connection"
+                );
+                return Ok(());
+            }
+        },
     };
     let origin = captured_origin.lock().unwrap().clone().unwrap_or_default();
-    let authentication = tokio::time::timeout(
-        HANDSHAKE_FIRST_FRAME_TIMEOUT,
-        super::local_auth::handshake::accept(state.clone(), &mut ws, &origin),
-    )
-    .await;
+    let authentication = tokio::select! {
+        biased;
+        _ = stop.cancelled() => {
+            let _ = tokio::time::timeout(Duration::from_millis(100), ws.close(None)).await;
+            return Ok(());
+        }
+        res = tokio::time::timeout(
+            HANDSHAKE_FIRST_FRAME_TIMEOUT,
+            super::local_auth::handshake::accept(state.clone(), &mut ws, &origin),
+        ) => res,
+    };
     let (authorization, first) = match authentication {
         Ok(Ok(value)) => value,
         _ => {
@@ -233,7 +376,7 @@ async fn handle_connection(
         }
     };
     read_limit.store(true, std::sync::atomic::Ordering::Release);
-    drive_connection(state, ws, authorization, first).await
+    drive_connection(state, ws, authorization, first, stop).await
 }
 
 /// Hard cap on how long the daemon will wait for a freshly-upgraded
@@ -243,13 +386,66 @@ async fn handle_connection(
 /// socket FD indefinitely (review M4/M5 round 3 I-R3-1).
 const HANDSHAKE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Periodic server-side WS Ping interval to detect half-open or dead peers
+/// (including legacy extensions that do not send `system.heartbeat`).
+const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Bound on a single WS write so a stalled/blackholed TCP peer cannot park
+/// `drive_connection` indefinitely.
+const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Consecutive unanswered WS Pings before closing a dead connection.
+const MAX_MISSED_WS_PONGS: u8 = 2;
+
+/// Bounded per-connection FIFO queue for background audit disk operations so
+/// slow 16 MiB audit reads/writes never head-of-line-block the WS pump loop.
+const AUDIT_WORKER_QUEUE_CAP: usize = 128;
+
+enum AuditWork {
+    Context {
+        ticket: super::audit::Ticket,
+        ctx: AuditContextEvent,
+    },
+    Marker {
+        session_id: String,
+        kind: &'static str,
+    },
+    Request {
+        id: RpcId,
+        params: serde_json::Value,
+    },
+}
+
+#[derive(serde::Deserialize)]
+struct LocalAuthTypeProbe<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<std::borrow::Cow<'a, str>>,
+}
+
+fn is_post_handshake_local_auth(text: &str) -> bool {
+    serde_json::from_str::<LocalAuthTypeProbe<'_>>(text)
+        .ok()
+        .and_then(|probe| probe.kind)
+        .is_some_and(|kind| kind.starts_with("local.auth."))
+}
+
 pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     state: Arc<DaemonState>,
     ws: WebSocketStream<S>,
     mut authorization: PeerAuthorization,
     first_message: Option<Message>,
+    listener_stop: super::abort::AbortToken,
 ) -> anyhow::Result<()> {
     let (mut writer, mut reader) = ws.split();
+
+    if listener_stop.is_cancelled() {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            writer.send(Message::Close(None)),
+        )
+        .await;
+        return Ok(());
+    }
 
     // The first frame MUST be `system.handshake` per §4.2. Bound the
     // wait so a stalled client cannot park resources forever.
@@ -257,8 +453,13 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         Ok(Some(Ok(message)))
     } else {
         tokio::select! {
-            first = tokio::time::timeout(HANDSHAKE_FIRST_FRAME_TIMEOUT, reader.next()) => first,
+            biased;
+            _ = listener_stop.cancelled() => {
+                let _ = tokio::time::timeout(Duration::from_millis(100), writer.send(Message::Close(None))).await;
+                return Ok(());
+            }
             _ = authorization.revoked() => return Err(anyhow!("device authorization ended before handshake")),
+            first = tokio::time::timeout(HANDSHAKE_FIRST_FRAME_TIMEOUT, reader.next()) => first,
         }
     };
     let first = match first {
@@ -369,23 +570,69 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // socket's cleanup path uses `remove_if_generation_matches` to
     // avoid clobbering the newer entry (review M4/M5 round 2 #1).
     let registration = authorization.registration_guard().await;
+    if listener_stop.is_cancelled() {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            writer.send(Message::Close(None)),
+        )
+        .await;
+        return Ok(());
+    }
     if !authorization.bind_instance(&params.instance_id) || !authorization.authorized().await {
         return Err(anyhow!(
             "device authorization ended or browser identity mismatch"
         ));
     }
+    if listener_stop.is_cancelled() {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            writer.send(Message::Close(None)),
+        )
+        .await;
+        return Ok(());
+    }
     let browser_id = BrowserId(authorization.browser_id(&params.instance_id).to_owned());
+    // Evict any prior socket for this browser FIRST before purging stale
+    // sessions and running `audit.configure`, so no CLI caller can attach a
+    // ghost session to the dying connection while `audit.configure` runs, and
+    // no tool RPC can dispatch on the new connection before opt-in is restored.
+    state.browsers.evict_for_reconnect(&browser_id);
     // A fresh socket represents a fresh extension control plane. The
     // extension tears down its local sessions before reconnecting, so any
     // daemon-side sessions left under the same instance id are stale. Purge
-    // them before replacing the browser registration; otherwise an old WS
-    // cleanup racing with this handshake can preserve rows that no longer
-    // have an Agent Window on the extension side.
+    // them before registering the new browser entry.
     state.purge_sessions_of_browser(
         &browser_id,
         bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
         "purged stale session before browser reconnect",
     );
+    // Restore opt-in before making the browser available to CLI callers.
+    let audit_ready = {
+        let state = Arc::clone(&state);
+        let browser = browser_id.0.clone();
+        let configure_task = tokio::task::spawn_blocking(move || {
+            state.audit.configure(&browser, audit_enabled).is_ok()
+        });
+        tokio::select! {
+            biased;
+            _ = listener_stop.cancelled() => {
+                let _ = tokio::time::timeout(Duration::from_millis(100), writer.send(Message::Close(None))).await;
+                return Ok(());
+            }
+            res = configure_task => res.unwrap_or(false),
+        }
+    };
+    if listener_stop.is_cancelled() {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            writer.send(Message::Close(None)),
+        )
+        .await;
+        return Ok(());
+    }
+    if !authorization.active() {
+        return Err(anyhow!("device authorization ended during registration"));
+    }
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
     let generation = super::browsers::next_browser_generation();
     let connected_at_ms = std::time::SystemTime::now()
@@ -406,14 +653,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         version_skew,
         liveness: super::browsers::Liveness::default(),
     });
-    // Restore opt-in before making the browser available to CLI callers.
-    let audit_ready = {
-        let state = Arc::clone(&state);
-        let browser = browser_id.0.clone();
-        tokio::task::spawn_blocking(move || state.audit.configure(&browser, audit_enabled).is_ok())
-            .await
-            .unwrap_or(false)
-    };
+    let client_closed = client.closed_token();
     state.browsers.insert(Arc::clone(&client));
     authorization.register(&client);
     drop(registration);
@@ -446,13 +686,75 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         id: request.id.clone(),
         body: ResponseBody::Ok(result),
     };
+
+    // Dedicated per-connection FIFO worker for audit disk I/O so slow audit
+    // reads/writes (up to 16 MiB) never stall tool responses, cancel frames,
+    // or heartbeats on the WS pump loop, while preserving strict arrival order
+    // between `audit.context`, markers, and subsequent `audit.request` calls.
+    let (audit_tx, mut audit_rx) = mpsc::channel::<AuditWork>(AUDIT_WORKER_QUEUE_CAP);
+    {
+        let worker_state = Arc::clone(&state);
+        let worker_client = Arc::clone(&client);
+        let worker_closed = client_closed.clone();
+        tokio::spawn(async move {
+            while let Some(work) = audit_rx.recv().await {
+                match work {
+                    AuditWork::Context { ticket, ctx } => {
+                        let state = Arc::clone(&worker_state);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            state.audit.write_context_with_ticket(ticket, &ctx);
+                        })
+                        .await;
+                    }
+                    AuditWork::Marker { session_id, kind } => {
+                        let state = Arc::clone(&worker_state);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            state.audit.marker(&session_id, kind);
+                        })
+                        .await;
+                    }
+                    AuditWork::Request { id, params } => {
+                        if worker_closed.is_cancelled() {
+                            continue;
+                        }
+                        let state = Arc::clone(&worker_state);
+                        let browser = worker_client.id.0.clone();
+                        let body = tokio::task::spawn_blocking(move || {
+                            handle_audit_request(&state, &browser, params)
+                        })
+                        .await
+                        .unwrap_or_else(|_| {
+                            ResponseBody::Err(RpcError {
+                                code: bsk_protocol::ErrorCode::ProtocolError,
+                                message: "Audit request failed. Check local storage, task availability, or retry.".into(),
+                                data: None,
+                            })
+                        });
+                        let _ = worker_client
+                            .sink
+                            .send(Frame::Response(ResponseFrame { id, body }));
+                    }
+                }
+            }
+        });
+    }
+
     // Pump loop: outbound frames from sink → ws; inbound from ws → resolve.
     let pump_state = Arc::clone(&state);
     let pump_browser = Arc::clone(&client);
     let pump = async {
-        writer
-            .send(Message::Text(serde_json::to_string(&resp)?))
-            .await?;
+        tokio::time::timeout(
+            WS_WRITE_TIMEOUT,
+            writer.send(Message::Text(serde_json::to_string(&resp)?)),
+        )
+        .await
+        .map_err(|_| anyhow!("ws handshake response write timed out"))??;
+        let mut ping_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + WS_PING_INTERVAL,
+            WS_PING_INTERVAL,
+        );
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut missed_pongs: u8 = 0;
         loop {
             tokio::select! {
                 outbound = rx.recv() => {
@@ -460,33 +762,101 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
                     match outbound {
                         Some(frame) => {
                             let json = serde_json::to_string(&frame)?;
-                            writer.send(Message::Text(json)).await?;
+                            match tokio::time::timeout(
+                                WS_WRITE_TIMEOUT,
+                                writer.send(Message::Text(json)),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(err)) => return Err(err.into()),
+                                Err(_) => return Err(anyhow!("ws outbound write timed out")),
+                            }
                         }
                         None => break,
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    if !authorization.active() { break; }
+                    if missed_pongs >= MAX_MISSED_WS_PONGS {
+                        warn!(
+                            id = %pump_browser.id,
+                            missed_pongs,
+                            "ws peer missed consecutive ping responses; closing connection"
+                        );
+                        break;
+                    }
+                    missed_pongs = missed_pongs.saturating_add(1);
+                    match tokio::time::timeout(
+                        WS_WRITE_TIMEOUT,
+                        writer.send(Message::Ping(Vec::new())),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            warn!(id = %pump_browser.id, %err, "ws ping write failed");
+                            break;
+                        }
+                        Err(_) => {
+                            warn!(id = %pump_browser.id, "ws ping write timed out");
+                            break;
+                        }
                     }
                 }
                 msg = reader.next() => {
                     if !authorization.active() { break; }
                     match msg {
                         Some(Ok(Message::Text(t))) => {
-                            if serde_json::from_str::<serde_json::Value>(&t).ok()
-                                .and_then(|value|value.get("type").and_then(|v|v.as_str()).map(|s|s.starts_with("local.auth."))).unwrap_or(false) {
-                                break;
+                            missed_pongs = 0;
+                            match serde_json::from_str::<Frame>(&t) {
+                                Ok(frame) => {
+                                    if t.contains("\"local.auth.")
+                                        && is_post_handshake_local_auth(&t)
+                                    {
+                                        break;
+                                    }
+                                    // Any inbound frame — tool response, event, or the
+                                    // ~20s heartbeat — counts as proof of life.
+                                    pump_browser.touch();
+                                    handle_inbound_frame(
+                                        &pump_state,
+                                        &pump_browser,
+                                        frame,
+                                        &audit_tx,
+                                    );
+                                }
+                                Err(err) => {
+                                    if is_post_handshake_local_auth(&t) {
+                                        break;
+                                    }
+                                    pump_browser.touch();
+                                    warn!(%err, "invalid inbound frame");
+                                }
                             }
-                            // Any inbound frame — tool response, event, or the
-                            // ~20s heartbeat — counts as proof of life.
-                            pump_browser.touch();
-                            handle_inbound_text(&pump_state, &pump_browser, &t).await;
                         }
                         Some(Ok(Message::Binary(_))) => {
                             warn!("ignoring binary message");
                         }
                         Some(Ok(Message::Ping(p))) => {
-                            pump_browser.touch();
-                            let _ = writer.send(Message::Pong(p)).await;
+                            missed_pongs = 0;
+                            if !pump_browser.has_heartbeat() {
+                                pump_browser.touch();
+                            }
+                            let _ = tokio::time::timeout(
+                                WS_WRITE_TIMEOUT,
+                                writer.send(Message::Pong(p)),
+                            )
+                            .await;
                         }
                         Some(Ok(Message::Pong(_))) => {
-                            pump_browser.touch();
+                            missed_pongs = 0;
+                            // For heartbeat-capable MV3 extensions, browser-level WS
+                            // Pongs can keep arriving even after the service worker
+                            // freezes; only touch liveness for legacy peers.
+                            if !pump_browser.has_heartbeat() {
+                                pump_browser.touch();
+                            }
                         }
                         Some(Ok(Message::Frame(_))) => {}
                         Some(Ok(Message::Close(_))) | None => break,
@@ -500,57 +870,81 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         }
         Ok(())
     };
-    // Revocation must also interrupt a blocked socket write or slow inbound
-    // handler, not just an idle iteration of the message pump.
-    let (result_outcome, revoked): (anyhow::Result<()>, bool) = tokio::select! {
-        result = pump => (result, false),
-        _ = authorization.revoked() => (Ok(()), true),
+    enum PumpExit {
+        Pump(anyhow::Result<()>),
+        Revoked,
+        Closed,
+    }
+    // Revocation and explicit eviction/shutdown must also interrupt a blocked
+    // socket write or idle pump, not rely on `rx.recv()` returning `None`
+    // (which cannot happen while this task still holds `Arc<BrowserClient>`).
+    let exit = tokio::select! {
+        biased;
+        _ = listener_stop.cancelled() => PumpExit::Closed,
+        _ = authorization.revoked() => PumpExit::Revoked,
+        _ = client_closed.cancelled() => PumpExit::Closed,
+        result = pump => PumpExit::Pump(result),
     };
-    if revoked {
-        let _ =
-            tokio::time::timeout(Duration::from_secs(1), writer.send(Message::Close(None))).await;
+    drop(audit_tx);
+    let (result_outcome, send_close) = match exit {
+        PumpExit::Pump(result) => (result, false),
+        PumpExit::Revoked | PumpExit::Closed => (Ok(()), true),
+    };
+    if send_close {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            writer.send(Message::Close(None)),
+        )
+        .await;
     }
     // Responses for this socket can only arrive on it, so calls still
     // waiting here would otherwise sit until their own deadline.
-    client
-        .pending
-        .lock()
-        .expect("browser pending poisoned")
-        .close();
+    client.close();
 
     // Cleanup: drop browser + purge its sessions, but only if the
     // registry still holds *this* generation. If a reconnect already
     // took over under the same `instance_id` we leave the new entry
     // and its (possibly fresh) sessions alone.
-    if state
-        .browsers
-        .remove_if_generation_matches(&browser_id, generation)
-        .is_some()
-    {
-        info!(id = %browser_id, generation, "browser disconnected");
-        state.purge_sessions_of_browser(
-            &browser_id,
-            bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
-            "purged session on browser disconnect",
-        );
-    } else {
-        info!(
-            id = %browser_id,
-            generation,
-            "browser disconnected; newer reconnect already owns this id, leaving sessions intact"
-        );
+    match state.browsers.remove_on_disconnect(&browser_id, generation) {
+        DisconnectDisposition::RemovedCurrent => {
+            info!(id = %browser_id, generation, "browser disconnected");
+            state.purge_sessions_of_browser(
+                &browser_id,
+                bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
+                "purged session on browser disconnect",
+            );
+        }
+        DisconnectDisposition::ReplacedBy { current_generation } => {
+            info!(
+                id = %browser_id,
+                generation,
+                current_generation,
+                "browser disconnected; newer reconnect already owns this id, leaving sessions intact"
+            );
+        }
+        DisconnectDisposition::AlreadyAbsent => {
+            // The liveness reaper (or a failed reconnect) already dropped the
+            // registration; this socket is the last owner of its sessions.
+            info!(
+                id = %browser_id,
+                generation, "browser disconnected after prior eviction; purging leftover sessions"
+            );
+            state.purge_sessions_of_browser(
+                &browser_id,
+                bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
+                "purged leftover session after browser eviction",
+            );
+        }
     }
     result_outcome
 }
 
-async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClient>, text: &str) {
-    let frame: Frame = match serde_json::from_str(text) {
-        Ok(f) => f,
-        Err(err) => {
-            warn!(%err, "invalid inbound frame");
-            return;
-        }
-    };
+fn handle_inbound_frame(
+    state: &Arc<DaemonState>,
+    client: &Arc<BrowserClient>,
+    frame: Frame,
+    audit_tx: &mpsc::Sender<AuditWork>,
+) {
     match frame {
         Frame::Response(resp) => {
             let mut pending = client.pending.lock().unwrap();
@@ -560,12 +954,10 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
         }
         Frame::Event(ev) => match ev {
             EventFrame::AuditContext(ctx) => {
-                if state.audit.needs_context(&client.id.0, &ctx.operation_id) {
-                    let state = Arc::clone(state);
-                    let browser = client.id.0.clone();
-                    let _ =
-                        tokio::task::spawn_blocking(move || state.audit.context(&browser, &ctx))
-                            .await;
+                if let Some(ticket) = state.audit.prepare_context(&client.id.0, &ctx)
+                    && let Err(err) = audit_tx.try_send(AuditWork::Context { ticket, ctx })
+                {
+                    warn!(browser = %client.id, %err, "dropping audit context: worker queue full");
                 }
             }
             EventFrame::DialogChanged(dlg) => {
@@ -613,12 +1005,12 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
             EventFrame::SessionUserInterrupt(interrupt) => {
                 if let Some(sid) = apply_session_user_interrupt(state, &client.id, &interrupt)
                     && state.audit.needs_marker(&sid)
-                {
-                    let state = Arc::clone(state);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        state.audit.marker(&sid, "user_interrupt");
+                    && let Err(err) = audit_tx.try_send(AuditWork::Marker {
+                        session_id: sid,
+                        kind: "user_interrupt",
                     })
-                    .await;
+                {
+                    warn!(browser = %client.id, %err, "dropping audit marker: worker queue full");
                 }
             }
             other @ (EventFrame::BrowserConnected(_) | EventFrame::BrowserDisconnected(_)) => {
@@ -626,29 +1018,44 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
             }
         },
         Frame::Request(req) => {
-            let body = if req.method == bsk_protocol::Method::AuditRequest {
-                let state = Arc::clone(state);
-                let browser = client.id.0.clone();
+            if req.method == bsk_protocol::Method::AuditRequest {
+                let id = req.id;
                 let params = req.params.unwrap_or_default();
-                tokio::task::spawn_blocking(move || handle_audit_request(&state, &browser, params))
-                    .await
-                    .unwrap_or_else(|_| {
-                        ResponseBody::Err(RpcError {
-                            code: bsk_protocol::ErrorCode::ProtocolError,
-                            message: "Audit request failed. Check local storage, task availability, or retry.".into(),
-                            data: None,
-                        })
+                let is_disable = params.get("action").and_then(serde_json::Value::as_str)
+                    == Some("configure")
+                    && params.get("enabled").and_then(serde_json::Value::as_bool) == Some(false);
+                // Apply opt-out immediately in memory before enqueueing disk work
+                // so a slow preceding `audit.request` cannot let subsequent tool
+                // RPCs keep recording after the user disables audit.
+                if is_disable {
+                    state.audit.disable_in_memory(&client.id.0);
+                }
+                if audit_tx
+                    .try_send(AuditWork::Request {
+                        id: id.clone(),
+                        params,
                     })
+                    .is_err()
+                {
+                    let _ = client.sink.send(Frame::Response(ResponseFrame {
+                        id,
+                        body: ResponseBody::Err(RpcError {
+                            code: bsk_protocol::ErrorCode::ProtocolError,
+                            message: "Audit worker is busy; retry shortly.".into(),
+                            data: None,
+                        }),
+                    }));
+                }
             } else {
-                ResponseBody::Err(RpcError {
-                    code: bsk_protocol::ErrorCode::UnknownMethod,
-                    message: "Unsupported extension request".into(),
-                    data: None,
-                })
-            };
-            let _ = client
-                .sink
-                .send(Frame::Response(ResponseFrame { id: req.id, body }));
+                let _ = client.sink.send(Frame::Response(ResponseFrame {
+                    id: req.id,
+                    body: ResponseBody::Err(RpcError {
+                        code: bsk_protocol::ErrorCode::UnknownMethod,
+                        message: "Unsupported extension request".into(),
+                        data: None,
+                    }),
+                }));
+            }
         }
     }
 }
@@ -788,12 +1195,14 @@ fn apply_session_user_interrupt(
         return None;
     }
     let sid = super::sessions::SessionId(interrupt.session_id.clone());
-    // Same ownership guard as window_closed: a browser must not be able
-    // to cancel another browser's inflight tools or trip its interrupt
-    // marker by sending user_interrupt with a foreign session_id.
-    if let Some(session) = state.sessions.get(&sid)
-        && session.browser_id != *sender
-    {
+    // Require a live session owned by `sender`: a foreign browser must not
+    // interrupt another browser's session, and late events for an already-ended
+    // session must not leak a `SessionId` into `SessionInterruptRegistry`.
+    let Some(session) = state.sessions.get(&sid) else {
+        debug!(session = %sid, sender = %sender, "ignoring session.user_interrupt for unknown or ended session");
+        return None;
+    };
+    if session.browser_id != *sender {
         warn!(
             session = %sid,
             sender = %sender,
@@ -949,8 +1358,25 @@ mod session_user_interrupt_tests {
     #[test]
     fn handle_session_user_interrupt_cancels_inflight_for_target_session() {
         let state = test_only_daemon_state();
+        let owner = BrowserId("sender".into());
         let sid_a = SessionId("A".into());
         let sid_b = SessionId("B".into());
+        state.sessions.insert(crate::daemon::sessions::Session {
+            controller: None,
+            interaction: None,
+            id: sid_a.clone(),
+            browser_id: owner.clone(),
+            agent_window_id: Some(1),
+            created_at_ms: 0,
+        });
+        state.sessions.insert(crate::daemon::sessions::Session {
+            controller: None,
+            interaction: None,
+            id: sid_b.clone(),
+            browser_id: owner.clone(),
+            agent_window_id: Some(2),
+            created_at_ms: 0,
+        });
         let g_a = state
             .tool_inflight
             .register("a".into(), sid_a.clone())
@@ -960,11 +1386,9 @@ mod session_user_interrupt_tests {
             .register("b".into(), sid_b.clone())
             .unwrap();
 
-        // No live session is registered, so the ownership guard treats the
-        // session as unknown and lets the interrupt through (legacy path).
         handle_session_user_interrupt(
             &state,
-            &BrowserId("sender".into()),
+            &owner,
             &SessionUserInterruptEvent {
                 session_id: "A".into(),
             },
@@ -977,12 +1401,21 @@ mod session_user_interrupt_tests {
     #[test]
     fn handle_session_user_interrupt_marks_pending_for_target_session() {
         let state = test_only_daemon_state();
+        let owner = BrowserId("sender".into());
         let sid_a = SessionId("A".into());
         let sid_b = SessionId("B".into());
+        state.sessions.insert(crate::daemon::sessions::Session {
+            controller: None,
+            interaction: None,
+            id: sid_a.clone(),
+            browser_id: owner.clone(),
+            agent_window_id: Some(1),
+            created_at_ms: 0,
+        });
 
         handle_session_user_interrupt(
             &state,
-            &BrowserId("sender".into()),
+            &owner,
             &SessionUserInterruptEvent {
                 session_id: "A".into(),
             },
@@ -995,6 +1428,23 @@ mod session_user_interrupt_tests {
         assert!(
             !state.session_interrupts.try_consume(&sid_b),
             "session B must not be marked"
+        );
+    }
+
+    #[test]
+    fn handle_session_user_interrupt_ignores_ended_session_without_leaking() {
+        let state = test_only_daemon_state();
+        let sid_ended = SessionId("gone".into());
+        handle_session_user_interrupt(
+            &state,
+            &BrowserId("sender".into()),
+            &SessionUserInterruptEvent {
+                session_id: sid_ended.0.clone(),
+            },
+        );
+        assert!(
+            !state.session_interrupts.try_consume(&sid_ended),
+            "late user_interrupt for an ended/unknown session must not leak a SessionId"
         );
     }
 

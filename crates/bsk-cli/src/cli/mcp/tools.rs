@@ -765,44 +765,34 @@ const EVIDENCE_FIELDS: [(&str, &str); 4] = [
     ("expect", "expect"),
 ];
 
-/// Where each protocol method that accepts full action evidence is reached over MCP, and
-/// the evidence arguments that tool leaves out on purpose. A method or field added to the
-/// protocol fails `evidence_arguments_follow_the_protocol` until it is listed here.
+/// Where each protocol method that accepts full action evidence is reached over MCP. A
+/// method or field added to the protocol fails `evidence_arguments_follow_the_protocol`
+/// until it is listed here.
 #[cfg(test)]
-const EVIDENCE_SURFACES: &[(Method, &str, &[&str])] = &[
-    (Method::ToolNavigate, "bsk_page", &[]),
-    (Method::ToolNavigateBack, "bsk_page", &[]),
-    (Method::ToolNavigateForward, "bsk_page", &[]),
-    (Method::ToolReload, "bsk_page", &[]),
-    (Method::ToolClick, "bsk_interact", &[]),
-    (Method::ToolHover, "bsk_interact", &[]),
-    (Method::ToolDrag, "bsk_interact", &[]),
-    (Method::ToolWheel, "bsk_interact", &[]),
-    (Method::ToolScrollTo, "bsk_interact", &[]),
-    (Method::ToolFocus, "bsk_interact", &[]),
-    (Method::ToolBlur, "bsk_interact", &[]),
-    (Method::ToolFill, "bsk_interact", &[]),
-    (Method::ToolPress, "bsk_interact", &[]),
-    (Method::ToolSelect, "bsk_interact", &[]),
-    (Method::ToolUpload, "bsk_interact", &[]),
-    (Method::ToolDownload, "bsk_interact", &[]),
-    (Method::ToolEvaluate, "bsk_interact", &[]),
-    (Method::ToolTabClose, "bsk_tabs", &[]),
-    (Method::ToolWindowResize, "bsk_assist", &[]),
-    (Method::ToolEmulate, "bsk_assist", &[]),
-    (Method::ToolDebug, "bsk_debug", &[]),
-    // Inspection stays a passive read: it binds to a tab with context and never
-    // consumes an observation or checks facts, also for hover probes and full pages.
-    (
-        Method::ToolObserve,
-        "bsk_inspect",
-        &["observation", "depends_on", "expect"],
-    ),
-    (
-        Method::ToolScreenshotFullPage,
-        "bsk_inspect",
-        &["observation", "depends_on", "expect"],
-    ),
+const EVIDENCE_SURFACES: &[(Method, &str)] = &[
+    (Method::ToolNavigate, "bsk_page"),
+    (Method::ToolNavigateBack, "bsk_page"),
+    (Method::ToolNavigateForward, "bsk_page"),
+    (Method::ToolReload, "bsk_page"),
+    (Method::ToolClick, "bsk_interact"),
+    (Method::ToolHover, "bsk_interact"),
+    (Method::ToolDrag, "bsk_interact"),
+    (Method::ToolWheel, "bsk_interact"),
+    (Method::ToolScrollTo, "bsk_interact"),
+    (Method::ToolFocus, "bsk_interact"),
+    (Method::ToolBlur, "bsk_interact"),
+    (Method::ToolFill, "bsk_interact"),
+    (Method::ToolPress, "bsk_interact"),
+    (Method::ToolSelect, "bsk_interact"),
+    (Method::ToolUpload, "bsk_interact"),
+    (Method::ToolDownload, "bsk_interact"),
+    (Method::ToolEvaluate, "bsk_interact"),
+    (Method::ToolTabClose, "bsk_tabs"),
+    (Method::ToolWindowResize, "bsk_assist"),
+    (Method::ToolEmulate, "bsk_assist"),
+    (Method::ToolDebug, "bsk_debug"),
+    (Method::ToolObserve, "bsk_inspect"),
+    (Method::ToolScreenshotFullPage, "bsk_inspect"),
 ];
 
 /// Top-level arguments that never belong to the protocol params of an action.
@@ -945,6 +935,14 @@ struct SessionArgs {
     /// wait: how long to wait for the user to hand back control, 0-25000 ms.
     /// open, sync with wait_for/wait_not: bounded wait budget in ms (1-120000 ms).
     timeout_ms: Option<u64>,
+    /// open: context_id from the latest sync when navigating an already-synchronized session.
+    context: Option<String>,
+    /// open: observation_id from the latest sync when navigating an already-synchronized session.
+    observation: Option<String>,
+    /// open: literal facts checked immediately before navigation, at most 16.
+    expect: Option<Vec<ActionExpectation>>,
+    /// open: strict-policy dependency targets (requires context).
+    depends_on: Option<Vec<String>>,
 }
 
 async fn session(
@@ -1077,6 +1075,10 @@ async fn session(
                     "wait_not",
                     "timeout_ms",
                     "max_tokens",
+                    "context",
+                    "observation",
+                    "expect",
+                    "depends_on",
                 ],
             )?;
             let url = args
@@ -1099,7 +1101,15 @@ async fn session(
                 .timeout_ms
                 .map(|ms| orchestration::validate_open_timeout_ms(ms).map_err(invalid))
                 .transpose()?;
-            let ctx = build_ctx(conn_scope, args.scope.as_deref(), None, None, None, None)?;
+            let ctx = build_ctx(
+                conn_scope,
+                args.scope.as_deref(),
+                args.context,
+                args.observation,
+                args.expect,
+                args.depends_on,
+            )?;
+            ctx.validate_action_metadata(&Method::ToolNavigate, None)?;
             let aux_ctx = ctx.without_action_metadata();
             let link = connect(daemon, control).await?;
 
@@ -1514,11 +1524,9 @@ struct PageArgs {
     context: Option<String>,
     /// observation_id from the latest sync, when the action requires it.
     observation: Option<String>,
-    /// navigate, back, forward, reload: literal facts checked immediately before the action,
-    /// at most 16. Example: [{"target":"@e3","field":"text","equals":"Save"}].
+    /// Literal facts checked immediately before navigation/reload, at most 16.
     expect: Option<Vec<ActionExpectation>>,
-    /// navigate, back, forward, reload, strict policy only: observed refs or selectors
-    /// covering the decision regions.
+    /// Strict policy only: observed refs or selectors covering the decision regions (requires context).
     depends_on: Option<Vec<String>>,
 }
 
@@ -1672,6 +1680,12 @@ struct InspectArgs {
     tab_id: Option<i64>,
     /// read, screenshot (full_page=true), observe (probe_hover=true): optional context_id from the latest sync.
     context: Option<String>,
+    /// screenshot (full_page=true), observe (probe_hover=true): observation_id from the latest sync.
+    observation: Option<String>,
+    /// screenshot (full_page=true), observe (probe_hover=true): literal preconditions checked before action, at most 16.
+    expect: Option<Vec<ActionExpectation>>,
+    /// screenshot (full_page=true), observe (probe_hover=true): strict-policy dependency targets (requires context).
+    depends_on: Option<Vec<String>>,
     /// observe, snapshot: approximate token cap for the rendered tree.
     max_tokens: Option<u32>,
     /// observe, snapshot: tree depth cap.
@@ -1775,9 +1789,9 @@ async fn inspect(
         conn_scope,
         args.scope.as_deref(),
         args.context,
-        None,
-        None,
-        None,
+        args.observation,
+        args.expect,
+        args.depends_on,
     )?;
 
     if matches!(args.action, InspectAction::Screenshot) {
@@ -1799,6 +1813,9 @@ async fn inspect(
                     "out",
                     "overwrite",
                     "context",
+                    "observation",
+                    "expect",
+                    "depends_on",
                 ],
             )?;
             let fp_scope = match args.full_page_scope.as_deref() {
@@ -1811,6 +1828,9 @@ async fn inspect(
                     )));
                 }
             };
+            if let Some(ref out) = args.out {
+                crate::cli::atomic_output::preflight_destination(out)?;
+            }
             let out = args.out.unwrap_or_else(screenshot::default_out_path);
             if !overwrite && out.exists() {
                 return Err(download::output_exists(&out));
@@ -1839,7 +1859,7 @@ async fn inspect(
                     &ctx,
                     Method::ToolScreenshotFullPage,
                     params,
-                    Duration::from_millis(u64::from(timeout_ms) + 5_000),
+                    ipc_timeout(timeout_ms),
                 )
                 .await?;
             let reply: ScreenshotFullPageResult = serde_json::from_value(reply_val)
@@ -1916,11 +1936,11 @@ async fn inspect(
                 "context",
             ],
         )?;
-        if let Some(ref out) = args.out
-            && !overwrite
-            && out.exists()
-        {
-            return Err(download::output_exists(out));
+        if let Some(ref out) = args.out {
+            crate::cli::atomic_output::preflight_destination(out)?;
+            if !overwrite && out.exists() {
+                return Err(download::output_exists(out));
+            }
         }
         let params = protocol::<ScreenshotParams>(
             arguments,
@@ -1979,17 +1999,26 @@ async fn inspect(
         {
             return Err(invalid("discover accepts JSON output only"));
         }
-        if let Some(ref out) = args.out
-            && !overwrite
-            && out.exists()
-        {
-            return Err(download::output_exists(out));
+        if let Some(ref out) = args.out {
+            crate::cli::atomic_output::preflight_destination(out)?;
+            if !overwrite && out.exists() {
+                return Err(download::output_exists(out));
+            }
+            if output_format == extract::OutputFormat::Csv {
+                let meta = extract::metadata_path(out);
+                if !overwrite && meta.exists() {
+                    return Err(download::output_exists(&meta));
+                }
+            }
         }
         let mut input = arguments.as_object().cloned().unwrap();
         input.remove("extract_action");
         input.remove("session");
         input.remove("scope");
         input.remove("context");
+        input.remove("observation");
+        input.remove("expect");
+        input.remove("depends_on");
         input.remove("out");
         input.remove("overwrite");
         input.remove("format");
@@ -2024,10 +2053,9 @@ async fn inspect(
             ));
         }
         ctx.validate_action_metadata(&Method::ToolExtract, Some(&params))?;
+        let timeout = orchestration::tool_ipc_timeout(&Method::ToolExtract, &params);
         let link = connect(daemon, control).await?;
-        let value = link
-            .rpc(&ctx, Method::ToolExtract, params, TOOL_IPC_TIMEOUT)
-            .await?;
+        let value = link.rpc(&ctx, Method::ToolExtract, params, timeout).await?;
         let mut parsed: ExtractResult = serde_json::from_value(value)
             .map_err(|e| CliError::Local(anyhow::anyhow!("decode extract reply: {e}")))?;
         let out = args.out;
@@ -2090,34 +2118,60 @@ async fn inspect(
         }
         InspectAction::Observe => (
             Method::ToolObserve,
-            protocol::<ObserveParams>(arguments, session, &["scope", "context"], &[])?,
+            protocol::<ObserveParams>(
+                arguments,
+                session,
+                &["scope", "context", "observation", "expect", "depends_on"],
+                &[],
+            )?,
             Some("/text"),
         ),
         InspectAction::Snapshot => (
             Method::ToolSnapshot,
-            protocol::<SnapshotParams>(arguments, session, &["scope", "context"], &[])?,
+            protocol::<SnapshotParams>(
+                arguments,
+                session,
+                &["scope", "context", "observation", "expect", "depends_on"],
+                &[],
+            )?,
             Some("/text"),
         ),
         InspectAction::Html => (
             Method::ToolGetHtml,
-            protocol::<GetHtmlParams>(arguments, session, &["scope", "context"], &[])?,
+            protocol::<GetHtmlParams>(
+                arguments,
+                session,
+                &["scope", "context", "observation", "expect", "depends_on"],
+                &[],
+            )?,
             None,
         ),
         InspectAction::Console => (
             Method::ToolConsole,
-            protocol::<ConsoleParams>(arguments, session, &["scope", "context"], &[])?,
+            protocol::<ConsoleParams>(
+                arguments,
+                session,
+                &["scope", "context", "observation", "expect", "depends_on"],
+                &[],
+            )?,
             None,
         ),
         InspectAction::Network => (
             Method::ToolNetwork,
-            protocol::<NetworkParams>(arguments, session, &["scope", "context"], &[])?,
+            protocol::<NetworkParams>(
+                arguments,
+                session,
+                &["scope", "context", "observation", "expect", "depends_on"],
+                &[],
+            )?,
             None,
         ),
         InspectAction::Screenshot | InspectAction::Extract | InspectAction::View => unreachable!(),
     };
     ctx.validate_action_metadata(&method, Some(&params))?;
+    let timeout = orchestration::tool_ipc_timeout(&method, &params);
     let link = connect(daemon, control).await?;
-    let value = link.rpc(&ctx, method, params, TOOL_IPC_TIMEOUT).await?;
+    let value = link.rpc(&ctx, method, params, timeout).await?;
     Ok(Reply {
         vom,
         ..Reply::json(value)
@@ -2352,6 +2406,7 @@ fn interact_prepare(args: InteractArgs, conn_scope: Option<&str>) -> Result<Prep
             }
             let input: DownloadInput = serde_json::from_value(Value::Object(args.params))
                 .map_err(|err| invalid(format!("invalid download params: {err}")))?;
+            crate::cli::atomic_output::preflight_destination(&input.out)?;
             if !input.overwrite && input.out.exists() {
                 return Err(download::output_exists(&input.out));
             }
@@ -2484,18 +2539,30 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
             // Only guarded actions receive caller evidence; readiness waits and post-sync stay clean.
             let aux_ctx = ctx.without_action_metadata();
             let (value, exit) = link
-                .blocking(move |rpc| {
-                    step::run(&args, method, params, |method, params, timeout| {
-                        let rpc_ctx = if business_rpc::method_accepts_action_metadata_with_params(
-                            &method,
-                            Some(&params),
-                        ) {
-                            &ctx
-                        } else {
-                            &aux_ctx
-                        };
-                        rpc(rpc_ctx, method, params, timeout)
-                    })
+                .blocking_envelope(move |rpc| {
+                    step::run_with_meta(
+                        &args,
+                        method,
+                        params,
+                        true,
+                        |method, params, timeout, want_meta| {
+                            let rpc_ctx =
+                                if business_rpc::method_accepts_action_metadata_with_params(
+                                    &method,
+                                    Some(&params),
+                                ) {
+                                    &ctx
+                                } else {
+                                    &aux_ctx
+                                };
+                            let meta = crate::ipc_client::IpcRequestMeta {
+                                return_scope_meta: want_meta,
+                                ..Default::default()
+                            };
+                            let (val, resp_meta) = rpc(rpc_ctx, method, params, meta, timeout)?;
+                            Ok((val, resp_meta.scope_meta))
+                        },
+                    )
                 })
                 .await?;
             Ok(Reply {
@@ -2939,9 +3006,9 @@ struct TabsArgs {
     context: Option<String>,
     /// close: observation_id from the latest sync, when the action requires it.
     observation: Option<String>,
-    /// close: literal facts checked immediately before the action, at most 16.
+    /// close: literal facts checked immediately before closing the tab, at most 16.
     expect: Option<Vec<ActionExpectation>>,
-    /// close, strict policy only: observed refs or selectors covering the decision regions.
+    /// close: strict-policy dependency targets (requires context).
     depends_on: Option<Vec<String>>,
 }
 
@@ -3055,10 +3122,9 @@ struct AssistArgs {
     /// resize, emulate: context and observation explicitly returned by the latest sync.
     context: Option<String>,
     observation: Option<String>,
-    /// resize, emulate: literal facts checked immediately before the action, at most 16.
+    /// resize, emulate: literal facts checked immediately before action, at most 16.
     expect: Option<Vec<ActionExpectation>>,
-    /// resize, emulate, strict policy only: observed refs or selectors covering the decision
-    /// regions.
+    /// resize, emulate: strict-policy dependency targets (requires context).
     depends_on: Option<Vec<String>>,
     /// request_help, dialog_status: task tab; defaults to the session's current task tab.
     tab_id: Option<i64>,
@@ -3094,6 +3160,7 @@ async fn assist(
     arguments: &Value,
 ) -> Result<Reply, CliError> {
     let session = args.session.as_deref().unwrap_or("");
+    let meta = ["scope", "context", "observation", "expect", "depends_on"];
     let ctx = build_ctx(
         conn_scope,
         args.scope.as_deref(),
@@ -3196,7 +3263,7 @@ async fn assist(
             let params = protocol::<RequestHelpParams>(
                 arguments,
                 session,
-                &["scope"],
+                &meta,
                 &[("timeout_ms", json!(300_000))],
             )?;
             let timeout = timeout_of(&params, 300_000);
@@ -3204,12 +3271,12 @@ async fn assist(
         }
         AssistAction::DialogStatus => (
             Method::ToolDialogStatus,
-            protocol::<DialogStatusParams>(arguments, session, &["scope"], &[])?,
+            protocol::<DialogStatusParams>(arguments, session, &meta, &[])?,
             DIALOG_TIMEOUT,
         ),
         AssistAction::DialogAccept => (
             Method::ToolDialogAccept,
-            protocol::<DialogHandleParams>(arguments, session, &["scope"], &[])?,
+            protocol::<DialogHandleParams>(arguments, session, &meta, &[])?,
             DIALOG_TIMEOUT,
         ),
         AssistAction::DialogDismiss => {
@@ -3218,7 +3285,7 @@ async fn assist(
             }
             (
                 Method::ToolDialogDismiss,
-                protocol::<DialogHandleParams>(arguments, session, &["scope"], &[])?,
+                protocol::<DialogHandleParams>(arguments, session, &meta, &[])?,
                 DIALOG_TIMEOUT,
             )
         }
@@ -3227,11 +3294,11 @@ async fn assist(
                 return Err(invalid("overwrite requires out"));
             }
             let overwrite = args.overwrite.unwrap_or(false);
-            if let Some(ref out) = args.out
-                && !overwrite
-                && out.exists()
-            {
-                return Err(download::output_exists(out));
+            if let Some(ref out) = args.out {
+                crate::cli::atomic_output::preflight_destination(out)?;
+                if !overwrite && out.exists() {
+                    return Err(download::output_exists(out));
+                }
             }
             let wait_ms = args.wait_ms.unwrap_or(10_000);
             if wait_ms > 60_000 {
@@ -3240,7 +3307,15 @@ async fn assist(
             let params = protocol::<OperationParams>(
                 arguments,
                 session,
-                &["scope", "out", "overwrite"],
+                &[
+                    "scope",
+                    "context",
+                    "observation",
+                    "expect",
+                    "depends_on",
+                    "out",
+                    "overwrite",
+                ],
                 &[("wait_ms", json!(wait_ms))],
             )?;
             ctx.validate_action_metadata(&Method::ToolOperationAwait, Some(&params))?;
@@ -3302,7 +3377,7 @@ async fn assist(
             }
             (
                 Method::ToolOperationCancel,
-                protocol::<OperationParams>(arguments, session, &["scope"], &[])?,
+                protocol::<OperationParams>(arguments, session, &meta, &[])?,
                 DIALOG_TIMEOUT,
             )
         }
@@ -3389,7 +3464,7 @@ async fn ledger(
 #[serde(deny_unknown_fields)]
 struct DebugMcpArgs {
     action: DebugAction,
-    /// Session id; required except for offline action="capabilities".
+    /// Session id; omit to use this caller scope's active session (or offline discovery for action="capabilities" when scope is also omitted).
     session: Option<String>,
     /// Explicit caller scope name for multi-agent isolation.
     scope: Option<String>,
@@ -3437,13 +3512,13 @@ struct DebugMcpArgs {
     command_id: Option<String>,
     /// export: write portable recording JSON to this new file path and return path + byte count.
     output: Option<PathBuf>,
-    /// replay: context_id from latest sync.
+    /// rule_add, rule_enable, rule_disable, rule_remove, replay: context_id from latest sync.
     context: Option<String>,
-    /// replay: observation_id from latest sync.
+    /// rule_add, rule_enable, rule_disable, rule_remove, replay: observation_id from latest sync.
     observation: Option<String>,
-    /// replay: pre-dispatch expectations checked immediately before replay.
+    /// rule_add, rule_enable, rule_disable, rule_remove, replay: pre-dispatch expectations checked immediately before action.
     expect: Option<Vec<ActionExpectation>>,
-    /// replay: strict-policy dependency targets.
+    /// rule_add, rule_enable, rule_disable, rule_remove, replay: strict-policy dependency targets.
     depends_on: Option<Vec<String>>,
 }
 
@@ -3462,12 +3537,6 @@ fn validate_debug_args(
     if !args.action.cooperation_guarded() && ctx.has_any_action_metadata() {
         return Err(invalid(
             "context, depends_on, observation, and expect on bsk_debug apply only to guarded debug actions",
-        ));
-    }
-    if args.action != DebugAction::Capabilities && args.session.as_deref().is_none_or(str::is_empty)
-    {
-        return Err(invalid(
-            "session is required except for offline capabilities",
         ));
     }
     if matches!(
@@ -3658,7 +3727,10 @@ async fn run_debug(
     args: DebugMcpArgs,
 ) -> Result<Reply, CliError> {
     let (ctx, params, output) = validate_debug_args(args, conn_scope)?;
-    if params.action == DebugAction::Capabilities && params.session_id.is_empty() {
+    if params.action == DebugAction::Capabilities
+        && params.session_id.is_empty()
+        && ctx.scope.is_none()
+    {
         return Ok(Reply::json(debug::offline_capabilities_value()));
     }
     let timeout = debug::debug_timeout(&params);
@@ -3868,6 +3940,7 @@ async fn run_video(
             })
         }
     };
+    video::preflight_command(&command)?;
     let link = connect(daemon, control).await?;
     let (value, failed) = link
         .blocking(move |rpc| {
@@ -3916,6 +3989,105 @@ struct RecordArgs {
     output: Option<PathBuf>,
 }
 
+const RECORD_CANCEL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Dedicated per-MCP-connection transient scope for ephemeral `bsk_record`
+/// sessions so EOF teardown can reap orphaned recording windows without
+/// overwriting or tombstoning the caller's normal browsing session scope.
+pub(crate) fn mcp_record_scope(conn_scope: &str) -> String {
+    format!("{conn_scope}:record")
+}
+
+/// Send `SessionStop` with a fresh, uncancelled control context so MCP client
+/// cancellation or stdio EOF teardown never short-circuits recording cleanup.
+/// Retries transient `session_busy` replies with short backoff until `timeout`
+/// so cleanup bridges the small gap between client `CANCEL_RESPONSE_GRACE` and
+/// daemon `CANCEL_CLEANUP_TIMEOUT`.
+async fn stop_record_session_uncancelled(
+    sock: &Path,
+    aux_ctx: &ClientContext,
+    session_id: &str,
+    recording: bool,
+    timeout: Duration,
+) -> Result<(), CliError> {
+    let cleanup_link = Link {
+        sock: sock.to_path_buf(),
+        control: Arc::new(CallControl::default()),
+    };
+    let params = if recording {
+        json!({"session_id": session_id, "recording": true})
+    } else {
+        json!({"session_id": session_id, "all": false})
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_busy: Option<CliError> = None;
+    let reply = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(last_busy.unwrap_or_else(|| CliError::Rpc {
+                code: ErrorCode::Timeout,
+                message: format!("session {session_id} stayed busy during recording cleanup"),
+                data: Some(json!({
+                    "reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str(),
+                })),
+                source: None,
+            }));
+        }
+        match cleanup_link
+            .rpc(aux_ctx, Method::SessionStop, params.clone(), remaining)
+            .await
+        {
+            Ok(reply) => break reply,
+            Err(err) if err.is_session_busy() => {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    return Err(err);
+                }
+                last_busy = Some(err);
+                tokio::time::sleep(SESSION_BUSY_RETRY_INTERVAL.min(left)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    };
+    if let Some(failure) = reply
+        .get("failed")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+    {
+        let code = failure
+            .get("code")
+            .cloned()
+            .and_then(|v| serde_json::from_value::<ErrorCode>(v).ok())
+            .unwrap_or(ErrorCode::ProtocolError);
+        let message = failure
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("failed to stop recording session")
+            .to_owned();
+        return Err(CliError::Rpc {
+            code,
+            message,
+            data: Some(json!({
+                "session_id": session_id,
+                "return_failures": reply.get("return_failures").cloned().unwrap_or(Value::Null),
+            })),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+/// Clear `record-session.json` only when teardown confirmed the session stopped
+/// or is already gone (`NotFound`), preserving the pointer if cleanup failed
+/// while the browser recording session may still be running.
+fn should_clear_record_state(stop_res: &Result<(), CliError>) -> bool {
+    match stop_res {
+        Ok(()) => true,
+        Err(err) => err.code() == Some(ErrorCode::NotFound),
+    }
+}
+
 fn record_reply_json(
     output_dir: &Path,
     trace: &RecordedTrace,
@@ -3956,11 +4128,19 @@ async fn run_record(
             if let Some(ref browser) = args.browser {
                 start_payload["browser_instance_id"] = json!(browser);
             }
-            let session_reply = link
-                .rpc(
+            let start_meta = conn_scope
+                .map(|cs| crate::ipc_client::IpcRequestMeta {
+                    caller_scope: Some(mcp_record_scope(cs)),
+                    bind_scope: true,
+                    ..Default::default()
+                })
+                .unwrap_or_default();
+            let (session_reply, _) = link
+                .rpc_envelope(
                     &aux_ctx,
                     Method::SessionStart,
                     start_payload,
+                    start_meta,
                     SESSION_START_TIMEOUT,
                 )
                 .await?;
@@ -3989,14 +4169,14 @@ async fn run_record(
                 )
                 .await
             {
-                let _ = link
-                    .rpc(
-                        &aux_ctx,
-                        Method::SessionStop,
-                        json!({"session_id": session_id, "all": false}),
-                        SESSION_STOP_TIMEOUT,
-                    )
-                    .await;
+                let _ = stop_record_session_uncancelled(
+                    &link.sock,
+                    &aux_ctx,
+                    &session_id,
+                    false,
+                    RECORD_CANCEL_STOP_TIMEOUT,
+                )
+                .await;
                 return Err(record::annotate_default_start_page_error(
                     err,
                     args.url.as_deref(),
@@ -4010,14 +4190,14 @@ async fn run_record(
                     .map_err(|e| anyhow::anyhow!("write record state failed: {e}"))
                     .and_then(|r| r)
             {
-                let _ = link
-                    .rpc(
-                        &aux_ctx,
-                        Method::SessionStop,
-                        json!({"session_id": session_id, "all": false}),
-                        SESSION_STOP_TIMEOUT,
-                    )
-                    .await;
+                let _ = stop_record_session_uncancelled(
+                    &link.sock,
+                    &aux_ctx,
+                    &session_id,
+                    false,
+                    RECORD_CANCEL_STOP_TIMEOUT,
+                )
+                .await;
                 return Err(CliError::Local(err));
             }
 
@@ -4056,17 +4236,25 @@ async fn run_record(
             }
             .unwrap();
 
-            let stop_res = link
-                .rpc(
-                    &aux_ctx,
-                    Method::SessionStop,
-                    json!({"session_id": session_id, "recording": true}),
-                    SESSION_STOP_TIMEOUT,
-                )
+            let stop_timeout = if control.is_cancelled() || bundle.is_err() {
+                RECORD_CANCEL_STOP_TIMEOUT
+            } else {
+                SESSION_STOP_TIMEOUT
+            };
+            let stop_res = stop_record_session_uncancelled(
+                &link.sock,
+                &aux_ctx,
+                &session_id,
+                !control.is_cancelled(),
+                stop_timeout,
+            )
+            .await;
+            if should_clear_record_state(&stop_res) {
+                let _ = tokio::task::spawn_blocking(move || {
+                    record_state::clear_session(&sid_for_clear)
+                })
                 .await;
-            let _ =
-                tokio::task::spawn_blocking(move || record_state::clear_session(&sid_for_clear))
-                    .await;
+            }
 
             let (trace, exported) = bundle?;
             stop_res?;
@@ -4100,7 +4288,7 @@ async fn run_record(
                     session_id: state.session_id.clone(),
                 })
                 .map_err(|e| invalid(e.to_string()))?;
-                let stop_reply = link
+                let stop_reply = match link
                     .rpc(
                         &aux_ctx,
                         Method::ToolRecordStop,
@@ -4108,7 +4296,28 @@ async fn run_record(
                         TOOL_IPC_TIMEOUT,
                     )
                     .await
-                    .map_err(|err| record::forget_stale_recording(err, &state.session_id))?;
+                {
+                    Ok(reply) => reply,
+                    Err(err) => {
+                        if err.code() == Some(ErrorCode::NotFound) {
+                            // Recording may have already ended while its Agent Window stayed alive
+                            // after a prior teardown failure; close the session before clearing state.
+                            let session_stop = stop_record_session_uncancelled(
+                                &link.sock,
+                                &aux_ctx,
+                                &state.session_id,
+                                false,
+                                RECORD_CANCEL_STOP_TIMEOUT,
+                            )
+                            .await;
+                            if should_clear_record_state(&session_stop) {
+                                return Err(record::forget_stale_recording(err, &state.session_id));
+                            }
+                            return Err(session_stop.unwrap_err());
+                        }
+                        return Err(err);
+                    }
+                };
                 let parsed: RecordStopResult = serde_json::from_value(stop_reply)
                     .map_err(|e| CliError::Local(anyhow::anyhow!("decode record_stop: {e}")))?;
 
@@ -4121,17 +4330,24 @@ async fn run_record(
                 .await
                 .map_err(|e| CliError::Local(anyhow::anyhow!("export task failed: {e}")))?;
 
-                let stop_res = link
-                    .rpc(
-                        &aux_ctx,
-                        Method::SessionStop,
-                        json!({"session_id": state.session_id, "recording": true}),
-                        SESSION_STOP_TIMEOUT,
-                    )
-                    .await;
-                let sid = state.session_id;
-                let _ =
-                    tokio::task::spawn_blocking(move || record_state::clear_session(&sid)).await;
+                let stop_timeout = if control.is_cancelled() {
+                    RECORD_CANCEL_STOP_TIMEOUT
+                } else {
+                    SESSION_STOP_TIMEOUT
+                };
+                let stop_res = stop_record_session_uncancelled(
+                    &link.sock,
+                    &aux_ctx,
+                    &state.session_id,
+                    true,
+                    stop_timeout,
+                )
+                .await;
+                if should_clear_record_state(&stop_res) {
+                    let sid = state.session_id;
+                    let _ = tokio::task::spawn_blocking(move || record_state::clear_session(&sid))
+                        .await;
+                }
                 let (trace, exported) = exported?;
                 stop_res?;
                 return Ok(Reply::json(record_reply_json(&output, &trace, &exported)?));
@@ -4154,8 +4370,137 @@ async fn run_record(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Validate a parsed MCP tool call `(tool_name, args)` against the real
+    /// `#[serde(deny_unknown_fields)]` MCP argument structs AND real dispatch-time
+    /// required-field / action-specific validation (never masking missing required fields).
+    pub(crate) fn assert_valid_mcp_args(tool_name: &str, args: &Value, is_union: bool) {
+        match tool_name {
+            "bsk_session" => {
+                let parsed = parse::<SessionArgs>(args)
+                    .unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+                if !is_union && matches!(parsed.action, SessionAction::Open) {
+                    assert!(
+                        parsed.url.as_deref().is_some_and(|u| !u.trim().is_empty()),
+                        "{tool_name} open requires url: {args}"
+                    );
+                }
+            }
+            "bsk_page" => {
+                let parsed =
+                    parse::<PageArgs>(args).unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+                match parsed.action {
+                    PageAction::Navigate => {
+                        assert!(
+                            parsed.url.is_some(),
+                            "{tool_name} navigate requires url: {args}"
+                        );
+                    }
+                    PageAction::WaitMs => {
+                        assert!(
+                            parsed.duration_ms.is_some(),
+                            "{tool_name} wait_ms requires duration_ms: {args}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            "bsk_inspect" => {
+                let parsed = parse::<InspectArgs>(args)
+                    .unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+                if !is_union && matches!(parsed.action, InspectAction::View) {
+                    assert!(
+                        parsed.file.is_some(),
+                        "{tool_name} view requires file: {args}"
+                    );
+                }
+            }
+            "bsk_interact" => {
+                let parsed = parse::<InteractArgs>(args)
+                    .unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+                if matches!(parsed.action, InteractAction::Upload) {
+                    let upload: UploadInput = serde_json::from_value(Value::Object(parsed.params))
+                        .unwrap_or_else(|e| panic!("{tool_name} upload params {args}: {e}"));
+                    assert!(
+                        !upload.files.is_empty(),
+                        "{tool_name} upload requires non-empty params.files: {args}"
+                    );
+                }
+            }
+            "bsk_plan" => {
+                parse::<PlanArgs>(args).unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+            }
+            "bsk_tabs" => {
+                let parsed =
+                    parse::<TabsArgs>(args).unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+                if matches!(
+                    parsed.action,
+                    TabsAction::Select
+                        | TabsAction::Close
+                        | TabsAction::Borrow
+                        | TabsAction::Return
+                ) {
+                    assert!(
+                        parsed.tab_id.is_some(),
+                        "{tool_name} {:?} requires tab_id: {args}",
+                        parsed.action
+                    );
+                }
+            }
+            "bsk_assist" => {
+                let parsed =
+                    parse::<AssistArgs>(args).unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+                match parsed.action {
+                    AssistAction::DialogAccept | AssistAction::DialogDismiss => {
+                        assert!(
+                            parsed.dialog_id.is_some(),
+                            "{tool_name} {:?} requires dialog_id: {args}",
+                            parsed.action
+                        );
+                    }
+                    AssistAction::OperationAwait | AssistAction::OperationCancel => {
+                        assert!(
+                            parsed.operation_id.is_some(),
+                            "{tool_name} {:?} requires operation_id: {args}",
+                            parsed.action
+                        );
+                    }
+                    AssistAction::RequestHelp => {
+                        assert!(
+                            parsed.prompt.is_some(),
+                            "{tool_name} request_help requires prompt: {args}"
+                        );
+                    }
+                    AssistAction::Resize => {
+                        assert!(
+                            parsed.width.is_some() && parsed.height.is_some(),
+                            "{tool_name} resize requires width and height: {args}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            "bsk_ledger" => {
+                parse::<LedgerArgs>(args).unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+            }
+            "bsk_debug" => {
+                let parsed = parse::<DebugMcpArgs>(args)
+                    .unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+                validate_debug_args(parsed, None).unwrap_or_else(|e| {
+                    panic!("{tool_name} dispatch validation failed {args}: {e}")
+                });
+            }
+            "bsk_video" => {
+                parse::<VideoArgs>(args).unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+            }
+            "bsk_record" => {
+                parse::<RecordArgs>(args).unwrap_or_else(|e| panic!("{tool_name} {args}: {e}"));
+            }
+            other => panic!("unknown MCP tool referenced in hint: {other}"),
+        }
+    }
 
     fn args(value: Value) -> InteractArgs {
         serde_json::from_value(value).unwrap()
@@ -4250,10 +4595,39 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.to_string().contains("incompatible"));
-        for illegal in ["expression", "readonly", "observation", "expect"] {
+        for illegal in ["expression", "readonly"] {
             let mut bad = input.clone();
             bad[illegal] = json!("unsafe");
             assert!(parse::<InspectArgs>(&bad).is_err());
+        }
+        // Action metadata other than `context` is valid on `bsk_inspect` for guarded
+        // `screenshot(full_page=true)` / `observe(probe_hover=true)`, but MUST fail closed
+        // offline on `read` before daemon contact.
+        for (illegal, val) in [
+            ("observation", json!("obs-1")),
+            (
+                "expect",
+                json!([{"target": "#x", "field": "exists", "equals": true}]),
+            ),
+            ("depends_on", json!(["@e1"])),
+        ] {
+            let mut bad = input.clone();
+            bad[illegal] = val;
+            let err = inspect(
+                &daemon,
+                &Arc::new(CallControl::default()),
+                None,
+                parse(&bad).unwrap(),
+                &bad,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(
+                err.code(),
+                Some(ErrorCode::InvalidParams),
+                "{illegal}: {err}"
+            );
         }
         let definitions = definitions();
         let read = definitions
@@ -4347,23 +4721,17 @@ mod tests {
                     .filter(|method| method.accepts_action_metadata())
                     .collect()
             ),
-            wire(
-                EVIDENCE_SURFACES
-                    .iter()
-                    .map(|(method, ..)| method)
-                    .collect()
-            ),
+            wire(EVIDENCE_SURFACES.iter().map(|(method, _)| method).collect()),
             "every method that accepts full action evidence needs one row in EVIDENCE_SURFACES"
         );
         let definitions = definitions();
-        for (method, tool, omitted) in EVIDENCE_SURFACES {
+        for (method, tool) in EVIDENCE_SURFACES {
             let properties = &definitions.iter().find(|def| def["name"] == *tool).unwrap()["inputSchema"]
                 ["properties"];
             for (_, arg) in EVIDENCE_FIELDS {
-                assert_eq!(
+                assert!(
                     properties.get(arg).is_some(),
-                    !omitted.contains(&arg),
-                    "{tool} and {arg} for {}",
+                    "{tool} lacks {arg} for {}",
                     method.wire_name()
                 );
             }
@@ -4974,5 +5342,86 @@ mod tests {
             "inner oneOf null branch must survive: {inner:?}"
         );
         assert!(inner.contains(&json!({ "type": "null" })));
+    }
+
+    #[tokio::test]
+    async fn mcp_output_tools_preflight_destination_before_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir").join("out.bin");
+        let existing_dir = dir.path().join("existing-dir");
+        std::fs::create_dir(&existing_dir).unwrap();
+        let daemon = Daemon::Fixed {
+            sock: PathBuf::from("/nonexistent/bsk-mcp-out-preflight.sock"),
+            protocol: "2.0".into(),
+        };
+        let control = Arc::new(CallControl::default());
+
+        for (target, expected_code) in [
+            (missing.to_str().unwrap(), "not_found"),
+            (existing_dir.to_str().unwrap(), "invalid_params"),
+        ] {
+            for (tool, args) in [
+                (
+                    "bsk_inspect",
+                    json!({"action":"screenshot","session":"s1","out":target}),
+                ),
+                (
+                    "bsk_inspect",
+                    json!({"action":"screenshot","session":"s1","full_page":true,"out":target}),
+                ),
+                (
+                    "bsk_inspect",
+                    json!({"action":"extract","session":"s1","extract_action":"table","selector":"table","out":target}),
+                ),
+                (
+                    "bsk_interact",
+                    json!({"action":"download","session":"s1","params":{"ref":"@e1","out":target}}),
+                ),
+                (
+                    "bsk_video",
+                    json!({"action":"stop","recording":"vid_0123456789abcdef0123456789abcdef","out":target}),
+                ),
+                (
+                    "bsk_video",
+                    json!({"action":"save","recording":"vid_0123456789abcdef0123456789abcdef","out":target}),
+                ),
+                (
+                    "bsk_assist",
+                    json!({"action":"operation_await","session":"s1","operation_id":"op-1","out":target}),
+                ),
+            ] {
+                let reply = call(&daemon, &control, None, tool, args.clone()).await;
+                assert_eq!(reply["isError"], true, "{tool} {args}: {reply}");
+                let body: Value =
+                    serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+                assert_eq!(body["code"], expected_code, "{tool} {args}: {body}");
+                assert_eq!(body["data"]["reason"], "local_file_error", "{tool}: {body}");
+            }
+        }
+
+        // CSV extract also rejects an existing `.meta.json` sidecar before connecting.
+        let csv = dir.path().join("rows.csv");
+        let meta = extract::metadata_path(&csv);
+        std::fs::write(&meta, b"{}").unwrap();
+        let reply = call(
+            &daemon,
+            &control,
+            None,
+            "bsk_inspect",
+            json!({
+                "action": "extract",
+                "session": "s1",
+                "extract_action": "table",
+                "selector": "table",
+                "format": "csv",
+                "out": csv.to_str().unwrap(),
+            }),
+        )
+        .await;
+        assert_eq!(reply["isError"], true, "{reply}");
+        let body: Value =
+            serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["code"], "invalid_params", "{body}");
+        assert_eq!(body["data"]["reason"], "local_file_error", "{body}");
     }
 }

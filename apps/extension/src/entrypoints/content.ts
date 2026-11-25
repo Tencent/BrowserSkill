@@ -108,6 +108,7 @@ export default defineContentScript({
 
     const overlays = new OverlayController();
     let activeRecordRequestId: string | null = null;
+    const stoppedRecordRequestIds = new Set<string>();
     let reactRoot: ReactDOM.Root | null = null;
     let overlayHost: HTMLElement | null = null;
     let overlayContainer: HTMLElement | null = null;
@@ -354,25 +355,32 @@ export default defineContentScript({
       }
 
       if (isRecordStartMessage(message)) {
+        if (stoppedRecordRequestIds.has(message.requestId)) {
+          (sendResponse as unknown as (response: RecordStartAck) => void)({ ok: true });
+          return false;
+        }
         recoverVideoOverlay();
-        activeRecordRequestId = message.requestId;
-        overlays.setAgentRecordRequest({
-          id: message.requestId,
-          ...(typeof message.startedAtMs === "number" ? { startedAtMs: message.startedAtMs } : {}),
-          onFinish: () => {
-            void chrome.runtime.sendMessage({
-              type: RECORD_FINISH,
-              requestId: message.requestId,
-            });
-          },
-        });
+        mountRecordRequest(message.requestId, message.startedAtMs);
         renderAll();
         (sendResponse as unknown as (response: RecordStartAck) => void)({ ok: true });
         return false;
       }
 
       if (isRecordStopMessage(message) || isRecordCancelMessage(message)) {
-        if (activeRecordRequestId !== message.requestId) return false;
+        stoppedRecordRequestIds.add(message.requestId);
+        if (stoppedRecordRequestIds.size > 64) {
+          const oldest = stoppedRecordRequestIds.values().next().value;
+          if (oldest !== undefined) stoppedRecordRequestIds.delete(oldest);
+        }
+        if (
+          activeRecordRequestId !== message.requestId &&
+          overlays.snapshot().activeRecord?.id !== message.requestId
+        ) {
+          if (isRecordStopMessage(message)) {
+            (sendResponse as unknown as (response: RecordStopAck) => void)({ ok: true });
+          }
+          return false;
+        }
         overlays.clearAgentRecordRequest(message.requestId);
         activeRecordRequestId = null;
         renderAll();
@@ -490,14 +498,40 @@ export default defineContentScript({
       );
     }
 
+    function mountRecordRequest(requestId: string, startedAtMs?: number): void {
+      activeRecordRequestId = requestId;
+      overlays.setAgentRecordRequest({
+        id: requestId,
+        ...(typeof startedAtMs === "number" ? { startedAtMs } : {}),
+        onFinish: () => {
+          void chrome.runtime.sendMessage({
+            type: RECORD_FINISH,
+            requestId,
+          });
+        },
+      });
+    }
+
     async function queryActiveHelpWithRetry(): Promise<void> {
+      const mountedHelpId = overlays.snapshot().activeHelp?.id ?? null;
       for (let attempt = 0; attempt < 6; attempt += 1) {
+        if (!alive) return;
         try {
           const helpQuery = (await chrome.runtime.sendMessage({
             type: HELP_QUERY,
           })) as HelpQueryResponse | undefined;
+          if (!alive) return;
           if (helpQuery?.active && helpQuery.request) {
             mountHelpRequest(helpQuery.request);
+            renderAll();
+            return;
+          }
+          if (
+            helpQuery?.active === false &&
+            mountedHelpId !== null &&
+            overlays.snapshot().activeHelp?.id === mountedHelpId
+          ) {
+            overlays.clearAgentHelpRequest(mountedHelpId);
             renderAll();
             return;
           }
@@ -506,30 +540,42 @@ export default defineContentScript({
         }
         await new Promise((resolve) => window.setTimeout(resolve, 150));
       }
+      // If the last active help request ended while this document was in BFCache,
+      // the background detached its HELP_QUERY listener (returning undefined).
+      // Clear the stale banner once retries confirm no active help replaced it.
+      if (alive && mountedHelpId !== null && overlays.snapshot().activeHelp?.id === mountedHelpId) {
+        overlays.clearAgentHelpRequest(mountedHelpId);
+        renderAll();
+      }
     }
 
     async function queryActiveRecord(): Promise<void> {
+      const mountedRecordId = activeRecordRequestId;
       try {
         const recordQuery = (await chrome.runtime.sendMessage({
           type: RECORD_QUERY,
         })) as RecordQueryResponse | undefined;
+        if (!alive) return;
         if (
           recordQuery?.active &&
           typeof recordQuery.requestId === "string" &&
-          overlays.snapshot().activeRecord === null
+          !stoppedRecordRequestIds.has(recordQuery.requestId)
         ) {
-          const requestId = recordQuery.requestId;
-          const startedAtMs = recordQuery.startedAtMs;
-          overlays.setAgentRecordRequest({
-            id: requestId,
-            ...(typeof startedAtMs === "number" ? { startedAtMs } : {}),
-            onFinish: () => {
-              void chrome.runtime.sendMessage({
-                type: RECORD_FINISH,
-                requestId,
-              });
-            },
-          });
+          if (
+            activeRecordRequestId === mountedRecordId &&
+            (activeRecordRequestId !== recordQuery.requestId ||
+              overlays.snapshot().activeRecord === null)
+          ) {
+            mountRecordRequest(recordQuery.requestId, recordQuery.startedAtMs);
+            renderAll();
+          }
+        } else if (
+          recordQuery?.active === false &&
+          mountedRecordId !== null &&
+          activeRecordRequestId === mountedRecordId
+        ) {
+          activeRecordRequestId = null;
+          overlays.clearAgentRecordRequest(mountedRecordId);
           renderAll();
         }
       } catch (err) {

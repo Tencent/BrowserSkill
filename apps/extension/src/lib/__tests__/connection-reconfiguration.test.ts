@@ -333,4 +333,40 @@ describe("connection reconfiguration with WSTransport", () => {
     expect(s.controller.snapshot().state).toBe("connected");
     expect(s.controller.snapshot().lastError).toBeNull();
   });
+
+  it("resets local authentication backoff immediately when reconfiguring to a new port or remote endpoint", async () => {
+    const sockets: Socket[] = [];
+    const authenticate = vi.fn().mockRejectedValue(new Error("server_unverified"));
+    const transport = new WSTransport({
+      url: DEFAULT_DAEMON_WS_URL,
+      authenticate,
+      webSocketFactory: (url) => {
+        const socket = new Socket(url);
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+    });
+    const controller = new ConnectionController();
+    await controller.attach(transport, { name: "Chrome", version: "125" }, true);
+    sockets[0].open();
+    await flush();
+
+    // Transport is now in 30s+ auth backoff on the old local endpoint.
+    await expect(transport.connect()).rejects.toThrow("backoff");
+
+    // Reconfiguring to a remote endpoint (or different local port) clears auth backoff immediately.
+    authenticate.mockResolvedValue(undefined);
+    const remoteUrl = "wss://gateway.example/api/v1/local-browser/extension";
+    await controller.reconfigureTransport(`remote:${remoteUrl}`, () => {
+      transport.setUrl(remoteUrl);
+    });
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1].url).toBe(remoteUrl);
+    sockets[1].open();
+    await flush();
+    sockets[1].reply();
+    await flush();
+    expect(controller.snapshot().state).toBe("connected");
+    expect(controller.snapshot().lastError).toBeNull();
+  });
 });
