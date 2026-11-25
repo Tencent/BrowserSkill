@@ -304,7 +304,11 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
         for (const [index, option] of Array.from(node.selectedOptions).entries()) {
           tick();
           if (index) newline();
-          append(option.label, "normal");
+          // `label` is the rendered option text and already falls back to the
+          // text content in a browser; read it explicitly for DOM
+          // implementations that do not expose the property, and case it like
+          // every other rendered leaf.
+          append(caseText(option.label ?? option.textContent ?? "", option), "normal");
         }
         continue;
       }
