@@ -70,6 +70,15 @@ describe("structured extraction facts", () => {
     expect(extract("#t").rows).toEqual([{ c1: expected }]);
   });
 
+  it("applies an author case transform to the selected option text", () => {
+    document.body.innerHTML =
+      `<table id="t"><tr><td><select style="text-transform:uppercase">` +
+      `<option value="paid" selected>paid</option><option value="open">open</option>` +
+      `</select></td></tr></table>`;
+    // The page shows PAID; extraction must report what the user reads.
+    expect(extract("#t").rows).toEqual([{ c1: "PAID" }]);
+  });
+
   it("inherits CSS case transforms and respects nested overrides and line breaks", () => {
     document.head.innerHTML = `<style>
       #t { text-transform: uppercase; }

@@ -117,7 +117,7 @@ try {
     {
       executable,
       extensionPath,
-      extensionViaCdp: true,
+      extensionViaCdp: process.env.BSK_TEST_LOAD_CDP !== "0",
       deviceScale: 1,
       zoom: 1,
       headless: process.env.BSK_DYNAMIC_HEADFUL !== "1",
