@@ -656,6 +656,9 @@ pub fn dispatch(
             print(&reply, exit)
         }
         RecipeCommand::Draft(args) => {
+            if let Some(out) = &args.out {
+                super::atomic_output::preflight_destination(out)?;
+            }
             let (daemon, _protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
                 .context("ensure daemon is running")?;
             let reply = draft(

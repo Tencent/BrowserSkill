@@ -260,11 +260,14 @@ async fn reconcile_completed_tool_rpc(
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
         {
-            let req_tab_id = params.get("tab_id").and_then(Value::as_i64);
+            let session_id = SessionId(sid.to_owned());
             let req_ctx = params
                 .get("context_id")
                 .and_then(Value::as_str)
                 .filter(|s| !s.trim().is_empty());
+            let req_tab_id = params.get("tab_id").and_then(Value::as_i64).or_else(|| {
+                req_ctx.and_then(|ctx| state.scopes.tab_id_for_context(&session_id, ctx))
+            });
             match body {
                 ResponseBody::Ok(val)
                     if matches!(
@@ -278,7 +281,7 @@ async fn reconcile_completed_tool_rpc(
                     let tid = val.get("tab_id").and_then(Value::as_i64).or(req_tab_id);
                     state
                         .scopes
-                        .clear_implicit_tab_context(&SessionId(sid.to_owned()), tid, None);
+                        .clear_implicit_tab_context(&session_id, tid, None);
                 }
                 ResponseBody::Err(err) => {
                     let effect = err
@@ -300,11 +303,9 @@ async fn reconcile_completed_tool_rpc(
                     if effect == Some("unknown")
                         || matches!(reason, Some("page_load_failed" | "frame_unobservable"))
                     {
-                        state.scopes.clear_implicit_tab_context(
-                            &SessionId(sid.to_owned()),
-                            tid,
-                            None,
-                        );
+                        state
+                            .scopes
+                            .clear_implicit_tab_context(&session_id, tid, None);
                     } else if matches!(
                         reason,
                         Some(
@@ -315,11 +316,9 @@ async fn reconcile_completed_tool_rpc(
                                 | "cooperation_sync_required"
                         )
                     ) {
-                        state.scopes.clear_implicit_tab_context(
-                            &SessionId(sid.to_owned()),
-                            tid,
-                            req_ctx,
-                        );
+                        state
+                            .scopes
+                            .clear_implicit_tab_context(&session_id, tid, req_ctx);
                     }
                 }
                 _ => {}
@@ -1113,7 +1112,7 @@ async fn handle_tool_dispatch(
                 }
             };
         download.browser_relative_dir = Some(staging.browser_relative_dir);
-        download.max_byte_size = Some(super::file_transfer::MAX_TRANSFER_BYTES);
+        download.max_byte_size = Some(staging.max_byte_size);
         download_transfer_id = Some(staging.transfer_id);
         params = serde_json::to_value(download).unwrap_or(Value::Null);
     }
@@ -1429,7 +1428,7 @@ pub(super) fn tool_dispatch_transport_timeout(
         };
         return Ok(timeout);
     }
-    let policy = super::tool_policy::execution_policy(method);
+    let policy = super::tool_policy::execution_policy(method, params);
     if policy.deadline == super::tool_policy::Deadline::BorrowConfirmation {
         let ms = params
             .get("confirmation_timeout_ms")

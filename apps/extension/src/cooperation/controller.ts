@@ -12,6 +12,7 @@ import {
   type CdpRunner,
   cdpBlockedUrlReason,
   chromeTabsApi,
+  evictSessionCdpRunner,
   isRpcError,
   type PinnedSelectorTarget,
   readReportedTimeoutMs,
@@ -371,6 +372,7 @@ export class CooperationController implements ControlAuthority {
   private readonly tabs = new Map<number, TabState>();
   /** Keep a lost task target until explicit replacement; never fall back to the active tab. */
   private readonly defaultTabs = new Map<string, number>();
+  private readonly sessionCdps = new Map<string, Set<object>>();
   private readonly now: () => number;
   constructor(private readonly deps: CooperationDeps) {
     this.now = deps.now ?? Date.now;
@@ -808,6 +810,37 @@ export class CooperationController implements ControlAuthority {
   release(sessionId: string) {
     for (const [id, state] of this.tabs) if (state.sessionId === sessionId) this.releaseTab(id);
     this.defaultTabs.delete(sessionId);
+    const cdps = this.sessionCdps.get(sessionId);
+    if (cdps) {
+      for (const cdp of cdps) evictSessionCdpRunner(cdp, sessionId);
+      this.sessionCdps.delete(sessionId);
+    }
+  }
+  replaceTab(addedTabId: number, removedTabId: number) {
+    if (addedTabId === removedTabId) return;
+    const previous = this.tabs.get(removedTabId);
+    for (const [sessionId, tabId] of this.defaultTabs) {
+      if (tabId === removedTabId) this.defaultTabs.set(sessionId, addedTabId);
+    }
+    let next: TabState | undefined;
+    if (previous && (previous.held || previous.stopped || previous.intervened)) {
+      const session = this.deps.sessions.get(previous.sessionId);
+      if (session) {
+        next = this.track(session, addedTabId);
+        next.held = previous.held;
+        next.heldAt = previous.heldAt;
+        next.stopped = previous.stopped;
+        next.intervened = previous.intervened;
+        next.controlRevision = previous.controlRevision + 1;
+        next.authorityRevision = previous.authorityRevision + 1;
+        next.bootstrap = false;
+      }
+    }
+    if (previous) this.releaseTab(removedTabId);
+    if (next) {
+      this.changed(next);
+      this.sessionActivity(next.sessionId);
+    }
   }
   stopSession(sessionId: string) {
     for (const state of this.tabs.values())
@@ -827,8 +860,29 @@ export class CooperationController implements ControlAuthority {
     this.sessionActivity(sessionId);
   }
   syncSessions() {
+    const stale = new Set<string>();
     for (const sessionId of this.defaultTabs.keys())
-      if (!this.deps.sessions.has(sessionId)) this.release(sessionId);
+      if (!this.deps.sessions.has(sessionId)) stale.add(sessionId);
+    for (const state of this.tabs.values())
+      if (!this.deps.sessions.has(state.sessionId)) stale.add(state.sessionId);
+    for (const sessionId of this.sessionCdps.keys())
+      if (!this.deps.sessions.has(sessionId)) stale.add(sessionId);
+    for (const sessionId of stale) this.release(sessionId);
+  }
+  private runnerForSession<T extends CdpRunner>(cdp: T, session: SessionContext): T {
+    const sessionId = session.sessionId;
+    const sessionRef = new WeakRef(session);
+    const wrapped = sessionCdpRunner(cdp, sessionId, () => {
+      const live = sessionRef.deref();
+      return live !== undefined && this.deps.sessions.get(sessionId) === live;
+    });
+    let tracked = this.sessionCdps.get(sessionId);
+    if (!tracked) {
+      tracked = new Set();
+      this.sessionCdps.set(sessionId, tracked);
+    }
+    tracked.add(cdp);
+    return wrapped;
   }
   private async refresh(
     state: TabState,
@@ -946,11 +1000,7 @@ export class CooperationController implements ControlAuthority {
   ): Promise<CooperateResult | RpcError> {
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return { code: "not_found", message: "Unknown session" };
-    cdp = sessionCdpRunner(
-      cdp,
-      session.sessionId,
-      () => this.deps.sessions.get(session.sessionId) === session,
-    );
+    cdp = this.runnerForSession(cdp, session);
     this.startSession(session.sessionId);
     if (!["enable", "status", "sync", "wait"].includes(params.action))
       return { code: "invalid_params", message: "Unknown cooperation action" };
@@ -1723,11 +1773,7 @@ export class CooperationController implements ControlAuthority {
       return invoke(cdp);
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return invoke(cdp);
-    cdp = sessionCdpRunner(
-      cdp,
-      session.sessionId,
-      () => this.deps.sessions.get(session.sessionId) === session,
-    );
+    cdp = this.runnerForSession(cdp, session);
     const targetPolicy = session.controlPolicy === "target";
     this.startSession(session.sessionId);
     if (
@@ -2049,12 +2095,22 @@ export class CooperationController implements ControlAuthority {
     let actionTarget: ResolvedActionTarget | undefined;
     let destinationTarget: typeof actionTarget;
     let checkFailure: RpcError | undefined;
-    // Preparation such as scrolling counts as an effect, so a click can be `unknown`
-    // without having been pressed. Only that distinction makes it safe to try again.
-    const unpressed = (effect: unknown) =>
-      effect === "unknown" && req.method === "tool.click" && !nativeInputStarted
-        ? { press_sent: false }
-        : {};
+    // Preparation such as scrolling or pointer positioning counts as an effect, so an
+    // action can be `unknown` without having dispatched its native input. Recording
+    // `press_sent: false` (click) or `dispatched: false` (wheel/drag/press/transfer
+    // without focus side effects) lets callers and the daemon WAL distinguish a safe retry.
+    const undispatched = (effect: unknown) => {
+      if (effect !== "unknown" || nativeInputStarted) return {};
+      if (req.method === "tool.click") return { press_sent: false };
+      if (
+        !preparationFocus &&
+        ["tool.wheel", "tool.drag", "tool.press", "tool.download", "tool.upload"].includes(
+          req.method,
+        )
+      )
+        return { dispatched: false };
+      return {};
+    };
     const describeFailure = (message: string, effect: "none" | "unknown"): RpcError => {
       if (
         checkFailure?.data?.reason === "input_clock_unavailable" &&
@@ -2063,7 +2119,7 @@ export class CooperationController implements ControlAuthority {
       )
         return {
           ...checkFailure,
-          data: { ...checkFailure.data, effect_state: effect, ...unpressed(effect) },
+          data: { ...checkFailure.data, effect_state: effect, ...undispatched(effect) },
         };
       const diagnosis = observed
         ? {
@@ -2083,7 +2139,7 @@ export class CooperationController implements ControlAuthority {
           ...refused,
           data: {
             ...refused.data,
-            ...unpressed(effect),
+            ...undispatched(effect),
             ...diagnosis,
             ...(idleResumable
               ? {
@@ -2129,7 +2185,7 @@ export class CooperationController implements ControlAuthority {
         data: {
           ...issue.data,
           effect_state: effect,
-          ...unpressed(effect),
+          ...undispatched(effect),
           ...diagnosis,
           ...(effect === "unknown"
             ? {
@@ -2742,7 +2798,9 @@ export class CooperationController implements ControlAuthority {
           },
           dispatch: (startsInput, method, stepParams) => {
             assert(!startsInput && boundObjectCompletion(undefined, method, stepParams));
-            sent = true;
+            // Temporary focus emulation wakes a hidden/occluded tab and is restored
+            // in finally; it is not an irreversible page mutation on its own.
+            if (method !== "Emulation.setFocusEmulationEnabled") sent = true;
             if (!startsInput && PREPARATION_METHODS.has(method)) {
               preparationSent = true;
               preparationFocus ||= method === "DOM.focus";
@@ -2820,7 +2878,11 @@ export class CooperationController implements ControlAuthority {
         sent &&
         !isRpcError(result) &&
         (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
-      if (["tool.evaluate", "tool.upload"].includes(req.method)) {
+      if (
+        !signal.aborted &&
+        !state.stopped &&
+        ["tool.evaluate", "tool.upload"].includes(req.method)
+      ) {
         const intact = !state.unavailable && state.epoch === epoch;
         const postActionReplyTimeoutMs =
           actionReplyTimeoutMs !== undefined
@@ -2843,16 +2905,22 @@ export class CooperationController implements ControlAuthority {
       // Even a successful CDP reply does not authorize a stale next step.
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) {
-        const effect = sent ? "unknown" : "none";
-        if (targetPolicy && sent) state.context = undefined;
+        const effect =
+          sent ||
+          detachedByHandler ||
+          (isRpcError(result) && result.data?.effect_state === "unknown")
+            ? "unknown"
+            : "none";
+        if (targetPolicy && effect === "unknown") state.context = undefined;
         else maybeRestoreObservation(effect);
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
           data: {
             effect_state: effect,
-            phase: sent ? "execution" : "precondition",
-            ...(sent ? { tab_id: state.tabId } : {}),
+            ...undispatched(effect),
+            phase: effect === "unknown" ? "execution" : "precondition",
+            ...(effect === "unknown" ? { tab_id: state.tabId } : {}),
           },
         };
       }
@@ -2894,7 +2962,7 @@ export class CooperationController implements ControlAuthority {
           data: {
             ...result.data,
             effect_state: effect,
-            ...unpressed(effect),
+            ...undispatched(effect),
             phase: result.data?.phase ?? "execution",
             recovery:
               result.data?.recovery ??
@@ -2908,16 +2976,17 @@ export class CooperationController implements ControlAuthority {
     } catch (error) {
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) {
-        const effect = sent ? "unknown" : "none";
-        if (targetPolicy && sent) state.context = undefined;
+        const effect = sent || detachedByHandler ? "unknown" : "none";
+        if (targetPolicy && effect === "unknown") state.context = undefined;
         else maybeRestoreObservation(effect);
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
           data: {
             effect_state: effect,
-            phase: sent ? "execution" : "precondition",
-            ...(sent ? { tab_id: state.tabId } : {}),
+            ...undispatched(effect),
+            phase: effect === "unknown" ? "execution" : "precondition",
+            ...(effect === "unknown" ? { tab_id: state.tabId } : {}),
           },
         };
       }
@@ -2992,7 +3061,10 @@ export class CooperationController implements ControlAuthority {
         if (error instanceof ActionCheckError) checkFailure = error.rpcError;
         const effect = sent ? "unknown" : "none";
         maybeRestoreObservation(effect);
-        if (error instanceof FrameCollectionError) return error.toRpcError(effect);
+        if (error instanceof FrameCollectionError) {
+          const rpc = error.toRpcError(effect);
+          return { ...rpc, data: { ...rpc.data, ...undispatched(effect) } };
+        }
         return reportFailure(error instanceof Error ? error.message : String(error), effect);
       }
     } finally {

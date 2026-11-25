@@ -79,18 +79,29 @@ python3 "$SKILL/scripts/release_audit.py" gate --run "$RUN"
 python3 "$SKILL/scripts/release_audit.py" benchmark --run "$RUN" \
   --out "$RUN/benchmark.json" --markdown "$RUN/benchmark.md"
 
-# 跨多轮运行聚合成功率、平均交互轮次、P50/P95 耗时分布
+# 聚合同一候选构建的多轮运行
 python3 "$SKILL/scripts/release_audit.py" benchmark \
   --run "$RUN_1" "$RUN_2" "$RUN_3" \
   --out evals/browser/results/benchmark-multi.json \
   --markdown evals/browser/results/benchmark-multi.md
 
-# 或直接扫描包含多个 run 子目录的父目录
+# 或扫描只包含同一候选构建各轮次的父目录
 python3 "$SKILL/scripts/release_audit.py" benchmark \
   --runs-dir evals/browser/results \
   --out evals/browser/results/benchmark-multi.json \
   --markdown evals/browser/results/benchmark-multi.md
 ```
+
+每个轮次应通过 `init` 单独创建，并使用独立的端口、运行环境和会话。
+聚合时会核对候选标识、CLI 入口和实际二进制的 SHA-256，以及 `plan.json`
+的 SHA-256。入口使用 wrapper 时，各轮次须使用内容一致的 wrapper，可以通过环境变量
+传入各轮次的端口和运行目录。不同构建或测试计划应分别生成报告。
+
+`k` 是实际提供的轮次数。每个场景的 `pass@k` 表示至少通过一次，`pass^k`
+表示每次都通过，`flaky` 表示有通过也有未通过。汇总中的 `pass_at_k_overall`
+和 `pass_all_k_overall` 是满足对应条件的计划场景比例，`flaky_ids` 列出不稳定的场景 ID。
+这些值描述本次提供的结果，单轮放行仍由 `gate` 判定。已有 `gate.json` 时，聚合以其
+`passed_ids` 为准。补充结果后请重新运行 `gate` 再聚合。
 
 ## 预期负例与中间状态
 

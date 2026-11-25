@@ -2,6 +2,7 @@
 
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -203,16 +204,20 @@ async function dndKitBundle() {
   if (!libraryBundle) {
     const result = await build({
       entryPoints: [
-        new URL(
-          "../../../../../evals/browser/cases/regression/drag-interactions/libraries.tsx",
-          import.meta.url,
-        ).pathname,
+        // `URL.pathname` keeps the leading slash on Windows (`/D:/...`), which
+        // esbuild cannot resolve. `fileURLToPath` yields the real path.
+        fileURLToPath(
+          new URL(
+            "../../../../../evals/browser/cases/regression/drag-interactions/libraries.tsx",
+            import.meta.url,
+          ),
+        ),
       ],
       bundle: true,
       write: false,
       format: "iife",
       platform: "browser",
-      nodePaths: [new URL("../../../node_modules", import.meta.url).pathname],
+      nodePaths: [fileURLToPath(new URL("../../../node_modules", import.meta.url))],
       define: { "process.env.NODE_ENV": '"production"' },
     });
     libraryBundle = result.outputFiles[0].text;

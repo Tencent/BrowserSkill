@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { rootEventSource, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
+import {
+  rootEventSource,
+  StaleFrameHandleError,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
+import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import {
   INPUT_PASSTHROUGH,
   INPUT_PASSTHROUGH_TTL_MS,
@@ -1669,6 +1674,71 @@ describe("handleHover", () => {
     expect(bypassOverlay).toHaveBeenCalledTimes(1);
     expect(bypassOverlay).toHaveBeenCalledWith(4, true);
   });
+
+  it("rejects an occluded target via verifyPointerTarget before moving the pointer", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Page.getFrameTree": () => ({ frameTree: { frame: { id: "main" } } }),
+      "DOM.getNodeForLocation": () => ({ backendNodeId: 9999 }),
+      "DOM.resolveNode": (params: unknown) => ({
+        object: {
+          objectId:
+            (params as { backendNodeId?: number }).backendNodeId === 1234 ? "target" : "blocker",
+        },
+      }),
+      "Runtime.callFunctionOn": () => ({ result: { value: false } }),
+      "Runtime.releaseObjectGroup": () => ({}),
+      "Input.dispatchMouseEvent": () => ({}),
+    });
+    fake.cdp.verifyPointerTarget = pointerTargetValidator(fake.cdp);
+
+    const res = await handleHover(
+      sm,
+      { session_id: "aa11", ref: "@e3", settle_ms: 0 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "target_covered", effect_state: "none" },
+    });
+    expect(fake.sent.some((c) => c.method === "Input.dispatchMouseEvent")).toBe(false);
+  });
+
+  it("wakes a hidden tab with preserveWindowFocus and maps StaleFrameHandleError to ref_not_found", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4, frameId: "child", loaderId: "old-loader" });
+    const fake = makeFakeCdp(
+      {
+        "Emulation.setFocusEmulationEnabled": () => ({}),
+        "DOM.scrollIntoViewIfNeeded": () => {
+          throw new StaleFrameHandleError({ tabId: 4, frameId: "child" });
+        },
+      },
+      () => "hidden",
+    );
+
+    const res = await handleHover(
+      sm,
+      { session_id: "aa11", ref: "@e3", settle_ms: 0 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(res).toMatchObject({
+      code: "not_found",
+      data: { reason: "ref_not_found" },
+    });
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Emulation.setFocusEmulationEnabled")
+        .map((c) => c.params),
+    ).toEqual([{ enabled: true }, { enabled: false }]);
+  });
 });
 
 describe("handleFocus and handleBlur", () => {
@@ -2467,6 +2537,27 @@ describe("handlePress", () => {
     expect(elapsed).toBeGreaterThanOrEqual(40); // generous lower bound
   });
 
+  it("stops holding at the command deadline instead of reporting success late", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const start = Date.now();
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Enter", hold_ms: 5_000, timeout_ms: 150 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    const elapsed = Date.now() - start;
+    // A hold that outlives `--timeout` must not answer 5s later with success.
+    expect(res).toMatchObject({ code: "timeout" });
+    expect(elapsed).toBeLessThan(2_000);
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Input.dispatchKeyEvent")
+        .map((c) => (c.params as { type?: string }).type),
+    ).toEqual(["keyDown", "keyUp"]);
+  }, 8_000);
+
   it("returns cancelled after hold_ms abort while still sending keyUp", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
@@ -2481,6 +2572,129 @@ describe("handlePress", () => {
     setTimeout(() => abort.abort(), 5);
     const res = await pressP;
     expect(res).toMatchObject({ code: "cancelled" });
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Input.dispatchKeyEvent")
+        .map((c) => (c.params as { type?: string }).type),
+    ).toEqual(["rawKeyDown", "keyUp"]);
+  });
+
+  it("releases keyUp in finally when char dispatch throws and preserves the original error if keyUp fails", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      "Input.dispatchKeyEvent": (params) => {
+        const type = (params as { type?: string }).type;
+        if (type === "char") throw new Error("char lost context");
+        if (type === "keyUp") throw new Error("cleanup disconnect");
+        return {};
+      },
+    });
+
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "a" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(res).toMatchObject({
+      code: "cdp_failed",
+      message: expect.stringContaining("char lost context"),
+    });
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Input.dispatchKeyEvent")
+        .map((c) => (c.params as { type?: string }).type),
+    ).toEqual(["rawKeyDown", "char", "keyUp"]);
+  });
+
+  it("maps StaleFrameHandleError during target focus to ref_not_found", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4, frameId: "child", loaderId: "old-loader" });
+    const fake = makeFakeCdp({
+      "DOM.focus": () => {
+        throw new StaleFrameHandleError({ tabId: 4, frameId: "child" });
+      },
+    });
+
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Enter", ref: "e1" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(res).toMatchObject({
+      code: "not_found",
+      data: { reason: "ref_not_found" },
+    });
+  });
+
+  it("bounds a stalled rawKeyDown on abort and releases keyUp in finally", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const abort = new AbortController();
+    const types: string[] = [];
+    const fake = makeFakeCdp({
+      "Input.dispatchKeyEvent": (params) => {
+        const type = String((params as { type?: string }).type);
+        types.push(type);
+        if (type === "rawKeyDown") {
+          queueMicrotask(() => abort.abort());
+          return new Promise<never>(() => {});
+        }
+        return {};
+      },
+    });
+
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "a", timeout_ms: 500 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, signal: abort.signal },
+    );
+
+    expect(res).toMatchObject({ code: "cancelled" });
+    expect(types).toEqual(["rawKeyDown", "keyUp"]);
+  });
+
+  it("aborts a queued char event on local timeout so it cannot fire after keyUp cleanup", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const dispatched: string[] = [];
+    let releaseChar!: () => void;
+    const queuedChar = new Promise<void>((resolve) => {
+      releaseChar = resolve;
+    });
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    fake.cdp.sendToFrame = vi.fn(
+      async (
+        _handle,
+        method: string,
+        params?: object,
+        guard?: { signal?: AbortSignal; onDispatch?: () => void },
+      ) => {
+        if (method === "Input.dispatchKeyEvent" && (params as { type?: string })?.type === "char") {
+          await queuedChar;
+          if (guard?.signal?.aborted) throw new DOMException("aborted", "AbortError");
+        }
+        guard?.onDispatch?.();
+        if (method === "Input.dispatchKeyEvent") {
+          dispatched.push(String((params as { type?: string })?.type));
+        }
+        return fake.cdp.send(4, method, params) as never;
+      },
+    ) as CdpRunner["sendToFrame"];
+
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "a", timeout_ms: 20 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    releaseChar();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(res).toMatchObject({ code: "timeout" });
+    expect(dispatched).toEqual(["rawKeyDown"]);
     expect(
       fake.sent
         .filter((c) => c.method === "Input.dispatchKeyEvent")
@@ -3006,6 +3220,96 @@ describe("handleSelect", () => {
         reason: "target_not_select",
         recovery: expect.stringContaining("Click @e7"),
       },
+    });
+  });
+
+  it("refuses disabled options and options inside a disabled optgroup without mutating selection", async () => {
+    const select = document.createElement("select");
+    select.innerHTML = [
+      '<option value="active" selected>Active</option>',
+      '<option value="sold_out" disabled>Sold Out</option>',
+      '<optgroup label="Archived" disabled><option value="legacy">Legacy</option></optgroup>',
+      '<option value="dup" disabled>Dup</option>',
+      '<option value="dup">Dup Enabled</option>',
+    ].join("");
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true, multiple: false }),
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+
+    const disabledOpt = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["sold_out"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(disabledOpt).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "target_disabled", effect_state: "none", disabled: "sold_out" },
+    });
+    expect(select.value).toBe("active");
+
+    const disabledGroup = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["Legacy"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(disabledGroup).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "target_disabled", effect_state: "none", disabled: "Legacy" },
+    });
+    expect(select.value).toBe("active");
+
+    // When a disabled and an enabled option share a value, select the enabled one.
+    const dupEnabled = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["dup"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(dupEnabled).toMatchObject({
+      selected_values: ["dup"],
+      selected_labels: ["Dup Enabled"],
+    });
+  });
+
+  it("maps StaleFrameHandleError during option commit to ref_not_found", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4, frameId: "child", loaderId: "old-loader" });
+    let callCount = 0;
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true, multiple: false }),
+      "Runtime.callFunctionOn": () => {
+        callCount++;
+        if (callCount === 1) return { result: { value: { ok: true } } };
+        throw new StaleFrameHandleError({ tabId: 4, frameId: "child" });
+      },
+    });
+
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["a"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      code: "not_found",
+      data: { reason: "ref_not_found" },
     });
   });
 });

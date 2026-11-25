@@ -9,12 +9,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { checkExpectations } from "@/cooperation/action-checks";
 import { CooperationController } from "@/cooperation/controller";
 import type { CooperationFrames, FrameState } from "@/cooperation/types";
 import { SessionManager } from "@/session-manager/manager";
-import { handleClick } from "../interaction";
+import { uploadThroughActivatedFileInput } from "../file-input-transaction";
+import { handleClick, handlePress } from "../interaction";
+import { handleScreenshot } from "../observation";
+import { handleRead } from "../read";
 import { handleScrollTo } from "../scroll";
-import { sessionCdpRunner } from "../shared";
+import { delegateCdpRunner, sessionCdpRunner } from "../shared";
 import { handleUpload } from "../upload";
 import { handleWaitForElement } from "../waits";
 import { handleWheel } from "../wheel";
@@ -1051,6 +1055,460 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)(
               });
             } finally {
               (globalThis as { chrome?: unknown }).chrome = prevChrome;
+              await cdp.detachAll();
+            }
+          },
+        );
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }, 60_000);
+
+    it("verifies read redaction/RefStore preservation, file-input timeout cleanup, OOPIF drop occlusion, press keyUp, unborrowed screenshot no-scroll, and ARIA checked in real Chrome", async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "bsk-pr4-e2e-"));
+      const fileA = join(tempDir, "drop-note.txt");
+      writeFileSync(fileA, "DROP-CONTENT");
+
+      const server = createServer((req, res) => {
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        if (req.url === "/drop-oopif") {
+          res.end(`<!doctype html>
+            <style>html,body{margin:0;padding:0}</style>
+            <div id="drop-zone" style="width:240px;height:140px;background:#eef">Drop Here</div>
+            <script>
+              window.droppedFiles = [];
+              const z = document.getElementById('drop-zone');
+              z.addEventListener('dragover', (e) => e.preventDefault());
+              z.addEventListener('drop', (e) => {
+                e.preventDefault();
+                window.droppedFiles.push(Array.from(e.dataTransfer.files, (f) => f.name));
+              });
+            </script>`);
+          return;
+        }
+        const port = (server.address() as { port: number }).port;
+        res.end(`<!doctype html>
+          <style>body{margin:0;padding:12px;font:14px sans-serif}</style>
+          <main id="csrf-card">
+            <form>
+              <input type="hidden" name="csrf" value="tok_secret_123">
+              <input type="password" name="pw" value="hunter2">
+              <button type="button" id="card-action">Order #42 — Paid</button>
+            </form>
+            <button type="button" id="aria-switch" role="switch" aria-checked="true">Enabled</button>
+            <div id="aria-cb" role="checkbox" aria-checked="false" tabindex="0">Unchecked</div>
+            <input id="native-file" type="file">
+            <button type="button" id="file-trigger">Choose</button>
+          </main>
+          <div style="position:relative;width:240px;height:140px;margin-top:8px">
+            <iframe id="drop-frame" src="http://localhost:${port}/drop-oopif" style="width:240px;height:140px;border:0;display:block"></iframe>
+            <div id="parent-modal" style="position:absolute;inset:0;background:rgba(0,0,0,0.4);z-index:10">Modal</div>
+          </div>
+          <div style="height:2400px"></div>
+          <button type="button" id="far-below">Far Below</button>
+          <script>
+            window.keyEvents = [];
+            window.addEventListener('keydown', (e) => window.keyEvents.push('down:' + e.key));
+            window.addEventListener('keyup', (e) => window.keyEvents.push('up:' + e.key));
+          </script>`);
+      });
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const port = (server.address() as { port: number }).port;
+      const hostUrl = `http://127.0.0.1:${port}/`;
+
+      try {
+        const { withChrome } = await import(
+          new URL(
+            "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+            import.meta.url,
+          ).href
+        );
+        let forwardEvent: ((event: CdpEvent) => void) | undefined;
+        await withChrome(
+          {
+            executable: process.env.BSK_TEST_CHROME,
+            deviceScale: 1,
+            zoom: 1,
+            startupTimeout: 30_000,
+            onEvent: (event: CdpEvent) => forwardEvent?.(event),
+          },
+          async (send: Send) => {
+            const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+              url: hostUrl,
+            });
+            let activeRootSession = "";
+            const childSessions = new Set<string>();
+            const eventListeners = new Set<CdpEventListener>();
+            forwardEvent = (event) => {
+              if (!activeRootSession) return;
+              if (
+                event.method === "Target.attachedToTarget" &&
+                event.sessionId === activeRootSession
+              ) {
+                const sid = (event.params as { sessionId?: string } | undefined)?.sessionId;
+                if (sid) childSessions.add(sid);
+              }
+              if (event.sessionId === activeRootSession) {
+                for (const fn of [...eventListeners]) fn({ tabId: 4 }, event.method, event.params);
+              } else if (event.sessionId && childSessions.has(event.sessionId)) {
+                for (const fn of [...eventListeners])
+                  fn({ tabId: 4, sessionId: event.sessionId }, event.method, event.params);
+              }
+            };
+            const api: CdpDebuggerApi = {
+              attach: async () => {
+                childSessions.clear();
+                const reply = await send<{ sessionId: string }>("Target.attachToTarget", {
+                  targetId,
+                  flatten: true,
+                });
+                activeRootSession = reply.sessionId;
+              },
+              detach: async () => {
+                const prev = activeRootSession;
+                activeRootSession = "";
+                childSessions.clear();
+                if (prev) await send("Target.detachFromTarget", { sessionId: prev });
+              },
+              sendCommand: async (target, method, params) => {
+                const sid = target.sessionId ?? activeRootSession;
+                if (!sid) throw new Error("debugger detached");
+                return send(method, params, sid);
+              },
+              onEvent: {
+                addListener: (fn: CdpEventListener) => eventListeners.add(fn),
+                removeListener: (fn: CdpEventListener) => eventListeners.delete(fn),
+              } as unknown as CdpDebuggerApi["onEvent"],
+              onDetach: {
+                addListener() {},
+                removeListener() {},
+              } as unknown as CdpDebuggerApi["onDetach"],
+            };
+            const cdp = new ChromiumCdp(api);
+            stubInputClock(cdp);
+            const sessions = new SessionManager({
+              agentWindow: {
+                create: async () => ({ windowId: 100, initialTabIds: [4] }),
+                remove: async () => {},
+                ensureActiveTab: async () => 4,
+              },
+            });
+            const ctx = await sessions.start("pr4-e2e");
+            const tab = { id: 4, windowId: 100, active: true, url: hostUrl } as chrome.tabs.Tab;
+            const tabsApi = { get: async () => tab, query: async () => [tab] };
+            const evalHost = async <T>(expression: string): Promise<T> => {
+              const r = await cdp.send<{ result: { value: T } }>(4, "Runtime.evaluate", {
+                expression,
+                returnByValue: true,
+              });
+              return r.result.value;
+            };
+
+            try {
+              await expect.poll(() => evalHost<string>("document.readyState")).toBe("complete");
+              let oopifTargetId = "";
+              await expect
+                .poll(async () => {
+                  const { targetInfos } = await send<{
+                    targetInfos: { targetId: string; type: string; url: string }[];
+                  }>("Target.getTargets");
+                  const found = targetInfos.find(
+                    (t) => t.type === "iframe" && t.url === `http://localhost:${port}/drop-oopif`,
+                  );
+                  if (found) oopifTargetId = found.targetId;
+                  return Boolean(found);
+                })
+                .toBe(true);
+              const { sessionId: monitorOopif } = await send<{ sessionId: string }>(
+                "Target.attachToTarget",
+                { targetId: oopifTargetId, flatten: true },
+              );
+              await expect
+                .poll(async () => {
+                  const r = await send<{ result: { value: string } }>(
+                    "Runtime.evaluate",
+                    { expression: "document.readyState", returnByValue: true },
+                    monitorOopif,
+                  );
+                  return r.result.value;
+                })
+                .toBe("complete");
+
+              // 1. P1 #23 & #24: read container with hidden/password inputs returns full text,
+              // preserves existing rowAnchor/name in RefStore, and does not mutate RefStore on max_bytes failure.
+              const doc = await cdp.send<{ root: { nodeId: number } }>(4, "DOM.getDocument");
+              const btnNode = await cdp.send<{ nodeId: number }>(4, "DOM.querySelector", {
+                nodeId: doc.root.nodeId,
+                selector: "#card-action",
+              });
+              const { node: btnDesc } = await cdp.send<{ node: { backendNodeId: number } }>(
+                4,
+                "DOM.describeNode",
+                { nodeId: btnNode.nodeId },
+              );
+              const graph = await cdp.getFrameDocuments(4);
+              const rootDoc = graph.frames.find((f) => f.frameId === graph.rootFrameId)!;
+              ctx.refStore.enableStableRefs();
+              const observedRef = ctx.refStore.allocateRef({
+                tabId: 4,
+                frameId: rootDoc.frameId,
+                loaderId: rootDoc.loaderId,
+                backendNodeId: btnDesc.backendNodeId,
+                name: "Order #42",
+                rowAnchor: "row-42",
+              });
+              ctx.refStore.set(observedRef, btnDesc.backendNodeId, {
+                tabId: 4,
+                frameId: rootDoc.frameId,
+                loaderId: rootDoc.loaderId,
+                name: "Order #42",
+                rowAnchor: "row-42",
+              });
+
+              const readOk = await handleRead(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 4,
+                  selector: "#csrf-card",
+                  fields: [{ key: "text", read: "text" }],
+                },
+                { cdp, tabsApi },
+              );
+              expect(readOk).toMatchObject({
+                items: [{ values: { text: expect.stringContaining("Order #42") }, redacted: [] }],
+              });
+
+              const readWithRef = await handleRead(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 4,
+                  selector: "#card-action",
+                  fields: [{ key: "label", read: "text" }],
+                },
+                { cdp, tabsApi },
+              );
+              expect(readWithRef).toMatchObject({
+                items: [{ ref: `@${observedRef}`, values: { label: "Order #42 — Paid" } }],
+              });
+              expect(ctx.refStore.resolveEntry(observedRef)).toMatchObject({
+                kind: "dom",
+                name: "Order #42",
+                rowAnchor: "row-42",
+              });
+
+              await evalHost(
+                `document.getElementById('aria-switch').dataset.big = 'x'.repeat(2000)`,
+              );
+              const sizeBeforeFail = ctx.refStore.size();
+              const readTooBig = await handleRead(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 4,
+                  selector: "#aria-switch",
+                  fields: [{ key: "big", read: "attribute", attribute: "data-big" }],
+                  max_bytes: 1024,
+                },
+                { cdp, tabsApi },
+              );
+              expect(readTooBig).toMatchObject({
+                code: "unsupported",
+                data: { reason: "read_limit", effect_state: "none" },
+              });
+              expect(ctx.refStore.size()).toBe(sizeBeforeFail);
+              expect(ctx.refStore.resolve("e3")).toBeNull();
+
+              // 2. P1 #25: timed-out file-input probe arming cleans up its capture-phase listener
+              // so subsequent clicks on <input type="file"> are NOT prevented.
+              const triggerDoc = await cdp.send<{ root: { nodeId: number } }>(4, "DOM.getDocument");
+              const triggerNode = await cdp.send<{ nodeId: number }>(4, "DOM.querySelector", {
+                nodeId: triggerDoc.root.nodeId,
+                selector: "#file-trigger",
+              });
+              const { node: triggerDesc } = await cdp.send<{ node: { backendNodeId: number } }>(
+                4,
+                "DOM.describeNode",
+                { nodeId: triggerNode.nodeId },
+              );
+              let delayedArm = false;
+              const slowArmCdp = delegateCdpRunner(cdp, {
+                sendToFrame: (async (handle, method, params, guard) => {
+                  if (
+                    !delayedArm &&
+                    method === "Runtime.callFunctionOn" &&
+                    String(
+                      (params as { functionDeclaration?: string })?.functionDeclaration,
+                    ).includes("addEventListener")
+                  ) {
+                    delayedArm = true;
+                    // Run the real arming script in Chrome, then stall past the timeout!
+                    await cdp.sendToFrame(handle, method, params, guard);
+                    return new Promise<never>(() => {});
+                  }
+                  return cdp.sendToFrame(handle, method, params, guard);
+                }) as typeof cdp.sendToFrame,
+              });
+              const armTimeout = await uploadThroughActivatedFileInput({
+                cdp: slowArmCdp,
+                actionTarget: {
+                  tab: { tabId: 4, windowId: 100, active: true },
+                  backendNodeId: triggerDesc.backendNodeId,
+                  handle: {
+                    tabId: 4,
+                    frameId: rootDoc.frameId,
+                    loaderId: rootDoc.loaderId,
+                    backendNodeId: triggerDesc.backendNodeId,
+                  },
+                },
+                files: [fileA],
+                timeoutMs: 60,
+                trigger: async () => ({ tab_id: 4, x: 10, y: 10 }),
+              });
+              expect(armTimeout).toMatchObject({
+                code: "timeout",
+                data: { reason: "file_input_probe_failed", effect_state: "none" },
+              });
+              // Dispatch a real click event on #native-file: if the capture probe leaked,
+              // `dispatchEvent` would return `false` (`defaultPrevented === true`).
+              expect(
+                await evalHost<boolean>(
+                  "document.getElementById('native-file').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))",
+                ),
+              ).toBe(true);
+
+              // 3. P1 #26: handlePress releases keyUp in finally when char dispatch fails in real Chrome.
+              const failCharCdp = delegateCdpRunner(cdp, {
+                sendToFrame: (async (handle, method, params, guard) => {
+                  if (
+                    method === "Input.dispatchKeyEvent" &&
+                    (params as { type?: string })?.type === "char"
+                  ) {
+                    throw new Error("simulated char failure");
+                  }
+                  return cdp.sendToFrame(handle, method, params, guard);
+                }) as typeof cdp.sendToFrame,
+              });
+              const pressFail = await handlePress(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 4, key: "a" },
+                { cdp: failCharCdp, tabsApi },
+              );
+              expect(pressFail).toMatchObject({ code: "cdp_failed" });
+              expect(await evalHost<string[]>("window.keyEvents")).toEqual(["down:a", "up:a"]);
+
+              // 4. P1 #27: OOPIF drop target occluded by #parent-modal fails closed, then succeeds unoccluded.
+              const blockedDrop = await handleUpload(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 4,
+                  selector: "#drop-zone",
+                  mode: "drop",
+                  files: [{ transfer_id: "tx-drop-1", name: "drop-note.txt", staged_path: fileA }],
+                },
+                { cdp, tabsApi },
+              );
+              expect(blockedDrop).toMatchObject({
+                code: "permission_denied",
+                data: { reason: "file_drop_target_unavailable", effect_state: "none" },
+              });
+              const evalDropOopif = async <T>(expression: string): Promise<T> => {
+                const r = await send<{ result: { value: T } }>(
+                  "Runtime.evaluate",
+                  { expression, returnByValue: true },
+                  monitorOopif,
+                );
+                return r.result.value;
+              };
+              expect(await evalDropOopif<string[][]>("window.droppedFiles")).toEqual([]);
+
+              await evalHost("document.getElementById('parent-modal').remove()");
+              const okDrop = await handleUpload(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 4,
+                  selector: "#drop-zone",
+                  mode: "drop",
+                  files: [{ transfer_id: "tx-drop-2", name: "drop-note.txt", staged_path: fileA }],
+                },
+                { cdp, tabsApi },
+              );
+              expect(okDrop).toMatchObject({ tab_id: 4, file_names: ["drop-note.txt"] });
+              expect(await evalDropOopif<string[][]>("window.droppedFiles")).toEqual([
+                ["drop-note.txt"],
+              ]);
+
+              // 5. P1 #30: unborrowed user tab screenshot --ref NEVER scrolls window.scrollY.
+              const farDoc = await cdp.send<{ root: { nodeId: number } }>(4, "DOM.getDocument");
+              const farNode = await cdp.send<{ nodeId: number }>(4, "DOM.querySelector", {
+                nodeId: farDoc.root.nodeId,
+                selector: "#far-below",
+              });
+              const { node: farDesc } = await cdp.send<{ node: { backendNodeId: number } }>(
+                4,
+                "DOM.describeNode",
+                { nodeId: farNode.nodeId },
+              );
+              ctx.refStore.set("e9", farDesc.backendNodeId, {
+                tabId: 4,
+                frameId: rootDoc.frameId,
+                loaderId: rootDoc.loaderId,
+              });
+              const unborrowedTab = {
+                id: 4,
+                windowId: 200,
+                active: true,
+                url: hostUrl,
+              } as chrome.tabs.Tab;
+              const unborrowedTabsApi = {
+                get: async () => unborrowedTab,
+                query: async () => [unborrowedTab],
+              };
+              const unborrowedShot = await handleScreenshot(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 4, ref: "@e9" },
+                {
+                  cdp,
+                  tabsApi: unborrowedTabsApi,
+                  captureApi: { ...unborrowedTabsApi, captureVisibleTab: vi.fn() },
+                },
+              );
+              expect(unborrowedShot).toMatchObject({
+                code: "permission_denied",
+                data: { reason: "element_not_visible" },
+              });
+              expect(await evalHost<number>("window.scrollY")).toBe(0);
+
+              // Visible ref on unborrowed tab still captures cleanly with scrollY === 0.
+              const visibleShot = await handleScreenshot(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 4, ref: "@e1" },
+                {
+                  cdp,
+                  tabsApi: unborrowedTabsApi,
+                  captureApi: { ...unborrowedTabsApi, captureVisibleTab: vi.fn() },
+                },
+              );
+              expect(visibleShot).toMatchObject({ tab_id: 4, format: "png" });
+              expect(await evalHost<number>("window.scrollY")).toBe(0);
+
+              // 6. P2-2: ARIA checked expectations in real Chrome.
+              expect(
+                await checkExpectations(cdp, ctx, { tabId: 4, windowId: 100, active: true }, [
+                  { target: "#aria-switch", field: "checked", equals: true },
+                  { target: "#aria-cb", field: "checked", equals: false },
+                ]),
+              ).toBeUndefined();
+              expect(
+                await checkExpectations(cdp, ctx, { tabId: 4, windowId: 100, active: true }, [
+                  { target: "#aria-switch", field: "checked", equals: false },
+                ]),
+              ).toMatchObject({ code: "permission_denied", data: { actual: true } });
+            } finally {
               await cdp.detachAll();
             }
           },

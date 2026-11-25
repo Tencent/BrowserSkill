@@ -233,6 +233,21 @@ impl UpdateRecord {
             tracing::warn!(error = %format_args!("{err:#}"), "could not record the update state");
         }
     }
+
+    /// Clear an in-progress update record when an auto-update is cleanly
+    /// deferred (e.g. an agent session started mid-download/install) so
+    /// neither `bsk doctor` nor the 6h failure cooldown treats it as a crash.
+    pub(crate) fn clear() {
+        if let Ok(path) = paths::update_state_path() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, "could not clear deferred update state");
+                }
+            }
+        }
+    }
 }
 
 pub fn read(path: &Path) -> Result<Option<UpdateRecord>> {

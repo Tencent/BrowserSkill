@@ -334,6 +334,20 @@ impl SessionLog {
             }
             _ => {}
         }
+        if *method == Method::ToolDebug
+            && matches!(
+                result.pointer("/replay/state").and_then(Value::as_str),
+                Some("failed" | "interrupted")
+            )
+        {
+            self.push(
+                LoggedStep::Uncertain {
+                    method: method_name(method),
+                },
+                None,
+            );
+            return;
+        }
         match method.spec().recipe_step {
             RecipeStepKind::Ignore => {}
             RecipeStepKind::Cooperate => {
@@ -396,8 +410,8 @@ impl SessionLog {
     }
 
     /// A refused action did nothing. One with a possible effect makes the run unsafe to copy.
-    fn finished_err(&mut self, method: &Method, error: &RpcError) {
-        if !method.is_mutating() && !matches!(method, Method::ToolHover) {
+    fn finished_err(&mut self, method: &Method, params: &Value, error: &RpcError) {
+        if !method.is_mutating_with_params(params) && !matches!(method, Method::ToolHover) {
             return;
         }
         if error
@@ -405,6 +419,12 @@ impl SessionLog {
             .as_ref()
             .and_then(|data| data["dispatched"].as_bool())
             == Some(false)
+            || (*method == Method::ToolClick
+                && error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data["press_sent"].as_bool())
+                    == Some(false))
         {
             return;
         }
@@ -452,13 +472,13 @@ impl SessionLog {
         }
     }
 
-    fn record_dialog_pending(&mut self, operation_id: &str, method: &Method) {
+    fn record_dialog_pending(&mut self, operation_id: &str, method: &Method, params: &Value) {
         if self.resolved_ops.iter().any(|done| done == operation_id)
             || self.pending_ops.contains_key(operation_id)
         {
             return;
         }
-        if !method.is_mutating() && !matches!(method, Method::ToolHover) {
+        if !method.is_mutating_with_params(params) && !matches!(method, Method::ToolHover) {
             return;
         }
         if self.log.steps.len() >= MAX_STEPS {
@@ -491,7 +511,7 @@ impl SessionLog {
         let Some(pending_idx) = self.pending_ops.remove(operation_id) else {
             match body {
                 ResponseBody::Ok(result) => self.finished_ok(method, params, result),
-                ResponseBody::Err(error) => self.finished_err(method, error),
+                ResponseBody::Err(error) => self.finished_err(method, params, error),
             }
             return;
         };
@@ -502,7 +522,7 @@ impl SessionLog {
         self.log.truncated = false;
         match body {
             ResponseBody::Ok(result) => self.finished_ok(method, params, result),
-            ResponseBody::Err(error) => self.finished_err(method, error),
+            ResponseBody::Err(error) => self.finished_err(method, params, error),
         }
         let produced_steps = std::mem::replace(&mut self.log.steps, saved_steps);
         let produced_tabs = std::mem::replace(&mut self.step_tabs, saved_tabs);
@@ -558,7 +578,7 @@ impl RunLogs {
         }
         logs.entry(session.to_owned())
             .or_default()
-            .record_dialog_pending(operation_id, method);
+            .record_dialog_pending(operation_id, method, params);
     }
 
     /// Reconcile a completed dialog-gated operation, replacing any prior
@@ -602,7 +622,7 @@ impl RunLogs {
         let log = logs.entry(session.to_owned()).or_default();
         match body {
             ResponseBody::Ok(result) => log.finished_ok(method, params, result),
-            ResponseBody::Err(error) => log.finished_err(method, error),
+            ResponseBody::Err(error) => log.finished_err(method, params, error),
         }
     }
 
@@ -984,5 +1004,75 @@ mod tests {
                 ..
             } if action == "click"
         ));
+    }
+
+    #[test]
+    fn debug_replay_failed_or_interrupted_ok_records_uncertain_step() {
+        let logs = RunLogs::default();
+        record(
+            &logs,
+            Method::ToolDebug,
+            json!({"session_id": "s", "action": "replay"}),
+            json!({"replay": {"state": "complete"}}),
+        );
+        assert!(
+            logs.read("s").steps.is_empty(),
+            "complete debug replay should stay ignored for recipe extraction"
+        );
+
+        for state in ["interrupted", "failed"] {
+            record(
+                &logs,
+                Method::ToolDebug,
+                json!({"session_id": "s", "action": "replay"}),
+                json!({"replay": {"state": state}}),
+            );
+        }
+        let steps = logs.read("s").steps;
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        for step in &steps {
+            assert_eq!(
+                *step,
+                LoggedStep::Uncertain {
+                    method: "tool.debug".into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn unpressed_click_and_undispatched_actions_do_not_record_uncertain_steps() {
+        let logs = RunLogs::default();
+        let unpressed = RpcError {
+            code: ErrorCode::PermissionDenied,
+            message: "covered before press".into(),
+            data: Some(json!({
+                "reason": "target_covered",
+                "effect_state": "unknown",
+                "press_sent": false
+            })),
+        };
+        let undispatched = RpcError {
+            code: ErrorCode::CdpFailed,
+            message: "clock unavailable before wheel".into(),
+            data: Some(json!({
+                "reason": "input_clock_unavailable",
+                "effect_state": "unknown",
+                "dispatched": false
+            })),
+        };
+        logs.record(
+            |_| true,
+            &Method::ToolClick,
+            &json!({"session_id": "s", "ref": "@e1"}),
+            &ResponseBody::Err(unpressed),
+        );
+        logs.record(
+            |_| true,
+            &Method::ToolWheel,
+            &json!({"session_id": "s", "delta_y": 300}),
+            &ResponseBody::Err(undispatched),
+        );
+        assert!(logs.read("s").steps.is_empty());
     }
 }

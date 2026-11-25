@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { rootEventSource, type TabEventSource } from "@/browser-driver/frame-handles";
+import {
+  createFrameDocumentInfo,
+  rootEventSource,
+  type TabEventSource,
+} from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { handleWaitForElement, handleWaitForNavigation, satisfiesState } from "../waits";
@@ -775,6 +779,15 @@ describe("wait-for-element regression coverage", () => {
       return handlers[method as keyof typeof handlers]?.() ?? {};
     });
     fake.cdp.sendToFrame = sendToFrame as CdpRunner["sendToFrame"];
+    fake.cdp.getMainFrameHandle = vi.fn(async () => ({
+      tabId: 4,
+      frameId: "frame-1",
+      loaderId: "",
+    }));
+    fake.cdp.getFrameDocuments = vi.fn(async () => ({
+      rootFrameId: "frame-1",
+      frames: [],
+    }));
     const pending = handleWaitForElement(manager, { ...params, state }, fake);
     await vi.advanceTimersByTimeAsync(0);
     expect(sendToFrame).toHaveBeenCalledWith(
@@ -1254,5 +1267,177 @@ describe("wait-for-element regression coverage", () => {
       visible: null,
       elapsed_ms: 500,
     });
+  });
+
+  it("bounds a hanging ensureCdpReady during wait_for_navigation on timeout and abort", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({});
+    fake.cdp.ensureAttachedToUrl = vi.fn(() => new Promise<never>(() => {}));
+
+    const timedOut = handleWaitForNavigation(
+      sm,
+      { session_id: "aa11", wait_until: "load", timeout_ms: 100 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await timedOut).toMatchObject({
+      tab_id: 4,
+      reached: "timeout",
+      error_text: expect.stringContaining("100ms"),
+    });
+
+    const abort = new AbortController();
+    const cancelled = handleWaitForNavigation(
+      sm,
+      { session_id: "aa11", wait_until: "load", timeout_ms: 1_000 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, signal: abort.signal },
+    );
+    await vi.advanceTimersByTimeAsync(20);
+    abort.abort();
+    expect(await cancelled).toMatchObject({ code: "cancelled" });
+  });
+
+  it("reports visible: false when an element inside a child frame has a hidden iframe owner", async () => {
+    const manager = await sessionWithRef();
+    manager
+      .get("aa11")
+      ?.refStore.set("e1", 555, { tabId: 4, frameId: "child-frame", loaderId: "child-loader" });
+    const fake = makeFakeCdp();
+    let ownerVisible = false;
+    fake.cdp.getFrameDocuments = vi.fn(async () => ({
+      rootFrameId: "root-frame",
+      frames: [
+        createFrameDocumentInfo({ tabId: 4, frameId: "root-frame" }),
+        createFrameDocumentInfo({
+          tabId: 4,
+          frameId: "child-frame",
+          parentFrameId: "root-frame",
+          ownerBackendNodeId: 77,
+          loaderId: "child-loader",
+        }),
+      ],
+    }));
+    fake.cdp.sendToFrame = vi.fn(async (handle, method) => {
+      if (method === "DOM.resolveNode") {
+        return { object: { objectId: handle.frameId === "child-frame" ? "child-el" : "owner-el" } };
+      }
+      if (method === "Runtime.callFunctionOn") {
+        const visible = handle.frameId === "child-frame" ? true : ownerVisible;
+        return { result: { value: { attached: true, visible } } };
+      }
+      return {};
+    }) as CdpRunner["sendToFrame"];
+
+    setTimeout(() => {
+      ownerVisible = true;
+    }, 60);
+    const pending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", ref: "e1", state: "visible", timeout_ms: 200, poll_ms: 20 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(40);
+    // Still hidden because iframe owner is hidden; once ownerVisible flips at 60ms it satisfies.
+    await vi.advanceTimersByTimeAsync(40);
+    expect(await pending).toMatchObject({
+      satisfied: true,
+      attached: true,
+      visible: true,
+      elapsed_ms: 60,
+    });
+  });
+
+  it("does not leak an unhandled rejection when an in-flight probe rejects after timeout", async () => {
+    const manager = await sessionWithRef();
+    let rejectLate!: (err: Error) => void;
+    const fake = makeFakeCdp({
+      handlers: {
+        "DOM.resolveNode": () =>
+          new Promise((_resolve, reject) => {
+            rejectLate = reject;
+          }),
+      },
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const pending = handleWaitForElement(manager, { ...params, timeout_ms: 50 }, fake);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await pending).toMatchObject({ satisfied: false, attached: null, visible: null });
+      rejectLate(new Error("late failure after deadline"));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("skips whole-tab getFrameDocuments when a ref carries the explicit root frameId", async () => {
+    const manager = await sessionWithRef();
+    manager
+      .get("aa11")
+      ?.refStore.set("e1", 555, { tabId: 4, frameId: "root-frame", loaderId: "root-loader" });
+    const fake = makeFakeCdp({
+      mainFrameId: "root-frame",
+      handlers: probeHandlers({ attached: true, visible: true }),
+    });
+    const getFrameDocuments = vi.fn(() => new Promise<never>(() => {}));
+    fake.cdp.getFrameDocuments = getFrameDocuments as CdpRunner["getFrameDocuments"];
+
+    expect(
+      await handleWaitForElement(
+        manager,
+        { session_id: "aa11", ref: "e1", state: "visible", timeout_ms: 100 },
+        fake,
+      ),
+    ).toMatchObject({ satisfied: true, attached: true, visible: true });
+    expect(getFrameDocuments).not.toHaveBeenCalled();
+  });
+
+  it("does not report visible: true when a child iframe disappears before ancestor verification", async () => {
+    const manager = await sessionWithRef();
+    manager
+      .get("aa11")
+      ?.refStore.set("e1", 555, { tabId: 4, frameId: "vanishing-child", loaderId: "child-loader" });
+    const fake = makeFakeCdp({
+      mainFrameId: "root-frame",
+      handlers: probeHandlers({ attached: true, visible: true }),
+    });
+    fake.cdp.getFrameDocuments = vi.fn(async () => ({
+      rootFrameId: "root-frame",
+      frames: [createFrameDocumentInfo({ tabId: 4, frameId: "root-frame" })],
+    }));
+
+    const pending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", ref: "e1", state: "visible", timeout_ms: 80, poll_ms: 20 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({ satisfied: false });
+  });
+
+  it("does not run ancestor-frame visibility probes when waiting for state: attached", async () => {
+    const manager = await sessionWithRef();
+    manager
+      .get("aa11")
+      ?.refStore.set("e1", 555, { tabId: 4, frameId: "child-frame", loaderId: "child-loader" });
+    const fake = makeFakeCdp({
+      mainFrameId: "root-frame",
+      handlers: probeHandlers({ attached: true, visible: true }),
+    });
+    const getFrameDocuments = vi.fn(() => new Promise<never>(() => {}));
+    fake.cdp.getFrameDocuments = getFrameDocuments as CdpRunner["getFrameDocuments"];
+
+    expect(
+      await handleWaitForElement(
+        manager,
+        { session_id: "aa11", ref: "e1", state: "attached", timeout_ms: 100 },
+        fake,
+      ),
+    ).toMatchObject({ satisfied: true, attached: true });
+    expect(getFrameDocuments).not.toHaveBeenCalled();
   });
 });

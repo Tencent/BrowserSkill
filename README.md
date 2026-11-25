@@ -198,6 +198,19 @@ Use `bsk --help` or `bsk <command> --help` for command options. Always stop your
 
 In WorkBuddy/CodeBuddy, or hosts that reap command children, the agent should reuse an existing daemon or run `bsk daemon start --foreground` in a managed background task, then verify it from a separate tool call. Follow the [host setup guide](docs/sandboxed-agents.md) for shared `BSK_HOME`, `BSK_AUTO_START=0`, and the independent-terminal fallback when the host cannot keep a task alive.
 
+### Close an unused Agent Window
+
+Ask your agent to end its browser session when the task finishes. If a task was interrupted and its Agent Window is still open, list sessions from the same daemon:
+
+```sh
+bsk session list
+bsk session stop SESSION_ID
+```
+
+Use the `BROWSER`, `AGENT WINDOW`, and `CONTROLLER / PROJECT` columns to identify the unused task, then replace `SESSION_ID` with the value in the `SESSION` column. When cleanup succeeds, BrowserSkill returns borrowed tabs and closes the task window if no user tabs remain. For a recording you want to save, finish it with `bsk record stop`.
+
+If the window is absent from the list, confirm you're using the `BSK_HOME` from that task. If the window is no longer associated with a session, save any work in it and close it in the browser.
+
 ## DeepSeek Harness plugin
 
 The lightweight [DSH plugin](packages/dsh-plugin-browserskill/README.md) (`@wxg-prc-cpg/browser-skill-dsh-plugin`) packages the canonical `browser-skill` CLI skill for DeepSeek Harness profiles, automatically adds `~/.local/bin` (or a configured `bskPath`) to the host `PATH`, and bundles an on-demand `bsk` CLI + extension setup flow when `bsk` is not yet installed. Under the hood, it shares the exact same `bsk` CLI, daemon (`DSH_SESSION_ID` implicit scoping), and Agent Window runtime as every other agent.

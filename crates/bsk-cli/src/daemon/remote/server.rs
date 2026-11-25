@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,6 @@ use hyper::{
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpListener;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 use tokio_rustls::{
     TlsAcceptor,
@@ -28,11 +27,16 @@ use tokio_tungstenite::{
 };
 use tracing::warn;
 
-use super::authorization::{AuthorizationRequest, AuthorizationStore, AuthorizedDevice};
+use super::authorization::{
+    AuthorizationRequest, AuthorizationStore, AuthorizedDevice, StoreFileStamp,
+};
 use super::rate_limit::AuthorizationRateLimit;
 use crate::daemon::{
     DaemonState, paths,
-    ws::{WsHandle, drive_connection, origin_allowed},
+    ws::{
+        WsHandle, bind_ws_listener, configure_tcp_keepalive, drive_connection,
+        is_fatal_accept_error, origin_allowed,
+    },
 };
 
 type Body = Full<Bytes>;
@@ -40,22 +44,27 @@ type Body = Full<Bytes>;
 struct Gateway {
     state: Arc<DaemonState>,
     stopped: AtomicBool,
+    stop: crate::daemon::abort::AbortToken,
+    next_conn_id: AtomicU64,
     store: AuthorizationStore,
     path: String,
     authorize_path: String,
     active: Mutex<HashMap<String, ActiveConnection>>,
+    active_changed: Notify,
     connections: Arc<Semaphore>,
     attempts: Mutex<AuthorizationRateLimit>,
     capacity_warning: Mutex<Option<Instant>>,
 }
 
 struct ActiveConnection {
+    conn_id: u64,
     cancel: watch::Sender<bool>,
     slot: Arc<OwnedSemaphorePermit>,
 }
 
 pub(crate) struct ConnectionAuthorization {
     pub device: AuthorizedDevice,
+    conn_id: u64,
     gateway: Arc<Gateway>,
     cancelled: watch::Receiver<bool>,
 }
@@ -79,20 +88,9 @@ impl ConnectionAuthorization {
 
     pub async fn revoked(&self) {
         let mut cancelled = self.cancelled.clone();
-        let mut timer = tokio::time::interval(Duration::from_secs(1));
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            if !self.active() {
+        while self.active() {
+            if cancelled.changed().await.is_err() {
                 return;
-            }
-            tokio::select! {
-                _ = cancelled.changed() => return,
-                _ = timer.tick() => {
-                    tokio::select! {
-                        _ = cancelled.changed() => return,
-                        allowed = self.authorized() => if !allowed { return; },
-                    }
-                },
             }
         }
     }
@@ -103,15 +101,100 @@ impl Drop for ConnectionAuthorization {
         let mut active = self.gateway.active.lock().unwrap();
         if active
             .get(&self.device.device_id)
-            .is_some_and(|entry| entry.cancel.receiver_count() == 1 && !*entry.cancel.borrow())
+            .is_some_and(|entry| entry.conn_id == self.conn_id)
         {
-            // The current receiver still belongs to this connection. A replaced
-            // connection has already been cancelled and must not remove its successor.
-            if !*self.cancelled.borrow() {
-                active.remove(&self.device.device_id);
-            }
+            active.remove(&self.device.device_id);
         }
     }
+}
+
+/// Shared background revocation monitor for the remote gateway.
+///
+/// Parks with zero disk/CPU cost when no remote browsers are connected. While
+/// at least one remote browser is active, performs a single lightweight file
+/// metadata check per tick and only reads/parses `remote-authorization.json`
+/// when its stamp changes, checking cached device expirations in memory.
+fn spawn_revocation_monitor(
+    gateway: Arc<Gateway>,
+    stop: crate::daemon::abort::AbortToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut cache: Option<(StoreFileStamp, HashMap<String, i64>)> = None;
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            if stop.is_cancelled() || gateway.stopped.load(Ordering::Acquire) {
+                break;
+            }
+            if gateway.active.lock().unwrap().is_empty() {
+                cache = None;
+                tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => break,
+                    _ = gateway.active_changed.notified() => continue,
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            if gateway.stopped.load(Ordering::Acquire) {
+                break;
+            }
+            if gateway.active.lock().unwrap().is_empty() {
+                continue;
+            }
+            let store = gateway.store.clone();
+            let prev_stamp = cache.as_ref().map(|(stamp, _)| stamp.clone());
+            let refresh = tokio::task::spawn_blocking(move || match store.file_stamp() {
+                Ok(stamp) if prev_stamp.as_ref() == Some(&stamp) => Ok(None),
+                Ok(stamp) => store.device_expiries().map(|map| Some((stamp, map))),
+                Err(err) => Err(anyhow::Error::new(err)),
+            })
+            .await;
+            let revoked_ids: Vec<String> = match refresh {
+                Ok(Ok(Some(updated))) => {
+                    cache = Some(updated);
+                    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                    let map = &cache.as_ref().unwrap().1;
+                    let active = gateway.active.lock().unwrap();
+                    active
+                        .keys()
+                        .filter(|id| !map.get(*id).is_some_and(|&exp| exp > now))
+                        .cloned()
+                        .collect()
+                }
+                Ok(Ok(None)) => {
+                    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                    let map = &cache.as_ref().unwrap().1;
+                    let active = gateway.active.lock().unwrap();
+                    active
+                        .keys()
+                        .filter(|id| !map.get(*id).is_some_and(|&exp| exp > now))
+                        .cloned()
+                        .collect()
+                }
+                Ok(Err(error)) => {
+                    warn!(
+                        %error,
+                        "could not check persisted browser authorization; disconnecting active remote browsers"
+                    );
+                    cache = None;
+                    gateway.active.lock().unwrap().keys().cloned().collect()
+                }
+                Err(_) => break,
+            };
+            if !revoked_ids.is_empty() {
+                let active = gateway.active.lock().unwrap();
+                for id in revoked_ids {
+                    if let Some(entry) = active.get(&id) {
+                        let _ = entry.cancel.send(true);
+                    }
+                }
+            }
+        }
+    })
 }
 
 pub async fn bind(state: Arc<DaemonState>, addr: SocketAddr) -> Result<WsHandle> {
@@ -136,7 +219,7 @@ pub async fn bind(state: Arc<DaemonState>, addr: SocketAddr) -> Result<WsHandle>
         None
     };
     let url = super::validate_endpoint(&config.public_url)?;
-    let listener = TcpListener::bind(addr).await?;
+    let listener = bind_ws_listener(addr)?;
     let local_addr = listener.local_addr()?;
     let store = AuthorizationStore::at_home(&paths::bsk_home()?);
     let configure_store = store.clone();
@@ -144,6 +227,7 @@ pub async fn bind(state: Arc<DaemonState>, addr: SocketAddr) -> Result<WsHandle>
     tokio::task::spawn_blocking(move || configure_store.configure(&configure)).await??;
     let connections = Arc::new(Semaphore::new(config.max_connections));
     let attempts = Mutex::new(AuthorizationRateLimit::new(config.authorize_rate_limit));
+    let gateway_stop = crate::daemon::abort::AbortToken::new();
     let gateway = Arc::new(Gateway {
         store,
         path: url.path().to_owned(),
@@ -153,21 +237,44 @@ pub async fn bind(state: Arc<DaemonState>, addr: SocketAddr) -> Result<WsHandle>
         ),
         state,
         stopped: AtomicBool::new(false),
+        stop: gateway_stop.clone(),
+        next_conn_id: AtomicU64::new(1),
         active: Mutex::new(HashMap::new()),
+        active_changed: Notify::new(),
         connections,
         attempts,
         capacity_warning: Mutex::new(None),
     });
     let shutdown = Arc::new(Notify::new());
     let stop = shutdown.clone();
+    let monitor_task = spawn_revocation_monitor(Arc::clone(&gateway), gateway_stop.clone());
     let task = tokio::spawn(async move {
         let limit = Arc::new(Semaphore::new(64));
         let mut last_capacity_warning: Option<Instant> = None;
+        let stop_notified = stop.notified();
+        tokio::pin!(stop_notified);
+        stop_notified.as_mut().enable();
         loop {
             tokio::select! {
-                _ = stop.notified() => break,
+                biased;
+                _ = &mut stop_notified => break,
                 incoming = listener.accept() => {
-                    let Ok((stream, peer)) = incoming else { break; };
+                    let (stream, peer) = match incoming {
+                        Ok(conn) => conn,
+                        Err(err) => {
+                            if is_fatal_accept_error(&err) {
+                                tracing::error!(error = %err, "fatal remote ws accept error; stopping listener");
+                                break;
+                            }
+                            warn!(error = %err, "transient remote ws accept error; backing off");
+                            tokio::select! {
+                                biased;
+                                _ = &mut stop_notified => break,
+                                _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
+                            }
+                        }
+                    };
+                    configure_tcp_keepalive(&stream);
                     let Ok(permit) = limit.clone().try_acquire_owned() else {
                         if last_capacity_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(60)) {
                             warn!("remote HTTP connection capacity reached; dropping new connections");
@@ -188,9 +295,14 @@ pub async fn bind(state: Arc<DaemonState>, addr: SocketAddr) -> Result<WsHandle>
             }
         }
         gateway.stopped.store(true, Ordering::Release);
+        gateway.stop.cancel();
         for (_, entry) in gateway.active.lock().unwrap().drain() {
             let _ = entry.cancel.send(true);
         }
+        for client in gateway.state.browsers.snapshot() {
+            client.close();
+        }
+        let _ = monitor_task.await;
     });
     Ok(WsHandle {
         local_addr,
@@ -400,16 +512,21 @@ async fn handle(
             return;
         }
         let (cancel, cancelled) = watch::channel(false);
-        if let Some(previous) = gateway
-            .active
-            .lock()
-            .unwrap()
-            .insert(device.device_id.clone(), ActiveConnection { cancel, slot })
-        {
+        let conn_id = gateway.next_conn_id.fetch_add(1, Ordering::Relaxed);
+        if let Some(previous) = gateway.active.lock().unwrap().insert(
+            device.device_id.clone(),
+            ActiveConnection {
+                conn_id,
+                cancel,
+                slot,
+            },
+        ) {
             let _ = previous.cancel.send(true);
         }
+        gateway.active_changed.notify_one();
         let authorization = ConnectionAuthorization {
             device,
+            conn_id,
             gateway: gateway.clone(),
             cancelled,
         };
@@ -425,6 +542,7 @@ async fn handle(
             ws,
             crate::daemon::peer_authorization::PeerAuthorization::Remote(authorization),
             None,
+            gateway.stop.clone(),
         )
         .await;
     });

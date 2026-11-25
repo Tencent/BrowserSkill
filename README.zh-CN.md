@@ -196,6 +196,19 @@ bsk session stop <id>
 
 在 WorkBuddy/CodeBuddy 或会回收命令子进程的宿主中，Agent 应先复用已有 daemon；需要启动时，在宿主管理的后台任务中运行 `bsk daemon start --foreground`，并在另一条工具调用中验证连接。[宿主配置指南](docs/sandboxed-agents.md)说明了如何共用 `BSK_HOME`、设置 `BSK_AUTO_START=0`，以及宿主无法维持任务时的独立终端兜底方式。
 
+### 关闭闲置的代理窗口
+
+任务完成后，可以让 Agent 结束浏览器会话。如果任务中断后代理窗口仍然开着，请在同一个 daemon 上查看会话列表：
+
+```sh
+bsk session list
+bsk session stop SESSION_ID
+```
+
+根据 `BROWSER`、`AGENT WINDOW` 和 `CONTROLLER / PROJECT` 列找到闲置的任务，将 `SESSION_ID` 替换为 `SESSION` 列的值。清理成功后，BrowserSkill 会归还借用的标签页，并在窗口中没有剩余用户标签页时关闭任务窗口。如果希望保存正在录制的操作记录，请使用 `bsk record stop`。
+
+如果窗口不在列表中，先确认使用的是任务当时的 `BSK_HOME`。如果窗口已经不属于任何会话，可以保存其中的工作后，在浏览器中手动关闭。
+
 ## DeepSeek Harness 插件
 
 轻量版 [DSH 插件](packages/dsh-plugin-browserskill/README.md)（`@wxg-prc-cpg/browser-skill-dsh-plugin`）为 DeepSeek Harness profile 内置主仓统一的 `browser-skill` CLI skill，自动将 `~/.local/bin`（或配置的 `bskPath`）补入宿主 `PATH`，并在本机尚未安装 `bsk` 时提供按需自动安装与浏览器扩展连接引导；底层与其他所有 Agent 共享同一套 `bsk` CLI、daemon（自动识别 `DSH_SESSION_ID` 隔离会话）与独立 Agent Window 运行时。

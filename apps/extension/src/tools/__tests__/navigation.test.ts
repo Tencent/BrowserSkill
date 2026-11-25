@@ -991,3 +991,105 @@ it.each([
   expect(await work).toMatchObject({ reached: phase });
   expect(fake.listeners).toHaveLength(0);
 });
+
+describe("beforeunload dismissal handling across sibling navigation commands", () => {
+  it.each([
+    ["navigate", handleNavigate, "Page.navigate", 1],
+    ["navigate_back", handleNavigateBack, "Page.navigateToHistoryEntry", 1],
+    ["navigate_forward", handleNavigateForward, "Page.navigateToHistoryEntry", 0],
+    ["reload", handleReload, "Page.reload", 1],
+  ] as const)("returns user_cancelled with effect_state=none instead of cdp_failed when %s is blocked and dismissed by beforeunload", async (label, handler, cdpMethod, historyIndex) => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await manager.start("aa11");
+    const fake = makeFakeCdp({
+      historyIndex,
+      historyEntries: [
+        { id: 11, url: "https://a.example/" },
+        { id: 12, url: "https://b.example/" },
+      ],
+    });
+    const baseSend = fake.cdp.send.bind(fake.cdp);
+    fake.cdp.send = (async (tabId, method, params) => {
+      if (method === cdpMethod) {
+        for (const listener of [...fake.listeners]) {
+          listener(rootEventSource(4), "Page.javascriptDialogOpening", {
+            type: "beforeunload",
+            message: "Unsaved changes",
+          });
+          listener(rootEventSource(4), "Page.javascriptDialogClosed", { result: false });
+        }
+        throw new Error("Navigation interrupted by beforeunload");
+      }
+      return baseSend(tabId, method, params);
+    }) as CdpRunner["send"];
+
+    const res =
+      label === "navigate"
+        ? await handleNavigate(
+            manager,
+            { session_id: "aa11", url: "https://next.example/", timeout_ms: 500 },
+            { cdp: fake.cdp, tabsApi: fake.tabsApi },
+          )
+        : await (handler as typeof handleReload)(
+            manager,
+            { session_id: "aa11", timeout_ms: 500 },
+            { cdp: fake.cdp, tabsApi: fake.tabsApi },
+          );
+    expect(res).toMatchObject({
+      code: "cancelled",
+      data: { reason: "user_cancelled", effect_state: "none" },
+    });
+    expect(fake.listeners).toHaveLength(0);
+  });
+
+  it.each([
+    ["navigate", handleNavigate, "Page.navigate", 1],
+    ["navigate_back", handleNavigateBack, "Page.navigateToHistoryEntry", 1],
+    ["navigate_forward", handleNavigateForward, "Page.navigateToHistoryEntry", 0],
+    ["reload", handleReload, "Page.reload", 1],
+  ] as const)("returns user_cancelled with effect_state=none when %s command resolves but beforeunload dialog is dismissed afterwards", async (label, handler, cdpMethod, historyIndex) => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await manager.start("aa11");
+    const fake = makeFakeCdp({
+      historyIndex,
+      historyEntries: [
+        { id: 11, url: "https://a.example/" },
+        { id: 12, url: "https://b.example/" },
+      ],
+    });
+    const baseSend = fake.cdp.send.bind(fake.cdp);
+    fake.cdp.send = (async (tabId, method, params) => {
+      const result = await baseSend(tabId, method, params);
+      if (method === cdpMethod) {
+        queueMicrotask(() => {
+          for (const listener of [...fake.listeners]) {
+            listener(rootEventSource(4), "Page.javascriptDialogOpening", {
+              type: "beforeunload",
+              message: "Unsaved changes",
+            });
+            listener(rootEventSource(4), "Page.javascriptDialogClosed", { result: false });
+          }
+        });
+      }
+      return result;
+    }) as CdpRunner["send"];
+
+    const res =
+      label === "navigate"
+        ? await handleNavigate(
+            manager,
+            { session_id: "aa11", url: "https://next.example/", timeout_ms: 500 },
+            { cdp: fake.cdp, tabsApi: fake.tabsApi },
+          )
+        : await (handler as typeof handleReload)(
+            manager,
+            { session_id: "aa11", timeout_ms: 500 },
+            { cdp: fake.cdp, tabsApi: fake.tabsApi },
+          );
+    expect(res).toMatchObject({
+      code: "cancelled",
+      data: { reason: "user_cancelled", effect_state: "none" },
+    });
+    expect(fake.listeners).toHaveLength(0);
+  });
+});

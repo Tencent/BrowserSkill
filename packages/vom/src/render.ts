@@ -116,16 +116,28 @@ export function inspectVomLine(line: string): VomLineMetadata {
   const trimmed = line.replace(/^ +/, "");
   const indent = line.length - trimmed.length;
   if (trimmed.startsWith("@context ")) {
-    const body = trimmed.slice("@context ".length);
+    const bodyOffset = indent + "@context ".length;
+    const body = line.slice(bodyOffset);
     const spaceAt = body.indexOf(" ");
     const role = spaceAt >= 0 ? body.slice(0, spaceAt) : body;
+    const quotedOffset = spaceAt >= 0 ? bodyOffset + spaceAt + 1 : undefined;
     const quoted =
-      spaceAt >= 0 ? readLeadingJsonEscapedContent(body.slice(spaceAt + 1)) : undefined;
+      quotedOffset !== undefined
+        ? readLeadingJsonEscapedContent(line.slice(quotedOffset))
+        : undefined;
+    const hasPlainQuoted = quoted !== undefined && quoted.rest.length === 0;
     return {
       indent,
       kind: "context",
       ...(role ? { role } : {}),
-      ...(quoted && quoted.rest.length === 0 ? { escapedName: quoted.escaped } : {}),
+      ...(hasPlainQuoted && quotedOffset !== undefined
+        ? {
+            escapedName: quoted.escaped,
+            nameStart: quotedOffset + 1,
+            nameEnd: quotedOffset + 1 + quoted.escaped.length,
+          }
+        : {}),
+      ...(quotedOffset !== undefined ? { contentStart: quotedOffset } : {}),
       plainNamedNode: false,
       silentlyTruncatesLabel: true,
     };
@@ -148,51 +160,73 @@ export function inspectVomLine(line: string): VomLineMetadata {
     return { indent, kind: "layer", plainNamedNode: false, silentlyTruncatesLabel: false };
   }
   if (trimmed.startsWith("[§ active:")) {
-    return { indent, kind: "active-scope", plainNamedNode: false, silentlyTruncatesLabel: false };
+    return {
+      indent,
+      kind: "active-scope",
+      contentStart: indent + "[§ active:".length,
+      plainNamedNode: false,
+      silentlyTruncatesLabel: false,
+    };
   }
 
-  let rest = trimmed;
+  let cursor = indent;
   let ref: string | undefined;
-  if (rest.startsWith("@e")) {
-    const spaceAt = rest.indexOf(" ");
-    if (spaceAt > 2) {
-      const digits = rest.slice(2, spaceAt);
+  if (line.startsWith("@e", cursor)) {
+    const spaceAt = line.indexOf(" ", cursor);
+    if (spaceAt > cursor + 2) {
+      const digits = line.slice(cursor + 2, spaceAt);
       if (/^\d+$/.test(digits)) {
         ref = `e${digits}`;
-        rest = rest.slice(spaceAt + 1);
+        cursor = spaceAt + 1;
       }
     }
   }
-  const roleMatch = /^[A-Za-z][\w-]*/.exec(rest);
+  const roleMatch = /^[A-Za-z][\w-]*/.exec(line.slice(cursor));
   if (!roleMatch) {
-    return { indent, kind: "node", plainNamedNode: false, silentlyTruncatesLabel: false };
+    return {
+      indent,
+      kind: "node",
+      ...(indent < line.length ? { contentStart: indent } : {}),
+      plainNamedNode: false,
+      silentlyTruncatesLabel: false,
+    };
   }
   const role = roleMatch[0];
-  rest = rest.slice(role.length);
+  cursor += role.length;
   let hadPreNameAnnotation = false;
   for (const hint of PRE_NAME_DRAG_HINTS) {
-    if (rest.startsWith(hint)) {
+    if (line.startsWith(hint, cursor)) {
       hadPreNameAnnotation = true;
-      rest = rest.slice(hint.length);
+      cursor += hint.length;
       break;
     }
   }
+  const contentStart = cursor < line.length ? cursor : undefined;
   let escapedName: string | undefined;
-  if (rest.startsWith(' "')) {
-    const parsed = readLeadingJsonEscapedContent(rest.slice(1));
+  let nameStart: number | undefined;
+  let nameEnd: number | undefined;
+  let trailingOffset = cursor;
+  if (line.startsWith(' "', cursor)) {
+    const parsed = readLeadingJsonEscapedContent(line.slice(cursor + 1));
     if (parsed) {
       escapedName = parsed.escaped;
-      rest = parsed.rest;
+      nameStart = cursor + 2;
+      nameEnd = nameStart + parsed.escaped.length;
+      trailingOffset = nameEnd + 1;
     }
   }
   const plainNamedNode =
-    ref === undefined && !hadPreNameAnnotation && escapedName !== undefined && rest.length === 0;
+    ref === undefined &&
+    !hadPreNameAnnotation &&
+    escapedName !== undefined &&
+    trailingOffset === line.length;
   return {
     indent,
     kind: "node",
     ...(ref ? { ref } : {}),
     role,
-    ...(escapedName !== undefined ? { escapedName } : {}),
+    ...(escapedName !== undefined ? { escapedName, nameStart, nameEnd } : {}),
+    ...(contentStart !== undefined ? { contentStart } : {}),
     plainNamedNode,
     silentlyTruncatesLabel: role === "canvas",
   };
@@ -1127,14 +1161,20 @@ function renderNodeLine(
   }
   const placeholder = cleaned(node.placeholder);
   if (placeholder) line += ` placeholder=${JSON.stringify(placeholder)}`;
+  const suppressSyntheticCheckableValue =
+    node.checked !== undefined &&
+    rawValue === "on" &&
+    !Object.prototype.hasOwnProperty.call(node.attrs ?? {}, "value");
+  const effectiveValue = suppressSyntheticCheckableValue ? undefined : rawValue;
   const hasValue =
-    rawValue !== undefined || node.inputState === "filled" || node.inputState === "default";
+    effectiveValue !== undefined ||
+    (node.checked === undefined && (node.inputState === "filled" || node.inputState === "default"));
   const value =
     node.sensitive || redactValues
       ? hasValue
         ? SENSITIVE_MASK
         : undefined
-      : rawValue?.slice(0, MAX_VALUE_LENGTH);
+      : effectiveValue?.slice(0, MAX_VALUE_LENGTH);
   if (value !== undefined) line += ` =${JSON.stringify(value)}`;
 
   if (isNativeSelect && !node.sensitive && !redactValues) {
@@ -1410,10 +1450,13 @@ function* renderTreeRows(
     };
     const scope = state.scopeMap.get(node.id);
     if (scope?.lines.length) {
-      yield { text: `${"  ".repeat(depth + 1)}[§ active: ${scope.label}]` };
+      yield {
+        frameId: node.frameId,
+        text: `${"  ".repeat(depth + 1)}[§ active: ${scope.label}]`,
+      };
       for (const text of scope.lines.slice(0, MAX_SCOPE_LINES)) {
         const clean = cleaned(text);
-        if (clean) yield { text: `${"  ".repeat(depth + 2)}${clean}` };
+        if (clean) yield { frameId: node.frameId, text: `${"  ".repeat(depth + 2)}${clean}` };
       }
     }
 
@@ -1753,16 +1796,54 @@ function renderPageOcclusionLine(hiddenNodeCount: number): string {
   return `L2 page … occluded by L1 (~${hiddenNodeCount} nodes, not actionable)`;
 }
 
+const NON_BLOCKING_REGION_TAGS = new Set(["html", "body"]);
+const NON_BLOCKING_REGION_ROLES = new Set(["rootwebarea", "webarea"]);
+
 function isPositionedRegionCandidate(node: VomNode): boolean {
-  return (
-    node.pointerEvents !== "none" &&
-    node.rect !== null &&
-    ACTIVE_REGION_POSITIONS.has(node.position)
-  );
+  if (node.pointerEvents === "none" || node.rect === null) return false;
+  if (!(node.rect.w > 0 && node.rect.h > 0)) return false;
+  if (!ACTIVE_REGION_POSITIONS.has(node.position)) return false;
+  if (node.modal !== true) {
+    if (
+      NON_BLOCKING_REGION_TAGS.has(normalizedTag(node)) ||
+      NON_BLOCKING_REGION_ROLES.has(normalizedRole(node))
+    ) {
+      return false;
+    }
+    // Decorative negative-z-index backgrounds paint behind normal flow even when
+    // Chromium's DOMSnapshot assigns their PaintLayer a higher scalar paintOrder.
+    if (node.paintOrder < 0 || (node.zIndex !== undefined && node.zIndex < 0)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** True when a non-modal candidate lives inside a same-frame negative stacking context. */
+function isBehindNormalFlow(
+  node: VomNode,
+  parentMap: Map<number, number | null>,
+  nodesById: Map<number, VomNode>,
+): boolean {
+  if (node.modal === true) return false;
+  let cur: VomNode | undefined = node;
+  let guard = 0;
+  while (cur && cur.frameId === node.frameId && guard <= parentMap.size) {
+    if (cur.paintOrder < 0) return true;
+    if (cur.position !== "static" && cur.zIndex !== undefined && cur.zIndex < 0) return true;
+    const parentId: number | null = parentMap.get(cur.id) ?? null;
+    cur = parentId === null ? undefined : nodesById.get(parentId);
+    guard += 1;
+  }
+  return false;
 }
 
 function rectContains(rect: Rect, x: number, y: number): boolean {
   return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+}
+
+function rectsOverlap(a: Rect, b: Rect): boolean {
+  return a.x <= b.x + b.w && a.x + a.w >= b.x && a.y <= b.y + b.h && a.y + a.h >= b.y;
 }
 
 function interactionPoints(rect: Rect): Array<[number, number]> {
@@ -1831,7 +1912,7 @@ function comparablePaintNodes(
   return null;
 }
 
-function isBlockedByRegion(
+function canRegionBlockTarget(
   target: VomNode,
   blocker: VomNode,
   parentMap: Map<number, number | null>,
@@ -1840,31 +1921,59 @@ function isBlockedByRegion(
   lineageCache: Map<number, Map<string | undefined, VomNode>>,
 ): boolean {
   if (target.id === blocker.id) return false;
+  if (
+    target.visualKey === undefined &&
+    (target.domAncestorIds?.includes(blocker.id) || blocker.domAncestorIds?.includes(target.id))
+  ) {
+    return false;
+  }
   if (isAncestorOf(parentMap, blocker.id, target.id)) return false;
   if (isAncestorOf(parentMap, target.id, blocker.id)) return false;
   if (!target.rect || !blocker.rect) return false;
+  if (!rectsOverlap(target.rect, blocker.rect)) return false;
   const paintNodes = comparablePaintNodes(target, blocker, parentMap, nodesById, lineageCache);
   if (!paintNodes) return false;
 
-  const points = interactionPoints(target.rect);
-
-  if (
-    !fullCover &&
-    paintNodes.target.paintOrder >= paintNodes.blocker.paintOrder &&
-    points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y))
-  ) {
-    return false;
-  }
-
   if (paintNodes.blocker.paintOrder < paintNodes.target.paintOrder) return false;
-  if (
-    paintNodes.blocker.paintOrder === paintNodes.target.paintOrder &&
-    paintNodes.blocker.id <= paintNodes.target.id
-  ) {
-    return false;
+  if (paintNodes.blocker.paintOrder === paintNodes.target.paintOrder) {
+    if (!fullCover || paintNodes.blocker.id <= paintNodes.target.id) return false;
   }
-  // Even a near-full region must overlap the target to occlude it.
-  return points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y));
+  return true;
+}
+
+/**
+ * A target is occluded by foreground positioned regions only when every inset
+ * interaction sample point is covered by at least one eligible foreground region.
+ * Partial overlap (corner badges, grazed sticky headers, floating buttons) leaves
+ * reachable click points and must keep the target visible.
+ */
+function isBlockedByRegions(
+  target: VomNode,
+  candidates: ReadonlyArray<{ node: VomNode; fullCover: boolean }>,
+  parentMap: Map<number, number | null>,
+  nodesById: Map<number, VomNode>,
+  lineageCache: Map<number, Map<string | undefined, VomNode>>,
+): boolean {
+  if (!target.rect) return false;
+  let blockers: Rect[] | undefined;
+  for (const candidate of candidates) {
+    if (
+      canRegionBlockTarget(
+        target,
+        candidate.node,
+        parentMap,
+        nodesById,
+        candidate.fullCover,
+        lineageCache,
+      )
+    ) {
+      blockers ??= [];
+      blockers.push(candidate.node.rect as Rect);
+    }
+  }
+  if (!blockers) return false;
+  const points = interactionPoints(target.rect);
+  return points.every(([x, y]) => blockers!.some((rect) => rectContains(rect, x, y)));
 }
 
 function collectDescendants(nodes: VomNode[], roots: Set<number>): Set<number> {
@@ -1888,13 +1997,101 @@ function collectDescendants(nodes: VomNode[], roots: Set<number>): Set<number> {
   return included;
 }
 
+/**
+ * Prune occluded targets and their passive descendants while keeping any
+ * geometrically proven uncovered interactive/visual descendants (e.g. an
+ * overflowing or higher-z-index button inside a covered clickable container),
+ * re-parenting surviving nodes to their nearest surviving ancestor.
+ */
+function pruneBlockedTargets(
+  nodes: VomNode[],
+  blockedTargets: ReadonlySet<number>,
+  parentMap: Map<number, number | null>,
+  nodesById: Map<number, VomNode>,
+  visualSources?: ReadonlyMap<number, VomNode>,
+): VomNode[] {
+  const children = buildChildren(nodes);
+  const kept = new Set<number>();
+  const droppedTargets = new Set(blockedTargets);
+  const visited = new Set<number>();
+  const stack: Array<{ node: VomNode; inBlocked: boolean }> = [];
+  for (const root of children.get(null) ?? []) {
+    stack.push({ node: root, inBlocked: false });
+  }
+
+  while (stack.length > 0) {
+    const { node, inBlocked } = stack.pop()!;
+    if (visited.has(node.id)) continue;
+    visited.add(node.id);
+
+    const isBlocked = blockedTargets.has(node.id);
+    const isTarget = node.visualKey !== undefined || isVomReferenceNode(node);
+    let nextInBlocked = inBlocked;
+
+    if (isBlocked) {
+      nextInBlocked = true;
+    } else if (isTarget) {
+      const targetRect = (visualSources?.get(node.id) ?? node).rect;
+      if (!inBlocked || targetRect !== null) {
+        kept.add(node.id);
+        nextInBlocked = false;
+      } else {
+        droppedTargets.add(node.id);
+      }
+    } else if (!inBlocked) {
+      kept.add(node.id);
+    }
+
+    for (const child of children.get(node.id) ?? []) {
+      stack.push({ node: child, inBlocked: nextInBlocked });
+    }
+  }
+
+  // Keep non-blocked structural wrappers (e.g. iframe, section, form) that enclose
+  // a surviving interactive/visual descendant inside a blocked container.
+  for (const id of [...kept]) {
+    let cur = parentMap.get(id) ?? null;
+    let guard = 0;
+    while (cur !== null && guard <= parentMap.size) {
+      if (kept.has(cur)) break;
+      if (!droppedTargets.has(cur)) kept.add(cur);
+      cur = parentMap.get(cur) ?? null;
+      guard += 1;
+    }
+  }
+
+  const nearestKeptAncestor = (parentId: number | null): number | null => {
+    let cur = parentId;
+    let guard = 0;
+    while (cur !== null && guard <= parentMap.size) {
+      if (kept.has(cur)) return cur;
+      cur = parentMap.get(cur) ?? null;
+      guard += 1;
+    }
+    return null;
+  };
+
+  return nodes.flatMap((node) => {
+    if (!kept.has(node.id)) return [];
+    if (node.parentId === null || !nodesById.has(node.parentId) || kept.has(node.parentId)) {
+      return [node];
+    }
+    return [{ ...node, parentId: nearestKeptAncestor(node.parentId) }];
+  });
+}
+
 function applyActiveRegionPolicy(
   nodes: VomNode[],
   scene: VomScene,
   visualSources?: ReadonlyMap<number, VomNode>,
 ): VomNode[] {
-  const candidates = nodes
-    .filter(isPositionedRegionCandidate)
+  const rawCandidates = nodes.filter(isPositionedRegionCandidate);
+  if (rawCandidates.length === 0) return nodes;
+
+  const parentMap = buildParentMap(nodes);
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const candidates = rawCandidates
+    .filter((node) => !isBehindNormalFlow(node, parentMap, nodesById))
     .map((node) => ({
       node,
       viewportCoverage: coverage(node.rect, scene.viewport),
@@ -1903,29 +2100,23 @@ function applyActiveRegionPolicy(
     .filter((candidate) => candidate.viewportCoverage > 0 || candidate.node.modal === true);
   if (candidates.length === 0) return nodes;
 
-  const parentMap = buildParentMap(nodes);
-  const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const lineageCache = new Map<number, Map<string | undefined, VomNode>>();
 
-  const blockedRoots = new Set<number>();
+  const blockedTargets = new Set<number>();
   for (const target of nodes) {
     if (target.visualKey === undefined && !isVomReferenceNode(target)) continue;
-    const blocked = candidates.some((candidate) =>
-      isBlockedByRegion(
-        visualSources?.get(target.id) ?? target,
-        candidate.node,
-        parentMap,
-        nodesById,
-        candidate.fullCover,
-        lineageCache,
-      ),
+    const blocked = isBlockedByRegions(
+      visualSources?.get(target.id) ?? target,
+      candidates,
+      parentMap,
+      nodesById,
+      lineageCache,
     );
-    if (blocked) blockedRoots.add(target.id);
+    if (blocked) blockedTargets.add(target.id);
   }
 
-  if (blockedRoots.size === 0) return nodes;
-  const blocked = collectDescendants(nodes, blockedRoots);
-  return nodes.filter((node) => !blocked.has(node.id));
+  if (blockedTargets.size === 0) return nodes;
+  return pruneBlockedTargets(nodes, blockedTargets, parentMap, nodesById, visualSources);
 }
 
 function countRenderable(nodes: VomNode[]): number {
@@ -2054,9 +2245,10 @@ export function prepareObservationRender(
     : options.activeRegionPolicy
       ? applyActiveRegionPolicy(scopeNodes, scene, visualSources)
       : scopeNodes;
-  const allowedVisuals = new Set(
-    scoped.filter((n) => n.visualKey !== undefined).map((n) => n.visualKey),
-  );
+  const allowedVisualParents = new Map<number, number | null>();
+  for (const n of scoped) {
+    if (n.visualKey !== undefined) allowedVisualParents.set(n.visualKey, n.parentId);
+  }
   const visible = scoped.filter((n) => n.visualKey === undefined);
   const byId = new Map(visible.map((n) => [n.id, n]));
   const ids = new Set(byId.keys());
@@ -2065,7 +2257,7 @@ export function prepareObservationRender(
   const fallbackGroups = new Map<string, number>();
   const representedSources = new Set<number>();
   for (const v of scene.visuals ?? []) {
-    if (!allowedVisuals.has(v.key)) continue;
+    if (!allowedVisualParents.has(v.key)) continue;
     const source = v.sourceId === undefined ? undefined : byId.get(v.sourceId);
     // Only suppress an exact passive Canvas description already carried by the visual line.
     // Action refs and distinct semantic content remain separate.
@@ -2081,9 +2273,21 @@ export function prepareObservationRender(
       representedSources.add(source.id);
     }
 
+    const prunedParent = allowedVisualParents.get(v.key) ?? null;
+    const resolvedParentId =
+      v.parentId === null
+        ? null
+        : ids.has(v.parentId)
+          ? v.parentId
+          : source && source.parentId !== null && ids.has(source.parentId)
+            ? source.parentId
+            : prunedParent !== null && ids.has(prunedParent)
+              ? prunedParent
+              : null;
+
     const node: VomNode = {
       id: nextId++,
-      parentId: v.parentId !== null && ids.has(v.parentId) ? v.parentId : null,
+      parentId: resolvedParentId,
       tag: "canvas",
       role: "canvas",
       name: v.label,

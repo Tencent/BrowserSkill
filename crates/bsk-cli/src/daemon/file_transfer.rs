@@ -87,11 +87,11 @@ impl ValidatedBrowserFile {
         })
     }
 
-    fn remove_source(mut self) -> Result<(), RpcError> {
-        remove_if_present(&self.path).map_err(io_error)?;
-        remove_dir_if_present(&self.parent).map_err(io_error)?;
+    fn remove_source(mut self) -> std::io::Result<()> {
         self.cleanup_armed = false;
-        Ok(())
+        let file_res = remove_if_present(&self.path);
+        let dir_res = remove_dir_if_present(&self.parent);
+        file_res.and(dir_res)
     }
 }
 
@@ -109,6 +109,7 @@ impl Drop for ValidatedBrowserFile {
 pub struct DownloadStaging {
     pub transfer_id: String,
     pub browser_relative_dir: String,
+    pub max_byte_size: u64,
 }
 
 #[derive(Debug)]
@@ -127,8 +128,7 @@ impl TransferRegistry {
         })
     }
 
-    #[cfg(test)]
-    fn at_root(root: PathBuf) -> anyhow::Result<Self> {
+    pub(super) fn at_root(root: PathBuf) -> anyhow::Result<Self> {
         let registry = Self {
             root,
             initialized: Mutex::new(false),
@@ -177,11 +177,7 @@ impl TransferRegistry {
         let path = dir.join(basename);
         {
             let mut entries = self.entries.lock().unwrap();
-            let session_bytes: u64 = entries
-                .values()
-                .filter(|entry| !entry.released && entry.session_id == p.session_id)
-                .map(|entry| entry.expected_size.unwrap_or(entry.written))
-                .sum();
+            let session_bytes = session_bytes_locked(&entries, &p.session_id, None);
             if session_bytes.saturating_add(p.byte_size) > MAX_TRANSFER_BYTES {
                 return Err(invalid(format!(
                     "session transfer staging exceeds limit {}",
@@ -358,33 +354,62 @@ impl TransferRegistry {
     pub fn begin_download(&self, session_id: &str) -> Result<DownloadStaging, RpcError> {
         self.ensure_root()
             .map_err(|err| protocol_error(err.to_string()))?;
+        let remaining = {
+            let entries = self.entries.lock().unwrap();
+            MAX_TRANSFER_BYTES.saturating_sub(session_bytes_locked(&entries, session_id, None))
+        };
+        if remaining == 0 {
+            return Err(invalid(format!(
+                "session transfer staging exceeds limit {}",
+                MAX_TRANSFER_BYTES
+            )));
+        }
         let id = new_id();
         let dir = self.root.join(&id);
         fs::create_dir(&dir).map_err(io_error)?;
         set_private_dir(&dir).map_err(io_error)?;
-        self.entries.lock().unwrap().insert(
-            id.clone(),
-            Entry {
-                session_id: session_id.to_string(),
-                direction: Direction::Download,
-                dir: dir.clone(),
-                path: dir,
-                expected_size: None,
-                written: 0,
-                ready: false,
-                busy: false,
-                readers: 0,
-                released: false,
-            },
-        );
+        let max_byte_size = {
+            let mut entries = self.entries.lock().unwrap();
+            let remaining =
+                MAX_TRANSFER_BYTES.saturating_sub(session_bytes_locked(&entries, session_id, None));
+            if remaining == 0 {
+                drop(entries);
+                let _ = fs::remove_dir_all(&dir);
+                return Err(invalid(format!(
+                    "session transfer staging exceeds limit {}",
+                    MAX_TRANSFER_BYTES
+                )));
+            }
+            entries.insert(
+                id.clone(),
+                Entry {
+                    session_id: session_id.to_string(),
+                    direction: Direction::Download,
+                    dir: dir.clone(),
+                    path: dir,
+                    // Reserve the advertised budget immediately so a concurrent
+                    // `transfer.begin` cannot consume space promised to Chrome
+                    // while the download is in flight; `import_download` shrinks
+                    // this to the actual copied size (or clears it on failure).
+                    expected_size: Some(remaining),
+                    written: 0,
+                    ready: false,
+                    busy: false,
+                    readers: 0,
+                    released: false,
+                },
+            );
+            remaining
+        };
         Ok(DownloadStaging {
             browser_relative_dir: format!("BrowserSkill/{id}"),
             transfer_id: id,
+            max_byte_size,
         })
     }
 
     pub fn import_download(&self, id: &str, reported_path: &Path) -> Result<u64, RpcError> {
-        let dir = {
+        let (dir, session_id) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries
                 .get_mut(id)
@@ -397,11 +422,11 @@ impl TransferRegistry {
                 return Err(invalid("download transfer is already finalized or busy"));
             }
             entry.busy = true;
-            entry.dir.clone()
+            (entry.dir.clone(), entry.session_id.clone())
         };
 
         let destination = dir.join("payload");
-        let import_res = (|| -> Result<u64, RpcError> {
+        let import_res = (|| -> Result<(u64, ValidatedBrowserFile), RpcError> {
             let browser_file = ValidatedBrowserFile::validate(reported_path, id)?;
             let canonical = browser_file.path.canonicalize().map_err(io_error)?;
             let meta = fs::metadata(&canonical).map_err(io_error)?;
@@ -410,6 +435,27 @@ impl TransferRegistry {
                     "download is not a regular file or exceeds the transfer limit",
                 ));
             }
+            let declared_len = meta.len();
+            // Keep the full remaining session budget reserved on this entry while
+            // copying so no concurrent `transfer.begin` can consume space promised
+            // to this download; `expected_size` shrinks to `Some(copied)` on commit.
+            let remaining = {
+                let mut entries = self.entries.lock().unwrap();
+                let other_bytes = session_bytes_locked(&entries, &session_id, Some(id));
+                let remaining = MAX_TRANSFER_BYTES.saturating_sub(other_bytes);
+                if declared_len > remaining {
+                    return Err(invalid(format!(
+                        "session transfer staging exceeds limit {}",
+                        MAX_TRANSFER_BYTES
+                    )));
+                }
+                let entry = entries
+                    .get_mut(id)
+                    .filter(|entry| !entry.released)
+                    .ok_or_else(|| not_found("download transfer not found"))?;
+                entry.expected_size = Some(remaining);
+                remaining
+            };
             let source = File::open(&canonical).map_err(io_error)?;
             let mut destination_file = OpenOptions::new()
                 .write(true)
@@ -417,20 +463,27 @@ impl TransferRegistry {
                 .open(&destination)
                 .map_err(io_error)?;
             let copied = std::io::copy(
-                &mut source.take(MAX_TRANSFER_BYTES.saturating_add(1)),
+                &mut source.take(remaining.saturating_add(1)),
                 &mut destination_file,
             )
             .map_err(io_error)?;
-            if copied > MAX_TRANSFER_BYTES {
+            if copied > remaining {
+                drop(destination_file);
                 let _ = fs::remove_file(&destination);
-                return Err(invalid("download exceeds the transfer limit"));
+                return Err(invalid(format!(
+                    "session transfer staging exceeds limit {}",
+                    MAX_TRANSFER_BYTES
+                )));
             }
-            browser_file.remove_source()?;
-            Ok(copied)
+            drop(destination_file);
+            Ok((copied, browser_file))
         })();
 
+        let mut quota_exceeded = false;
+        let mut committed: Option<(u64, ValidatedBrowserFile)> = None;
         let released_mid_flight = {
             let mut entries = self.entries.lock().unwrap();
+            let other_bytes = session_bytes_locked(&entries, &session_id, Some(id));
             match entries.get_mut(id) {
                 Some(entry) if entry.released => {
                     entries.remove(id);
@@ -438,11 +491,25 @@ impl TransferRegistry {
                 }
                 Some(entry) => {
                     entry.busy = false;
-                    if let Ok(copied) = import_res {
-                        entry.path = destination;
-                        entry.written = copied;
-                        entry.expected_size = Some(copied);
-                        entry.ready = true;
+                    match import_res {
+                        Ok((copied, browser_file)) => {
+                            if other_bytes.saturating_add(copied) > MAX_TRANSFER_BYTES {
+                                entry.expected_size = None;
+                                quota_exceeded = true;
+                                drop(browser_file);
+                            } else {
+                                entry.path = destination.clone();
+                                entry.written = copied;
+                                entry.expected_size = Some(copied);
+                                entry.ready = true;
+                                committed = Some((copied, browser_file));
+                            }
+                        }
+                        Err(err) => {
+                            entry.expected_size = None;
+                            drop(entries);
+                            return Err(err);
+                        }
                     }
                     false
                 }
@@ -453,7 +520,27 @@ impl TransferRegistry {
             let _ = fs::remove_dir_all(&dir);
             return Err(not_found("download transfer not found"));
         }
-        import_res
+        if quota_exceeded {
+            let _ = fs::remove_file(&destination);
+            return Err(invalid(format!(
+                "session transfer staging exceeds limit {}",
+                MAX_TRANSFER_BYTES
+            )));
+        }
+        let (copied, browser_file) =
+            committed.ok_or_else(|| not_found("download transfer not found"))?;
+        // Remove the browser source only AFTER `entry.ready = true` is durably
+        // committed, and tolerate non-fatal cleanup failures (e.g. macOS `.DS_Store`
+        // `ENOTEMPTY` or Windows AV file locks) without discarding the imported file.
+        if let Err(err) = browser_file.remove_source() {
+            tracing::warn!(
+                transfer_id = id,
+                path = %reported_path.display(),
+                %err,
+                "download imported, but removing browser download source failed"
+            );
+        }
+        Ok(copied)
     }
 
     pub fn read_chunk(&self, p: TransferReadParams) -> Result<TransferChunkResult, RpcError> {
@@ -554,6 +641,22 @@ impl TransferRegistry {
     pub fn release_session(&self, session_id: &str) {
         Self::remove_dirs(self.drain_session_dirs(session_id));
     }
+}
+
+fn session_bytes_locked(
+    entries: &HashMap<String, Entry>,
+    session_id: &str,
+    exclude_id: Option<&str>,
+) -> u64 {
+    entries
+        .iter()
+        .filter(|(id, entry)| {
+            exclude_id.is_none_or(|excluded| id.as_str() != excluded)
+                && !entry.released
+                && entry.session_id == session_id
+        })
+        .map(|(_, entry)| entry.expected_size.unwrap_or(entry.written))
+        .fold(0u64, u64::saturating_add)
 }
 
 fn new_id() -> String {
@@ -867,6 +970,181 @@ mod tests {
                     session_id: "s2".into(),
                     name: "other-session.bin".into(),
                     byte_size: 1,
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn import_download_succeeds_when_source_parent_dir_is_not_empty() {
+        let (temp, registry) = registry();
+        let staging = registry.begin_download("s1").unwrap();
+        let browser_dir = temp
+            .path()
+            .join("Downloads")
+            .join("BrowserSkill")
+            .join(&staging.transfer_id);
+        fs::create_dir_all(&browser_dir).unwrap();
+        // Simulate macOS Finder `.DS_Store` preventing `remove_dir` with ENOTEMPTY.
+        fs::write(browser_dir.join(".DS_Store"), b"finder").unwrap();
+        let downloaded = browser_dir.join("report.pdf");
+        fs::write(&downloaded, b"pdf-payload").unwrap();
+
+        let copied = registry
+            .import_download(&staging.transfer_id, &downloaded)
+            .expect("import_download must succeed even when remove_dir hits ENOTEMPTY");
+        assert_eq!(copied, 11);
+
+        let chunk = registry
+            .read_chunk(TransferReadParams {
+                transfer_id: staging.transfer_id.clone(),
+                offset: 0,
+                data_base64: None,
+            })
+            .unwrap();
+        assert!(chunk.eof);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(chunk.data_base64.unwrap())
+            .unwrap();
+        assert_eq!(decoded, b"pdf-payload");
+    }
+
+    #[test]
+    fn download_enforces_cumulative_session_transfer_quota() {
+        let (temp, registry) = registry();
+        // Reserve all but 4 bytes of the session quota with an upload.
+        registry
+            .begin_upload(TransferBeginParams {
+                session_id: "s1".into(),
+                name: "almost-full.bin".into(),
+                byte_size: MAX_TRANSFER_BYTES - 4,
+            })
+            .unwrap();
+
+        let staging = registry.begin_download("s1").unwrap();
+        assert_eq!(staging.max_byte_size, 4);
+
+        // A 5-byte download must be rejected because cumulative session bytes exceed MAX_TRANSFER_BYTES.
+        let browser_dir = temp
+            .path()
+            .join("Downloads")
+            .join("BrowserSkill")
+            .join(&staging.transfer_id);
+        fs::create_dir_all(&browser_dir).unwrap();
+        let too_big = browser_dir.join("five.bin");
+        fs::write(&too_big, b"12345").unwrap();
+        assert!(
+            registry
+                .import_download(&staging.transfer_id, &too_big)
+                .is_err()
+        );
+
+        // A 4-byte download fits exactly and exhausts the remaining quota.
+        let staging2 = registry.begin_download("s1").unwrap();
+        let browser_dir2 = temp
+            .path()
+            .join("Downloads")
+            .join("BrowserSkill")
+            .join(&staging2.transfer_id);
+        fs::create_dir_all(&browser_dir2).unwrap();
+        let exact = browser_dir2.join("four.bin");
+        fs::write(&exact, b"1234").unwrap();
+        assert_eq!(
+            registry
+                .import_download(&staging2.transfer_id, &exact)
+                .unwrap(),
+            4
+        );
+
+        // Now zero quota remains: `begin_download` rejects upfront.
+        assert!(registry.begin_download("s1").is_err());
+    }
+
+    #[test]
+    fn begin_download_reserves_budget_against_concurrent_uploads_and_releases_unused_on_import() {
+        let (temp, registry) = registry();
+        // Reserve all but 1024 bytes of session quota with an existing upload.
+        registry
+            .begin_upload(TransferBeginParams {
+                session_id: "s1".into(),
+                name: "existing.bin".into(),
+                byte_size: MAX_TRANSFER_BYTES - 1024,
+            })
+            .unwrap();
+
+        let staging = registry.begin_download("s1").unwrap();
+        assert_eq!(staging.max_byte_size, 1024);
+
+        // While the download is in flight, a concurrent `transfer.begin` must not
+        // steal any of the 1024 bytes already advertised to Chrome.
+        assert!(
+            registry
+                .begin_upload(TransferBeginParams {
+                    session_id: "s1".into(),
+                    name: "thief.bin".into(),
+                    byte_size: 1,
+                })
+                .is_err(),
+            "concurrent upload must not steal in-flight download budget"
+        );
+
+        // Once the browser finishes a 16-byte download and `import_download` commits,
+        // the reservation shrinks from 1024 to 16, releasing 1008 bytes for new uploads.
+        let browser_dir = temp
+            .path()
+            .join("Downloads")
+            .join("BrowserSkill")
+            .join(&staging.transfer_id);
+        fs::create_dir_all(&browser_dir).unwrap();
+        let downloaded = browser_dir.join("small.bin");
+        fs::write(&downloaded, b"0123456789abcdef").unwrap();
+        assert_eq!(
+            registry
+                .import_download(&staging.transfer_id, &downloaded)
+                .unwrap(),
+            16
+        );
+
+        assert!(
+            registry
+                .begin_upload(TransferBeginParams {
+                    session_id: "s1".into(),
+                    name: "too-large.bin".into(),
+                    byte_size: 1009,
+                })
+                .is_err()
+        );
+        let fits = registry
+            .begin_upload(TransferBeginParams {
+                session_id: "s1".into(),
+                name: "fits-exact.bin".into(),
+                byte_size: 1008,
+            })
+            .unwrap();
+        // Releasing that upload frees 1008 bytes, and releasing a fresh in-flight
+        // download frees its reservation cleanly as well.
+        assert!(
+            registry
+                .release(TransferIdParams {
+                    transfer_id: fits.transfer_id,
+                })
+                .released
+        );
+        let staging2 = registry.begin_download("s1").unwrap();
+        assert_eq!(staging2.max_byte_size, 1008);
+        assert!(
+            registry
+                .release(TransferIdParams {
+                    transfer_id: staging2.transfer_id,
+                })
+                .released
+        );
+        assert!(
+            registry
+                .begin_upload(TransferBeginParams {
+                    session_id: "s1".into(),
+                    name: "after-release.bin".into(),
+                    byte_size: 1008,
                 })
                 .is_ok()
         );
