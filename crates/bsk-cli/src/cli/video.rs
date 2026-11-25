@@ -393,12 +393,28 @@ pub(crate) fn run_command_with_rpc(
     }
 }
 
+pub(crate) fn preflight_command(command: &VideoCommand) -> Result<(), CliError> {
+    match command {
+        VideoCommand::Stop(args) => {
+            if let Some(out) = &args.out {
+                atomic_output::preflight_destination(out)?;
+            }
+        }
+        VideoCommand::Save(args) => {
+            atomic_output::preflight_destination(&args.out)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub fn dispatch(
     cmd: VideoCmd,
     ctx: &business_rpc::ClientContext,
     format: Format,
 ) -> Result<(), CliError> {
     ctx.prepare_params(&Method::ToolVideo, Some(json!({})))?;
+    preflight_command(&cmd.command)?;
     let scope_override = match &cmd.command {
         VideoCommand::Start(args) => args.scope.clone(),
         _ => None,

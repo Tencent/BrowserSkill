@@ -264,16 +264,28 @@ async function harness(
     );
   const setWindowState = (state: "minimized" | "normal") =>
     evaluate(`chrome.windows.update(${started.agent_window_id},${JSON.stringify({ state })})`);
-  const syncCtx = async () => [
+  const syncCtx = async (targetTabId?: number) => [
     "--context",
-    (await ok(["cooperate", "sync", "--session", session, "--policy", "strict", "--settle"]))
-      .context_id as string,
+    (
+      await ok([
+        "cooperate",
+        "sync",
+        "--session",
+        session,
+        ...(targetTabId !== undefined ? ["--tab-id", String(targetTabId)] : []),
+        "--policy",
+        "strict",
+        "--settle",
+      ])
+    ).context_id as string,
   ];
   return {
     directory,
     baseUrl,
     session,
     tabId,
+    agentWindowId: started.agent_window_id as number,
+    evaluate,
     setWindowState,
     syncCtx,
     command,
@@ -396,7 +408,11 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("Agent full-page screenshots", () 
           path.join(h.directory, "hidden.png"),
         ]).done;
         expect(rejected.code).not.toBe(0);
-        expect(rejected.stdout + rejected.stderr).toContain("page_hidden");
+        const rejectedPayload = JSON.parse(rejected.stdout || rejected.stderr);
+        expect(rejectedPayload.data?.reason).toBe("page_hidden");
+        expect(rejectedPayload.data?.effect_state).toBe("none");
+        const ledger = await h.ok(["ledger", "status", ...session]);
+        expect(ledger.pending_unknown).toEqual([]);
         expect(await h.restored()).toEqual(original);
         expect(await h.scratch()).toEqual([]);
         await h.setWindowState("normal");
@@ -412,6 +428,76 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("Agent full-page screenshots", () 
         await h.ok(["screenshot", "--full-page", ...target, ...(await h.syncCtx()), "--out", out]);
         verifyPng(await readFile(out), 2634);
         expect(await h.restored()).toEqual(original);
+      }),
+    120_000,
+  );
+
+  it(
+    "captures an unselected background tab in default cooperation mode without focusing it",
+    () =>
+      withAgent(async (h) => {
+        const session = ["--session", h.session];
+        const target = [...session, "--tab-id", String(h.tabId)];
+        const original = await h.restored();
+        // Open and select a session-owned sibling tab so the target tab stays unselected and hidden.
+        const created = await h.ok(["tab", "create", ...session]);
+        const foregroundTabId = created.tab_id as number;
+        try {
+          await poll(async () => (await h.onPage("document.visibilityState")) === "hidden");
+          const out = path.join(h.directory, "background-tab-full.png");
+          await h.ok([
+            "screenshot",
+            "--full-page",
+            ...target,
+            ...(await h.syncCtx(h.tabId)),
+            "--out",
+            out,
+          ]);
+          verifyPng(await readFile(out), 2634);
+          expect(await h.restored()).toEqual(original);
+          expect(await h.scratch()).toEqual([]);
+          // The target tab must remain unselected and focus emulation must be released.
+          const tabActive = await h.evaluate<boolean>(
+            `(async()=>(await chrome.tabs.get(${h.tabId})).active)()`,
+          );
+          expect(tabActive).toBe(false);
+          await poll(async () => (await h.onPage("document.visibilityState")) === "hidden");
+        } finally {
+          await h.evaluate(`chrome.tabs.remove(${foregroundTabId}).catch(()=>{})`);
+        }
+        // In headed desktop mode (e.g. macOS --no-focus), also verify an active tab in
+        // a normal window occluded behind another focused window succeeds pixel-exact.
+        if (process.env.BSK_LONG_SCREENSHOT_HEADED === "1") {
+          const bounds = await h.evaluate<{
+            left: number;
+            top: number;
+            width: number;
+            height: number;
+          }>(
+            `(async()=>{const w=await chrome.windows.get(${h.agentWindowId});return {left:w.left??0,top:w.top??0,width:w.width??900,height:w.height??720};})()`,
+          );
+          const coverWinId = await h.evaluate<number>(
+            `(async()=>{const w=await chrome.windows.create({url:'about:blank',focused:true,left:${Math.max(0, bounds.left - 40)},top:${Math.max(0, bounds.top - 40)},width:${bounds.width + 160},height:${bounds.height + 160}});return w.id;})()`,
+          );
+          try {
+            // Wait briefly for desktop occlusion (macOS flips visibilityState to hidden).
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            const out = path.join(h.directory, "occluded-window-full.png");
+            await h.ok([
+              "screenshot",
+              "--full-page",
+              ...target,
+              ...(await h.syncCtx(h.tabId)),
+              "--out",
+              out,
+            ]);
+            verifyPng(await readFile(out), 2634);
+            expect(await h.restored()).toEqual(original);
+            expect(await h.scratch()).toEqual([]);
+          } finally {
+            await h.evaluate(`chrome.windows.remove(${coverWinId}).catch(()=>{})`);
+          }
+        }
       }),
     120_000,
   );

@@ -31,7 +31,7 @@ use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
 use tracing::{debug, info, warn};
 
-use super::browsers::{BrowserClient, BrowserId, BrowserSink, Pending};
+use super::browsers::{BrowserClient, BrowserId, BrowserSink, DisconnectDisposition, Pending};
 use super::peer_authorization::PeerAuthorization;
 use super::state::{DaemonState, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVER_NAME};
 
@@ -905,23 +905,36 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // registry still holds *this* generation. If a reconnect already
     // took over under the same `instance_id` we leave the new entry
     // and its (possibly fresh) sessions alone.
-    if state
-        .browsers
-        .remove_if_generation_matches(&browser_id, generation)
-        .is_some()
-    {
-        info!(id = %browser_id, generation, "browser disconnected");
-        state.purge_sessions_of_browser(
-            &browser_id,
-            bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
-            "purged session on browser disconnect",
-        );
-    } else {
-        info!(
-            id = %browser_id,
-            generation,
-            "browser disconnected; newer reconnect already owns this id, leaving sessions intact"
-        );
+    match state.browsers.remove_on_disconnect(&browser_id, generation) {
+        DisconnectDisposition::RemovedCurrent => {
+            info!(id = %browser_id, generation, "browser disconnected");
+            state.purge_sessions_of_browser(
+                &browser_id,
+                bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
+                "purged session on browser disconnect",
+            );
+        }
+        DisconnectDisposition::ReplacedBy { current_generation } => {
+            info!(
+                id = %browser_id,
+                generation,
+                current_generation,
+                "browser disconnected; newer reconnect already owns this id, leaving sessions intact"
+            );
+        }
+        DisconnectDisposition::AlreadyAbsent => {
+            // The liveness reaper (or a failed reconnect) already dropped the
+            // registration; this socket is the last owner of its sessions.
+            info!(
+                id = %browser_id,
+                generation, "browser disconnected after prior eviction; purging leftover sessions"
+            );
+            state.purge_sessions_of_browser(
+                &browser_id,
+                bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
+                "purged leftover session after browser eviction",
+            );
+        }
     }
     result_outcome
 }

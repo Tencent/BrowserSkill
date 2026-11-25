@@ -4,17 +4,31 @@ use std::path::Path;
 
 use crate::cli::error::CliError;
 
-/// Reject a destination that cannot receive the output before the command pays
-/// for a capture or a daemon round trip. Only the containing directory is
-/// checked: whether an existing file may be replaced is the command's own
-/// `--overwrite` decision, and it belongs to the commit step.
+/// Reject a destination that cannot receive an output file before the command
+/// pays for a capture or a daemon round trip. Only the target path shape and
+/// containing directory are checked: whether an existing regular file may be
+/// replaced is the command's own `--overwrite` decision.
 pub(crate) fn preflight_destination(out: &Path) -> Result<(), CliError> {
-    let hint = "choose an --out path inside an existing directory";
+    let hint = "choose an --out file path inside an existing directory";
     let reject = |error: std::io::Error| CliError::file_validation(error.into(), hint);
     if out.as_os_str().is_empty() {
         return Err(reject(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "output path is empty",
+        )));
+    }
+    let trailing_sep = out
+        .as_os_str()
+        .as_encoded_bytes()
+        .last()
+        .is_some_and(|&byte| byte == b'/' || (cfg!(windows) && byte == b'\\'));
+    if trailing_sep
+        || out.file_name().is_none()
+        || std::fs::metadata(out).is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Err(reject(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("output path is a directory, not a file: {}", out.display()),
         )));
     }
     let parent = out
@@ -142,5 +156,32 @@ mod tests {
         let error = preflight_destination(&file.join("shot.png")).unwrap_err();
         assert_eq!(error.exit_code(), 1);
         assert_eq!(error.code(), Some(bsk_protocol::ErrorCode::InvalidParams));
+    }
+
+    #[test]
+    fn preflight_rejects_a_directory_or_trailing_separator_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let trailing_missing = format!("{}/", dir.path().join("no-such-dir").display());
+        let trailing_existing = format!("{}/", dir.path().display());
+        for candidate in [
+            dir.path().to_path_buf(),
+            Path::new(".").to_path_buf(),
+            Path::new(trailing_missing.as_str()).to_path_buf(),
+            Path::new(trailing_existing.as_str()).to_path_buf(),
+        ] {
+            let error = preflight_destination(&candidate).unwrap_err();
+            assert_eq!(error.exit_code(), 1, "{}", candidate.display());
+            assert_eq!(
+                error.code(),
+                Some(bsk_protocol::ErrorCode::InvalidParams),
+                "{}",
+                candidate.display()
+            );
+            assert!(
+                format!("{error:#}").contains("output path is a directory"),
+                "{}: {error:#}",
+                candidate.display()
+            );
+        }
     }
 }

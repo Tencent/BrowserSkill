@@ -360,41 +360,129 @@ fn version_flag_prints_semver_and_exits_zero() {
 #[test]
 fn output_commands_reject_an_unusable_destination_before_reaching_the_daemon() {
     let home = tempfile::tempdir().unwrap();
-    let out = home.path().join("no-such-dir").join("artifact");
-    for command in ["screenshot", "get-html"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_bsk"))
-            .args([
+    let missing_out = home.path().join("no-such-dir").join("artifact");
+    let existing_dir = home.path().join("existing-dir");
+    std::fs::create_dir(&existing_dir).unwrap();
+    let missing_str = missing_out.to_str().unwrap();
+    let dir_str = existing_dir.to_str().unwrap();
+
+    let invocations: [(&str, Vec<&str>); 8] = [
+        (
+            "screenshot",
+            vec!["--json", "screenshot", "--session", "s1", "--out"],
+        ),
+        (
+            "get-html",
+            vec!["--json", "get-html", "--session", "s1", "--out"],
+        ),
+        (
+            "download",
+            vec!["--json", "download", "@e1", "--session", "s1", "--out"],
+        ),
+        (
+            "extract",
+            vec![
                 "--json",
-                command,
+                "extract",
+                "table",
+                "--session",
+                "s1",
+                "--selector",
+                "table",
+                "--out",
+            ],
+        ),
+        (
+            "video stop",
+            vec![
+                "--json",
+                "video",
+                "stop",
+                "--recording",
+                "vid_0123456789abcdef0123456789abcdef",
+                "--out",
+            ],
+        ),
+        (
+            "video save",
+            vec![
+                "--json",
+                "video",
+                "save",
+                "--recording",
+                "vid_0123456789abcdef0123456789abcdef",
+                "--out",
+            ],
+        ),
+        (
+            "operation await",
+            vec![
+                "--json",
+                "operation",
+                "await",
+                "op-1",
                 "--session",
                 "s1",
                 "--out",
-                out.to_str().unwrap(),
-            ])
-            .env("BSK_HOME", home.path())
-            .env("BSK_AUTO_UPDATE", "off")
-            // Any daemon probe would fail with a different error, so this
-            // also proves the destination is checked first.
-            .env("BSK_AUTO_START", "0")
-            .env("NO_COLOR", "1")
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(1), "{command}: {output:?}");
-        assert!(output.stderr.is_empty(), "{command}: {output:?}");
-        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(error["code"], "not_found", "{command}: {error}");
-        assert_eq!(error["exit_code"], 1, "{command}: {error}");
-        assert!(
-            error["message"]
-                .as_str()
-                .unwrap()
-                .starts_with("output directory is not usable:"),
-            "{command}: {error}"
-        );
-        assert_eq!(error["data"]["reason"], "local_file_error");
-        let hint = error["hint"].as_str().unwrap();
-        assert!(hint.contains("--out"), "{command}: {hint}");
-        assert!(!hint.contains("daemon"), "{command}: {hint}");
+            ],
+        ),
+        (
+            "recipe draft",
+            vec![
+                "--json",
+                "recipe",
+                "draft",
+                "--session",
+                "s1",
+                "--name",
+                "demo",
+                "--out",
+            ],
+        ),
+    ];
+
+    for (label, base_args) in &invocations {
+        for (target, expected_code, expected_prefix) in [
+            (missing_str, "not_found", "output directory is not usable:"),
+            (
+                dir_str,
+                "invalid_params",
+                "output path is a directory, not a file:",
+            ),
+        ] {
+            let mut args = base_args.clone();
+            args.push(target);
+            let output = Command::new(env!("CARGO_BIN_EXE_bsk"))
+                .args(&args)
+                .env("BSK_HOME", home.path())
+                .env("BSK_AUTO_UPDATE", "off")
+                // Any daemon probe would fail with a different error, so this
+                // also proves the destination is checked first.
+                .env("BSK_AUTO_START", "0")
+                .env("NO_COLOR", "1")
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{label} ({target}): {output:?}"
+            );
+            assert!(output.stderr.is_empty(), "{label} ({target}): {output:?}");
+            let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(error["code"], expected_code, "{label} ({target}): {error}");
+            assert_eq!(error["exit_code"], 1, "{label} ({target}): {error}");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(expected_prefix),
+                "{label} ({target}): {error}"
+            );
+            assert_eq!(error["data"]["reason"], "local_file_error");
+            let hint = error["hint"].as_str().unwrap();
+            assert!(hint.contains("--out"), "{label} ({target}): {hint}");
+            assert!(!hint.contains("daemon"), "{label} ({target}): {hint}");
+        }
     }
     assert!(!home.path().join("daemon.json").exists());
 }

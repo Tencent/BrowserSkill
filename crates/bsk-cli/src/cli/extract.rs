@@ -159,6 +159,7 @@ pub fn dispatch(
     }
     let params = params(&args).map_err(CliError::Local)?;
     if let Some(path) = &args.out {
+        atomic_output::preflight_destination(path)?;
         preflight(path, args.overwrite).map_err(CliError::Local)?;
         if args.output_format == OutputFormat::Csv {
             preflight(&metadata_path(path), args.overwrite).map_err(CliError::Local)?;
@@ -259,7 +260,7 @@ fn order_rows(reply: &mut ExtractResult) {
         row.sort_by_cached_key(|key, _| order.get(key.as_str()).copied().unwrap_or(usize::MAX));
     }
 }
-fn metadata_path(path: &Path) -> PathBuf {
+pub(crate) fn metadata_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(".meta.json");
     name.into()

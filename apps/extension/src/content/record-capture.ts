@@ -167,11 +167,58 @@ function geometryForEventTarget(
   return captureGeometry(clickable ?? target);
 }
 
+// Typing in an editor stores lines as <div> blocks and <br> elements, which
+// `textContent` joins without a separator, so a recorded value would read
+// "AlphaBeta" for two lines. Read the value exactly the way `bsk fill` verifies
+// it (`FILL_VALUE_FUNCTION` in `tools/interaction.ts`): typed layouts are read
+// literally, other rich structures keep their rendered text.
+function editorValue(el: HTMLElement): string {
+  const collapses = ["normal", "nowrap"].includes(getComputedStyle(el).whiteSpace);
+  const isInline = (node: Node) => node.nodeType === Node.TEXT_NODE || node.nodeName === "BR";
+  const isLine = (node: Node) =>
+    node.nodeName === "DIV" &&
+    getComputedStyle(node as Element).display === "block" &&
+    [...node.childNodes].every(isInline);
+  const nodes = [...el.childNodes];
+  let value: string;
+  if (nodes.every((node) => isInline(node) || isLine(node))) {
+    const lines: Node[][] = [];
+    let open: Node[] | undefined;
+    for (const node of nodes) {
+      if (isLine(node)) {
+        lines.push([...node.childNodes]);
+        open = undefined;
+      } else {
+        if (!open) lines.push((open = []));
+        open.push(node);
+      }
+    }
+    value = lines
+      .flatMap((line) => {
+        let text = line
+          .map((node, index) => {
+            if (node.nodeName !== "BR") return (node as CharacterData).data;
+            return index < line.length - 1 ? "\n" : "";
+          })
+          .join("");
+        if (collapses) text = text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+        // Without a <br>, an empty line has no height.
+        return text === "" && !line.some((node) => node.nodeName === "BR") ? [] : [text];
+      })
+      .join("\n");
+  } else {
+    // An editor holding only an empty line, such as <p><br></p>, is empty.
+    const rendered = el.innerText;
+    value = rendered === "\n" && el.textContent === "" ? "" : rendered;
+  }
+  return collapses ? value.replace(/\u00a0/g, " ") : value;
+}
+
 function fillableValue(el: FillableElement): string {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     return el.value;
   }
-  return el.textContent ?? "";
+  return editorValue(el);
 }
 
 function hoverTriggerAttrs(el: Element): Record<string, string | undefined> {
@@ -445,7 +492,13 @@ export function startRecordCapture(
       hoverSurfaceSignatures.set(el, hoverSurfaceSignature(el));
     }
   }
-  let generatedControlClick: Element | null = null;
+  let generatedControlClick: { control: HTMLElement; labelEvent: MouseEvent } | null = null;
+  let generatedControlClickTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearGeneratedControlClick = () => {
+    clearTimeout(generatedControlClickTimer);
+    generatedControlClickTimer = undefined;
+    generatedControlClick = null;
+  };
   const committedValues = new WeakMap<FillableElement, string>();
   // A "show password" toggle switches type=password to text; keep masking those
   // fields across the light DOM and open/closed ShadowRoots until recording cleanup.
@@ -780,13 +833,14 @@ export function startRecordCapture(
     // Only record clicks an LLM can re-identify (named interactive controls).
     const rawTarget = primaryEventTarget(event);
     const target = describeEventTarget(rawTarget);
-    if (!target) return;
+    if (!target) return false;
     emitStep({
       op: "click",
       target,
       geometry: geometryForEventTarget(rawTarget),
       expects_navigation: true,
     });
+    return true;
   };
 
   const emitHoverCandidateBeforeAction = (actionTarget: EventTarget | null) => {
@@ -853,8 +907,13 @@ export function startRecordCapture(
     if (event.button !== 0 || isExtensionOverlayEvent(event)) return;
     observeEventShadowRoots(event);
     const target = primaryEventTarget(event);
-    if (event.detail === 0 && generatedControlClick !== null && target === generatedControlClick) {
-      generatedControlClick = null;
+    if (
+      generatedControlClick !== null &&
+      target === generatedControlClick.control &&
+      (!generatedControlClick.labelEvent.defaultPrevented ||
+        generatedControlClick.labelEvent.eventPhase !== Event.NONE)
+    ) {
+      clearGeneratedControlClick();
       return;
     }
     if (
@@ -876,8 +935,17 @@ export function startRecordCapture(
       target instanceof Element ? target.closest("a,button,input,select,textarea") : null;
     if (label instanceof HTMLLabelElement && !nestedInteractive) {
       commitFillSession();
-      generatedControlClick = label.control;
-      emitClick(event);
+      clearGeneratedControlClick();
+      const recorded = emitClick(event);
+      const control = label.control;
+      if (recorded && control && !control.matches(":disabled")) {
+        // Native label activation forwards a click with the original pointer detail.
+        const activation = { control, labelEvent: event };
+        generatedControlClick = activation;
+        generatedControlClickTimer = setTimeout(() => {
+          if (generatedControlClick === activation) clearGeneratedControlClick();
+        }, 0);
+      }
       return;
     }
 
@@ -1081,6 +1149,7 @@ export function startRecordCapture(
     stopped = true;
     handlePasswordMutations(typeObserver.takeRecords());
     commitFillSession();
+    clearGeneratedControlClick();
     document.removeEventListener("click", onClick, true);
     document.removeEventListener("mouseover", onMouseOver, true);
     document.removeEventListener("focusin", onFocusIn, true);

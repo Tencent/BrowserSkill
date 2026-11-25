@@ -434,6 +434,17 @@ impl BrowserClient {
     }
 }
 
+/// Why a browser registration was (not) dropped when its socket closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisconnectDisposition {
+    /// This generation owned the entry and it was removed.
+    RemovedCurrent,
+    /// A newer connection already owns the id; its sessions stay alive.
+    ReplacedBy { current_generation: u64 },
+    /// The entry was already evicted (liveness reaper or failed reconnect).
+    AlreadyAbsent,
+}
+
 #[derive(Debug, Default)]
 pub struct BrowserRegistry {
     inner: Mutex<HashMap<BrowserId, std::sync::Arc<BrowserClient>>>,
@@ -495,6 +506,26 @@ impl BrowserRegistry {
             .lock()
             .expect("browser registry poisoned")
             .remove(id)
+    }
+
+    /// Drop a disconnecting browser and report why it was (not) removed.
+    ///
+    /// Session cleanup depends on distinguishing "this generation owned the
+    /// registration" from "a newer reconnect owns it" and from "the reaper
+    /// already evicted it": the last case leaves no registration behind but
+    /// must still purge the sessions the eviction did not clean up.
+    pub fn remove_on_disconnect(&self, id: &BrowserId, generation: u64) -> DisconnectDisposition {
+        let mut guard = self.inner.lock().expect("browser registry poisoned");
+        match guard.get(id) {
+            Some(current) if current.generation == generation => {
+                guard.remove(id);
+                DisconnectDisposition::RemovedCurrent
+            }
+            Some(current) => DisconnectDisposition::ReplacedBy {
+                current_generation: current.generation,
+            },
+            None => DisconnectDisposition::AlreadyAbsent,
+        }
     }
 
     /// Drop the entry for `id` only if the current registered
@@ -702,6 +733,78 @@ mod tests {
             liveness: Liveness::default(),
         });
         (client, rx)
+    }
+
+    fn client_with_generation(id: &str, generation: u64) -> std::sync::Arc<BrowserClient> {
+        let (tx, _rx) = mpsc::unbounded_channel::<Frame>();
+        std::sync::Arc::new(BrowserClient {
+            id: BrowserId(id.into()),
+            browser_name: "chrome".into(),
+            browser_version: "131".into(),
+            extension_version: "0.1.0-dev.0".into(),
+            extension_protocol_version: "2.0".into(),
+            label: String::new(),
+            sink: BrowserSink { tx },
+            pending: Mutex::new(Pending::default()),
+            generation,
+            connected_at_ms: 0,
+            version_skew: false,
+            liveness: Liveness::default(),
+        })
+    }
+
+    #[test]
+    fn remove_on_disconnect_reports_removed_current() {
+        let reg = BrowserRegistry::new();
+        reg.insert(client_with_generation("b1", 7));
+
+        assert_eq!(
+            reg.remove_on_disconnect(&BrowserId("b1".into()), 7),
+            DisconnectDisposition::RemovedCurrent
+        );
+        assert!(reg.get(&BrowserId("b1".into())).is_none());
+    }
+
+    #[test]
+    fn remove_on_disconnect_keeps_newer_registration() {
+        let reg = BrowserRegistry::new();
+        reg.insert(client_with_generation("b1", 7));
+        reg.insert(client_with_generation("b1", 8));
+
+        assert_eq!(
+            reg.remove_on_disconnect(&BrowserId("b1".into()), 7),
+            DisconnectDisposition::ReplacedBy {
+                current_generation: 8
+            }
+        );
+        let current = reg.get(&BrowserId("b1".into())).expect("newer entry stays");
+        assert_eq!(current.generation, 8);
+    }
+
+    #[test]
+    fn remove_on_disconnect_reports_already_absent() {
+        let reg = BrowserRegistry::new();
+
+        assert_eq!(
+            reg.remove_on_disconnect(&BrowserId("b1".into()), 7),
+            DisconnectDisposition::AlreadyAbsent
+        );
+    }
+
+    #[test]
+    fn remove_if_generation_matches_still_ignores_newer_registration() {
+        let reg = BrowserRegistry::new();
+        reg.insert(client_with_generation("b1", 7));
+        reg.insert(client_with_generation("b1", 8));
+
+        assert!(
+            reg.remove_if_generation_matches(&BrowserId("b1".into()), 7)
+                .is_none()
+        );
+        assert!(
+            reg.remove_if_generation_matches(&BrowserId("b1".into()), 8)
+                .is_some()
+        );
     }
 
     #[test]

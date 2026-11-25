@@ -1307,10 +1307,28 @@ mod tests {
             (IntentState::Settled, true)
         );
         // `dispatched: false` is proof of absence regardless of the generic effect state.
+        for (method, reason) in [
+            (Method::ToolFill, "target_covered"),
+            (Method::ToolWheel, "observation_changed"),
+            (Method::ToolWheel, "input_clock_unavailable"),
+            (Method::ToolDrag, "target_covered"),
+            (Method::ToolPress, "input_clock_unavailable"),
+            (Method::ToolDownload, "input_clock_unavailable"),
+            (Method::ToolUpload, "target_covered"),
+        ] {
+            assert_eq!(
+                settle(
+                    method,
+                    json!({ "reason": reason, "effect_state": "unknown", "dispatched": false })
+                ),
+                (IntentState::Settled, true)
+            );
+        }
+        // Pre-begin full-page screenshot refusal (`page_hidden`) reports `effect_state: none`.
         assert_eq!(
             settle(
-                Method::ToolFill,
-                json!({ "effect_state": "unknown", "dispatched": false })
+                Method::ToolScreenshotFullPage,
+                json!({ "reason": "page_hidden", "effect_state": "none", "frames": 0 })
             ),
             (IntentState::Settled, true)
         );
