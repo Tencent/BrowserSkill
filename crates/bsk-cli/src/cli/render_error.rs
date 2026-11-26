@@ -1114,6 +1114,16 @@ pub fn reason_info_for_error(
             ),
             base.exit_code,
         ),
+        (ErrorCode::ProtocolError, RpcErrorReason::CleanupFailed) => info(
+            "the browser did not close a window or tab that BrowserSkill opened",
+            Some(
+                "run `bsk close` to retry the cleanup; if the Agent Window or tab stays open, close it in the browser",
+            ),
+            Some(
+                "call bsk_session(action='stop') to retry the cleanup; if the Agent Window or tab stays open, ask the user to close it in the browser",
+            ),
+            base.exit_code,
+        ),
         (
             _,
             RpcErrorReason::ReadParamsInvalid
@@ -1354,6 +1364,25 @@ mod tests {
         // bucket (2) and the daemon is no longer implicated.
         assert_eq!(info.exit_code, 2);
         assert!(!info.summary.contains("protocol error"));
+    }
+
+    #[test]
+    fn cleanup_failed_reports_the_leftover_browser_resource_not_a_protocol_error() {
+        let data = serde_json::json!({
+            "reason": RpcErrorReason::CleanupFailed.as_str(),
+            "resource_type": "agent_window",
+            "resource_id": 100,
+        });
+        let info = info_for_error(ErrorCode::ProtocolError, Some(&data));
+        assert!(!info.summary.contains("protocol error"), "{info:?}");
+        assert!(!info.hint.unwrap().contains("protocol version"), "{info:?}");
+        assert!(info.hint.unwrap().contains("bsk close"), "{info:?}");
+        assert!(
+            info.mcp_hint
+                .unwrap()
+                .contains("bsk_session(action='stop')")
+        );
+        assert_eq!(info.exit_code, 2);
     }
 
     #[test]

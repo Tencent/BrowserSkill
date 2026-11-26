@@ -37,6 +37,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- 修复 `bsk close`、`bsk open` 与 `bsk session start` 在浏览器未能关闭 BrowserSkill 打开的窗口或标签页（`cleanup_failed`）时误报“protocol error communicating with bsk daemon”的问题：CLI 现在说明是窗口或标签页未能关闭，并提示用 `bsk close`（MCP：`bsk_session(action='stop')`）重试清理；`session.stop` 也保留扩展返回的错误数据（`reason`、`resource_type`、`resource_id`），供 `--json` 与 MCP 调用方使用。退出码仍为 2。
 - 修复 `bsk fill` 在空的 ProseMirror 富文本编辑器（空段落内含不可编辑 `.ProseMirror-widget[contenteditable="false"]` 占位符及可选空 `img.ProseMirror-separator`、单个尾随 `<br>`）上误读占位符文本或因光标规范化报 `fill_focus_lost` 的问题：`handleFill` 现将此类装饰性空段落按空值处理并接受段落内的规范化光标位置，同时继续拒绝含真实文本、正文图片或多行 `<br>` 的段落。
 - CLI 带 `--out` 参数的命令（`screenshot`、`get-html`、`download`、`extract`、`video stop`/`save`、`operation await`、`recipe draft`）及对应 MCP 工具（`bsk_inspect` 的 `screenshot`/`extract`、`bsk_interact` 的 `download`、`bsk_video` 的 `stop`/`save`、`bsk_assist` 的 `operation_await`）现在会在连接守护进程或启动采集之前拒绝不可用的输出路径（空路径、目录/尾分隔符路径、父目录不存在或父路径为普通文件），统一返回 `local file validation failed` 与 `--out` 恢复提示，同时保留各命令对既有普通文件的 `--overwrite` 覆写语义（含 MCP CSV `extract` 的 `.meta.json` 伴生文件冲突前置校验）。
 - `bsk extract` 现在会按页面 CSS `text-transform` 输出下拉框选中项的文本，报告用户实际看到的标签（`PAID`）而不是原始选项文本（`paid`）；表格单元格与 `input`/`textarea` 值此前已按此处理。

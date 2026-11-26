@@ -569,8 +569,11 @@ fn map_stop_error(err: StopSessionError) -> RpcError {
         StopSessionError::ReturnFailures(_) => ErrorCode::CdpFailed,
     };
     let message = err.to_string();
-    let data = matches!(err, StopSessionError::TransportClosed)
-        .then(super::browsers::extension_disconnected_data);
+    let data = match &err {
+        StopSessionError::TransportClosed => Some(super::browsers::extension_disconnected_data()),
+        StopSessionError::ExtensionError(inner) => inner.data.clone(),
+        _ => None,
+    };
     RpcError {
         code,
         message,
@@ -890,5 +893,26 @@ pub(super) async fn handle_transfer_release(
             message: format!("transfer.release worker failed: {join_err}"),
             data: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_error_keeps_the_extension_error_data() {
+        let data = serde_json::json!({
+            "reason": "cleanup_failed",
+            "resource_type": "agent_window",
+            "resource_id": 100,
+        });
+        let err = map_stop_error(StopSessionError::ExtensionError(RpcError {
+            code: ErrorCode::ProtocolError,
+            message: "Agent tabs could not be closed".into(),
+            data: Some(data.clone()),
+        }));
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(err.data, Some(data));
     }
 }
