@@ -486,3 +486,73 @@ fn output_commands_reject_an_unusable_destination_before_reaching_the_daemon() {
     }
     assert!(!home.path().join("daemon.json").exists());
 }
+
+/// Local argument validation must never be reported as a daemon failure: exit
+/// code 1, `invalid_params`, an argument hint, and no daemon reachability hint
+/// or daemon side effect.
+fn assert_local_argument_error(output: &Output) -> Value {
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let error: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "expected JSON error: {err}; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(error["code"], "invalid_params", "{error}");
+    assert_eq!(error["exit_code"], 1, "{error}");
+    let hint = error["hint"].as_str().unwrap();
+    assert!(hint.contains("check your command arguments"), "{hint}");
+    assert!(!hint.contains("daemon"), "{hint}");
+    error
+}
+
+#[test]
+fn local_argument_errors_are_caller_side_and_never_touch_the_daemon() {
+    for args in [
+        vec!["click", "--json"],
+        vec!["--json", "click"],
+        vec!["click", "--ref", "@e1", "--selector", "#submit", "--json"],
+        vec![
+            "extract",
+            "table",
+            "--format",
+            "csv",
+            "--json",
+            "--selector",
+            "a",
+        ],
+        vec![
+            "session",
+            "start",
+            "--browser",
+            "chrome-1",
+            "--width",
+            "1280",
+            "--json",
+        ],
+    ] {
+        let label = args.join(" ");
+        let home = tempfile::tempdir().unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_bsk"))
+            .args(&args)
+            .env("BSK_HOME", home.path())
+            .env("BSK_AUTO_UPDATE", "off")
+            // A daemon probe or an auto-start would produce a different error
+            // or a daemon.json, so this also proves the argument check runs
+            // before any daemon discovery.
+            .env("BSK_AUTO_START", "0")
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run bsk");
+        let error = assert_local_argument_error(&output);
+        assert!(
+            error["message"].as_str().unwrap().len() > 5,
+            "{label}: {error}"
+        );
+        assert!(
+            !home.path().join("daemon.json").exists(),
+            "{label} contacted the daemon"
+        );
+    }
+}

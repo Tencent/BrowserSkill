@@ -79,7 +79,7 @@ pub(crate) fn split_target(
     explicit_selector: Option<String>,
 ) -> Result<(Option<String>, Option<String>), CliError> {
     match (positional, explicit_ref, explicit_selector) {
-        (None, None, None) => Err(CliError::Local(anyhow::anyhow!(
+        (None, None, None) => Err(CliError::invalid_params(anyhow::anyhow!(
             "missing target: pass <ref-or-selector>, --ref @eN, or --selector <css>"
         ))),
         (None, Some(r), None) => Ok((Some(r), None)),
@@ -91,7 +91,7 @@ pub(crate) fn split_target(
                 Ok((None, Some(t)))
             }
         }
-        _ => Err(CliError::Local(anyhow::anyhow!(
+        _ => Err(CliError::invalid_params(anyhow::anyhow!(
             "pass exactly one of: <target>, --ref, or --selector"
         ))),
     }
