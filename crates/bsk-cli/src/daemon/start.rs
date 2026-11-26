@@ -1424,7 +1424,7 @@ fn record_ipc_close(activity: &Arc<Mutex<IpcActivityState>>) {
 /// Maximum number of daily rotated `daemon.log.YYYY-MM-DD` files retained.
 const MAX_DAEMON_LOG_FILES: usize = 14;
 
-fn is_daily_daemon_log_name(name: &str) -> bool {
+pub(crate) fn is_daily_daemon_log_name(name: &str) -> bool {
     let Some(date) = name.strip_prefix("daemon.log.") else {
         return false;
     };

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bsk_protocol::StatusResult;
 use console::style;
 use serde::Serialize;
@@ -111,7 +111,13 @@ impl CheckResult {
 
 pub fn run(output: Output) -> Result<Vec<CheckResult>> {
     let state = resolve_daemon_state(output);
-    let checks = collect_checks(state);
+    let checks = collect_checks(
+        &state,
+        check_home_writable(),
+        check_skill_up_to_date(),
+        Ok(update::state::current()),
+        Ok(trust_local(state.status()).unwrap_or(false)),
+    );
     match output {
         Output::Human => render_human(&checks),
         Output::Json => render_json(&checks)?,
@@ -199,16 +205,66 @@ impl DaemonState {
     }
 }
 
-fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
+/// Snapshot for export. Keep startup, the browser wait, filesystem preparation
+/// and skill synchronization exclusively on the interactive doctor path.
+pub(super) fn passive_snapshot() -> (Vec<CheckResult>, Option<Box<StatusResult>>) {
+    let state = current_state(Duration::ZERO);
+    let home = paths::bsk_home().and_then(|path| {
+        let metadata = path
+            .metadata()
+            .with_context(|| format!("inspect {}", path.display()))?;
+        anyhow::ensure!(metadata.is_dir(), "{} is not a directory", path.display());
+        Ok(path)
+    });
+    let home_check = match home {
+        Ok(path) => CheckResult::na(
+            "bsk home writable",
+            format!("{} exists; write access was not tested", path.display()),
+        ),
+        Err(err) => CheckResult::fail(
+            "bsk home writable",
+            format!("bsk home unavailable: {err:#}"),
+            paths::BSK_HOME_HINT,
+        ),
+    };
+    let checks = collect_checks(
+        &state,
+        home_check,
+        CheckResult::na(
+            "agent skill matches bundled CLI",
+            "skill synchronization skipped during export",
+        ),
+        paths::update_state_path().and_then(|path| update::state::read(&path)),
+        trust_local(state.status()),
+    );
+    let status = match state {
+        DaemonState::Verified { status, .. } => Some(status),
+        _ => None,
+    };
+    (checks, status)
+}
+
+fn collect_checks(
+    state: &DaemonState,
+    home: CheckResult,
+    skill: CheckResult,
+    update_record: Result<Option<UpdateRecord>>,
+    trust_local: Result<bool>,
+) -> Vec<CheckResult> {
     vec![
-        check_home_writable(),
-        check_skill_up_to_date(),
-        check_daemon_running(&state),
-        check_daemon_management(&state),
+        home,
+        skill,
+        check_daemon_running(state),
+        check_daemon_management(state),
         check_version_compatible(state.status()),
-        check_auto_update(state.status(), state.host_managed()),
+        match update_record {
+            Ok(record) => check_auto_update(state.status(), state.host_managed(), record.as_ref()),
+            Err(err) => {
+                CheckResult::na("auto-update", format!("update state unavailable: {err:#}"))
+            }
+        },
         check_extension_connected(state.status()),
-        check_local_auth(state.status()),
+        check_local_auth(trust_local),
         check_browsers_protocol_compatible(state.status()),
     ]
 }
@@ -216,12 +272,16 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
 /// An attempt still `in_progress` after this long was interrupted.
 const UPDATE_STALLED_AFTER_SECS: u64 = 10 * 60;
 
-fn check_auto_update(status: Option<&StatusResult>, host_managed: bool) -> CheckResult {
+fn check_auto_update(
+    status: Option<&StatusResult>,
+    host_managed: bool,
+    record: Option<&UpdateRecord>,
+) -> CheckResult {
     let leftovers = std::env::current_exe()
         .map(|exe| update::update_leftovers(&exe))
         .unwrap_or_default();
     auto_update_check(
-        update::state::current().as_ref(),
+        record,
         status.map(|status| (status.daemon_version.as_str(), host_managed)),
         env!("CARGO_PKG_VERSION"),
         &leftovers,
@@ -663,28 +723,29 @@ fn display_protocol(value: &str) -> &str {
     if value.is_empty() { "unknown" } else { value }
 }
 
-fn check_local_auth(status: Option<&StatusResult>) -> CheckResult {
-    let mode = status
-        .and_then(|s| s.local_auth.as_ref())
-        .map(|s| s.mode.clone())
-        .or_else(|| {
-            paths::bsk_home()
-                .ok()
-                .and_then(|home| crate::daemon::local_auth::read_mode(&home).ok())
-                .and_then(|mode| serde_json::to_value(mode).ok())
-                .and_then(|value| value.as_str().map(str::to_owned))
-        });
-    if mode.as_deref() == Some("trust_local") {
-        CheckResult::warn(
+fn trust_local(status: Option<&StatusResult>) -> Result<bool> {
+    if let Some(auth) = status.and_then(|s| s.local_auth.as_ref()) {
+        return Ok(auth.mode == "trust_local");
+    }
+    use crate::daemon::local_auth::{LocalAuthMode, read_mode};
+    Ok(read_mode(&paths::bsk_home()?)? == LocalAuthMode::TrustLocal)
+}
+
+fn check_local_auth(trust_local: Result<bool>) -> CheckResult {
+    match trust_local {
+        Ok(true) => CheckResult::warn(
             "local connection verification",
             "unverified local connections are allowed",
             "run `bsk daemon trust-local off` and turn off skipping in the extension to restore verification",
-        )
-    } else {
-        CheckResult::ok(
+        ),
+        Ok(false) => CheckResult::ok(
             "local connection verification",
             "local pairing verification is available",
-        )
+        ),
+        Err(err) => CheckResult::na(
+            "local connection verification",
+            format!("settings.json unavailable: {err:#}"),
+        ),
     }
 }
 

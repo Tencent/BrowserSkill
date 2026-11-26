@@ -54,6 +54,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::Recipe(cmd) => cli::recipe::dispatch(cmd, &cli.flags, &step_ctx, format),
         Command::View(args) => cli::observation_view::dispatch(args, format),
         Command::Daemon(cmd) => cli::daemon::dispatch(cmd).map_err(CliError::Local),
+        Command::Diagnostics(cmd) => cli::diagnostics::dispatch(cmd, format),
         Command::Status => {
             let output = if cli.flags.json {
                 Output::Json

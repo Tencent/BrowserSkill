@@ -156,6 +156,8 @@ bsk doctor
 
 解决失败项，确认扩展显示**已连接**。再开启一个新的 Agent 会话，确认能发现 `browser-skill`；doctor 通过并不代表 Agent 已加载 skill。
 
+如果连接失败，可以在修复前运行 `bsk diagnostics export --output diagnostics.zip`，保存 CLI 和 daemon 的现场状态。详见[诊断包说明](docs/diagnostics.md)。
+
 </details>
 
 ### 试一个任务

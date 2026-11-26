@@ -10,6 +10,7 @@ pub mod console;
 pub mod cooperate;
 pub mod daemon;
 pub mod debug;
+pub mod diagnostics;
 pub mod dialog_control;
 pub mod dialogs;
 pub mod doctor;
@@ -172,6 +173,10 @@ pub enum Command {
 
     /// Run diagnostics + repair hints.
     Doctor,
+
+    /// Collect local CLI and daemon diagnostics, even when disconnected.
+    #[command(subcommand)]
+    Diagnostics(diagnostics::DiagnosticsCmd),
 
     /// Install the browser-skill agent skill into local agent harnesses.
     #[command(name = "install-skill")]

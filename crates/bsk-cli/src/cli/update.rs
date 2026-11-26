@@ -906,7 +906,7 @@ pub fn print_update_hint_from_cache(flags: &super::GlobalFlags, command: &super:
         || flags.json
         || matches!(
             command,
-            super::Command::Daemon(_) | super::Command::Update(_)
+            super::Command::Daemon(_) | super::Command::Diagnostics(_) | super::Command::Update(_)
         )
     {
         return;

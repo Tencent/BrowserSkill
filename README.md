@@ -158,6 +158,8 @@ bsk doctor
 
 Resolve any failed checks and confirm that the extension shows **Connected**. Start a new agent session and check that it can discover `browser-skill`; a successful doctor check alone does not confirm skill discovery.
 
+If the connection fails, capture the CLI and daemon state before attempting repairs with `bsk diagnostics export --output diagnostics.zip`. See [BrowserSkill diagnostics](docs/diagnostics.md).
+
 </details>
 
 ### Try your first task

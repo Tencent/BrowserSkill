@@ -29,18 +29,27 @@ impl Default for LogsArgs {
 /// are named `daemon.log.YYYY-MM-DD`; we pick the lexicographically
 /// largest one matching the prefix.
 pub fn latest_log_file() -> Result<Option<PathBuf>> {
+    latest_matching_log(|name| name.starts_with("daemon.log"))
+}
+
+pub(super) fn latest_matching_log(matches: impl Fn(&str) -> bool) -> Result<Option<PathBuf>> {
     let dir = paths::log_dir()?;
-    if !dir.exists() {
-        return Ok(None);
+    match dir.metadata() {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.is_dir(),
+            "bsk home {} is not a directory",
+            dir.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("inspect bsk home {}", dir.display())),
     }
     let mut best: Option<(String, PathBuf)> = None;
-    for entry in std::fs::read_dir(&dir).context("read bsk home dir")? {
+    for entry in
+        std::fs::read_dir(&dir).with_context(|| format!("read bsk home {}", dir.display()))?
+    {
         let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("daemon.log") {
+        if !matches(&name) || !entry.file_type()?.is_file() {
             continue;
         }
         if let Some((cur, _)) = &best
