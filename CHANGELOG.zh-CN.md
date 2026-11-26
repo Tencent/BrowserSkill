@@ -35,6 +35,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 - 将所有真浏览器测试与回归套件的环境变量统一收敛至 `BSK_TEST_CHROME` 与 `BSK_TEST_CLI`（补齐 Windows `.exe` 后缀并在隔离 daemon 用例中清理宿主子代理作用域环境变量），将 `.browser.test.ts` 与 `.bench.ts` 从单元测试配置剥离至 `apps/extension/vitest.browser.config.ts` 与零跳过运行器 `scripts/run-browser-tests.mjs`（将 `pnpm --filter @browser-skill/extension test:browser` 统一路由至该运行器，强制校验 `skipped === 0`、每个套件存在有效断言以及多目标参数逐项命中），并在 CI 中接入全部扩展真浏览器测试套件、`eval:browser:check` 与 `eval:browser:dynamic-read`（#731、#732）。
 - 将分散手写的默认守护进程端口、WebSocket URL、本地配对与远程鉴权协议常量、实例 ID 长度、JSON-RPC 标准错误码以及 `BASE_TOOL_NAMES` 统一收敛至 `bsk-protocol` / `bsk` 单一事实源（消除跨语言重复定义与脆弱的集合长度魔法断言），将 Rust 集成测试二进制从 51 个合并为 6 个并为 `dev`/`test` Profile 启用 `debug = "line-tables-only"`，将扩展 Vitest 单元测试拆分为 `threads` 并发池下的 `unit-node` 与 `unit-dom` 项目并清理冗余/恒真测试及合并单函数碎片用例，将多处固定墙钟睡眠替换为确定性虚拟时钟/时间戳/就绪态检查，新增 `copyIsolatedExtension` 以消除 CI 中重复的按端口全量构建扩展步骤，并在 `.github/workflows/ci.yml` 中增加 Cargo 缓存及合并测试步骤以缩短 CI 耗时。
 
+- 修复 `withClickOverlay` 的 `input_not_ready` 失败（“Could not clear the extension overlay from the click point”）无法自诊断的问题（#556）：三类成因现在分别给出独立错误文案与结构化 `data`（`click_point`、`overlay_probe`、`overlay_bypass`、`overlay_passthrough` 及按成因定制的 `recovery`），使调用方能区分「遮罩仍在覆盖」「命中测试无响应」与「穿透租约已过期」，而不必在守护进程、扩展遮罩与站点自带遮罩之间盲猜。
 ### 修复
 
 - 修复 `bsk fill` 在空的 ProseMirror 富文本编辑器（空段落内含不可编辑 `.ProseMirror-widget[contenteditable="false"]` 占位符及可选空 `img.ProseMirror-separator`、单个尾随 `<br>`）上误读占位符文本或因光标规范化报 `fill_focus_lost` 的问题：`handleFill` 现将此类装饰性空段落按空值处理并接受段落内的规范化光标位置，同时继续拒绝含真实文本、正文图片或多行 `<br>` 的段落。
