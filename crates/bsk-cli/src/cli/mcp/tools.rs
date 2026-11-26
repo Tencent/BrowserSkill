@@ -883,6 +883,9 @@ struct SessionArgs {
     wait_for: Option<String>,
     /// open, sync: wait until the rendered VOM no longer contains this substring (bounded polling).
     wait_not: Option<String>,
+    /// open: lifecycle phase to wait for during navigation (load, domcontentloaded, networkidle,
+    /// commit). Defaults to load.
+    wait_until: Option<WaitUntil>,
     /// sync: filter VOM lines to snippets containing any of these literal substrings.
     match_text: Option<Vec<String>>,
     /// sync: context lines around each match_text hit (default 12).
@@ -898,6 +901,25 @@ struct SessionArgs {
     expect: Option<Vec<ActionExpectation>>,
     /// open: strict-policy dependency targets (requires context).
     depends_on: Option<Vec<String>>,
+}
+
+fn session_open_navigate_params(
+    session_id: String,
+    url: String,
+    wait_until: Option<WaitUntil>,
+    nav_timeout_ms: u32,
+) -> NavigateParams {
+    NavigateParams {
+        session_id,
+        url,
+        tab_id: None,
+        wait_until: Some(wait_until.unwrap_or(WaitUntil::Load)),
+        timeout_ms: Some(nav_timeout_ms),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
+    }
 }
 
 async fn session(
@@ -1028,6 +1050,7 @@ async fn session(
                     "height",
                     "wait_for",
                     "wait_not",
+                    "wait_until",
                     "timeout_ms",
                     "max_tokens",
                     "context",
@@ -1138,17 +1161,12 @@ async fn session(
                 .rpc(
                     &ctx,
                     Method::ToolNavigate,
-                    serde_json::to_value(NavigateParams {
-                        session_id: session_id.clone(),
+                    serde_json::to_value(session_open_navigate_params(
+                        session_id.clone(),
                         url,
-                        tab_id: None,
-                        wait_until: Some(WaitUntil::Load),
-                        timeout_ms: Some(nav_timeout_ms),
-                        context_id: None,
-                        observation_id: None,
-                        depends_on: None,
-                        expect: None,
-                    })
+                        args.wait_until,
+                        nav_timeout_ms,
+                    ))
                     .unwrap(),
                     ipc_timeout(nav_timeout_ms),
                 )
@@ -5198,5 +5216,97 @@ pub(crate) mod tests {
             serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(body["code"], "invalid_params", "{body}");
         assert_eq!(body["data"]["reason"], "local_file_error", "{body}");
+    }
+
+    #[tokio::test]
+    async fn session_open_accepts_and_forwards_wait_until() {
+        let defs = base_definitions();
+        let session_def = defs.iter().find(|v| v["name"] == "bsk_session").unwrap();
+        assert!(
+            session_def["inputSchema"]["properties"]["wait_until"].is_object(),
+            "bsk_session schema must expose wait_until"
+        );
+
+        let default_args: SessionArgs =
+            parse(&json!({"action": "open", "url": "https://example.com"}))
+                .expect("bsk_session open without wait_until should parse");
+        assert_eq!(default_args.wait_until, None);
+        let default_params = session_open_navigate_params(
+            "s-open".into(),
+            "https://example.com".into(),
+            default_args.wait_until,
+            30_000,
+        );
+        assert_eq!(default_params.wait_until, Some(WaitUntil::Load));
+        assert_eq!(default_params.timeout_ms, Some(30_000));
+
+        for (value, expected) in [
+            ("load", WaitUntil::Load),
+            ("domcontentloaded", WaitUntil::DomContentLoaded),
+            ("networkidle", WaitUntil::NetworkIdle),
+            ("commit", WaitUntil::Commit),
+        ] {
+            let parsed: SessionArgs = parse(&json!({
+                "action": "open",
+                "url": "https://example.com",
+                "wait_until": value,
+            }))
+            .expect("bsk_session open with valid wait_until should parse");
+            assert_eq!(parsed.wait_until, Some(expected));
+            let params = session_open_navigate_params(
+                "s-open".into(),
+                "https://example.com".into(),
+                parsed.wait_until,
+                15_000,
+            );
+            assert_eq!(params.wait_until, Some(expected));
+            assert_eq!(params.timeout_ms, Some(15_000));
+        }
+
+        assert!(
+            parse::<SessionArgs>(&json!({
+                "action": "open",
+                "url": "https://example.com",
+                "wait_until": "invalid-phase",
+            }))
+            .is_err()
+        );
+
+        let control = Arc::new(CallControl::default());
+        let daemon = Daemon::Fixed {
+            sock: PathBuf::from("/nonexistent/bsk-mcp-open-wait-until.sock"),
+            protocol: bsk_protocol::PROTOCOL_VERSION.into(),
+        };
+        let empty_url = call(
+            &daemon,
+            &control,
+            None,
+            "bsk_session",
+            json!({"action": "open", "url": "", "wait_until": "domcontentloaded"}),
+        )
+        .await;
+        assert_eq!(empty_url["isError"], true);
+        assert!(
+            empty_url["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("open requires a non-empty url")
+        );
+
+        let wrong_action = call(
+            &daemon,
+            &control,
+            None,
+            "bsk_session",
+            json!({"action": "sync", "session": "s1", "wait_until": "domcontentloaded"}),
+        )
+        .await;
+        assert_eq!(wrong_action["isError"], true);
+        assert!(
+            wrong_action["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("wait_until does not apply to sync")
+        );
     }
 }

@@ -11,7 +11,7 @@ use anyhow::Context;
 use bsk_protocol::system::{BrowserListResult, SessionListResult};
 use bsk_protocol::tools::{
     ControlPolicy, CooperateAction, CooperateParams, NavigateParams, NavigateResult,
-    SnapshotParams, SnapshotResult, WaitUntil,
+    SnapshotParams, SnapshotResult,
 };
 use bsk_protocol::{ErrorCode, Method, RpcError};
 use clap::Args;
@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use super::cooperate::{self, Policy};
 use super::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use super::error::{CliError, Format};
+use super::navigate::CliWaitUntil;
 use super::session::{StartReply, StopReply, handle_start_error, window_size};
 use super::{TOOL_IPC_TIMEOUT, business_rpc};
 use crate::ipc_client::{IpcRequestMeta, IpcResponseMeta, ScopeResultMeta};
@@ -81,6 +82,10 @@ pub struct OpenArgs {
     /// Wait until the rendered VOM no longer contains this substring (bounded polling).
     #[arg(long = "wait-not")]
     pub wait_not: Option<String>,
+
+    /// Lifecycle phase to wait for during navigation. Defaults to `load`.
+    #[arg(long = "wait-until", value_enum, default_value_t = CliWaitUntil::Load)]
+    pub wait_until: CliWaitUntil,
 
     /// Bounded readiness / navigation timeout in milliseconds (default 5000ms for wait checks).
     #[arg(long = "timeout-ms", value_parser = clap::value_parser!(u32).range(1..=120_000))]
@@ -160,6 +165,24 @@ fn nonempty_single_line(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
+fn open_navigate_params(
+    session_id: String,
+    args: &OpenArgs,
+    nav_timeout_ms: u32,
+) -> NavigateParams {
+    NavigateParams {
+        session_id,
+        url: args.url.clone(),
+        tab_id: None,
+        wait_until: Some(args.wait_until.into()),
+        timeout_ms: Some(nav_timeout_ms),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
+    }
+}
+
 pub fn dispatch_open(
     args: OpenArgs,
     ctx: &business_rpc::ClientContext,
@@ -188,17 +211,11 @@ pub fn dispatch_open(
         info.sock_path.clone(),
         "open-nav",
         Method::ToolNavigate,
-        Some(NavigateParams {
-            session_id: session_id.clone(),
-            url: args.url.clone(),
-            tab_id: None,
-            wait_until: Some(WaitUntil::Load),
-            timeout_ms: Some(nav_timeout_ms),
-            context_id: None,
-            observation_id: None,
-            depends_on: None,
-            expect: None,
-        }),
+        Some(open_navigate_params(
+            session_id.clone(),
+            &args,
+            nav_timeout_ms,
+        )),
         business_rpc::ipc_timeout(nav_timeout_ms),
     )?;
 
@@ -2488,5 +2505,64 @@ mod tests {
             "expected forwarded timeout_ms in 19000..=20000, got {forwarded}"
         );
         assert_eq!(state.reply["context_id"], "ctx-heavy");
+    }
+
+    #[test]
+    fn open_defaults_and_forwards_wait_until_into_navigate_params() {
+        use bsk_protocol::tools::WaitUntil;
+        use clap::Parser;
+
+        let default_cli = crate::cli::Cli::try_parse_from(["bsk", "open", "https://example.com"])
+            .expect("open without --wait-until should parse");
+        let crate::cli::Command::Open(default_args) = default_cli.command else {
+            panic!("expected Command::Open");
+        };
+        assert_eq!(default_args.wait_until, CliWaitUntil::Load);
+        let default_params =
+            open_navigate_params("s-open".into(), &default_args, DEFAULT_NAV_TIMEOUT_MS);
+        assert_eq!(default_params.wait_until, Some(WaitUntil::Load));
+        assert_eq!(default_params.timeout_ms, Some(DEFAULT_NAV_TIMEOUT_MS));
+
+        for (flag, expected_cli, expected_proto) in [
+            ("load", CliWaitUntil::Load, WaitUntil::Load),
+            (
+                "domcontentloaded",
+                CliWaitUntil::DomContentLoaded,
+                WaitUntil::DomContentLoaded,
+            ),
+            (
+                "networkidle",
+                CliWaitUntil::NetworkIdle,
+                WaitUntil::NetworkIdle,
+            ),
+            ("commit", CliWaitUntil::Commit, WaitUntil::Commit),
+        ] {
+            let parsed = crate::cli::Cli::try_parse_from([
+                "bsk",
+                "open",
+                "https://example.com",
+                "--wait-until",
+                flag,
+            ])
+            .expect("open with valid --wait-until should parse");
+            let crate::cli::Command::Open(args) = parsed.command else {
+                panic!("expected Command::Open");
+            };
+            assert_eq!(args.wait_until, expected_cli);
+            let params = open_navigate_params("s-open".into(), &args, 15_000);
+            assert_eq!(params.wait_until, Some(expected_proto));
+            assert_eq!(params.timeout_ms, Some(15_000));
+        }
+
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "bsk",
+                "open",
+                "https://example.com",
+                "--wait-until",
+                "invalid-phase",
+            ])
+            .is_err()
+        );
     }
 }
