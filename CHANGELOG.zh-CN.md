@@ -37,6 +37,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- 观察结果不再把浏览器仍能命中的页面内容折叠到一个并不存在的全屏遮挡层后面。`z-index: -1` 的全屏背景、被 `clip-path` 或 `overflow: hidden` 祖先完全裁掉的抽屉，与真正的遮罩在布局矩形和 DOMSnapshot 绘制顺序上没有区别，VOM 因此输出 `L1 mask cover=100%`，并丢掉浏览器仍可点击的按钮引用。现在对跨越整个视口的非模态候选，在采集时用浏览器命中测试核对（最多取 4 个将被折叠的节点）：只要其中一个节点的中心点仍能收到指针，分层判定和活动区域过滤就不再把该候选当作遮挡。模态对话框和真正的遮罩仍按原样折叠页面（#788）。
 - 修复 `bsk fill` 在空的 ProseMirror 富文本编辑器（空段落内含不可编辑 `.ProseMirror-widget[contenteditable="false"]` 占位符及可选空 `img.ProseMirror-separator`、单个尾随 `<br>`）上误读占位符文本或因光标规范化报 `fill_focus_lost` 的问题：`handleFill` 现将此类装饰性空段落按空值处理并接受段落内的规范化光标位置，同时继续拒绝含真实文本、正文图片或多行 `<br>` 的段落。
 - CLI 带 `--out` 参数的命令（`screenshot`、`get-html`、`download`、`extract`、`video stop`/`save`、`operation await`、`recipe draft`）及对应 MCP 工具（`bsk_inspect` 的 `screenshot`/`extract`、`bsk_interact` 的 `download`、`bsk_video` 的 `stop`/`save`、`bsk_assist` 的 `operation_await`）现在会在连接守护进程或启动采集之前拒绝不可用的输出路径（空路径、目录/尾分隔符路径、父目录不存在或父路径为普通文件），统一返回 `local file validation failed` 与 `--out` 恢复提示，同时保留各命令对既有普通文件的 `--overwrite` 覆写语义（含 MCP CSV `extract` 的 `.meta.json` 伴生文件冲突前置校验）。
 - `bsk extract` 现在会按页面 CSS `text-transform` 输出下拉框选中项的文本，报告用户实际看到的标签（`PAID`）而不是原始选项文本（`paid`）；表格单元格与 `input`/`textarea` 值此前已按此处理。

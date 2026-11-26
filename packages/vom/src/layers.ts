@@ -72,7 +72,9 @@ export function detectBlockingLayer(
     const cov = coverage(node.rect, vp);
     // A large sidebar can leave usable page content beside it. Only actual
     // modality or a cover spanning the whole viewport can fold the base page.
-    const qualifies = spansViewport(node.rect, vp) || (node.modal === true && cov > 0);
+    const qualifies =
+      (spansViewport(node.rect, vp) && node.hitThrough !== true) ||
+      (node.modal === true && cov > 0);
     if (!qualifies) continue;
     if (
       blocker === null ||

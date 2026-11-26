@@ -1800,7 +1800,7 @@ const NON_BLOCKING_REGION_TAGS = new Set(["html", "body"]);
 const NON_BLOCKING_REGION_ROLES = new Set(["rootwebarea", "webarea"]);
 
 function isPositionedRegionCandidate(node: VomNode): boolean {
-  if (node.pointerEvents === "none" || node.rect === null) return false;
+  if (node.pointerEvents === "none" || node.hitThrough === true || node.rect === null) return false;
   if (!(node.rect.w > 0 && node.rect.h > 0)) return false;
   if (!ACTIVE_REGION_POSITIONS.has(node.position)) return false;
   if (node.modal !== true) {

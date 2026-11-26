@@ -71,6 +71,10 @@ export interface VomNode {
   domAncestorIds?: number[];
 
   modal?: boolean;
+  /** Capture-time hit testing reached content this node would fold, so its box
+   * does not block the page. Geometry and layer paint order cannot tell a
+   * backdrop from a negative z-index background or a fully clipped drawer. */
+  hitThrough?: boolean;
   /** Accessibility/ARIA popup trigger state (`aria-haspopup` / AX `hasPopup`). */
   hasPopup?: boolean;
   /** Accessibility/ARIA expansion state (`aria-expanded` / AX `expanded`). */

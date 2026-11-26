@@ -93,6 +93,17 @@ describe("detectBlockingLayer", () => {
     expect(layer?.kind).toBe("mask");
   });
 
+  it("skips a viewport-spanning box that hit testing saw through", () => {
+    const cover = { position: "fixed", rect: { x: 0, y: 0, w: 1000, h: 800 } };
+    const background = node({ id: 1, ...cover, paintOrder: 2, hitThrough: true });
+    expect(detectBlockingLayer([background], VP)).toBeNull();
+    // The next real cover still wins, and modality does not depend on geometry.
+    expect(
+      detectBlockingLayer([background, node({ id: 2, ...cover, paintOrder: 9 })], VP)?.rootId,
+    ).toBe(2);
+    expect(detectBlockingLayer([{ ...background, modal: true }], VP)?.kind).toBe("modal");
+  });
+
   it("allows one CSS pixel of rounding at every viewport edge", () => {
     const layer = detectBlockingLayer(
       [
