@@ -124,7 +124,7 @@ describe("@wxg-prc-cpg/browser-skill-dsh-plugin end-to-end integration", () => {
     // Mount our plugin BEFORE SkillRegistry to verify Cordis `ctx.inject(["skills"])`
     // works regardless of plugin load order in cordis.patch.yml.
     const root = new Context();
-    const pluginFiber = root.plugin(BrowserSkillPlugin);
+    const pluginFiber = root.plugin(BrowserSkillPlugin, { manageDaemon: false });
     const skillFiber = root.plugin(SkillRegistry);
     await pluginFiber;
     await skillFiber;
@@ -225,6 +225,9 @@ describe("@wxg-prc-cpg/browser-skill-dsh-plugin end-to-end integration", () => {
     const skillFiber = root.plugin(SkillRegistry);
     const pluginFiber = root.plugin(BrowserSkillPlugin, {
       bskPath: `~/custom-bsk/${exeName}`,
+      // This case exercises PATH handling only; daemon supervision is covered
+      // by daemon.test.ts and would spawn the fake executable here.
+      manageDaemon: false,
     });
     await skillFiber;
     await pluginFiber;

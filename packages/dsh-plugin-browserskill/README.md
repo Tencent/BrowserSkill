@@ -57,16 +57,18 @@ Verify the daemon from a separate call, then use `BSK_AUTO_START=0` for later `b
 
 ## Configuration
 
-The plugin exposes one optional setting in `cordis.patch.yml` and the DSH Web UI settings form:
+The plugin exposes two optional settings in `cordis.patch.yml` and the DSH Web UI settings form:
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `bskPath` | `"bsk"` | Path to the `bsk` executable or its directory. Defaults to resolving `bsk` from `PATH` or `~/.local/bin` (`$BSK_INSTALL_DIR`). |
+| `manageDaemon` | `true` on Windows, `false` elsewhere | Supervise a foreground `bsk daemon start --foreground` child when no daemon is already running, instead of leaving the host to start one. Windows defaults to `true` because DSH Desktop runs inside a Job Object that forbids the breakaway `bsk` needs for its detached auto-start (`os error 5`); other platforms keep `bsk`'s own daemon startup. |
 
 ## How it works
 
 - **Unified CLI runtime:** Uses DSH's shell execution tool to run `bsk` commands (`bsk open`, `bsk click`, `bsk fill`, `bsk sync`, `bsk close`) with full support for shared control, full-page screenshots, structured extraction, file upload/download, task video recording, recipes, and website debugging.
 - **Automatic session scoping:** The `bsk` daemon recognizes `DSH_SESSION_ID` automatically so concurrent conversations and subagents keep isolated browser scopes without manual `--session` flags.
+- **Windows host-managed daemon:** With `manageDaemon` enabled the plugin *is* the persistent host task described above — it reuses a daemon that already answers, or owns `bsk daemon start --foreground` itself (hidden console, inherited `BSK_HOME`) and stops only that child when the plugin is disposed. A host-managed daemon does not self-update; restart DSH after `bsk update`.
 - **MCP alternative:** For restricted profiles without shell execution, connect `bsk mcp` through `@deepseek-ai/dsh-mcp-client` instead (see [MCP setup](https://github.com/Tencent/BrowserSkill/blob/main/docs/mcp.md)).
 
 ## Updating
