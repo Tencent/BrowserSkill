@@ -32,6 +32,10 @@ determines which versions can connect.
   startup, `bsk daemon start`, `bsk daemon restart`, and `bsk update` restarts
   (CLI flags always take precedence, empty values are ignored, and
   `BSK_DAEMON_IDLE` is ignored in `--mode server`) ([#456](https://github.com/Tencent/BrowserSkill/issues/456)).
+- **Release-test reachability preflight**: `release_audit.py preflight` records
+  each real-site HTTP status, redirect chain, latency, proxy mode, and transport
+  error class from `run.json.site_urls`; `gate` embeds the summary as environment
+  evidence without changing pass criteria ([#791](https://github.com/Tencent/BrowserSkill/issues/791)).
 
 ### Changed
 

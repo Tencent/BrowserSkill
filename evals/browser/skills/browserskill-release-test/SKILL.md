@@ -31,15 +31,15 @@ description: 使用 Bsk 执行 BrowserSkill 的 PR 前可选端到端自测、�
 ## 执行
 
 1. **建立候选与清单。** 读 [candidate-setup.md](references/candidate-setup.md)；以当前 CLI 的递归帮助（含隐藏的实验子命令树 `bsk recipe`）发现命令及枚举动作，不能沿用旧版本固定数量。读 [evidence-contract.md](references/evidence-contract.md)，运行 `scripts/release_audit.py init` 生成全命令用例及 [scenarios.json](references/scenarios.json) 的全部 113 个必测场景。帮助只算发现，不算操作覆盖。
-2. **搭建本轮合成页面。** init 会复制 assets（含高复杂度对抗靶场 `arena-joint-forms`、`arena-shadow-iframe`、`arena-frame-outer`、`arena-frame-inner`、`arena-media-studio`、`arena-modern-spa-grid`、`arena-bfcache-detail` 以及 `workbench`、`plan-recipe-lab`、`video-portal`、`forum-hub`、`nested-menu`、`edgecases`、`extra`、`carousel`、`live-update` 等）到全新 RUN；用 `scripts/serve.py --root RUN/fixtures --port PORT` 启动 loopback 服务器。每轮重新建立事件、上传和输出文件，不能复制旧通过记录。
+2. **搭建本轮合成页面。** init 会复制 assets（含高复杂度对抗靶场 `arena-joint-forms`、`arena-shadow-iframe`、`arena-frame-outer`、`arena-frame-inner`、`arena-media-studio`、`arena-modern-spa-grid`、`arena-bfcache-detail` 以及 `workbench`、`plan-recipe-lab`、`video-portal`、`forum-hub`、`nested-menu`、`edgecases`、`extra`、`carousel`、`live-update` 等）到全新 RUN；用 `scripts/serve.py --root RUN/fixtures --port PORT` 启动 loopback 服务器。每轮重新建立事件、上传和输出文件，不能复制旧通过记录。同时运行 `scripts/release_audit.py preflight --run RUN`，把八个公网站点的 HTTP 可达性证据写入 `RUN/preflight.json`。
 3. **逐步操作并检查实际结果。** 读 [command-recipes.md](references/command-recipes.md)。每秒变化页及轮播页另按 [dynamic-pages.md](references/dynamic-pages.md) 测试 evaluate/read/wheel。每次 Bsk 调用通过 recorder，读取原始输出后再构造下一条命令；session start 和依赖它的命令分开。每项检查 DOM/业务事件/目标记录/文件内容等 oracle，不能仅看 exit 0。MCP 通道同样使用候选 `bsk mcp`，保留协议输入输出和逐工具（含 `bsk_recipe`）检查。
-4. **完成八个公网站点实战。** 读 [public-sites.md](references/public-sites.md)：
+4. **完成八个公网站点实战。** 读 [public-sites.md](references/public-sites.md) 和本轮 `RUN/preflight.json`；站点不可达或返回 4xx/5xx 时按环境阻塞记录，不归因产品，preflight 只证明 HTTP 可达，登录墙/验证码仍需实际判断：
    - **轮播与电商**：巨量引擎（`oceanengine.com`）、淘宝（`taobao.com`）；
    - **真实视频网站**：哔哩哔哩（`bilibili.com`，首页推荐流抽取 + 公开视频播放页 `<video>` 状态读取与只读控件交互）；
    - **真实论坛网站**：V2EX（`v2ex.com`，技术节点切换、主题列表提取、零回复/多回复对齐、楼层详情与代码块读取、只读 Recipe 回放）；
    - **文档、SPA、分页与资讯列表**：MDN、GitHub、Books to Scrape、Hacker News。
 5. **逐项登记及审查。** 依据 plan.json 填写每一个结果；CMD-* 需实际执行该命令并检查结果。场景与命令行可引用同一真实记录，但不能凭一次打开页面给整类能力打勾。对每类页面输出实际适用的命令矩阵；不强行对 Canvas 执行 select 等无语义动作，但任何必测命令/场景/网站都不能用 N/A 消去。
-6. **清理、生成 Benchmark 与计算门槛、交付。** 结束本轮 capture/录制/session/临时配对并归还标签，按约定保留测试安装。运行 `gate`（自动生成 `gate.json`、`benchmark.json` 与 `benchmark.md`）；跨多轮对比时额外运行 `scripts/release_audit.py benchmark --run RUN1 RUN2 ... --out benchmark-multi.json --markdown benchmark-multi.md`。只有所有必测项 passed、动态命令覆盖率 100%、场景通过率 100%、无意外失败/超时/未核验才称全量通过。否则明确“未达到全量通过条件”，列出实际覆盖、阻塞、缺陷和最小复现。
+6. **清理、生成 Benchmark 与计算门槛、交付。** 结束本轮 capture/录制/session/临时配对并归还标签，按约定保留测试安装。运行 `gate`（自动生成 `gate.json`、`benchmark.json` 与 `benchmark.md`；`gate.json` 会内嵌本轮 preflight 摘要与 sha256）；跨多轮对比时额外运行 `scripts/release_audit.py benchmark --run RUN1 RUN2 ... --out benchmark-multi.json --markdown benchmark-multi.md`。只有所有必测项 passed、动态命令覆盖率 100%、场景通过率 100%、无意外失败/超时/未核验才称全量通过。否则明确“未达到全量通过条件”，列出实际覆盖、阻塞、缺陷和最小复现。
 
 ## 最终报告与 Benchmark 输出
 
