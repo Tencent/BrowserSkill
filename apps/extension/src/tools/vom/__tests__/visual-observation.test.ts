@@ -18,6 +18,7 @@ import {
   projectSemanticGraph,
   resolveSemanticGraph,
 } from "../semantic-graph";
+import { REQUESTED_STYLES, VISUAL_STYLES } from "../snapshot";
 import { deduplicateVisualCandidates } from "../visual-dedup";
 import type { VisualCandidate } from "../visual-discovery";
 import {
@@ -624,8 +625,8 @@ it.each([
   expect(send.mock.calls.some((c) => c[1] === "Page.captureScreenshot")).toBe(false);
   await handleSnapshot(manager, { session_id: "test" }, deps);
   const captures = send.mock.calls.filter((c) => c[1] === "DOMSnapshot.captureSnapshot");
-  expect(captures[0][2]?.computedStyles).toHaveLength(29);
-  expect(captures[1][2]?.computedStyles).toHaveLength(16);
+  expect(captures[0][2]?.computedStyles).toHaveLength(VISUAL_STYLES.length);
+  expect(captures[1][2]?.computedStyles).toHaveLength(REQUESTED_STYLES.length);
   expect([...ctx.refStore.entries()].some(([, entry]) => entry.kind === "visual-region")).toBe(
     false,
   );

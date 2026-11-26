@@ -611,4 +611,258 @@ describe("page and region occlusion", () => {
     expect(text).not.toContain("Unplaced Canvas regions");
     expect(text).not.toContain("Covered card");
   });
+
+  it("does not fold the page for fixed app shells wrapping <main>, scroll-locked html/body, or negative-z backgrounds", () => {
+    const fullRect = { x: 0, y: 0, w: 1000, h: 800 };
+    const appShellScene: VomScene = {
+      viewport,
+      rootFrameId: "root",
+      nodes: [
+        node(1, null, { tag: "html", role: "RootWebArea", position: "fixed", rect: fullRect }),
+        node(2, 1, { tag: "body", position: "fixed", paintOrder: 1, rect: fullRect }),
+        node(3, 2, { position: "fixed", paintOrder: 15, zIndex: -1, rect: fullRect }),
+        node(4, 2, {
+          position: "fixed",
+          paintOrder: 10,
+          rect: fullRect,
+        }),
+        node(5, 4, {
+          tag: "aside",
+          role: "complementary",
+          name: "Sidebar",
+          paintOrder: 11,
+          rect: { x: 0, y: 0, w: 200, h: 800 },
+        }),
+        node(6, 5, {
+          ...action,
+          name: "Publish nav",
+          paintOrder: 11,
+          rect: { x: 16, y: 40, w: 160, h: 32 },
+        }),
+        node(7, 4, {
+          tag: "main",
+          role: "main",
+          paintOrder: 10,
+          rect: { x: 200, y: 0, w: 800, h: 800 },
+          domAncestorIds: [4, 2, 1],
+        }),
+        node(8, 7, {
+          ...action,
+          name: "Upload video",
+          paintOrder: 10,
+          rect: { x: 260, y: 120, w: 180, h: 48 },
+          domAncestorIds: [7, 4, 2, 1],
+        }),
+        node(9, 7, {
+          tag: "iframe",
+          role: "Iframe",
+          paintOrder: 10,
+          rect: { x: 200, y: 200, w: 800, h: 600 },
+          domAncestorIds: [7, 4, 2, 1],
+        }),
+        node(10, 9, {
+          ...action,
+          frameId: "child",
+          name: "Iframe upload",
+          paintOrder: 1,
+          rect: { x: 240, y: 240, w: 140, h: 40 },
+        }),
+      ],
+    };
+    for (const result of rendered(appShellScene)) {
+      expect(result.text).toContain("@layers 1 focus=L1");
+      expect(result.text).toContain("L1 page");
+      expect(result.text).not.toContain("occluded by L1");
+      expect(result.ids).toEqual([6, 8, 10]);
+    }
+
+    // Negative z-index background with higher Blink paintOrder (real Chromium DOMSnapshot behavior),
+    // including a full-viewport positioned child inside a negative-z stacking wrapper.
+    const negZScene: VomScene = {
+      viewport,
+      rootFrameId: "root",
+      nodes: [
+        node(1, null, { role: "RootWebArea" }),
+        node(2, 1, { position: "fixed", paintOrder: 12, zIndex: -1, rect: fullRect }),
+        node(3, 2, { position: "absolute", paintOrder: 13, rect: fullRect }),
+        node(4, 1, {
+          tag: "main",
+          role: "main",
+          position: "static",
+          paintOrder: 0,
+          rect: fullRect,
+        }),
+        node(5, 4, {
+          ...action,
+          name: "Upload",
+          position: "static",
+          paintOrder: 0,
+          rect: { x: 100, y: 100, w: 120, h: 40 },
+        }),
+      ],
+    };
+    for (const result of rendered(negZScene)) {
+      expect(result.text).toContain("@layers 1 focus=L1");
+      expect(result.ids).toEqual([5]);
+    }
+  });
+
+  it("keeps child-iframe <main> from disabling parent modal iframes, hides drawers behind fixed app shells, and preserves modal backdrops inside positive-z wrappers", () => {
+    const fullRect = { x: 0, y: 0, w: 1000, h: 800 };
+
+    // 1. Child iframe <main> must not mark a parent fullscreen checkout overlay as a non-blocking app shell.
+    const checkoutModalScene: VomScene = {
+      viewport,
+      rootFrameId: "root",
+      nodes: [
+        node(1, null, { role: "RootWebArea" }),
+        node(2, 1, {
+          ...action,
+          name: "Background page action",
+          paintOrder: 1,
+          rect: { x: 40, y: 40, w: 160, h: 40 },
+        }),
+        node(3, 1, {
+          tag: "div",
+          position: "fixed",
+          paintOrder: 10,
+          zIndex: 1000,
+          rect: fullRect,
+        }),
+        node(4, 3, {
+          tag: "iframe",
+          role: "Iframe",
+          position: "fixed",
+          paintOrder: 11,
+          rect: fullRect,
+        }),
+        node(5, 4, {
+          tag: "main",
+          role: "main",
+          frameId: "checkout",
+          paintOrder: 1,
+          rect: fullRect,
+          domAncestorIds: [4, 3, 1],
+        }),
+        node(6, 5, {
+          ...action,
+          frameId: "checkout",
+          name: "Pay now",
+          paintOrder: 2,
+          rect: { x: 300, y: 300, w: 140, h: 40 },
+        }),
+      ],
+    };
+    for (const result of rendered(checkoutModalScene)) {
+      expect(result.text).toContain("@layers 2 focus=L1");
+      expect(result.text).toContain("L1 modal cover=100%");
+      expect(result.ids).toEqual([6]);
+    }
+
+    // 2. A fixed opaque #app shell wrapping <main> must not fold the page, yet must still
+    // hide a closed drawer painted behind #app in activeRegionPolicy.
+    const appShellOverDrawerScene: VomScene = {
+      viewport,
+      rootFrameId: "root",
+      nodes: [
+        node(1, null, { tag: "body", role: "RootWebArea" }),
+        node(2, 1, {
+          tag: "nav",
+          role: "navigation",
+          name: "Closed Drawer",
+          position: "fixed",
+          paintOrder: 2,
+          zIndex: 1,
+          rect: { x: 0, y: 0, w: 220, h: 800 },
+        }),
+        node(3, 2, {
+          ...action,
+          name: "Hidden drawer link",
+          paintOrder: 2,
+          rect: { x: 16, y: 60, w: 160, h: 36 },
+        }),
+        node(4, 1, {
+          tag: "div",
+          position: "fixed",
+          paintOrder: 10,
+          zIndex: 2,
+          rect: fullRect,
+        }),
+        node(5, 4, {
+          tag: "main",
+          role: "main",
+          paintOrder: 10,
+          rect: fullRect,
+          domAncestorIds: [4, 1],
+        }),
+        node(6, 5, {
+          ...action,
+          name: "Visible shell button",
+          paintOrder: 10,
+          rect: { x: 40, y: 60, w: 160, h: 36 },
+          domAncestorIds: [5, 4, 1],
+        }),
+      ],
+    };
+    for (const result of rendered(appShellOverDrawerScene)) {
+      expect(result.text).toContain("@layers 1 focus=L1");
+      expect(result.ids).toEqual([6]);
+    }
+
+    // 3. A z-index:-1 backdrop inside a z-index:1000 modal wrapper paints at z=1000 above
+    // the base page and must still fold <main> (both when wrapper is retained or flattened via rootZIndex).
+    for (const flattenedWrapper of [false, true]) {
+      const portalModalScene: VomScene = {
+        viewport,
+        rootFrameId: "root",
+        nodes: [
+          node(1, null, { role: "RootWebArea" }),
+          node(2, 1, { tag: "main", role: "main", paintOrder: 1, rect: fullRect }),
+          node(3, 2, {
+            ...action,
+            name: "Base page button",
+            paintOrder: 1,
+            rect: { x: 40, y: 40, w: 160, h: 36 },
+          }),
+          ...(flattenedWrapper
+            ? []
+            : [
+                node(4, 1, {
+                  tag: "div",
+                  position: "fixed",
+                  pointerEvents: "none",
+                  paintOrder: 10,
+                  zIndex: 1000,
+                  rect: fullRect,
+                }),
+              ]),
+          node(5, flattenedWrapper ? 1 : 4, {
+            tag: "div",
+            position: "fixed",
+            paintOrder: 11,
+            zIndex: -1,
+            ...(flattenedWrapper ? { rootZIndex: 1000 } : {}),
+            rect: fullRect,
+          }),
+          node(6, flattenedWrapper ? 1 : 4, {
+            tag: "div",
+            role: "dialog",
+            position: "relative",
+            paintOrder: 12,
+            rect: { x: 300, y: 240, w: 400, h: 200 },
+          }),
+          node(7, 6, {
+            ...action,
+            name: "Confirm modal",
+            paintOrder: 12,
+            rect: { x: 340, y: 320, w: 120, h: 36 },
+          }),
+        ],
+      };
+      for (const result of rendered(portalModalScene)) {
+        expect(result.text, `flattened=${flattenedWrapper}`).toContain("@layers 2 focus=L1");
+        expect(result.ids, `flattened=${flattenedWrapper}`).toEqual([7]);
+      }
+    }
+  });
 });

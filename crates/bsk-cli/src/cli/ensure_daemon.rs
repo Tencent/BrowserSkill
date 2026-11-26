@@ -85,12 +85,16 @@ fn optimistic_endpoint_present(sock_path: &Path) -> bool {
 }
 
 /// Optimistic single-UDS fast path for business CLI commands:
-/// When `daemon.json` exists, carries `protocol_version`, and its `sock_path`
-/// exists on disk, validate protocol compatibility directly from `daemon.json`
-/// without opening a separate `system.status` probe socket. If the subsequent
-/// first `connect()` in `business_rpc` fails with `NotFound` /
-/// `ConnectionRefused` (before writing any bytes), `business_rpc` falls back
-/// to [`ensure_daemon_with_protocol`].
+/// When `daemon.json` exists, carries a compatible `protocol_version`, and its
+/// `sock_path` exists on disk, trust the cached discovery info without opening
+/// a separate `system.status` probe socket. If the cached protocol is
+/// incompatible (for example a stale `1.x` `daemon.json` left by an unclean
+/// shutdown or on Windows where named-pipe presence is not checked on disk),
+/// fall through to [`ensure_daemon_with_protocol`] so a live probe either
+/// auto-starts a fresh daemon or rejects a genuinely running incompatible one.
+/// If the subsequent first `connect()` in `business_rpc` fails with
+/// `NotFound` / `ConnectionRefused` (before writing any bytes), `business_rpc`
+/// falls back to [`ensure_daemon_with_protocol`].
 pub fn ensure_daemon_optimistic() -> Result<DaemonInfo> {
     let (info, protocol) = ensure_daemon_optimistic_with_protocol()?;
     super::business_rpc::check_daemon_protocol(&protocol)?;
@@ -100,6 +104,7 @@ pub fn ensure_daemon_optimistic() -> Result<DaemonInfo> {
 pub(crate) fn ensure_daemon_optimistic_with_protocol() -> Result<(DaemonInfo, String)> {
     if let Ok(Some(info)) = daemon_info::read()
         && let Some(protocol) = info.protocol_version.clone()
+        && bsk_protocol::catalog::is_protocol_compatible(&protocol)
         && optimistic_endpoint_present(&info.sock_path)
     {
         crate::ipc_client::record_endpoint_ipc_envelope(&info.sock_path, info.ipc_envelope);

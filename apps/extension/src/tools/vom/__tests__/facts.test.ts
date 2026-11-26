@@ -95,7 +95,12 @@ describe("document facts", () => {
                 ? 10
                 : style === "background-color"
                   ? 11
-                  : style === "background-image"
+                  : style === "background-image" ||
+                      style === "transform" ||
+                      style === "rotate" ||
+                      style === "scale" ||
+                      style === "perspective" ||
+                      style === "contain"
                     ? 12
                     : style === "background-clip" || style === "-webkit-background-clip"
                       ? 13
@@ -133,6 +138,11 @@ describe("document facts", () => {
         width: "120px",
         height: "40px",
         "z-index": "auto",
+        transform: "none",
+        rotate: "none",
+        scale: "none",
+        perspective: "none",
+        contain: "none",
       },
     });
     expect(nodes[0].zIndex).toBeUndefined();

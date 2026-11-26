@@ -34,9 +34,116 @@ const cases = [
   { name: "CSS backdrop", width: 64, backdrop: true },
   { name: "pointer-transparent sidebar", width: 95, transparent: true },
   { name: "iframe beside sidebar", width: 64, frame: true },
+  { name: "hidden narrow-nav cover with visible toggle", width: 100, hiddenCoverWithToggle: true },
+  { name: "zero-width overflow-clipped drawer backdrop", width: 100, clippedDrawerBackdrop: true },
+  {
+    name: "transformed zero-width overflow-clipped fixed drawer backdrop",
+    width: 100,
+    transformedClippedFixedDrawer: true,
+  },
+  {
+    name: "zero-height overflow-hidden body with visible absolute ARIA modal",
+    width: 64,
+    zeroHeightBodyModal: true,
+    modal: true,
+  },
+  {
+    name: "negative-z backdrop inside positive-z modal portal wrapper",
+    width: 64,
+    portalNegZBackdrop: true,
+    modal: true,
+  },
+  { name: "fixed app shell wrapping main and iframe", width: 64, fixedAppShell: true, frame: true },
 ];
 
 function fixture(c: (typeof cases)[number]): string {
+  if (c.hiddenCoverWithToggle) {
+    return `<!doctype html><style>
+      * { box-sizing: border-box; } html,body { margin:0; }
+      main { margin-left:200px; padding:8px; }
+      button { display:block; width:160px; height:32px; margin:0 0 8px; padding:0; }
+      #sidebar { position:fixed; left:0; top:0; width:180px; height:100vh; z-index:11; background:#fff; padding:8px; }
+      #narrow-nav-mask { position:fixed; inset:0; z-index:9; background:#0008; visibility:hidden; opacity:0; }
+      #narrow-nav { position:fixed; inset:0; z-index:10; visibility:hidden; }
+      #nav-toggle { position:absolute; right:8px; top:8px; visibility:visible; width:48px; height:32px; }
+      #offscreen { position:absolute; top:150vh; left:220px; width:120px; }
+    </style>
+    <div style="position:fixed;inset:0;z-index:-1;background:#fafafa"></div>
+    <aside id="sidebar"><button id="publish-nav">发表</button></aside>
+    <main>
+      <button id="main">Main action</button>
+      <canvas aria-label="Main canvas" width="40" height="30"></canvas>
+    </main>
+    <button id="offscreen">Offscreen action</button>
+    <div id="narrow-nav-mask"></div>
+    <nav id="narrow-nav" aria-label="窄屏导航">
+      <button id="nav-toggle">窄屏开关</button>
+    </nav>`;
+  }
+  if (c.clippedDrawerBackdrop || c.transformedClippedFixedDrawer) {
+    return `<!doctype html><style>
+      * { box-sizing: border-box; } html,body { margin:0; }
+      main { padding:8px; }
+      button { display:block; width:160px; height:32px; margin:0 0 8px; padding:0; }
+      #drawer-host { position:fixed; left:0; top:0; width:0; height:100vh; overflow:hidden; z-index:10; ${c.transformedClippedFixedDrawer ? "transform:translateX(0);" : ""} }
+      #drawer-backdrop { position:${c.transformedClippedFixedDrawer ? "fixed" : "absolute"}; left:0; top:0; width:100vw; height:100vh; background:#0008; }
+    </style><main>
+      <button id="main">Main action</button>
+      <canvas aria-label="Main canvas" width="40" height="30"></canvas>
+    </main>
+    <div id="drawer-host"><div id="drawer-backdrop"></div></div>`;
+  }
+  if (c.zeroHeightBodyModal) {
+    return `<!doctype html><style>
+      * { box-sizing: border-box; } html { margin:0; }
+      body { margin:0; height:0; overflow:hidden; }
+      main { position:absolute; left:0; top:0; width:100vw; padding:8px; }
+      button { display:block; width:160px; height:32px; margin:0 0 8px; padding:0; }
+      #panel { position:absolute; left:20vw; top:20vh; width:60vw; height:200px; background:#fff; z-index:20; padding:8px; }
+      #offscreen { position:absolute; top:150vh; left:8px; width:120px; }
+    </style><main>
+      <button id="main">Main action</button>
+      <canvas aria-label="Main canvas" width="40" height="30"></canvas>
+    </main>
+    <button id="offscreen">Offscreen action</button>
+    <div id="panel" role="dialog" aria-modal="true"><button id="inside">Panel action</button></div>`;
+  }
+  if (c.portalNegZBackdrop) {
+    return `<!doctype html><style>
+      * { box-sizing: border-box; } html,body { margin:0; }
+      main { padding:8px; }
+      button { display:block; width:160px; height:32px; margin:0 0 8px; padding:0; }
+      #portal { position:fixed; inset:0; z-index:1000; pointer-events:none; }
+      #portal-backdrop { position:fixed; inset:0; z-index:-1; pointer-events:auto; background:#0008; }
+      #panel { position:relative; margin:80px auto; width:360px; height:160px; background:#fff; padding:8px; pointer-events:auto; }
+      #offscreen { position:absolute; top:150vh; left:8px; width:120px; }
+    </style><main>
+      <button id="main">Main action</button>
+      <canvas aria-label="Main canvas" width="40" height="30"></canvas>
+    </main>
+    <button id="offscreen">Offscreen action</button>
+    <div id="portal">
+      <div id="portal-backdrop"></div>
+      <div id="panel" role="dialog"><button id="inside">Panel action</button></div>
+    </div>`;
+  }
+  if (c.fixedAppShell) {
+    return `<!doctype html><style>
+      * { box-sizing: border-box; } html,body { position:fixed; inset:0; margin:0; }
+      #app { position:fixed; inset:0; display:flex; }
+      aside { width:180px; height:100%; padding:8px; background:#fff; }
+      main { flex:1; padding:8px; }
+      button { display:block; width:140px; height:32px; margin:0 0 8px; padding:0; }
+      iframe { width:100%; height:120px; border:0; }
+    </style><div id="app">
+      <aside><button id="inside">Panel action</button></aside>
+      <main>
+        <button id="main">Main action</button>
+        <canvas aria-label="Main canvas" width="40" height="30"></canvas>
+        <iframe srcdoc="<button id='child' onclick='parent.frameClicks++'>Frame action</button>"></iframe>
+      </main>
+    </div>`;
+  }
   const tag = c.native ? "dialog" : "aside";
   return `<!doctype html><style>
     * { box-sizing: border-box; } html,body { margin:0; }
@@ -238,6 +345,11 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser observation layers",
               expect(clicked, c.name + ": " + JSON.stringify(clicked)).not.toHaveProperty("code");
               expect(await evaluate("mainClicks"), c.name).toEqual([true]);
             }
+            if (c.hiddenCoverWithToggle) {
+              expect(result.text, c.name).toContain('button "窄屏开关"');
+              expect(result.text, c.name).toContain('button "发表"');
+              expect(result.text, c.name).toContain('button "Offscreen action"');
+            }
             if (!c.transparent && !c.small && !c.ignored && !blocked)
               expect(result.text, c.name).not.toContain('button "Covered action"');
             if (c.frame) {
@@ -250,6 +362,32 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser observation layers",
               );
               expect(clicked).not.toHaveProperty("code");
               expect(await evaluate("frameClicks")).toBe(1);
+            }
+            if (
+              c.hiddenCoverWithToggle ||
+              c.clippedDrawerBackdrop ||
+              c.transformedClippedFixedDrawer ||
+              c.fixedAppShell ||
+              c.zeroHeightBodyModal ||
+              c.portalNegZBackdrop
+            ) {
+              const snap = await handleSnapshot(
+                manager,
+                { session_id: ctx.sessionId },
+                { cdp, tabsApi },
+              );
+              expect(snap, c.name).not.toHaveProperty("code");
+              if ("text" in snap) {
+                if (blocked) {
+                  expect(snap.text, c.name).toContain("@layers 2 focus=L1");
+                  expect(snap.text, c.name).toContain('button "Panel action"');
+                  expect(snap.text, c.name).not.toContain('button "Main action"');
+                } else {
+                  expect(snap.text, c.name).toContain("@layers 1 focus=L1");
+                  expect(snap.text, c.name).toContain("L1 page");
+                  expect(snap.text, c.name).toMatch(/(@e\d+) button "Main action"/);
+                }
+              }
             }
           }
 

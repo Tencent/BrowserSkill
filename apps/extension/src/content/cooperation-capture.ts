@@ -709,6 +709,13 @@ export function attachCooperationCapture() {
     state.focusNeutral = focusNeutral();
     updateInteraction();
     state.fields = [...fields.values()];
+    const viewportWidth = document.documentElement?.clientWidth || window.innerWidth;
+    const viewportHeight = document.documentElement?.clientHeight || window.innerHeight;
+    if (viewportWidth > 0 && viewportHeight > 0) {
+      state.viewport = { width: viewportWidth, height: viewportHeight };
+    } else {
+      delete state.viewport;
+    }
     return { ...state };
   };
   const matches = (event: Event): boolean => {

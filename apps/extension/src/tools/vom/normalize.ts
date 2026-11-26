@@ -26,6 +26,7 @@ import {
   applyHiddenTextExclusions,
   buildDocumentIndex,
   type CaptureIssue,
+  type DecodedNode,
   type DocumentGeometry,
   type DocumentIndex,
   type NodeFacts,
@@ -140,6 +141,68 @@ async function captureCustomProgressFormMembership(
   }
 }
 
+function parseNodeOpacity(raw: string | undefined): number {
+  if (!raw || raw === "1") return 1;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 1;
+}
+
+function createsFixedContainingBlock(
+  styles: Readonly<Record<string, string>> | undefined,
+): boolean {
+  if (!styles) return false;
+  const transform = styles.transform;
+  if (transform && transform !== "none") return true;
+  const perspective = styles.perspective;
+  if (perspective && perspective !== "none") return true;
+  const rotate = styles.rotate;
+  if (rotate && rotate !== "none") return true;
+  const scale = styles.scale;
+  if (scale && scale !== "none") return true;
+  const contain = styles.contain;
+  if (contain && /\b(?:paint|layout|strict|content)\b/.test(contain)) return true;
+  return false;
+}
+
+function isClippedByZeroSizeOverflowAncestor(
+  node: DecodedNode,
+  byBackendId: ReadonlyMap<number, DecodedNode>,
+): boolean {
+  let mode: "flow" | "absolute" | "fixed" =
+    node.position === "fixed" ? "fixed" : node.position === "absolute" ? "absolute" : "flow";
+  let curId = node.parentBackendNodeId;
+  let guard = 0;
+  while (curId !== null && guard++ < 64) {
+    const anc = byBackendId.get(curId);
+    if (!anc) break;
+    // CSS propagates overflow on <html>/<body> to the viewport, so a zero-height
+    // body with overflow:hidden does not clip its descendants to 0px.
+    if (anc.tag === "html" || anc.tag === "body") break;
+    const st = anc.layout?.styles;
+    const fixedCb = createsFixedContainingBlock(st);
+    const establishesCb =
+      mode === "flow" ||
+      (mode === "absolute" && (anc.position !== "static" || fixedCb)) ||
+      (mode === "fixed" && fixedCb);
+    if (establishesCb) {
+      const b = anc.layout?.bounds;
+      if (st && b && b.length >= 4) {
+        const ox = st["overflow-x"];
+        const oy = st["overflow-y"];
+        if (
+          ((ox === "hidden" || ox === "clip") && !(b[2] > 0)) ||
+          ((oy === "hidden" || oy === "clip") && !(b[3] > 0))
+        ) {
+          return true;
+        }
+      }
+      mode = anc.position === "fixed" ? "fixed" : anc.position === "absolute" ? "absolute" : "flow";
+    }
+    curId = anc.parentBackendNodeId;
+  }
+  return false;
+}
+
 /** Interpret one document using a supplied projection. No live reads or frame scheduling. */
 export async function normalizeDocument(
   doc: SnapshotDocument,
@@ -151,6 +214,24 @@ export async function normalizeDocument(
 ): Promise<NormalizedDocument> {
   const decoded = await decodeDocument(doc, strings, signal, profile);
   const checkpoint = createCaptureCheckpoint(signal);
+  const decodedById = new Map<number, DecodedNode>();
+  for (let i = 0; i < decoded.nodes.length; i++) {
+    decodedById.set(decoded.nodes[i].backendNodeId, decoded.nodes[i]);
+  }
+  const opacityMemo = new Map<number, number>();
+  const effectiveOpacity = (node: DecodedNode, depth = 0): number => {
+    const hit = opacityMemo.get(node.backendNodeId);
+    if (hit !== undefined) return hit;
+    const own = parseNodeOpacity(node.layout?.styles.opacity);
+    if (own <= 0 || node.parentBackendNodeId === null || depth >= 64) {
+      opacityMemo.set(node.backendNodeId, own);
+      return own;
+    }
+    const parent = decodedById.get(node.parentBackendNodeId);
+    const val = parent ? own * effectiveOpacity(parent, depth + 1) : own;
+    opacityMemo.set(node.backendNodeId, val);
+    return val;
+  };
   const nodes: NodeFacts[] = [];
   for (let i = 0; i < decoded.nodes.length; i++) {
     if (i % 256 === 0) {
@@ -160,14 +241,16 @@ export async function normalizeDocument(
     const node = decoded.nodes[i];
     const bounds = node.layout?.bounds ?? [];
     const visibility = node.layout?.styles.visibility || "visible";
-    const opacity = node.layout?.styles.opacity || "1";
+    const zeroClipped = isClippedByZeroSizeOverflowAncestor(node, decodedById);
     nodes.push({
       ...node,
+      ...(zeroClipped ? { pointerEvents: "none", clickable: undefined } : {}),
       ...(context.frameId ? { frameId: context.frameId } : {}),
       ownerFrameBackendNodeId: context.ownerFrameBackendNodeId,
       localRect: null,
       rect: null,
       rendered:
+        !zeroClipped &&
         bounds.length >= 4 &&
         Number.isFinite(bounds[0]) &&
         Number.isFinite(bounds[1]) &&
@@ -177,7 +260,7 @@ export async function normalizeDocument(
         bounds[3] > 0 &&
         visibility !== "hidden" &&
         visibility !== "collapse" &&
-        (Number.parseFloat(opacity) || 0) >= 0.05,
+        effectiveOpacity(node) >= 0.05,
     });
   }
   const index = await buildDocumentIndex(
