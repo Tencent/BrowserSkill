@@ -69,7 +69,7 @@ async function fixture(failures: number, prerendering = false, hintsHidden = fal
       },
     },
   });
-  let shadow!: ShadowRoot;
+  let shadow: ShadowRoot | undefined;
   let remove: (() => void) | undefined;
   let mount!: () => void;
   vi.stubGlobal(
@@ -84,17 +84,20 @@ async function fixture(failures: number, prerendering = false, hintsHidden = fal
       mount = () => {
         remove?.();
         const host = document.createElement("browser-skill-overlay");
-        shadow = host.attachShadow({ mode: "open" });
+        const nextShadow = host.attachShadow({ mode: "open" });
+        shadow = nextShadow;
         const container = document.createElement("div");
-        shadow.append(container);
+        nextShadow.append(container);
         document.documentElement.append(host);
-        const root = options.onMount(container, shadow, host);
+        const root = options.onMount(container, nextShadow, host);
         remove = () => {
+          if (shadow === nextShadow) shadow = undefined;
+          remove = undefined;
           options.onRemove(root);
           host.remove();
         };
       };
-      return { mount };
+      return { mount, remove: () => remove?.() };
     },
   );
   await (content.main as (ctx: { onInvalidated(fn: () => void): void }) => Promise<void>)({
@@ -108,13 +111,13 @@ async function fixture(failures: number, prerendering = false, hintsHidden = fal
   return {
     query,
     remount: () => mount(),
-    find: (selector: string) => shadow.querySelector(selector),
+    find: (selector: string) => shadow?.querySelector(selector) ?? null,
     preference(hidden: boolean) {
       preference.hidden = hidden;
       storageChange({ control_hints_hidden: { newValue: hidden } }, "local");
     },
     send: (message: unknown) => receive(message, {}, vi.fn()),
-    visible: (slot: string) => shadow.querySelector(`[data-slot="${slot}"]`) !== null,
+    visible: (slot: string) => Boolean(shadow?.querySelector(`[data-slot="${slot}"]`)),
     activate() {
       Object.assign(document, { prerendering: false });
       document.dispatchEvent(new Event("prerenderingchange"));
@@ -235,9 +238,13 @@ it.each([
     expect(f.visible("control-overlay-blocker")).toBe(false);
     expect(f.visible("control-overlay")).toBe(false);
     expect(f.find(".bsk-cooperation-target")).toBeNull();
-    expect(document.querySelector("browser-skill-overlay")?.getAttribute("aria-hidden")).toBe(
-      "true",
-    );
+    if (!remount) {
+      expect(document.querySelector("browser-skill-overlay")).toBeNull();
+    } else {
+      expect(document.querySelector("browser-skill-overlay")?.getAttribute("aria-hidden")).toBe(
+        "true",
+      );
+    }
   }
 });
 
@@ -266,8 +273,7 @@ it("keeps fallback hints, input bypass and remounts on their existing lifecycle"
   expect(f.visible("control-overlay-card")).toBe(false);
   expect(f.visible("control-overlay")).toBe(false);
   expect(blocker()).toBeNull();
-  expect(host().hasAttribute("data-bsk-overlay-surface")).toBe(false);
-  expect(host().hasAttribute(INPUT_PASSTHROUGH_ATTR)).toBe(false);
+  expect(document.querySelector("browser-skill-overlay")).toBeNull();
   f.remount();
   f.preference(false);
   expect(f.visible("control-overlay-card")).toBe(true);
@@ -328,9 +334,7 @@ it.each([
   expect(f.visible("cooperation-toolbar")).toBe(false);
   expect(f.visible("control-overlay")).toBe(false);
   expect(f.visible("control-overlay-blocker")).toBe(false);
-  expect(
-    document.querySelector("browser-skill-overlay")?.hasAttribute("data-bsk-overlay-surface"),
-  ).toBe(false);
+  expect(document.querySelector("browser-skill-overlay")).toBeNull();
 });
 
 it("hides only control UI and restores the latest cooperation state when hints return", async () => {

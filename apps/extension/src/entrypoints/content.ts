@@ -112,10 +112,12 @@ export default defineContentScript({
     let reactRoot: ReactDOM.Root | null = null;
     let overlayHost: HTMLElement | null = null;
     let overlayContainer: HTMLElement | null = null;
+    let overlayUi: { mount(): void; remove(): void } | null = null;
     let activeAgentState: OverlayAgentStateMessage | null = null;
     const overlayVersions = new OverlayVersionGate();
     let hostLossReported = false;
     let remountInProgress = false;
+    let inOnMount = false;
     let isMounted = false;
     let hostObserver: MutationObserver | null = null;
     const videoOverlay = new VideoOverlayGate(
@@ -182,7 +184,7 @@ export default defineContentScript({
       host.setAttribute("aria-hidden", "true");
     }
 
-    function renderReactOverlays(): void {
+    function computeOverlayPresentation() {
       const overlayState = overlays.snapshot();
       const controlVisible =
         videoOverlay.canRenderControl() && shouldShowAgentControlOverlay(overlayState);
@@ -195,9 +197,55 @@ export default defineContentScript({
       const cooperationState =
         controlVisible && !interactiveOverlayVisible ? activeAgentState?.cooperation : undefined;
       const cardVisible = controlOverlayVisible || !!cooperationState;
+      const needsHost = (interactiveOverlayVisible && showInteractive) || cardVisible;
+      return {
+        overlayState,
+        controlOverlayVisible,
+        interactiveOverlayVisible,
+        showInteractive,
+        cooperationState,
+        cardVisible,
+        needsHost,
+      };
+    }
+
+    function renderReactOverlays(): void {
+      const {
+        overlayState,
+        controlOverlayVisible,
+        interactiveOverlayVisible,
+        showInteractive,
+        cooperationState,
+        cardVisible,
+        needsHost,
+      } = computeOverlayPresentation();
       // Cooperative status updates and minimization keep the same click lease.
       // Clear it only when control UI leaves or interactive overlays take over.
       if (!cardVisible || interactiveOverlayVisible) inputPassthrough.reset();
+      if (!needsHost) {
+        if ((overlayHost || reactRoot) && !inOnMount && !remountInProgress) {
+          setOverlayHostHiddenFromAccessibility(true);
+          setOverlaySurfaceState(false, false);
+          remountInProgress = true;
+          try {
+            overlayUi?.remove();
+          } finally {
+            remountInProgress = false;
+          }
+        }
+        return;
+      }
+      if (!overlayHost?.isConnected || !reactRoot) {
+        if (!inOnMount && !remountInProgress && overlayUi) {
+          remountInProgress = true;
+          try {
+            overlayUi.mount();
+          } finally {
+            remountInProgress = false;
+          }
+        }
+        return;
+      }
       setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cardVisible);
       setOverlaySurfaceState(
         controlOverlayVisible,
@@ -673,8 +721,12 @@ export default defineContentScript({
           app.className = "bsk-overlay-root";
           container.append(app);
           reactRoot = ReactDOM.createRoot(app);
-          renderAll();
-          void requestOverlayState();
+          inOnMount = true;
+          try {
+            renderAll();
+          } finally {
+            inOnMount = false;
+          }
           return reactRoot;
         },
         onRemove(root) {
@@ -685,13 +737,15 @@ export default defineContentScript({
         },
       });
       if (!alive) return;
+      overlayUi = ui;
 
       chrome.storage.onChanged.addListener(onStorageChange);
-      ui.mount();
       isMounted = true;
-      // Start the handshake after mounting/listening; it never delays page setup.
+      // Start the handshake after listening; the shadow host mounts lazily only
+      // when an interactive or control overlay actually needs to be shown.
       refreshVideoOverlay();
       void requestOverlayState();
+      renderAll();
 
       window.addEventListener("pageshow", onPageShow);
       document.addEventListener("prerenderingchange", onPageActivated);
@@ -699,7 +753,8 @@ export default defineContentScript({
 
       hostObserver = new MutationObserver(() => {
         const connected = overlayHost?.isConnected ?? false;
-        if (overlays.isControlVisible() && !connected && !hostLossReported) {
+        const shouldKeepHost = computeOverlayPresentation().needsHost;
+        if (shouldKeepHost && !connected && !hostLossReported) {
           hostLossReported = true;
           if (!remountInProgress) {
             remountInProgress = true;
@@ -712,7 +767,7 @@ export default defineContentScript({
             }
           }
         }
-        if (connected) {
+        if (connected || !shouldKeepHost) {
           hostLossReported = false;
         }
       });
@@ -758,6 +813,7 @@ export default defineContentScript({
       alive = false;
       releaseMount();
       isMounted = false;
+      overlayUi = null;
       videoOverlay.dispose();
       inputPassthrough.reset();
       hostObserver?.disconnect();

@@ -21,7 +21,9 @@ vi.mock("react-dom/client", () => ({
       render(element: unknown) {
         renderedRef.current = element;
       },
-      unmount() {},
+      unmount() {
+        renderedRef.current = null;
+      },
     }),
   },
 }));
@@ -36,13 +38,14 @@ let dispose: (() => void) | undefined;
 afterEach(() => {
   dispose?.();
   dispose = undefined;
+  renderedRef.current = null;
   document.querySelectorAll("browser-skill-overlay").forEach((host) => host.remove());
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
-async function fixture(pendingVideoQuery = false) {
+async function fixture(pendingVideoQuery = false, initialControlState = true) {
   vi.useFakeTimers();
   let receive: (message: unknown, sender: object, ack: () => void) => void;
   vi.stubGlobal("chrome", {
@@ -61,8 +64,9 @@ async function fixture(pendingVideoQuery = false) {
     },
     storage: { onChanged: { addListener: vi.fn(), removeListener: vi.fn() } },
   });
-  let host: HTMLElement;
-  let mount: () => void;
+  let host: HTMLElement | undefined;
+  let mount!: () => void;
+  let removeImpl: (() => void) | undefined;
   vi.stubGlobal(
     "createShadowRootUi",
     async (
@@ -73,19 +77,27 @@ async function fixture(pendingVideoQuery = false) {
       },
     ) => {
       let root: unknown;
+      const remove = () => {
+        removeImpl?.();
+      };
       mount = () => {
-        if (host) {
-          options.onRemove(root);
-          host.remove();
-        }
-        host = document.createElement("browser-skill-overlay");
-        const shadow = host.attachShadow({ mode: "closed" });
+        removeImpl?.();
+        const nextHost = document.createElement("browser-skill-overlay");
+        host = nextHost;
+        const shadow = nextHost.attachShadow({ mode: "closed" });
         const container = document.createElement("div");
         shadow.append(container);
-        document.documentElement.append(host);
-        root = options.onMount(container, shadow, host);
+        document.documentElement.append(nextHost);
+        root = options.onMount(container, shadow, nextHost);
+        removeImpl = () => {
+          if (host === nextHost) host = undefined;
+          removeImpl = undefined;
+          options.onRemove(root);
+          root = undefined;
+          nextHost.remove();
+        };
       };
-      return { mount };
+      return { mount, remove };
     },
   );
   await (content.main as (ctx: { onInvalidated(fn: () => void): void }) => Promise<void>)({
@@ -106,9 +118,9 @@ async function fixture(pendingVideoQuery = false) {
   const reset = (sessionId: string, v: OverlayVersion = version()) =>
     send({ type: OVERLAY_AGENT_OVERLAY_RESET, sessionId, ...v });
   const begin = (id = "click-one") => send({ type: INPUT_PASSTHROUGH, phase: "begin", id });
-  const active = () => host.hasAttribute(INPUT_PASSTHROUGH_ATTR);
-  const blocking = () => host.hasAttribute("data-bsk-overlay-blocking");
-  state();
+  const active = () => host?.hasAttribute(INPUT_PASSTHROUGH_ATTR) ?? false;
+  const blocking = () => host?.hasAttribute("data-bsk-overlay-blocking") ?? false;
+  if (initialControlState) state();
   return { send, version, state, reset, begin, active, blocking, remount: () => mount() };
 }
 
@@ -235,6 +247,15 @@ describe("overlay state ordering", () => {
   });
 });
 
+it("does not mount overlay DOM when idle and removes it when returning to idle", async () => {
+  const f = await fixture(false, false);
+  expect(document.querySelector("browser-skill-overlay")).toBeNull();
+  f.state("one", "control");
+  expect(document.querySelector("browser-skill-overlay")).not.toBeNull();
+  f.reset("one");
+  expect(document.querySelector("browser-skill-overlay")).toBeNull();
+});
+
 function renderedRecordRequest(): { id: string } | null {
   const root = renderedRef.current as {
     props?: {
@@ -256,6 +277,38 @@ function renderedHelpRequest(): { id: string } | null {
 }
 
 describe("record overlay recovery and stop races", () => {
+  function stubRecordShadowRootUi() {
+    let removeImpl: (() => void) | undefined;
+    vi.stubGlobal(
+      "createShadowRootUi",
+      async (
+        _ctx: unknown,
+        options: {
+          onMount(container: HTMLElement, shadow: ShadowRoot, host: HTMLElement): unknown;
+          onRemove(root: unknown): void;
+        },
+      ) => ({
+        mount() {
+          removeImpl?.();
+          const host = document.createElement("browser-skill-overlay");
+          const shadow = host.attachShadow({ mode: "closed" });
+          const container = document.createElement("div");
+          shadow.append(container);
+          document.documentElement.append(host);
+          const root = options.onMount(container, shadow, host);
+          removeImpl = () => {
+            removeImpl = undefined;
+            options.onRemove(root);
+            host.remove();
+          };
+        },
+        remove() {
+          removeImpl?.();
+        },
+      }),
+    );
+  }
+
   it.each([
     RECORD_STOP,
     RECORD_CANCEL,
@@ -280,25 +333,7 @@ describe("record overlay recovery and stop races", () => {
       },
       storage: { onChanged: { addListener: vi.fn(), removeListener: vi.fn() } },
     });
-    vi.stubGlobal(
-      "createShadowRootUi",
-      async (
-        _ctx: unknown,
-        options: {
-          onMount(container: HTMLElement, shadow: ShadowRoot, host: HTMLElement): unknown;
-          onRemove(root: unknown): void;
-        },
-      ) => ({
-        mount() {
-          const host = document.createElement("browser-skill-overlay");
-          const shadow = host.attachShadow({ mode: "closed" });
-          const container = document.createElement("div");
-          shadow.append(container);
-          document.documentElement.append(host);
-          options.onMount(container, shadow, host);
-        },
-      }),
-    );
+    stubRecordShadowRootUi();
 
     await (content.main as (ctx: { onInvalidated(fn: () => void): void }) => Promise<void>)({
       onInvalidated: (fn) => {
@@ -340,25 +375,7 @@ describe("record overlay recovery and stop races", () => {
       },
       storage: { onChanged: { addListener: vi.fn(), removeListener: vi.fn() } },
     });
-    vi.stubGlobal(
-      "createShadowRootUi",
-      async (
-        _ctx: unknown,
-        options: {
-          onMount(container: HTMLElement, shadow: ShadowRoot, host: HTMLElement): unknown;
-          onRemove(root: unknown): void;
-        },
-      ) => ({
-        mount() {
-          const host = document.createElement("browser-skill-overlay");
-          const shadow = host.attachShadow({ mode: "closed" });
-          const container = document.createElement("div");
-          shadow.append(container);
-          document.documentElement.append(host);
-          options.onMount(container, shadow, host);
-        },
-      }),
-    );
+    stubRecordShadowRootUi();
 
     await (content.main as (ctx: { onInvalidated(fn: () => void): void }) => Promise<void>)({
       onInvalidated: (fn) => {
@@ -411,25 +428,7 @@ describe("record overlay recovery and stop races", () => {
       },
       storage: { onChanged: { addListener: vi.fn(), removeListener: vi.fn() } },
     });
-    vi.stubGlobal(
-      "createShadowRootUi",
-      async (
-        _ctx: unknown,
-        options: {
-          onMount(container: HTMLElement, shadow: ShadowRoot, host: HTMLElement): unknown;
-          onRemove(root: unknown): void;
-        },
-      ) => ({
-        mount() {
-          const host = document.createElement("browser-skill-overlay");
-          const shadow = host.attachShadow({ mode: "closed" });
-          const container = document.createElement("div");
-          shadow.append(container);
-          document.documentElement.append(host);
-          options.onMount(container, shadow, host);
-        },
-      }),
-    );
+    stubRecordShadowRootUi();
 
     await (content.main as (ctx: { onInvalidated(fn: () => void): void }) => Promise<void>)({
       onInvalidated: (fn) => {
@@ -499,25 +498,7 @@ describe("record overlay recovery and stop races", () => {
       },
       storage: { onChanged: { addListener: vi.fn(), removeListener: vi.fn() } },
     });
-    vi.stubGlobal(
-      "createShadowRootUi",
-      async (
-        _ctx: unknown,
-        options: {
-          onMount(container: HTMLElement, shadow: ShadowRoot, host: HTMLElement): unknown;
-          onRemove(root: unknown): void;
-        },
-      ) => ({
-        mount() {
-          const host = document.createElement("browser-skill-overlay");
-          const shadow = host.attachShadow({ mode: "closed" });
-          const container = document.createElement("div");
-          shadow.append(container);
-          document.documentElement.append(host);
-          options.onMount(container, shadow, host);
-        },
-      }),
-    );
+    stubRecordShadowRootUi();
 
     const dispatchPersistedPageshow = () => {
       const event = new Event("pageshow");
