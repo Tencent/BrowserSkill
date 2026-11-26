@@ -37,6 +37,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- MCP 适配层现在用一张表写明协议的共享证据字段（`context_id`、`observation_id`、`expect`、`depends_on`）在 MCP 中的名称，以及每个受保护方法由哪个工具承载。协议新增方法或证据字段而 MCP 未作决定时，或 `bsk_interact.params` 的说明漏掉调用方可设置的字段时，测试会失败；该说明现在还列出 `hover.settle_ms`、`drag.duration_ms`、`evaluate.await_promise` 和按截图坐标点击的字段。另有一条 stdio 测试同时核对导航与点击的 `tools/list`、`tools/call` 和 CLI。随 CLI 分发的技能文档不再把 MCP 工具称为“Full parity”（#790）。
 - 修复 `bsk fill` 在空的 ProseMirror 富文本编辑器（空段落内含不可编辑 `.ProseMirror-widget[contenteditable="false"]` 占位符及可选空 `img.ProseMirror-separator`、单个尾随 `<br>`）上误读占位符文本或因光标规范化报 `fill_focus_lost` 的问题：`handleFill` 现将此类装饰性空段落按空值处理并接受段落内的规范化光标位置，同时继续拒绝含真实文本、正文图片或多行 `<br>` 的段落。
 - CLI 带 `--out` 参数的命令（`screenshot`、`get-html`、`download`、`extract`、`video stop`/`save`、`operation await`、`recipe draft`）及对应 MCP 工具（`bsk_inspect` 的 `screenshot`/`extract`、`bsk_interact` 的 `download`、`bsk_video` 的 `stop`/`save`、`bsk_assist` 的 `operation_await`）现在会在连接守护进程或启动采集之前拒绝不可用的输出路径（空路径、目录/尾分隔符路径、父目录不存在或父路径为普通文件），统一返回 `local file validation failed` 与 `--out` 恢复提示，同时保留各命令对既有普通文件的 `--overwrite` 覆写语义（含 MCP CSV `extract` 的 `.meta.json` 伴生文件冲突前置校验）。
 - `bsk extract` 现在会按页面 CSS `text-transform` 输出下拉框选中项的文本，报告用户实际看到的标签（`PAID`）而不是原始选项文本（`paid`）；表格单元格与 `input`/`textarea` 值此前已按此处理。
