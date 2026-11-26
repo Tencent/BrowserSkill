@@ -984,9 +984,15 @@ export function attachCooperationCapture() {
     }
     if (event.type === "keydown" || event.type === "keypress" || event.type === "keyup") {
       const key = (event as KeyboardEvent).key;
+      // A keyboard event without a key is a CDP command-only dispatch (focus
+      // flush, native editor commands). A person's keystroke always has a key,
+      // so a missed match must not poison the following native insertion with
+      // a "human" source: background tabs throttle the clearing timer to ~1s.
+      const keyless = key === "";
       eventAgent = event.type === "keyup" ? keys.get(key) : matches(event);
       if (event.type === "keydown") keys.set(key, eventAgent ?? false);
       else if (event.type === "keyup") keys.delete(key);
+      if (keyless && eventAgent === false) eventAgent = undefined;
       let releasedPending = false;
       if (
         event.type === "keydown" &&
