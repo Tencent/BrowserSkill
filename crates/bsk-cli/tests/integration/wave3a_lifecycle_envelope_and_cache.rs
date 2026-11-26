@@ -3562,3 +3562,190 @@ async fn step_and_plan_forward_max_tokens_and_preserve_delta_budget() {
 
     env.shutdown().await;
 }
+
+#[tokio::test]
+async fn stale_1x_daemon_json_falls_back_to_live_probe_instead_of_blocking_cli() {
+    let run_cli = |home: &Path, args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsk"));
+        cmd.env("BSK_HOME", home)
+            .env("BSK_AUTO_START", "0")
+            .env("BSK_AUTO_UPDATE", "off")
+            .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
+            .env_remove("BSK_SESSION")
+            .env_remove("BSK_SCOPE")
+            .env_remove("CLAUDE_CODE_AGENT_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID")
+            .env_remove("CURSOR_TRACE_ID")
+            .env_remove("DSH_SESSION_ID")
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        async move {
+            let child = cmd.spawn().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+
+    // 1. Dead leftover 1.9 daemon.json + stale socket inode (or Windows pipe path):
+    //    optimistic fast path must NOT reject with cached "daemon protocol 1.9 is incompatible";
+    //    it must fall through to the live IPC probe and see that no daemon is listening (so
+    //    auto-start can launch a fresh 2.0 daemon when enabled, or report auto-start disabled here).
+    let dead_home = crate::support::short_tempdir();
+    let dead_sock = dead_home.path().join("stale.sock");
+    #[cfg(unix)]
+    {
+        // Bind and drop a real Unix listener to leave a dead socket inode on disk,
+        // matching an uncleanly terminated 0.5.0 daemon (`ConnectionRefused` on connect).
+        let _dead_listener = std::os::unix::net::UnixListener::bind(&dead_sock).unwrap();
+    }
+    let stale_info = DaemonInfo::now(std::process::id(), dead_sock.clone(), 52998, "0.5.0")
+        .with_protocol_version("1.9");
+    bsk::daemon::info::write_to_path(&stale_info, &dead_home.path().join("daemon.json")).unwrap();
+
+    for args in [
+        &["session", "list", "--json"][..],
+        &["open", "https://example.com", "--json"][..],
+        &[
+            "recipe",
+            "draft",
+            "--session",
+            "s-stale",
+            "--name",
+            "demo",
+            "--description",
+            "demo",
+            "--json",
+        ][..],
+    ] {
+        let out = run_cli(dead_home.path(), args).await;
+        assert!(
+            !out.status.success(),
+            "expected failure with BSK_AUTO_START=0 for {args:?}"
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !combined.contains("daemon protocol 1.9 is incompatible"),
+            "stale dead 1.9 daemon.json must not short-circuit before live probe ({args:?}): {combined}"
+        );
+        assert!(
+            combined.contains("auto-start") || combined.contains("BSK_AUTO_START"),
+            "live probe should detect absent daemon and hit auto-start gate ({args:?}): {combined}"
+        );
+    }
+
+    // 2. Stale 1.9 daemon.json pointing at an actually live 2.0 daemon: live probe sees 2.0
+    //    and business CLI succeeds instead of trusting the stale 1.9 cache.
+    let live20_home = crate::support::short_tempdir();
+    let live20_sock = live20_home.path().join("live20.sock");
+    let live20 = daemon::run(
+        DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        Some(live20_sock.clone()),
+    )
+    .await
+    .unwrap();
+    let stale_over_20 = DaemonInfo::now(
+        std::process::id(),
+        live20_sock.clone(),
+        live20.ws_addr().port(),
+        "0.5.0",
+    )
+    .with_protocol_version("1.9");
+    bsk::daemon::info::write_to_path(&stale_over_20, &live20_home.path().join("daemon.json"))
+        .unwrap();
+
+    let ok_out = run_cli(live20_home.path(), &["session", "list", "--json"]).await;
+    assert!(
+        ok_out.status.success(),
+        "live probe against real 2.0 daemon must recover from stale 1.9 daemon.json: stdout={} stderr={}",
+        String::from_utf8_lossy(&ok_out.stdout),
+        String::from_utf8_lossy(&ok_out.stderr)
+    );
+    live20.shutdown().await;
+
+    // 3. Live 1.9 IPC listener: live probe confirms 1.9 and both normal CLI commands and
+    //    `recipe draft` reject with clear restart-or-update guidance.
+    let live19_home = crate::support::short_tempdir();
+    let live19_sock = live19_home.path().join("live19.sock");
+    let live19_daemon = daemon::run(
+        DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        None,
+    )
+    .await
+    .unwrap();
+    let live19_info = DaemonInfo::now(
+        std::process::id(),
+        live19_sock.clone(),
+        live19_daemon.ws_addr().port(),
+        "0.5.0",
+    )
+    .with_protocol_version("1.9");
+    bsk::daemon::info::write_to_path(&live19_info, &live19_home.path().join("daemon.json"))
+        .unwrap();
+
+    let handler19 = daemon::ipc::full_handler(
+        daemon::ipc::DaemonStatus {
+            started_at: std::time::Instant::now(),
+            ws_port: live19_daemon.ws_addr().port(),
+            sock_path: live19_sock.clone(),
+            daemon_version: "0.5.0",
+            protocol_version: "1.9",
+        },
+        live19_daemon.state(),
+    );
+    let listener19 = daemon::ipc::bind(&live19_sock).await.unwrap();
+    let (stop19_tx, stop19_rx) = tokio::sync::oneshot::channel::<()>();
+    let srv19 = tokio::spawn(daemon::ipc::serve(
+        listener19,
+        handler19,
+        || {},
+        || {},
+        || {},
+        async move {
+            let _ = stop19_rx.await;
+        },
+    ));
+
+    for args in [
+        &["session", "list", "--json"][..],
+        &[
+            "recipe",
+            "draft",
+            "--session",
+            "s-19",
+            "--name",
+            "demo",
+            "--description",
+            "demo",
+            "--json",
+        ][..],
+    ] {
+        let out = run_cli(live19_home.path(), args).await;
+        assert!(
+            !out.status.success(),
+            "live 1.9 daemon must be rejected for {args:?}"
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            combined.contains("daemon protocol 1.9 is incompatible")
+                && combined.contains("bsk daemon restart"),
+            "expected protocol 1.9 incompatibility with restart hint ({args:?}): {combined}"
+        );
+    }
+
+    let _ = stop19_tx.send(());
+    let _ = srv19.await;
+    live19_daemon.shutdown().await;
+}

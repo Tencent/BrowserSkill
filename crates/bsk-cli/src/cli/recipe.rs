@@ -659,8 +659,8 @@ pub fn dispatch(
             if let Some(out) = &args.out {
                 super::atomic_output::preflight_destination(out)?;
             }
-            let (daemon, _protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
-                .context("ensure daemon is running")?;
+            let daemon =
+                ensure_daemon::ensure_daemon_optimistic().context("ensure daemon is running")?;
             let reply = draft(
                 &args.session,
                 &args.name,

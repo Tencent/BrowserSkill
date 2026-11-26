@@ -76,6 +76,8 @@ interface Context {
   refs: number;
   documentRevision: number;
   frames: Frames;
+  /** Viewport snapshot from the last full observation capture; prevents height-tolerance drift across unchanged syncs. */
+  viewportBaseline?: Frames;
   evidence?: ObservationEvidence;
   activityCursor: number;
   observationId?: string;
@@ -296,6 +298,21 @@ function sameMedia(a: Frames, b: Frames): boolean {
     [...a].every(
       ([id, frame]) => JSON.stringify(frame.media ?? []) === JSON.stringify(b.get(id)?.media ?? []),
     )
+  );
+}
+function sameViewport(a: Frames, b: Frames): boolean {
+  return (
+    a.size === b.size &&
+    [...a].every(([id, frame]) => {
+      const other = b.get(id);
+      if (!frame.viewport || !other?.viewport) return true;
+      // Chrome's debugger infobar slides in asynchronously by ~36-44px vertically
+      // without changing width; explicit window_resize and emulate clear baselines directly.
+      return (
+        frame.viewport.width === other.viewport.width &&
+        Math.abs(frame.viewport.height - other.viewport.height) <= 60
+      );
+    })
   );
 }
 
@@ -1162,6 +1179,7 @@ export class CooperationController implements ControlAuthority {
         );
         const sameBudget = baseline !== undefined && baseline.maxTokens === params.max_tokens;
         const sameRootUrl = baseline?.frames.get(0)?.url === before.get(0)?.url;
+        const baselineViewport = baseline?.viewportBaseline ?? baseline?.frames;
         const comparable =
           baseline &&
           sameBudget &&
@@ -1170,7 +1188,8 @@ export class CooperationController implements ControlAuthority {
           fieldsComplete &&
           baseline.refs === session.refStore.revision &&
           baseline.documentRevision === session.refStore.documentRevision(state.tabId) &&
-          sameMedia(baseline.frames, before);
+          sameMedia(baseline.frames, before) &&
+          sameViewport(baselineViewport!, before);
         const exact =
           comparable &&
           (!targetPolicy || sameFrames(baseline.frames, before, "revision")) &&
@@ -1199,11 +1218,13 @@ export class CooperationController implements ControlAuthority {
                     ? "media_changed"
                     : !sameBudget
                       ? "token_budget_changed"
-                      : typeof patched === "string"
-                        ? patched
-                        : !sameFrames(baseline.frames, before, "structure")
-                          ? "structure_changed"
-                          : "focus_changed";
+                      : !sameViewport(baselineViewport!, before)
+                        ? "structure_changed"
+                        : typeof patched === "string"
+                          ? patched
+                          : !sameFrames(baseline.frames, before, "structure")
+                            ? "structure_changed"
+                            : "focus_changed";
         // The private evidence describes the text and focus as they were captured.
         if (text && (text.lines.length || text.focusMoved)) evidence = undefined;
         // A delta updates the model's field values. Refresh private semantic
@@ -1255,6 +1276,7 @@ export class CooperationController implements ControlAuthority {
           (!targetPolicy &&
             (!sameFields(before, after, true) ||
               !sameMedia(before, after) ||
+              !sameViewport(before, after) ||
               (delta && !sameFrames(before, after, "structure")))) ||
           this.humanActive(state) ||
           state.held
@@ -1281,6 +1303,7 @@ export class CooperationController implements ControlAuthority {
           refs: session.refStore.revision,
           documentRevision: session.refStore.documentRevision(state.tabId),
           frames: before,
+          viewportBaseline: observation ? before : (baseline?.viewportBaseline ?? before),
           evidence,
           activityCursor: state.activitySequence,
           observationId: crypto.randomUUID(),
@@ -1505,6 +1528,7 @@ export class CooperationController implements ControlAuthority {
       );
     } finally {
       if (sent && method === "tool.window_resize") this.clearWindowObservations(state.sessionId);
+      if (sent && method === "tool.emulate") state.baseline = undefined;
       if (sent) state.lastAgentActivity = this.now();
       state.working = false;
       if (
@@ -2086,6 +2110,7 @@ export class CooperationController implements ControlAuthority {
     const authorityRevision = state.authorityRevision;
     const idleAtEntry = this.canAutoResumeIdle(state, this.now());
     let verifiedFrames = context?.frames;
+    let verifiedViewport = context?.viewportBaseline ?? context?.frames;
     let evidenceTargets: { backendNodeId: number; frameId?: string }[] | undefined;
     let actionTarget: ResolvedActionTarget | undefined;
     let destinationTarget: typeof actionTarget;
@@ -2256,7 +2281,11 @@ export class CooperationController implements ControlAuthority {
         : undefined;
     const verifyEvidence = async () => {
       if (!context || !verifiedFrames) throw new Error((revoked = "Synchronize before acting"));
-      if (sameFrames(verifiedFrames, state.frames, "revision")) return;
+      if (
+        sameFrames(verifiedFrames, state.frames, "revision") &&
+        sameViewport(verifiedViewport ?? verifiedFrames, state.frames)
+      )
+        return;
       if (!context.evidence) {
         // A text delta carries no evidence. Have the next sync capture the page,
         // or a page that keeps changing would refuse this action after every delta.
@@ -2392,8 +2421,9 @@ export class CooperationController implements ControlAuthority {
       const matches = (keys?: ReadonlySet<string>) => !failing(keys);
       const refusal = failing(volatile);
       if (!refusal) {
-        // Keep the pre-capture revision: later mutations must be checked again.
+        // Keep the pre-capture revision and viewport: later mutations or resizes must be checked again.
         verifiedFrames = before;
+        verifiedViewport = before;
         return;
       }
       observed = {
@@ -3074,6 +3104,7 @@ export class CooperationController implements ControlAuthority {
       }
       if (sent && req.method === "tool.window_resize")
         this.clearWindowObservations(state.sessionId);
+      if ((sent || nativeInputStarted) && req.method === "tool.emulate") state.baseline = undefined;
       if (sent) state.lastAgentActivity = this.now();
       if (state.interruption === intervention) state.interruption = undefined;
       if (state.completion === completion) state.completion = undefined;

@@ -317,6 +317,37 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
         response.end("<!doctype html><p>subframe tick</p>");
         return;
       }
+      if (request.url?.startsWith("/responsive-studio")) {
+        response.end(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+          <style>
+            * { box-sizing: border-box; }
+            html, body { position: fixed; inset: 0; margin: 0; overflow: hidden; }
+            #bg { position: fixed; inset: 0; z-index: -1; background: #f8f9fa; }
+            #app { position: fixed; inset: 0; display: flex; }
+            aside { width: 180px; height: 100%; background: #fff; padding: 12px; }
+            main { flex: 1; padding: 16px; }
+            #narrow-nav-mask { position: fixed; inset: 0; z-index: 49; background: rgba(0,0,0,0.45); visibility: hidden; opacity: 0; }
+            #narrow-nav { position: fixed; inset: 0; z-index: 50; visibility: hidden; }
+            #nav-toggle { position: absolute; right: 12px; top: 12px; visibility: visible; width: 96px; height: 32px; }
+            @media (max-width: 700px) {
+              #narrow-nav-mask { visibility: visible; opacity: 1; }
+              #narrow-nav { visibility: visible; }
+            }
+          </style>
+          <div id="bg"></div>
+          <div id="app">
+            <aside><a id="nav-publish" href="#publish">发表</a></aside>
+            <main>
+              <button id="publish-video" type="button" onclick="document.getElementById('studio-out').textContent='uploaded'">上传视频</button>
+              <output id="studio-out">ready</output>
+            </main>
+          </div>
+          <div id="narrow-nav-mask"></div>
+          <nav id="narrow-nav" aria-label="窄屏导航">
+            <button id="nav-toggle" type="button">窄屏开关</button>
+          </nav>`);
+        return;
+      }
       response.end(`<!doctype html>
         <h1>SPA & Subframe Control</h1>
         <form id="otp-form" action="/done">
@@ -809,6 +840,155 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
               ).exitCode,
             ).toBe(0);
             expect(await readProbeCounts()).toEqual({ creates: 1, attaches: 1 });
+
+            // 8. Pure CSS @media responsive layout (no JS resize listener / zero DOM mutations):
+            // narrow viewport shows `L1 mask` (`窄屏导航`), while widening via `emulate --off`
+            // or external window bounds updates refreshes `sync` & `snapshot` to `L1 page`
+            // without false occlusion from `visibility: hidden` covers, fixed `#app`, or `z-index: -1`.
+            const preStudioSync = await mcp.run("bsk_session", { action: "sync", session });
+            expect(
+              (
+                await runCli(
+                  "navigate",
+                  `${url}responsive-studio`,
+                  ...scope,
+                  "--context",
+                  preStudioSync.context_id,
+                  "--observation",
+                  preStudioSync.observation_id,
+                )
+              ).exitCode,
+            ).toBe(0);
+            const wideInitial = await runCli("sync", ...scope);
+            expect(wideInitial.exitCode).toBe(0);
+            expect(wideInitial.body.vom).toContain("@layers 1 focus=L1");
+            expect(wideInitial.body.vom).toContain('button "上传视频"');
+            expect(wideInitial.body.vom).toContain('button "窄屏开关"');
+
+            expect(
+              (
+                await runCli(
+                  "emulate",
+                  "--device",
+                  "iphone-14",
+                  ...scope,
+                  "--context",
+                  wideInitial.body.context_id,
+                  "--observation",
+                  wideInitial.body.observation_id,
+                )
+              ).exitCode,
+            ).toBe(0);
+            const narrowSync = await runCli("sync", ...scope);
+            expect(narrowSync.exitCode).toBe(0);
+            expect(narrowSync.body.vom).toContain("@view 390x844");
+            expect(narrowSync.body.vom).toContain("@layers 2 focus=L1");
+            expect(narrowSync.body.vom).toContain("occluded by L1");
+            expect(narrowSync.body.vom).not.toContain('button "上传视频"');
+            // Repeat sync at narrow viewport hits daemon cached_vom (`unchanged`).
+            const narrowCached = await runCli("sync", ...scope);
+            expect(narrowCached.exitCode).toBe(0);
+            expect(narrowCached.body.unchanged).toBe(true);
+            expect(narrowCached.body.observation_origin?.kind).toBe("reused");
+            expect(narrowCached.body.vom).toContain("occluded by L1");
+
+            // Clearing emulation widens the viewport via pure CSS @media with zero DOM mutations;
+            // `sync` and `snapshot` must both refresh to `L1 page` and expose `上传视频`.
+            expect(
+              (
+                await runCli(
+                  "emulate",
+                  "--off",
+                  ...scope,
+                  "--context",
+                  narrowCached.body.context_id,
+                  "--observation",
+                  narrowCached.body.observation_id,
+                )
+              ).exitCode,
+            ).toBe(0);
+            const wideAfterEmulate = await runCli("sync", ...scope);
+            expect(wideAfterEmulate.exitCode).toBe(0);
+            expect(wideAfterEmulate.body.observation_origin?.kind).toBe("capture");
+            expect(wideAfterEmulate.body.vom).toContain("@layers 1 focus=L1");
+            expect(wideAfterEmulate.body.vom).not.toContain("occluded by L1");
+            const uploadRef = (wideAfterEmulate.body.vom as string).match(
+              /@(e\d+) button "上传视频"/,
+            )?.[1];
+            expect(uploadRef, wideAfterEmulate.body.vom).toBeDefined();
+            expect(
+              (
+                await runCli(
+                  "click",
+                  `@${uploadRef}`,
+                  ...scope,
+                  "--context",
+                  wideAfterEmulate.body.context_id,
+                )
+              ).exitCode,
+            ).toBe(0);
+            expect(
+              (await runCli("read", "--selector", "#studio-out", ...scope)).body.items[0].values
+                .text,
+            ).toBe("uploaded");
+
+            const liveSnapshot = await runCli("snapshot", ...scope);
+            expect(liveSnapshot.exitCode).toBe(0);
+            expect(liveSnapshot.body.text).toContain("@layers 1 focus=L1");
+            expect(liveSnapshot.body.text).toContain('button "上传视频"');
+
+            // External window resize (user/OS resizing Chrome window without `bsk window resize`)
+            // must also invalidate cached narrow-screen `L1/L2` VOM via `FrameState.viewport`.
+            const beforeResizeSync = await runCli("sync", ...scope);
+            expect(beforeResizeSync.exitCode).toBe(0);
+            expect(
+              (
+                await runCli(
+                  "window",
+                  "resize",
+                  "--width",
+                  "520",
+                  "--height",
+                  "760",
+                  ...scope,
+                  "--context",
+                  beforeResizeSync.body.context_id,
+                  "--observation",
+                  beforeResizeSync.body.observation_id,
+                )
+              ).exitCode,
+            ).toBe(0);
+            const narrowWindowSync = await runCli("sync", ...scope);
+            expect(narrowWindowSync.exitCode).toBe(0);
+            expect(narrowWindowSync.body.vom).toContain("@layers 2 focus=L1");
+            expect(narrowWindowSync.body.vom).toContain("occluded by L1");
+
+            const resizedExternally = await send<{ exceptionDetails?: unknown }>(
+              "Runtime.evaluate",
+              {
+                expression: `(async () => {
+                  const wins = await chrome.windows.getAll();
+                  for (const w of wins) {
+                    if (w.type === "normal" && w.width === 520) {
+                      await chrome.windows.update(w.id, { width: 960, height: 760 });
+                    }
+                  }
+                })()`,
+                returnByValue: true,
+                awaitPromise: true,
+              },
+              worker.sessionId,
+            );
+            expect(resizedExternally.exceptionDetails).toBeUndefined();
+            await expect
+              .poll(
+                async () => {
+                  const refreshed = await runCli("sync", ...scope);
+                  return refreshed.body.vom as string;
+                },
+                { timeout: 10000 },
+              )
+              .toContain('button "上传视频"');
           } finally {
             if (session) await runCli("session", "stop", session).catch(() => {});
             await mcp.dispose();

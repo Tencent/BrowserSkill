@@ -524,7 +524,7 @@ pub(super) fn cancel_requested() -> bool {
 pub(crate) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         bsk_protocol::catalog::is_protocol_compatible(protocol),
-        "daemon protocol {protocol} is incompatible with CLI (requires >= {}, current {}); update the CLI and restart its daemon",
+        "daemon protocol {protocol} is incompatible with CLI (requires >= {}, current {}); restart the daemon (`bsk daemon restart`) or update the CLI so both match",
         bsk_protocol::catalog::MIN_COMPATIBLE_PROTOCOL,
         bsk_protocol::catalog::PROTOCOL_VERSION,
     );

@@ -1,4 +1,11 @@
-import { coverage, detectBlockingLayer, spansViewport } from "./layers";
+import {
+  coverage,
+  detectBlockingLayer,
+  isBehindNormalFlow,
+  isRootDocumentShell,
+  looksLikeDialog,
+  spansViewport,
+} from "./layers";
 import { estimateLineTokens, estimateTokens } from "./tokens";
 import type {
   ActiveScopeBlock,
@@ -1796,20 +1803,12 @@ function renderPageOcclusionLine(hiddenNodeCount: number): string {
   return `L2 page … occluded by L1 (~${hiddenNodeCount} nodes, not actionable)`;
 }
 
-const NON_BLOCKING_REGION_TAGS = new Set(["html", "body"]);
-const NON_BLOCKING_REGION_ROLES = new Set(["rootwebarea", "webarea"]);
-
 function isPositionedRegionCandidate(node: VomNode): boolean {
   if (node.pointerEvents === "none" || node.rect === null) return false;
   if (!(node.rect.w > 0 && node.rect.h > 0)) return false;
   if (!ACTIVE_REGION_POSITIONS.has(node.position)) return false;
-  if (node.modal !== true) {
-    if (
-      NON_BLOCKING_REGION_TAGS.has(normalizedTag(node)) ||
-      NON_BLOCKING_REGION_ROLES.has(normalizedRole(node))
-    ) {
-      return false;
-    }
+  if (isRootDocumentShell(node)) return false;
+  if (!looksLikeDialog(node)) {
     // Decorative negative-z-index backgrounds paint behind normal flow even when
     // Chromium's DOMSnapshot assigns their PaintLayer a higher scalar paintOrder.
     if (node.paintOrder < 0 || (node.zIndex !== undefined && node.zIndex < 0)) {
@@ -1817,25 +1816,6 @@ function isPositionedRegionCandidate(node: VomNode): boolean {
     }
   }
   return true;
-}
-
-/** True when a non-modal candidate lives inside a same-frame negative stacking context. */
-function isBehindNormalFlow(
-  node: VomNode,
-  parentMap: Map<number, number | null>,
-  nodesById: Map<number, VomNode>,
-): boolean {
-  if (node.modal === true) return false;
-  let cur: VomNode | undefined = node;
-  let guard = 0;
-  while (cur && cur.frameId === node.frameId && guard <= parentMap.size) {
-    if (cur.paintOrder < 0) return true;
-    if (cur.position !== "static" && cur.zIndex !== undefined && cur.zIndex < 0) return true;
-    const parentId: number | null = parentMap.get(cur.id) ?? null;
-    cur = parentId === null ? undefined : nodesById.get(parentId);
-    guard += 1;
-  }
-  return false;
 }
 
 function rectContains(rect: Rect, x: number, y: number): boolean {
@@ -2091,7 +2071,7 @@ function applyActiveRegionPolicy(
   const parentMap = buildParentMap(nodes);
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const candidates = rawCandidates
-    .filter((node) => !isBehindNormalFlow(node, parentMap, nodesById))
+    .filter((node) => !isBehindNormalFlow(node, nodesById))
     .map((node) => ({
       node,
       viewportCoverage: coverage(node.rect, scene.viewport),

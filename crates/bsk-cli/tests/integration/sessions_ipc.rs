@@ -575,8 +575,9 @@ async fn cli_incognito_start_refuses_an_old_daemon_before_dispatching_a_start() 
     assert!(msg.contains("incompatible") && msg.contains("2.0"), "{msg}");
     assert_eq!(*calls.lock().unwrap(), vec![Method::SystemStatus]);
 
-    // Optimistic `daemon.json` carrying `protocol_version: "1.9"`: CLI fails closed
-    // immediately from discovery metadata with zero IPC round-trips.
+    // Incompatible `daemon.json` carrying `protocol_version: "1.9"` must NOT be trusted
+    // blindly (stale leftover metadata after upgrading to 2.0): CLI falls through to a live
+    // `system.status` probe and still fails closed before dispatching `session.start`.
     calls.lock().unwrap().clear();
     let output = run_incognito_start(
         DaemonInfo::now(std::process::id(), sock.clone(), 0, "0.4.0").with_protocol_version("1.9"),
@@ -586,7 +587,7 @@ async fn cli_incognito_start_refuses_an_old_daemon_before_dispatching_a_start() 
     let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let msg = error["message"].as_str().unwrap();
     assert!(msg.contains("incompatible") && msg.contains("2.0"), "{msg}");
-    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(*calls.lock().unwrap(), vec![Method::SystemStatus]);
 
     server.abort();
     let _ = server.await;

@@ -59,6 +59,8 @@ export interface VomNode {
   paintOrder: number;
   /** Parsed integer CSS `z-index` when explicitly set (absent for `auto`). */
   zIndex?: number;
+  /** Outermost stacking-context `z-index` in the document when an ancestor stacking context overrides `zIndex`. */
+  rootZIndex?: number;
   position: string;
   pointerEvents: string;
   cursor?: string;

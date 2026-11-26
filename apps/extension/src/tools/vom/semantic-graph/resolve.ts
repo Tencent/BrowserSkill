@@ -304,6 +304,7 @@ interface ResolveIndexes {
   hasNativeDescendant: (nodeId: SemanticNodeId) => boolean;
   isOrInsideNative: (nodeId: SemanticNodeId) => boolean;
   inNegativeStackingContext: (nodeId: SemanticNodeId) => boolean;
+  rootStackingZIndex: (nodeId: SemanticNodeId) => number | undefined;
   selfOrEnclosingLabel: (nodeId: SemanticNodeId) => SemanticNodeId | undefined;
 }
 
@@ -584,6 +585,35 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     return value;
   };
 
+  const rootStackingZMemo = new Map<SemanticNodeId, number | undefined>();
+  const visitingRootStackingZ = new Set<SemanticNodeId>();
+  const rootStackingZIndex = (nodeId: SemanticNodeId): number | undefined => {
+    if (rootStackingZMemo.has(nodeId)) return rootStackingZMemo.get(nodeId);
+    if (visitingRootStackingZ.has(nodeId)) return undefined;
+    visitingRootStackingZ.add(nodeId);
+    const node = graph.nodes.get(nodeId);
+    let value: number | undefined;
+    if (node) {
+      if (node.domParentId) {
+        const parent = graph.nodes.get(node.domParentId);
+        if (parent?.frameId === node.frameId) {
+          value = rootStackingZIndex(node.domParentId);
+        }
+      }
+      if (
+        value === undefined &&
+        node.dom !== undefined &&
+        node.dom.position !== "static" &&
+        node.dom.zIndex !== undefined
+      ) {
+        value = node.dom.zIndex;
+      }
+    }
+    visitingRootStackingZ.delete(nodeId);
+    rootStackingZMemo.set(nodeId, value);
+    return value;
+  };
+
   const enclosingLabelMemo = new Map<SemanticNodeId, SemanticNodeId | undefined>();
   const visitingLabel = new Set<SemanticNodeId>();
   const selfOrEnclosingLabel = (nodeId: SemanticNodeId): SemanticNodeId | undefined => {
@@ -617,6 +647,7 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     hasNativeDescendant,
     isOrInsideNative,
     inNegativeStackingContext,
+    rootStackingZIndex,
     selfOrEnclosingLabel,
   };
 }
@@ -1144,11 +1175,14 @@ export function resolveSemanticGraph(
         : node.dom && node.dom.position !== "static" && indexes.inNegativeStackingContext(node.id)
           ? -1
           : node.dom?.zIndex;
+    const rootZIndex =
+      node.dom && node.dom.position !== "static" ? indexes.rootStackingZIndex(node.id) : undefined;
     const vom: ResolvedSemanticNode["vom"] = {
       tag,
       rect: node.dom?.rect ?? null,
       paintOrder: node.dom?.paintOrder ?? 0,
       ...(resolvedZIndex !== undefined ? { zIndex: resolvedZIndex } : {}),
+      ...(rootZIndex !== undefined && rootZIndex !== resolvedZIndex ? { rootZIndex } : {}),
       position: node.dom?.position || "static",
       pointerEvents: node.dom?.pointerEvents || "auto",
       ...(node.dom?.cursor ? { cursor: node.dom.cursor } : {}),
@@ -1172,10 +1206,13 @@ export function resolveSemanticGraph(
       ...(rowAnchor ? { rowAnchor } : {}),
       inputState: inputState(node, role, sourceValue, isSensitive, graph, indexes),
       sensitive: isSensitive,
-      // An available AX result is authoritative, including ignored/nonmodal nodes.
-      modal: node.ax
-        ? !axIgnored && axProps?.modal === "true"
-        : (attrs["aria-modal"] ?? "").toLowerCase() === "true",
+      // An available AX result is authoritative, including ignored/nonmodal nodes,
+      // except when CSS visibility:hidden/collapse or zero-size clipping suppresses the box.
+      modal:
+        !(node.dom?.rendered === false && node.dom.pointerEvents === "none") &&
+        (node.ax
+          ? !axIgnored && axProps?.modal === "true"
+          : (attrs["aria-modal"] ?? "").toLowerCase() === "true"),
       disabled:
         (!axIgnored && axProps?.disabled === "true") ||
         Object.prototype.hasOwnProperty.call(attrs, "disabled") ||

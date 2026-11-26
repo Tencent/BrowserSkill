@@ -694,7 +694,7 @@ async fn connect(daemon: &Daemon, control: &Arc<CallControl>) -> Result<Link, Cl
         return Err(CliError::from_rpc(RpcError {
             code: ErrorCode::Unsupported,
             message: format!(
-                "daemon protocol {protocol} is incompatible with MCP server (requires >= {}, current {}); update bsk and restart its daemon",
+                "daemon protocol {protocol} is incompatible with MCP server (requires >= {}, current {}); restart the daemon (`bsk daemon restart`) or update bsk so both match",
                 bsk_protocol::MIN_COMPATIBLE_PROTOCOL,
                 bsk_protocol::PROTOCOL_VERSION,
             ),

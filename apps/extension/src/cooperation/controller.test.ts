@@ -4308,4 +4308,81 @@ describe("tool.record_start cooperation guard", () => {
     });
     expect(f.native).not.toHaveBeenCalled();
   });
+
+  it("re-verifies strict observation evidence when the viewport changes without DOM mutations", async () => {
+    const sceneFor = (label: string): VomScene => ({
+      viewport: { width: 900, height: 700 },
+      rootFrameId: "root",
+      nodes: [
+        {
+          id: 1,
+          parentId: null,
+          frameId: "root",
+          tag: "body",
+          role: "RootWebArea",
+          rect: { x: 0, y: 0, w: 900, h: 700 },
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          id: 2,
+          parentId: 1,
+          frameId: "root",
+          backendNodeId: 20,
+          tag: "button",
+          role: "button",
+          name: label,
+          rect: { x: 20, y: 20, w: 120, h: 36 },
+          paintOrder: 1,
+          position: "static",
+          pointerEvents: "auto",
+          referenceable: true,
+        },
+      ],
+    });
+    vi.mocked(handleSnapshot).mockImplementationOnce(async (_sessions, _params, opts) => {
+      opts?.onScene?.(sceneFor("Desktop Publish"));
+      return { text: '@e1 button "Desktop Publish"', ref_count: 1, tab_id: 7, truncated: false };
+    });
+    vi.mocked(captureVomObservation).mockImplementationOnce(async (_cdp, _tabId, _url, opts) => {
+      opts?.onScene?.(sceneFor("Mobile Drawer Toggle"));
+      return { text: '@e1 button "Mobile Drawer Toggle"', refs: [], truncated: false } as never;
+    });
+
+    const f = await fixture({ sync: false });
+    f.change({ revision: 0, viewport: { width: 900, height: 700 } }, false);
+    const synced = await f.command("sync");
+    expect(synced.kind).toBe("baseline");
+
+    // Narrow viewport with zero DOM mutations (revision stays unchanged).
+    f.change({ revision: 0, viewport: { width: 500, height: 700 } }, true);
+
+    const invoke = vi.fn(async () => ({ ok: true }));
+    const res = await f.act(synced.context_id, invoke, "tool.press");
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "cooperation_sync_required", effect_state: "none" },
+    });
+    expect(captureVomObservation).toHaveBeenCalledTimes(1);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("prevents stepped viewport height changes from drifting past the tolerance across unchanged syncs", async () => {
+    const f = await fixture({ sync: false });
+    f.change({ revision: 0, viewport: { width: 1000, height: 800 } }, false);
+    const s1 = await f.command("sync");
+    expect(s1.kind).toBe("baseline");
+
+    // Shrink by 50px (within 60px tolerance): stays unchanged, but keeps 800px as viewportBaseline.
+    f.change({ revision: 0, viewport: { width: 1000, height: 750 } }, true);
+    const s2 = await f.command("sync");
+    expect(s2.kind).toBe("unchanged");
+
+    // Shrink another 50px (cumulative 100px > 60px from the last full capture): must force full re-capture.
+    f.change({ revision: 0, viewport: { width: 1000, height: 700 } }, true);
+    const s3 = await f.command("sync");
+    expect(s3.kind).toBe("baseline");
+    expect(s3.baseline_reason).toBe("structure_changed");
+  });
 });

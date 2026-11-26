@@ -62,6 +62,8 @@ export interface TextChange {
 export interface FrameState {
   document: string;
   url?: string;
+  /** Layout viewport dimensions in CSS pixels, used to detect responsive media-query shifts. */
+  viewport?: { width: number; height: number };
   /** Collector-local identity of the deep active element in this document. */
   focus?: string;
   /** True only for the ordinary document focus, without a specific recipient. */

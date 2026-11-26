@@ -29,19 +29,19 @@ export const REQUESTED_STYLES = [
   "width",
   "height",
   "z-index",
+  "transform",
+  "rotate",
+  "scale",
+  "perspective",
+  "contain",
 ] as const;
 export const VISUAL_STYLES = [
   ...REQUESTED_STYLES,
   "display",
-  "transform",
   "zoom",
   "clip-path",
   "mask-image",
-  "rotate",
-  "scale",
-  "perspective",
   "clip",
-  "contain",
   "content-visibility",
   "container-type",
   "overflow-clip-margin",
@@ -338,6 +338,7 @@ export async function decodeDocument(
     const shadowRootTypeIdx = shadowRootTypes.get(n);
     const shadowRootType =
       shadowRootTypeIdx !== undefined ? str(strings, shadowRootTypeIdx) || undefined : undefined;
+    const hiddenVisibility = styles?.visibility === "hidden" || styles?.visibility === "collapse";
 
     nodes.push({
       backendNodeId,
@@ -354,9 +355,11 @@ export async function decodeDocument(
       paintOrder: li === undefined ? 0 : (dl?.paintOrders?.[li] ?? 0),
       ...(zIndex !== undefined ? { zIndex } : {}),
       position: styles?.position || "static",
-      pointerEvents: styles?.["pointer-events"] || "auto",
+      // CSS visibility:hidden/collapse boxes never receive hit-testing; any
+      // visibility:visible descendant carries its own computed styles in DOMSnapshot.
+      pointerEvents: hiddenVisibility ? "none" : styles?.["pointer-events"] || "auto",
       cursor: styles?.cursor || "auto",
-      ...(clickableNodes.has(n) ? { clickable: true } : {}),
+      ...(!hiddenVisibility && clickableNodes.has(n) ? { clickable: true } : {}),
 
       textContent,
       ...(formValue !== undefined ? { formValue } : {}),
