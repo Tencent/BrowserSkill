@@ -12,11 +12,12 @@ use serde_json::{Value, json};
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use super::error::{CliError, Format};
-use super::{doctor, logs};
+use super::{atomic_output, doctor, logs};
 use crate::daemon::{start::is_daily_daemon_log_name, state::PROTOCOL_VERSION};
 
 const LOG_BYTES: usize = 4 * 1024 * 1024;
 const LOG_LINES: usize = 500;
+const OUTPUT_HINT: &str = "choose a new --output filename in an existing writable directory";
 
 #[derive(Debug, Subcommand)]
 pub enum DiagnosticsCmd {
@@ -30,7 +31,8 @@ pub enum DiagnosticsCmd {
 
 pub fn dispatch(cmd: DiagnosticsCmd, format: Format) -> Result<(), CliError> {
     let DiagnosticsCmd::Export { output } = cmd;
-    let bytes = export(&output)?;
+    atomic_output::preflight_destination_with_hint(&output, OUTPUT_HINT)?;
+    let bytes = export(&output).map_err(|err| CliError::file_validation(err, OUTPUT_HINT))?;
     match format {
         Format::Human => println!("Wrote {} ({bytes} bytes)", output.display()),
         Format::Json => println!(
@@ -42,13 +44,31 @@ pub fn dispatch(cmd: DiagnosticsCmd, format: Format) -> Result<(), CliError> {
 }
 
 fn export(output: &Path) -> Result<u64> {
+    // Reject even a dangling symlink before probing the daemon. The final
+    // no-clobber persist also protects against a concurrent writer.
+    match output.symlink_metadata() {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("output already exists: {}", output.display()),
+            )
+            .into());
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).with_context(|| format!("inspect output {}", output.display()));
+        }
+    }
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let mut temp =
+    let temp =
         tempfile::NamedTempFile::new_in(parent).context("create temporary diagnostics ZIP")?;
-    let mut zip = ZipWriter::new(temp.as_file_mut());
+    let mut bundle = Bundle {
+        zip: ZipWriter::new(temp),
+        redactor: redact::Redactor::default(),
+    };
     let (checks, status) = doctor::passive_snapshot();
     let mut notes = String::from(
         "BrowserSkill CLI and daemon diagnostics\nSession summaries and logs cover the whole daemon. Review before sharing.\n",
@@ -60,24 +80,16 @@ fn export(output: &Path) -> Result<u64> {
         "arch": std::env::consts::ARCH,
         "collected_at_epoch_secs": super::update::now_epoch_secs(),
     });
-    write_entry(&mut zip, "metadata.json", Entry::Json(metadata))?;
-    write_entry(
-        &mut zip,
-        "doctor.json",
-        Entry::Json(serde_json::to_value(checks)?),
-    )?;
+    bundle.write_entry("metadata.json", Entry::Json(metadata))?;
+    bundle.write_entry("doctor.json", Entry::Json(serde_json::to_value(checks)?))?;
     if status.is_none() {
         notes.push_str("status.json: live status and session summaries unavailable. See the daemon running check in doctor.json for the reason.\n");
     }
-    write_entry(
-        &mut zip,
-        "status.json",
-        Entry::Json(serde_json::to_value(status)?),
-    )?;
+    bundle.write_entry("status.json", Entry::Json(serde_json::to_value(status)?))?;
 
     match log_tail() {
         Ok(Some((raw, truncated))) => {
-            let shortened = write_entry(&mut zip, "daemon-log.txt", Entry::Log(&raw))?;
+            let shortened = bundle.write_entry("daemon-log.txt", Entry::Log(&raw))?;
             if truncated || shortened {
                 notes.push_str("daemon-log.txt: truncated to the latest complete lines within 500 lines and 4 MiB.\n");
             }
@@ -85,16 +97,13 @@ fn export(output: &Path) -> Result<u64> {
         Ok(None) => notes.push_str("daemon-log.txt unavailable: no daemon log file found.\n"),
         Err(err) => notes.push_str(&format!("daemon-log.txt unavailable: {err:#}\n")),
     }
-    write_entry(&mut zip, "README.txt", Entry::Text(&notes))?;
-    let file = zip.finish()?;
-    file.sync_all().context("sync diagnostics ZIP")?;
-    let bytes = file.metadata()?.len();
-    temp.persist_noclobber(output).with_context(|| {
-        format!(
-            "save diagnostics ZIP to {} (destination must not exist)",
-            output.display()
-        )
-    })?;
+    bundle.write_entry("README.txt", Entry::Text(&notes))?;
+    let temp = bundle.zip.finish()?;
+    temp.as_file().sync_all().context("sync diagnostics ZIP")?;
+    let bytes = temp.as_file().metadata()?.len();
+    temp.persist_noclobber(output)
+        .map_err(|err| err.error)
+        .with_context(|| format!("save diagnostics ZIP to {}", output.display()))?;
     Ok(bytes)
 }
 
@@ -104,30 +113,37 @@ enum Entry<'a> {
     Log(&'a str),
 }
 
-/// Redact before encoding or limiting the output. A partially retained log
-/// line could begin in the middle of a credential, so drop whole lines only.
-fn write_entry(zip: &mut ZipWriter<&mut File>, name: &str, entry: Entry<'_>) -> Result<bool> {
-    let mut truncated = false;
-    let content = match entry {
-        Entry::Json(mut value) => {
-            redact::json(&mut value);
-            serde_json::to_string_pretty(&value)?
-        }
-        Entry::Text(raw) => redact::text(raw),
-        Entry::Log(raw) => {
-            let mut clean = redact::log(raw);
-            if clean.len() > LOG_BYTES {
-                let boundary = clean.len() - LOG_BYTES;
-                let start = after_newline(clean.as_bytes(), boundary - 1);
-                clean.drain(..start);
-                truncated = true;
+struct Bundle {
+    zip: ZipWriter<tempfile::NamedTempFile>,
+    redactor: redact::Redactor,
+}
+
+impl Bundle {
+    /// Redact before encoding or limiting the output. A partially retained log
+    /// line could begin in the middle of a credential, so drop whole lines only.
+    fn write_entry(&mut self, name: &str, entry: Entry<'_>) -> Result<bool> {
+        let mut truncated = false;
+        let content = match entry {
+            Entry::Json(mut value) => {
+                self.redactor.json(&mut value);
+                serde_json::to_string_pretty(&value)?
             }
-            clean
-        }
-    };
-    zip.start_file(name, SimpleFileOptions::default())?;
-    zip.write_all(content.as_bytes())?;
-    Ok(truncated)
+            Entry::Text(raw) => self.redactor.text(raw),
+            Entry::Log(raw) => {
+                let mut clean = self.redactor.text(raw);
+                if clean.len() > LOG_BYTES {
+                    let boundary = clean.len() - LOG_BYTES;
+                    let start = after_newline(clean.as_bytes(), boundary - 1);
+                    clean.drain(..start);
+                    truncated = true;
+                }
+                clean
+            }
+        };
+        self.zip.start_file(name, SimpleFileOptions::default())?;
+        self.zip.write_all(content.as_bytes())?;
+        Ok(truncated)
+    }
 }
 
 /// Read one bounded snapshot of the newest regular daemon log. An appended

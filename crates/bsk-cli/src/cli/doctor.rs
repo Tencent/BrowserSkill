@@ -221,6 +221,16 @@ pub(super) fn passive_snapshot() -> (Vec<CheckResult>, Option<Box<StatusResult>>
             "bsk home writable",
             format!("{} exists; write access was not tested", path.display()),
         ),
+        Err(err)
+            if err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            CheckResult::na(
+                "bsk home writable",
+                format!("bsk home is missing; write access was not tested ({err:#})"),
+            )
+        }
         Err(err) => CheckResult::fail(
             "bsk home writable",
             format!("bsk home unavailable: {err:#}"),
@@ -257,12 +267,11 @@ fn collect_checks(
         check_daemon_running(state),
         check_daemon_management(state),
         check_version_compatible(state.status()),
-        match update_record {
-            Ok(record) => check_auto_update(state.status(), state.host_managed(), record.as_ref()),
-            Err(err) => {
-                CheckResult::na("auto-update", format!("update state unavailable: {err:#}"))
-            }
-        },
+        check_auto_update(
+            state.status(),
+            state.host_managed(),
+            update_record.as_ref().map(Option::as_ref),
+        ),
         check_extension_connected(state.status()),
         check_local_auth(trust_local),
         check_browsers_protocol_compatible(state.status()),
@@ -275,7 +284,7 @@ const UPDATE_STALLED_AFTER_SECS: u64 = 10 * 60;
 fn check_auto_update(
     status: Option<&StatusResult>,
     host_managed: bool,
-    record: Option<&UpdateRecord>,
+    record: Result<Option<&UpdateRecord>, &anyhow::Error>,
 ) -> CheckResult {
     let leftovers = std::env::current_exe()
         .map(|exe| update::update_leftovers(&exe))
@@ -293,7 +302,7 @@ fn check_auto_update(
 /// it from which versions exist. `daemon` is the running daemon's version and
 /// whether its terminal or supervisor owns it.
 fn auto_update_check(
-    record: Option<&UpdateRecord>,
+    record: Result<Option<&UpdateRecord>, &anyhow::Error>,
     daemon: Option<(&str, bool)>,
     installed_version: &str,
     leftovers: &[update::Leftover],
@@ -316,8 +325,11 @@ fn auto_update_check(
         });
     }
     match record {
-        None => details.push("no update attempt recorded".to_string()),
-        Some(record) => describe_update(record, installed_version, now, &mut details, &mut hints),
+        Ok(None) => details.push("no update attempt recorded".to_string()),
+        Ok(Some(record)) => {
+            describe_update(record, installed_version, now, &mut details, &mut hints)
+        }
+        Err(err) => details.push(format!("update state unavailable: {err:#}")),
     }
     if !leftovers.is_empty() {
         let names = leftovers
@@ -330,10 +342,12 @@ fn auto_update_check(
         ));
     }
     let detail = details.join("; ");
-    if hints.is_empty() {
-        CheckResult::ok(name, detail)
-    } else {
+    if !hints.is_empty() {
         CheckResult::warn(name, detail, hints.join("; "))
+    } else if record.is_err() {
+        CheckResult::na(name, detail)
+    } else {
+        CheckResult::ok(name, detail)
     }
 }
 
@@ -926,7 +940,7 @@ mod m2_tests {
     }
 
     fn update_check(record: Option<&UpdateRecord>, daemon: Option<&str>) -> CheckResult {
-        auto_update_check(record, daemon.map(|v| (v, false)), "0.3.1", &[], 1_120)
+        auto_update_check(Ok(record), daemon.map(|v| (v, false)), "0.3.1", &[], 1_120)
     }
 
     #[test]
@@ -952,7 +966,7 @@ mod m2_tests {
         assert!(!has_failures(&[update_check(None, Some("0.3.0"))]));
 
         // A daemon its terminal or supervisor owns is restarted there.
-        let host = auto_update_check(None, Some(("0.3.0", true)), "0.3.1", &[], 0);
+        let host = auto_update_check(Ok(None), Some(("0.3.0", true)), "0.3.1", &[], 0);
         let hint = host.hint.unwrap();
         assert!(hint.contains("its terminal or supervisor"), "{hint}");
         assert!(!hint.contains("bsk daemon restart"), "{hint}");
@@ -989,10 +1003,10 @@ mod m2_tests {
 
         // Nothing is left to do once that version is installed.
         let superseded = auto_update_check(
-            Some(&UpdateRecord {
+            Ok(Some(&UpdateRecord {
                 recovery: Some(Recovery::Unchanged),
                 ..failed.clone()
-            }),
+            })),
             Some(("0.4.0", false)),
             "0.4.0",
             &[],
@@ -1005,12 +1019,12 @@ mod m2_tests {
     fn auto_update_check_flags_an_interrupted_attempt() {
         let mut interrupted = attempt(UpdateResult::InProgress);
         interrupted.stage = Some(UpdateStage::Install);
-        let running = auto_update_check(Some(&interrupted), None, "0.3.1", &[], 1_060);
+        let running = auto_update_check(Ok(Some(&interrupted)), None, "0.3.1", &[], 1_060);
         assert_eq!(running.status, CheckStatus::Ok);
         assert!(running.detail.contains("in progress while installing"));
 
         let stalled = auto_update_check(
-            Some(&interrupted),
+            Ok(Some(&interrupted)),
             None,
             "0.3.1",
             &[],
@@ -1062,7 +1076,7 @@ mod m2_tests {
             owner: Some(1),
             expired: true,
         }];
-        let check = auto_update_check(None, None, "0.3.1", &leftovers, 0);
+        let check = auto_update_check(Ok(None), None, "0.3.1", &leftovers, 0);
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.detail.contains("/bin/.bsk.old-1-1"));
     }

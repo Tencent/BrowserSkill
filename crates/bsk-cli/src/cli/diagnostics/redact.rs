@@ -1,165 +1,217 @@
-//! Sanitize JSON before serialization and free text before it enters the ZIP.
+//! Sanitize JSON and free text at the ZIP boundary.
 
-use std::sync::LazyLock;
+use std::{collections::HashMap, sync::LazyLock};
 
 use regex::Regex;
 use serde_json::Value;
 
 const MASK: &str = "[redacted]";
-// Keep these names consistent with apps/extension/src/debug/redact.ts.
-// Listing token names individually preserves non-secret pagination cursors.
-const HEADER: &str = r"(?:proxy[-_]?)?authorization|(?:set[-_]?)?cookie";
-const FIELD: &str = concat!(
-    r"(?:(?:new|old|current|confirm|db)[-_]?)?(?:password|passwd|pwd)(?:[-_]?confirmation)?|",
-    r"secret|client[-_]?secret|credentials?|(?:(?:access|refresh|next|id|auth|csrf|xsrf)[-_]?)?token|",
-    r"api[-_]?key|session[-_]?(?:id|key)|private[-_]token|x[-_](?:api[-_]key|(?:auth|access|csrf|xsrf|vault)[-_]token|csrftoken)|",
-    r"x[-_](?:goog[-_]api[-_]key|amz[-_]security[-_]token|shopify[-_]access[-_]token|hasura[-_]admin[-_]secret)|ocp[-_]apim[-_]subscription[-_]key"
-);
-static SECRET_NAME: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(&format!(r"(?i)^(?:{HEADER}|{FIELD})$")).unwrap());
-static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(
-        r#"(?i)\b(?:(?<header>{HEADER})|{FIELD})\]?(?:\\?["'])?[ \t]*(?<separator>[:=])[ \t]*"#
-    ))
-    .unwrap()
-});
-static AUTH_SCHEME: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(Bearer|Basic)[ \t]+[a-z0-9._~+/=-]+").unwrap());
-static URL_USERINFO: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^/?#@\s]+@").unwrap());
-// Local and remote pairing links carry a credential in the WebSocket URL fragment.
-static PAIRING_LINK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?i)\b(wss?://[^#\s"'<>]*)#[^\s"'<>]+"#).unwrap());
 
-fn secret_name(key: &str) -> bool {
-    key.split(['.', '[', ']'])
-        .any(|part| SECRET_NAME.is_match(part))
+// A credential header includes all of its parameters and folded lines. In
+// free text, other credential fields can be followed by diagnostic context.
+static HEADER_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?ix)^(?:(?<full>(?:proxy[-_]?)?authorization|(?:set[-_]?)?cookie)|",
+        r"api[-_]?key|private[-_]token|x[-_](?:api[-_]key|(?:auth|access|csrf|xsrf|vault)[-_]token|csrftoken)|",
+        r"x[-_](?:goog[-_]api[-_]key|amz[-_]security[-_]token|shopify[-_]access[-_]token|hasura[-_]admin[-_]secret)|ocp[-_]apim[-_]subscription[-_]key)$"
+    )).unwrap()
+});
+static CAMEL_BOUNDARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([a-z0-9])([A-Z])").unwrap());
+static SECRET_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?ix)(?:^|[-_])(?:",
+        r"(?:(?:new|old|current|confirm|db)[-_]?)?(?:password|passwd|pwd)(?:confirmation)?(?:[-_]|$)|",
+        r"(?:(?:client[-_]?)?secret|credentials?|(?:(?:access|refresh|next|id|auth|csrf|xsrf)[-_]?)?token|api[-_]?key|session[-_]?(?:id|key))$)"
+    )).unwrap()
+});
+// next_token is a BrowserSkill remote credential. Only explicit page cursor
+// names from the extension's redaction policy are exempt.
+static PAGE_CURSOR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(?:(?:next|x)[-_]?)?page[-_]?token$").unwrap());
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Header,
+    Credential,
+    Session,
 }
 
-pub(super) fn json(value: &mut Value) {
-    match value {
-        Value::Object(fields) => {
-            // Also recognize the name/value representation of HTTP headers.
-            let secret_header = fields
-                .get("name")
-                .and_then(Value::as_str)
-                .is_some_and(secret_name);
-            for (key, mut child) in std::mem::take(fields) {
-                if secret_name(&key) || (secret_header && key == "value") {
-                    child = Value::String(MASK.into());
-                } else {
-                    json(&mut child);
-                }
-                fields.insert(plain(&key), child);
-            }
-        }
-        Value::Array(items) => {
-            if let [name, value] = items.as_mut_slice()
-                && name.as_str().is_some_and(secret_name)
-            {
-                *value = Value::String(MASK.into());
+fn field(name: &str, colon: bool) -> Option<Field> {
+    if ["session", "session_id", "sessionId", "session-id"]
+        .iter()
+        .any(|s| name.eq_ignore_ascii_case(s))
+    {
+        return Some(Field::Session);
+    }
+    for part in name.split(['.', '[', ']']) {
+        if let Some(header) = HEADER_NAME.captures(part) {
+            return Some(if colon || header.name("full").is_some() {
+                Field::Header
             } else {
-                items.iter_mut().for_each(json);
+                Field::Credential
+            });
+        }
+        let normalized = CAMEL_BOUNDARY.replace_all(part, "${1}_${2}");
+        if !PAGE_CURSOR.is_match(&normalized) && SECRET_NAME.is_match(&normalized) {
+            return Some(Field::Credential);
+        }
+    }
+    None
+}
+
+// Tokenize the complete ASCII key before classifying it. This works for
+// environment prefixes and for headers that follow non-Latin prose.
+static TEXT_ITEM: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?P<key>[a-zA-Z0-9_][a-zA-Z0-9_.-]*(?:\[[a-zA-Z0-9_.-]+\])*)(?:\\?["'])?[ \t]*(?<separator>[:=])[ \t]*|[\[{]"#).unwrap()
+});
+static AUTH_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(?:Bearer|Basic)[ \t]+").unwrap());
+static AUTH_SCHEME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?-u:\b)(Bearer|Basic)[ \t]+[a-z0-9._~+/=-]+").unwrap());
+static URL_USERINFO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)([a-z][a-z0-9+.-]*://)[^/?#@\s"'<>]+@"#).unwrap());
+static PAIRING_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)(?-u:\b)(wss?://[^#\s"'<>]*)#[^\s"'<>]+"#).unwrap());
+
+/// Aliases are allocated afresh for each bundle. Never persist the lookup.
+#[derive(Default)]
+pub(super) struct Redactor {
+    sessions: HashMap<String, usize>,
+}
+
+impl Redactor {
+    fn session(&mut self, id: &str) -> String {
+        if id.is_empty() {
+            return String::new();
+        }
+        let next = self.sessions.len() + 1;
+        format!("session-{}", self.sessions.entry(id.into()).or_insert(next))
+    }
+
+    pub(super) fn json(&mut self, value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                let credential_header = fields.iter().any(|(key, value)| {
+                    (key.eq_ignore_ascii_case("name") || key.eq_ignore_ascii_case("key"))
+                        && value
+                            .as_str()
+                            .is_some_and(|name| field(name, true).is_some())
+                });
+                for (key, mut child) in std::mem::take(fields) {
+                    match (field(&key, false), &mut child) {
+                        (Some(Field::Session), Value::String(id)) => *id = self.session(id),
+                        (Some(Field::Session), Value::Null) => {}
+                        (Some(_), child) => *child = Value::String(MASK.into()),
+                        (None, child) if credential_header && key.eq_ignore_ascii_case("value") => {
+                            *child = Value::String(MASK.into())
+                        }
+                        (None, child) => self.json(child),
+                    }
+                    fields.insert(self.text(&key), child);
+                }
+            }
+            Value::Array(items) => {
+                // Header lists may contain pairs or a flat sequence of names and values.
+                for [name, value] in items.as_chunks_mut::<2>().0 {
+                    if name
+                        .as_str()
+                        .is_some_and(|name| field(name, true).is_some())
+                    {
+                        *value = Value::String(MASK.into());
+                    }
+                }
+                items.iter_mut().for_each(|child| self.json(child));
+            }
+            Value::String(s) => *s = self.text(s),
+            _ => {}
+        }
+    }
+
+    /// An embedded JSON value and an assignment each own their complete
+    /// value. In particular, JSON in a folded Cookie header is never copied
+    /// independently, and a header object inside a log message stays structured.
+    pub(super) fn text(&mut self, mut input: &str) -> String {
+        let mut output = String::new();
+        let mut plain = String::new();
+        while let Some(item) = TEXT_ITEM.captures(input) {
+            let matched = item.get(0).unwrap();
+            plain.push_str(&input[..matched.start()]);
+            let rest = &input[matched.end()..];
+            if let Some(key) = item.name("key") {
+                plain.push_str(matched.as_str());
+                input = rest;
+                if let Some(kind) = field(key.as_str(), &item["separator"] == ":") {
+                    let end = if kind == Field::Header {
+                        header_len(rest)
+                    } else {
+                        value_len(rest)
+                    };
+                    if kind == Field::Session {
+                        plain.push_str(&self.session(rest[..end].trim_matches(['"', '\''])));
+                    } else {
+                        plain.push_str(MASK);
+                    }
+                    input = &rest[end..];
+                }
+                continue;
+            }
+            let candidate = &input[matched.start()..];
+            if !looks_like_json(candidate) {
+                plain.push_str(matched.as_str());
+                input = rest;
+                continue;
+            }
+            flush_plain(&mut plain, &mut output);
+            let mut stream = serde_json::Deserializer::from_str(candidate).into_iter::<Value>();
+            match stream.next() {
+                Some(Ok(mut value)) => {
+                    self.json(&mut value);
+                    output.push_str(&value.to_string());
+                    input = &candidate[stream.byte_offset()..];
+                }
+                Some(Err(err)) => {
+                    output.push_str(MASK);
+                    input = if err.is_eof() {
+                        ""
+                    } else {
+                        &candidate[header_len(candidate)..]
+                    };
+                }
+                None => break,
             }
         }
-        Value::String(s) => *s = text(s),
-        _ => {}
+        plain.push_str(input);
+        flush_plain(&mut plain, &mut output);
+        output
     }
 }
 
 fn looks_like_json(input: &str) -> bool {
-    let input = input.trim_start();
-    let Some(array) = input.strip_prefix('[') else {
-        return input.starts_with('{');
-    };
-    let first = array.trim_start();
-    // A plain log prefix such as [INFO] or [2026-09-24] is not a JSON array.
-    first.is_empty()
-        || first.starts_with(['{', '[', '"', ']'])
-        || first.split_once([',', ']']).is_some_and(|(item, _)| {
-            let item = item.trim();
-            matches!(item, "true" | "false" | "null") || item.parse::<serde_json::Number>().is_ok()
-        })
+    let body = input[1..].trim_start();
+    if input.starts_with('{') {
+        return body.is_empty() || body.starts_with(['"', '}']);
+    }
+    if body.is_empty() || body.starts_with(['{', '[', '"', ']']) {
+        return true;
+    }
+    // Let [INFO] and [2026-09-24] through as ordinary log prefixes.
+    let end = body
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '.')))
+        .unwrap_or(body.len());
+    let item = &body[..end];
+    body[end..].trim_start().starts_with([',', ']'])
+        && (matches!(item, "true" | "false" | "null") || item.parse::<serde_json::Number>().is_ok())
 }
 
-pub(super) fn text(input: &str) -> String {
-    if looks_like_json(input) {
-        return match serde_json::from_str(input) {
-            Ok(mut value) => {
-                json(&mut value);
-                value.to_string()
-            }
-            Err(_) => MASK.into(),
-        };
+fn flush_plain(plain: &mut String, output: &mut String) {
+    if plain.is_empty() {
+        return;
     }
-    plain(input)
-}
-
-/// Daemon tracing emits JSON records. Parse each entire value, including
-/// embedded newlines. Keep plaintext together for folded HTTP headers.
-pub(super) fn log(input: &str) -> String {
-    let mut output = String::new();
-    let mut plain_start = 0;
-    let mut start = 0;
-    while start < input.len() {
-        let mut end = super::after_newline(input.as_bytes(), start);
-        let line = &input[start..end];
-        if !looks_like_json(line) || (start > plain_start && line.starts_with([' ', '\t'])) {
-            start = end;
-            continue;
-        }
-        output.push_str(&plain(&input[plain_start..start]));
-        let mut records = serde_json::Deserializer::from_str(&input[start..]).into_iter::<Value>();
-        match records.next() {
-            Some(Ok(mut value)) => {
-                let value_end = start + records.byte_offset();
-                end = super::after_newline(input.as_bytes(), value_end);
-                if input[value_end..end].trim().is_empty() {
-                    json(&mut value);
-                    output.push_str(&value.to_string());
-                } else {
-                    output.push_str(MASK);
-                }
-            }
-            Some(Err(error)) if error.is_eof() => {
-                output.push_str(MASK);
-                end = input.len();
-            }
-            _ => output.push_str(MASK),
-        }
-        if input[..end].ends_with('\n') {
-            output.push('\n');
-        }
-        start = end;
-        plain_start = end;
-    }
-    output.push_str(&plain(&input[plain_start..]));
-    output
-}
-
-fn plain(input: &str) -> String {
-    let mut clean = String::new();
-    let mut remaining = input;
-    while let Some(found) = ASSIGNMENT.captures(remaining) {
-        let start = found.get(0).unwrap().end();
-        clean.push_str(&remaining[..start]);
-        clean.push_str(MASK);
-        let value = &remaining[start..];
-        let len = if found.name("header").is_some() || &found["separator"] == ":" {
-            // Cookies and authorization schemes can contain spaces, commas,
-            // semicolons and quoted parameters. Consume the entire header.
-            header_len(value)
-        } else {
-            value_len(value)
-        };
-        remaining = &value[len..];
-    }
-    clean.push_str(remaining);
-    let clean = AUTH_SCHEME.replace_all(&clean, "$1 [redacted]");
+    let clean = AUTH_SCHEME.replace_all(plain, "$1 [redacted]");
     let clean = URL_USERINFO.replace_all(&clean, "${1}[redacted]@");
-    PAIRING_LINK
-        .replace_all(&clean, "${1}#[redacted]")
-        .into_owned()
+    output.push_str(&PAIRING_LINK.replace_all(&clean, "${1}#[redacted]"));
+    plain.clear();
 }
 
 fn header_len(value: &str) -> usize {
@@ -172,25 +224,36 @@ fn header_len(value: &str) -> usize {
 }
 
 fn value_len(value: &str) -> usize {
-    let mut chars = value.char_indices();
-    match chars.next() {
+    // A credential assignment can include both an authentication scheme and
+    // its token. Consume them together before looking for the next field.
+    let prefix = AUTH_PREFIX.find(value).map_or(0, |m| m.end());
+    let body = &value[prefix..];
+    let mut chars = body.char_indices();
+    let len = match chars.next() {
         Some((_, quote @ ('"' | '\''))) => {
             while let Some((offset, ch)) = chars.next() {
                 if ch == '\\' {
                     chars.next();
                 } else if ch == quote {
-                    return offset + ch.len_utf8();
+                    return prefix + offset + ch.len_utf8();
                 }
             }
-            value.len()
+            body.len()
         }
-        // A compound value or an extra layer of quoting in unstructured
-        // text has no reliable field delimiter. Omit the rest of the line.
-        Some((_, '{' | '[' | '\\')) => header_len(value),
-        _ => value
+        Some((_, '{' | '[')) => {
+            let mut stream =
+                serde_json::Deserializer::from_str(body).into_iter::<serde::de::IgnoredAny>();
+            match stream.next() {
+                Some(Ok(_)) => stream.byte_offset(),
+                _ => body.len(),
+            }
+        }
+        Some((_, '\\')) => header_len(body),
+        _ => body
             .find(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '&' | '}' | ']'))
-            .unwrap_or(value.len()),
-    }
+            .unwrap_or(body.len()),
+    };
+    prefix + len
 }
 
 #[cfg(test)]
@@ -229,6 +292,23 @@ mod tests {
                 "no token supplied; status=unhealthy",
             ),
             (
+                "refresh token: expired; retrying in 5s",
+                "refresh token: [redacted]; retrying in 5s",
+            ),
+            ("[0] browser connected", "[0] browser connected"),
+            (
+                "user[0][newPassword]=DEMO_PW&nextPageToken=2",
+                "user[0][newPassword]=[redacted]&nextPageToken=2",
+            ),
+            (
+                "token={\n\"key\": \"DEMO_TOKEN\"\n}\nstatus=healthy",
+                "token=[redacted]\nstatus=healthy",
+            ),
+            (
+                r#"headers: {"name":"Cookie","value":"DEMO"#,
+                "headers: [redacted]",
+            ),
+            (
                 "https://user:DEMO_SECRET@host/?api_key=DEMO_B&pageToken=2",
                 "https://[redacted]@host/?api_key=[redacted]&pageToken=2",
             ),
@@ -245,7 +325,7 @@ mod tests {
                 "pair wss://remote.example/bsk#[redacted]",
             ),
         ] {
-            assert_eq!(text(input), expected, "{input}");
+            assert_eq!(Redactor::default().text(input), expected, "{input}");
         }
     }
 
@@ -253,16 +333,18 @@ mod tests {
     fn json_masks_nested_credentials_and_sanitizes_dynamic_keys_and_strings() {
         let mut value = json!({
             "headers": [{"name": "Set-Cookie", "value": "k=DEMO_A; other=DEMO_B"}],
+            "rawHeaders": ["Accept", "text/plain", "Cookie", "k=DEMO_COOKIE"],
             "credentials": [{"opaque": 42}],
             "error": r#"{"nested":[{"X-Goog-Api-Key":"DEMO_C"}],"error":"token='DEMO_D' retry"}"#,
             "token=DEMO_E": "ok",
             "pageToken": "keep"
         });
-        json(&mut value);
+        Redactor::default().json(&mut value);
         assert_eq!(
             value,
             json!({
                 "headers": [{"name":"Set-Cookie","value":MASK}],
+                "rawHeaders": ["Accept", "text/plain", "Cookie", MASK],
                 "credentials": MASK,
                 "error": r#"{"error":"token=[redacted] retry","nested":[{"X-Goog-Api-Key":"[redacted]"}]}"#,
                 "token=[redacted]": "ok",
@@ -283,7 +365,7 @@ mod tests {
             "[2026-09-24] daemon ready\n",
             "{\"credentials\": [\"DEMO_E\""
         );
-        let clean = log(raw);
+        let clean = Redactor::default().text(raw);
         assert_eq!(
             clean,
             "Cookie: [redacted]\r\nready\n{\"headers\":[[\"Authorization\",\"[redacted]\"]],\"ok\":true}\n{\"nested\":{\"password\":\"[redacted]\"}}\n[1,{\"credentials\":\"[redacted]\"}]\n[2026-09-24] daemon ready\n[redacted]"

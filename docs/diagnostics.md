@@ -17,7 +17,7 @@ file. Add `--json` to receive the output path and size in bytes.
 | File | What it contains |
 | --- | --- |
 | `metadata.json` | CLI and protocol versions, operating system, architecture and collection time in Unix seconds. |
-| `doctor.json` | Health checks and repair hints for the state observed during export. The home write test and managed skill synchronization are skipped. |
+| `doctor.json` | Health checks, unavailable sources and repair hints. A missing home is reported as untested. A damaged update record is reported alongside any daemon/CLI version mismatch. |
 | `status.json` | One snapshot from the existing daemon, including its version, connected browsers and daemon-wide session summaries. If the daemon is missing or its IPC endpoint fails, this file contains `null`. The **daemon running** check in `doctor.json` gives the reason. |
 | `daemon-log.txt` | Up to 500 trailing lines from the latest daemon log, limited to 4 MiB after redaction. Older lines and any partial leading line are dropped. |
 | `README.txt` | Availability and truncation notes. If the log is missing or unreadable, the note explains why the log entry was omitted. |
@@ -31,6 +31,8 @@ permissions or update installed skills.
 
 The ZIP stays on disk. Export does not upload anything. Session summaries and
 logs cover the **whole daemon** and can include activity from other sessions.
+Session ID fields use the same anonymous label in the status snapshot and
+daemon log so you can follow a session within this ZIP.
 JSON credential fields are masked recursively. Free text is checked for common
 credential assignments, authorization schemes, URL credentials and BrowserSkill
 pairing links. Cookie and Authorization header values are masked in full.
