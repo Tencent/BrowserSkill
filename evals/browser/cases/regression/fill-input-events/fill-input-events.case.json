@@ -1,0 +1,84 @@
+{
+  "$schema": "../../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "fill-input-events",
+  "title": "Fill notifies each final value once",
+  "suite": "regression",
+  "tags": ["badcase", "regression", "fill", "events"],
+  "source": {
+    "type": "user-badcase",
+    "reference": "#624"
+  },
+  "fixture": {
+    "startPath": "/cases/fill-input-events"
+  },
+  "prompts": {
+    "en": "Open {url}. Fill the Event field with \"Hello\" without clearing first, then click Check events. Confirm the page reports FILL-EVENTS-OK, report FILL-EVENTS-OK, and close the browser session.",
+    "zh-CN": "打开 {url}。不要先清空，把 Event field 填为 \"Hello\"，然后点击 Check events。确认页面显示 FILL-EVENTS-OK，报告 FILL-EVENTS-OK，最后关闭浏览器会话。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "interact.fill",
+    "interact.click",
+    "inspect.observe"
+  ],
+  "assertions": {
+    "site": [
+      {
+        "label": "fill notified the page once with the final value",
+        "type": "fill.checked",
+        "where": {
+          "data.inputCount": 1,
+          "data.inputValues": "Hello",
+          "data.finalValue": "Hello",
+          "data.ok": true
+        },
+        "minCount": 1
+      }
+    ],
+    "response": [
+      {
+        "label": "reported regression marker",
+        "includes": "FILL-EVENTS-OK"
+      }
+    ],
+    "adapter": [
+      {
+        "label": "browser session was closed",
+        "key": "sessionStopped"
+      }
+    ]
+  },
+  "smoke": {
+    "steps": [
+      {
+        "action": "navigate"
+      },
+      {
+        "action": "sync",
+        "saveAs": "control"
+      },
+      {
+        "action": "fill",
+        "selector": "#field",
+        "contextId": "{control.context_id}",
+        "value": "Hello",
+        "noClear": true
+      },
+      {
+        "action": "click",
+        "selector": "#check",
+        "contextId": "{control.context_id}"
+      },
+      {
+        "action": "wait-site-event",
+        "type": "fill.checked"
+      },
+      {
+        "action": "observe"
+      }
+    ]
+  }
+}
