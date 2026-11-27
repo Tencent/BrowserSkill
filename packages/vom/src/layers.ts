@@ -35,8 +35,11 @@ export function spansViewport(rect: Rect | null, vp: Viewport): boolean {
 }
 
 function isBlockingCandidate(node: VomNode): boolean {
-  if (node.pointerEvents === "none") return false;
-  return POSITIONED.has(node.position);
+  return node.modal === true || (node.pointerEvents !== "none" && POSITIONED.has(node.position));
+}
+
+export function usesModalSubtree(node: VomNode): boolean {
+  return node.modal === true && !POSITIONED.has(node.position);
 }
 
 /** Naming only: dialog roles/tags do not determine whether a layer blocks. */
@@ -87,9 +90,14 @@ export function detectBlockingLayer(
 
   const threshold = blocker.node.paintOrder;
   const members = new Set<number>();
-  for (const node of nodes) {
-    if (node.frameId === blocker.node.frameId && node.paintOrder >= threshold) {
-      members.add(node.id);
+  if (usesModalSubtree(blocker.node)) {
+    // Static and relative modals can share a paint order with the background.
+    members.add(blocker.node.id);
+  } else {
+    for (const node of nodes) {
+      if (node.frameId === blocker.node.frameId && node.paintOrder >= threshold) {
+        members.add(node.id);
+      }
     }
   }
 
