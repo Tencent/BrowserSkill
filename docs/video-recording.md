@@ -45,7 +45,9 @@ There is no default output directory. `stop --out` also exports; existing files
 require `--overwrite`. CLI exports write on the CLI machine, while Save As writes
 on the browser machine. Start supports a stable `--request-id` for lost-response
 retries and `--max-duration` as an alias for `--duration`. Stop is idempotent after
-automatic stop. Omitting an artifact selector requires exactly one match. `list`
+automatic stop. Omitting an artifact selector requires exactly one match;
+`--session <task>` narrows `status`, `stop`, `save` and `discard` to the recordings
+that session started, and still works after the session has ended. `list`
 discovers artifacts started from either UI.
 
 Defaults: 60 seconds, standard quality (longest edge ≤1280, target 15 fps,

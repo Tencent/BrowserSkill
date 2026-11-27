@@ -17,7 +17,8 @@ bsk video stop --recording <recording_id> --json
 bsk video save --recording <recording_id> --out <explicit-path.mp4> --json
 ```
 
-Retain `recording_id` from start. Choose a task-created or borrowed tab. Omitting
+Retain `recording_id` from start; `--session <session_id>` also selects the
+recording that session started. Choose a task-created or borrowed tab. Omitting
 `--tab-id` resolves the task's active tab once; later tab switches do not change
 the capture. Navigation, reload and history navigation within that tab continue
 recording. Default limit: 60 seconds; accepted range: 1 second to 10 minutes.
