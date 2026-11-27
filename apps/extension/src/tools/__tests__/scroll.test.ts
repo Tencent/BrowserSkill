@@ -148,6 +148,24 @@ async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
 afterEach(() => vi.restoreAllMocks());
 
 describe("handleScrollTo", () => {
+  it("keeps scroll-to fail-closed when the renderer visibility observer times out", async () => {
+    const f = await fixture("oopif");
+    f.hooks.reply = (call) => {
+      if (
+        call.method === "Runtime.callFunctionOn" &&
+        String(call.params?.functionDeclaration).includes("IntersectionObserver")
+      ) {
+        return { exceptionDetails: { text: "Error: scroll visibility measurement timed out" } };
+      }
+      return undefined;
+    };
+
+    expect(await f.run({ ref: "@e3" })).toMatchObject({
+      code: "cdp_failed",
+      message: "scroll visibility measurement timed out",
+    });
+  });
+
   it("scrolls a ref and returns renderer-clipped bounds", async () => {
     const f = await fixture();
     expect(await f.run()).toMatchObject({

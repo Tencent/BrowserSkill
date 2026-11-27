@@ -60,8 +60,8 @@ test("repository validation links every case to a fixture and valid workflow evi
   assert.deepEqual(validateRepositoryCases(cases, fixtureRegistry), []);
   const summary = repositorySummary(cases, fixtureRegistry);
   assert.equal(summary.cases, 12);
-  assert.equal(summary.fixtureModules, 13);
-  assert.equal(summary.fixtureRoutes, 21);
+  assert.equal(summary.fixtureModules, 14);
+  assert.equal(summary.fixtureRoutes, 23);
 });
 
 test("manifest validation rejects unknown operations and incomplete workflow steps", () => {
