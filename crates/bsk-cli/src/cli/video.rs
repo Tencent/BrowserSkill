@@ -61,6 +61,9 @@ pub struct Selector {
     /// Omit only when exactly one recording matches.
     #[arg(long)]
     pub recording: Option<String>,
+    /// Only consider recordings started by this session.
+    #[arg(long)]
+    pub session: Option<String>,
     /// Browser instance ID or label; required when connected browsers are ambiguous.
     #[arg(long)]
     pub browser: Option<String>,
@@ -247,25 +250,22 @@ fn resolve(
             if cached.grant.recording.recording_id != *id {
                 return Err(anyhow!("Video cache identity mismatch").into());
             }
-            if cached.grant.recording.expires_at > now_ms() {
+            if cached.grant.recording.expires_at > now_ms()
+                && selects(&selector, &cached.grant.recording)
+            {
                 return Ok(cached);
             }
         }
     }
-    let list = listing(rpc, selector.browser)?;
+    let list = listing(rpc, selector.browser.clone())?;
     let mut matches: Vec<_> = list
         .recordings
         .into_iter()
-        .filter(|grant| {
-            selector
-                .recording
-                .as_ref()
-                .is_none_or(|id| *id == grant.recording.recording_id)
-        })
+        .filter(|grant| selects(&selector, &grant.recording))
         .collect();
     if matches.len() != 1 {
         return Err(anyhow!(
-            "Choose one recording with --recording ({} matches); use bsk video list",
+            "Choose one recording with --recording or --session ({} matches); use bsk video list",
             matches.len()
         )
         .into());
@@ -274,6 +274,19 @@ fn resolve(
         browser: list.browser,
         grant: matches.remove(0),
     })
+}
+
+/// A recording keeps the session that started it, so it stays selectable by
+/// that session after the session itself has ended.
+fn selects(selector: &Selector, recording: &VideoRecording) -> bool {
+    selector
+        .recording
+        .as_ref()
+        .is_none_or(|id| *id == recording.recording_id)
+        && selector
+            .session
+            .as_ref()
+            .is_none_or(|session| *session == recording.session_id)
 }
 
 pub(crate) fn run_command_with_rpc(
@@ -646,6 +659,60 @@ mod tests {
             assert_eq!(args.duration, 300_000);
         }
         assert!(crate::cli::Cli::try_parse_from(["bsk", "video", "save"]).is_err());
+    }
+
+    #[test]
+    fn selects_artifacts_by_the_session_that_started_them() {
+        for argv in [
+            &["bsk", "video", "status", "--session", "task"][..],
+            &["bsk", "video", "stop", "--session", "task"],
+            &[
+                "bsk",
+                "video",
+                "save",
+                "--session",
+                "task",
+                "--out",
+                "a.mp4",
+            ],
+            &["bsk", "video", "discard", "--session", "task"],
+        ] {
+            let parsed = crate::cli::Cli::try_parse_from(argv).unwrap();
+            let crate::cli::Command::Video(VideoCmd { command }) = parsed.command else {
+                panic!("expected video command");
+            };
+            let selector = match command {
+                VideoCommand::Status(selector) | VideoCommand::Discard(selector) => selector,
+                VideoCommand::Stop(args) => args.selector,
+                VideoCommand::Save(args) => args.selector,
+                _ => panic!("unexpected video subcommand"),
+            };
+            assert_eq!(selector.session.as_deref(), Some("task"), "{argv:?}");
+        }
+
+        let recording = |id: char, session: &str| -> VideoRecording {
+            serde_json::from_value(json!({
+                "recording_id": format!("vid_{}", id.to_string().repeat(32)),
+                "session_id": session, "tab_id": 1, "title": "test", "state": "recording",
+                "quality": "standard", "created_at": 1, "expires_at": 2,
+                "max_duration_ms": 1000, "duration_ms": 0, "byte_size": 0, "width": 100,
+                "height": 100, "frames": 1, "dropped_frames": 0, "exported": false
+            }))
+            .unwrap()
+        };
+        let earlier = recording('a', "earlier");
+        let task = recording('b', "task");
+        let selector = |recording: Option<&VideoRecording>, session: Option<&str>| Selector {
+            recording: recording.map(|r| r.recording_id.clone()),
+            session: session.map(str::to_string),
+            browser: None,
+        };
+        let by_session = selector(None, Some("task"));
+        assert!(!selects(&by_session, &earlier));
+        assert!(selects(&by_session, &task));
+        assert!(selects(&selector(Some(&task), Some("task")), &task));
+        assert!(!selects(&selector(Some(&earlier), Some("task")), &earlier));
+        assert!(selects(&selector(None, None), &earlier));
     }
 
     #[test]

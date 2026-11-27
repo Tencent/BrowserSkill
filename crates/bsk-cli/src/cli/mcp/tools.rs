@@ -3737,6 +3737,7 @@ enum VideoAction {
 struct VideoArgs {
     action: VideoAction,
     /// start: session id; omit to use caller scope's active session.
+    /// status, stop, save, discard: only consider recordings started by this session.
     session: Option<String>,
     /// start: explicit caller scope override.
     scope: Option<String>,
@@ -3807,8 +3808,7 @@ async fn run_video(
             })
         }
         VideoAction::Status => {
-            if args.session.is_some()
-                || args.tab_id.is_some()
+            if args.tab_id.is_some()
                 || args.duration.is_some()
                 || args.duration_ms.is_some()
                 || args.quality.is_some()
@@ -3816,10 +3816,13 @@ async fn run_video(
                 || args.out.is_some()
                 || args.overwrite.is_some()
             {
-                return Err(invalid("status accepts only recording and browser"));
+                return Err(invalid(
+                    "status accepts only recording, session, and browser",
+                ));
             }
             video::VideoCommand::Status(video::Selector {
                 recording: args.recording,
+                session: args.session,
                 browser: args.browser,
             })
         }
@@ -3844,20 +3847,20 @@ async fn run_video(
             if args.overwrite.is_some() && args.out.is_none() {
                 return Err(invalid("overwrite requires out"));
             }
-            if args.session.is_some()
-                || args.tab_id.is_some()
+            if args.tab_id.is_some()
                 || args.duration.is_some()
                 || args.duration_ms.is_some()
                 || args.quality.is_some()
                 || args.request_id.is_some()
             {
                 return Err(invalid(
-                    "stop accepts only recording, browser, out, and overwrite",
+                    "stop accepts only recording, session, browser, out, and overwrite",
                 ));
             }
             video::VideoCommand::Stop(video::StopArgs {
                 selector: video::Selector {
                     recording: args.recording,
+                    session: args.session,
                     browser: args.browser,
                 },
                 out: args.out,
@@ -3868,20 +3871,20 @@ async fn run_video(
             let out = args
                 .out
                 .ok_or_else(|| invalid("out is required for video save"))?;
-            if args.session.is_some()
-                || args.tab_id.is_some()
+            if args.tab_id.is_some()
                 || args.duration.is_some()
                 || args.duration_ms.is_some()
                 || args.quality.is_some()
                 || args.request_id.is_some()
             {
                 return Err(invalid(
-                    "save accepts only recording, browser, out, and overwrite",
+                    "save accepts only recording, session, browser, out, and overwrite",
                 ));
             }
             video::VideoCommand::Save(video::SaveArgs {
                 selector: video::Selector {
                     recording: args.recording,
+                    session: args.session,
                     browser: args.browser,
                 },
                 out,
@@ -3889,8 +3892,7 @@ async fn run_video(
             })
         }
         VideoAction::Discard => {
-            if args.session.is_some()
-                || args.tab_id.is_some()
+            if args.tab_id.is_some()
                 || args.duration.is_some()
                 || args.duration_ms.is_some()
                 || args.quality.is_some()
@@ -3898,10 +3900,13 @@ async fn run_video(
                 || args.out.is_some()
                 || args.overwrite.is_some()
             {
-                return Err(invalid("discard accepts only recording and browser"));
+                return Err(invalid(
+                    "discard accepts only recording, session, and browser",
+                ));
             }
             video::VideoCommand::Discard(video::Selector {
                 recording: args.recording,
+                session: args.session,
                 browser: args.browser,
             })
         }
