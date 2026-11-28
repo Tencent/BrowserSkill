@@ -80,6 +80,11 @@ Compare the highlighted cells before/after movement. Unnamed clickable items
 with numeric `data-index` may appear as `"item 14"`; the index is raw DOM evidence,
 not a time or an endpoint label. Identify its row and time headers before acting.
 Do not infer the first-selected cell or range direction from a static highlight.
+
+VOM reports `[pressed]`/`[unpressed]` for a toggle button's `aria-pressed`, and
+`[current]` or `[current:page]` for the item that declares `aria-current`, such
+as the active navigation tab. A button without either marker declares no toggle
+state.
 Verify the final displayed range/form and, when requested, the eventual business
 success message separately.
 
