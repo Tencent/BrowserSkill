@@ -9,7 +9,13 @@ use crate::cli::error::CliError;
 /// containing directory are checked: whether an existing regular file may be
 /// replaced is the command's own `--overwrite` decision.
 pub(crate) fn preflight_destination(out: &Path) -> Result<(), CliError> {
-    let hint = "choose an --out file path inside an existing directory";
+    preflight_destination_with_hint(
+        out,
+        "choose an --out file path inside an existing directory",
+    )
+}
+
+pub(super) fn preflight_destination_with_hint(out: &Path, hint: &str) -> Result<(), CliError> {
     let reject = |error: std::io::Error| CliError::file_validation(error.into(), hint);
     if out.as_os_str().is_empty() {
         return Err(reject(std::io::Error::new(

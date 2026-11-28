@@ -11,6 +11,7 @@ determines which versions can connect.
 
 ### Added
 
+- `bsk diagnostics export --output diagnostics.zip` saves redacted CLI checks, daemon status and recent daemon logs, including when the extension is disconnected. See [BrowserSkill diagnostics](docs/diagnostics.md).
 - `bsk open` (and MCP `bsk_session` `action: "open"`) now accepts `--wait-until` / `wait_until` (`load|domcontentloaded|networkidle|commit`, defaulting to `load`), matching `bsk navigate` so heavy SPAs do not wait for a full `load` timeout before syncing.
 
 - Release benchmarks now report empirical `pass@k`, `pass^k`, and flaky cases across independent runs of the same candidate and test plan.

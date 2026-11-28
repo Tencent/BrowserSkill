@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bsk_protocol::StatusResult;
 use console::style;
 use serde::Serialize;
@@ -111,7 +111,13 @@ impl CheckResult {
 
 pub fn run(output: Output) -> Result<Vec<CheckResult>> {
     let state = resolve_daemon_state(output);
-    let checks = collect_checks(state);
+    let checks = collect_checks(
+        &state,
+        check_home_writable(),
+        check_skill_up_to_date(),
+        Ok(update::state::current()),
+        Ok(trust_local(state.status()).unwrap_or(false)),
+    );
     match output {
         Output::Human => render_human(&checks),
         Output::Json => render_json(&checks)?,
@@ -199,16 +205,75 @@ impl DaemonState {
     }
 }
 
-fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
+/// Snapshot for export. Keep startup, the browser wait, filesystem preparation
+/// and skill synchronization exclusively on the interactive doctor path.
+pub(super) fn passive_snapshot() -> (Vec<CheckResult>, Option<Box<StatusResult>>) {
+    let state = current_state(Duration::ZERO);
+    let home = paths::bsk_home().and_then(|path| {
+        let metadata = path
+            .metadata()
+            .with_context(|| format!("inspect {}", path.display()))?;
+        anyhow::ensure!(metadata.is_dir(), "{} is not a directory", path.display());
+        Ok(path)
+    });
+    let home_check = match home {
+        Ok(path) => CheckResult::na(
+            "bsk home writable",
+            format!("{} exists; write access was not tested", path.display()),
+        ),
+        Err(err)
+            if err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            CheckResult::na(
+                "bsk home writable",
+                format!("bsk home is missing; write access was not tested ({err:#})"),
+            )
+        }
+        Err(err) => CheckResult::fail(
+            "bsk home writable",
+            format!("bsk home unavailable: {err:#}"),
+            paths::BSK_HOME_HINT,
+        ),
+    };
+    let checks = collect_checks(
+        &state,
+        home_check,
+        CheckResult::na(
+            "agent skill matches bundled CLI",
+            "skill synchronization skipped during export",
+        ),
+        paths::update_state_path().and_then(|path| update::state::read(&path)),
+        trust_local(state.status()),
+    );
+    let status = match state {
+        DaemonState::Verified { status, .. } => Some(status),
+        _ => None,
+    };
+    (checks, status)
+}
+
+fn collect_checks(
+    state: &DaemonState,
+    home: CheckResult,
+    skill: CheckResult,
+    update_record: Result<Option<UpdateRecord>>,
+    trust_local: Result<bool>,
+) -> Vec<CheckResult> {
     vec![
-        check_home_writable(),
-        check_skill_up_to_date(),
-        check_daemon_running(&state),
-        check_daemon_management(&state),
+        home,
+        skill,
+        check_daemon_running(state),
+        check_daemon_management(state),
         check_version_compatible(state.status()),
-        check_auto_update(state.status(), state.host_managed()),
+        check_auto_update(
+            state.status(),
+            state.host_managed(),
+            update_record.as_ref().map(Option::as_ref),
+        ),
         check_extension_connected(state.status()),
-        check_local_auth(state.status()),
+        check_local_auth(trust_local),
         check_browsers_protocol_compatible(state.status()),
     ]
 }
@@ -216,12 +281,16 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
 /// An attempt still `in_progress` after this long was interrupted.
 const UPDATE_STALLED_AFTER_SECS: u64 = 10 * 60;
 
-fn check_auto_update(status: Option<&StatusResult>, host_managed: bool) -> CheckResult {
+fn check_auto_update(
+    status: Option<&StatusResult>,
+    host_managed: bool,
+    record: Result<Option<&UpdateRecord>, &anyhow::Error>,
+) -> CheckResult {
     let leftovers = std::env::current_exe()
         .map(|exe| update::update_leftovers(&exe))
         .unwrap_or_default();
     auto_update_check(
-        update::state::current().as_ref(),
+        record,
         status.map(|status| (status.daemon_version.as_str(), host_managed)),
         env!("CARGO_PKG_VERSION"),
         &leftovers,
@@ -233,7 +302,7 @@ fn check_auto_update(status: Option<&StatusResult>, host_managed: bool) -> Check
 /// it from which versions exist. `daemon` is the running daemon's version and
 /// whether its terminal or supervisor owns it.
 fn auto_update_check(
-    record: Option<&UpdateRecord>,
+    record: Result<Option<&UpdateRecord>, &anyhow::Error>,
     daemon: Option<(&str, bool)>,
     installed_version: &str,
     leftovers: &[update::Leftover],
@@ -256,8 +325,11 @@ fn auto_update_check(
         });
     }
     match record {
-        None => details.push("no update attempt recorded".to_string()),
-        Some(record) => describe_update(record, installed_version, now, &mut details, &mut hints),
+        Ok(None) => details.push("no update attempt recorded".to_string()),
+        Ok(Some(record)) => {
+            describe_update(record, installed_version, now, &mut details, &mut hints)
+        }
+        Err(err) => details.push(format!("update state unavailable: {err:#}")),
     }
     if !leftovers.is_empty() {
         let names = leftovers
@@ -270,10 +342,12 @@ fn auto_update_check(
         ));
     }
     let detail = details.join("; ");
-    if hints.is_empty() {
-        CheckResult::ok(name, detail)
-    } else {
+    if !hints.is_empty() {
         CheckResult::warn(name, detail, hints.join("; "))
+    } else if record.is_err() {
+        CheckResult::na(name, detail)
+    } else {
+        CheckResult::ok(name, detail)
     }
 }
 
@@ -663,28 +737,29 @@ fn display_protocol(value: &str) -> &str {
     if value.is_empty() { "unknown" } else { value }
 }
 
-fn check_local_auth(status: Option<&StatusResult>) -> CheckResult {
-    let mode = status
-        .and_then(|s| s.local_auth.as_ref())
-        .map(|s| s.mode.clone())
-        .or_else(|| {
-            paths::bsk_home()
-                .ok()
-                .and_then(|home| crate::daemon::local_auth::read_mode(&home).ok())
-                .and_then(|mode| serde_json::to_value(mode).ok())
-                .and_then(|value| value.as_str().map(str::to_owned))
-        });
-    if mode.as_deref() == Some("trust_local") {
-        CheckResult::warn(
+fn trust_local(status: Option<&StatusResult>) -> Result<bool> {
+    if let Some(auth) = status.and_then(|s| s.local_auth.as_ref()) {
+        return Ok(auth.mode == "trust_local");
+    }
+    use crate::daemon::local_auth::{LocalAuthMode, read_mode};
+    Ok(read_mode(&paths::bsk_home()?)? == LocalAuthMode::TrustLocal)
+}
+
+fn check_local_auth(trust_local: Result<bool>) -> CheckResult {
+    match trust_local {
+        Ok(true) => CheckResult::warn(
             "local connection verification",
             "unverified local connections are allowed",
             "run `bsk daemon trust-local off` and turn off skipping in the extension to restore verification",
-        )
-    } else {
-        CheckResult::ok(
+        ),
+        Ok(false) => CheckResult::ok(
             "local connection verification",
             "local pairing verification is available",
-        )
+        ),
+        Err(err) => CheckResult::na(
+            "local connection verification",
+            format!("settings.json unavailable: {err:#}"),
+        ),
     }
 }
 
@@ -865,7 +940,7 @@ mod m2_tests {
     }
 
     fn update_check(record: Option<&UpdateRecord>, daemon: Option<&str>) -> CheckResult {
-        auto_update_check(record, daemon.map(|v| (v, false)), "0.3.1", &[], 1_120)
+        auto_update_check(Ok(record), daemon.map(|v| (v, false)), "0.3.1", &[], 1_120)
     }
 
     #[test]
@@ -891,7 +966,7 @@ mod m2_tests {
         assert!(!has_failures(&[update_check(None, Some("0.3.0"))]));
 
         // A daemon its terminal or supervisor owns is restarted there.
-        let host = auto_update_check(None, Some(("0.3.0", true)), "0.3.1", &[], 0);
+        let host = auto_update_check(Ok(None), Some(("0.3.0", true)), "0.3.1", &[], 0);
         let hint = host.hint.unwrap();
         assert!(hint.contains("its terminal or supervisor"), "{hint}");
         assert!(!hint.contains("bsk daemon restart"), "{hint}");
@@ -928,10 +1003,10 @@ mod m2_tests {
 
         // Nothing is left to do once that version is installed.
         let superseded = auto_update_check(
-            Some(&UpdateRecord {
+            Ok(Some(&UpdateRecord {
                 recovery: Some(Recovery::Unchanged),
                 ..failed.clone()
-            }),
+            })),
             Some(("0.4.0", false)),
             "0.4.0",
             &[],
@@ -944,12 +1019,12 @@ mod m2_tests {
     fn auto_update_check_flags_an_interrupted_attempt() {
         let mut interrupted = attempt(UpdateResult::InProgress);
         interrupted.stage = Some(UpdateStage::Install);
-        let running = auto_update_check(Some(&interrupted), None, "0.3.1", &[], 1_060);
+        let running = auto_update_check(Ok(Some(&interrupted)), None, "0.3.1", &[], 1_060);
         assert_eq!(running.status, CheckStatus::Ok);
         assert!(running.detail.contains("in progress while installing"));
 
         let stalled = auto_update_check(
-            Some(&interrupted),
+            Ok(Some(&interrupted)),
             None,
             "0.3.1",
             &[],
@@ -1001,7 +1076,7 @@ mod m2_tests {
             owner: Some(1),
             expired: true,
         }];
-        let check = auto_update_check(None, None, "0.3.1", &leftovers, 0);
+        let check = auto_update_check(Ok(None), None, "0.3.1", &leftovers, 0);
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.detail.contains("/bin/.bsk.old-1-1"));
     }

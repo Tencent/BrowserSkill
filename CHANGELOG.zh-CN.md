@@ -7,6 +7,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 新增
 
+- `bsk diagnostics export --output diagnostics.zip` 可将脱敏后的 CLI 检查结果、daemon 状态和近期日志保存到本地，扩展断开时也可使用。详见[诊断包说明](docs/diagnostics.md)。
 - `bsk open`（及 MCP `bsk_session` 的 `action: "open"`）新增 `--wait-until` / `wait_until`（`load|domcontentloaded|networkidle|commit`，默认仍为 `load`）参数，与 `bsk navigate` 对齐，避免重型 SPA 在首次打开同步前反复干等整页 `load` 超时。
 
 - 发版评测可汇总同一候选构建和测试计划的独立轮次，报告实际 `pass@k`、`pass^k` 和不稳定的场景。

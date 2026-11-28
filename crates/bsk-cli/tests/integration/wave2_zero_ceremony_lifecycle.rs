@@ -797,7 +797,10 @@ async fn mcp_stdio_connections_get_isolated_process_scopes() {
 fn skill_md_budget_and_rt05_safety_invariants_gate() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let skill_path = manifest_dir.join("skill/SKILL.md");
-    let content = std::fs::read_to_string(&skill_path).unwrap();
+    // Measure LF and CRLF from the same text on either checkout.
+    let content = std::fs::read_to_string(&skill_path)
+        .unwrap()
+        .replace("\r\n", "\n");
 
     // 1. Hard UTF-8 byte ceiling <= 2,000 bytes (both LF and CRLF).
     assert!(

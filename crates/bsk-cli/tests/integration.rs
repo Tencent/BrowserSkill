@@ -70,6 +70,8 @@ mod cli_mcp_recipe_contracts_e2e;
 mod cli_parse;
 #[path = "integration/cli_usage_errors.rs"]
 mod cli_usage_errors;
+#[path = "integration/diagnostics.rs"]
+mod diagnostics;
 #[path = "integration/dialog_control.rs"]
 mod dialog_control;
 #[path = "integration/handshake_compat.rs"]

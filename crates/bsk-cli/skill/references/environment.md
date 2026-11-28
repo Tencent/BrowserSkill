@@ -14,6 +14,17 @@ with `bsk --version` (or its absolute path with `--version`).
 
 For remote setup or pairing, follow the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
 
+## Diagnostics export
+
+When asked to diagnose a BrowserSkill failure, use the failing command's
+`BSK_HOME` and run `bsk diagnostics export --output diagnostics.zip` before
+restarting or repairing anything. Choose a fresh path. This works offline
+and without a session. Read `README.txt` for missing or truncated archive
+entries and `doctor.json` for check results and source errors. The ZIP stays
+local and may contain details from other sessions on this daemon. Review it
+before sharing. See the
+[diagnostics guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/diagnostics.md).
+
 ## Local daemon startup
 
 Ordinary local commands auto-start the daemon. In WorkBuddy/CodeBuddy, or a host

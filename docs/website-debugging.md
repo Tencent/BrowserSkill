@@ -1,5 +1,8 @@
 # Website debugging
 
+If BrowserSkill itself fails to connect or start a session, use the
+[CLI and daemon diagnostics export](diagnostics.md) to capture that failure.
+
 BrowserSkill lets a developer's agent investigate their own website through the
 same owned browser task. It records browser evidence for people and agents to inspect later:
 

@@ -25,4 +25,6 @@ Full parity: `bsk_session`, `bsk_page`, `bsk_inspect`, `bsk_interact`, `bsk_plan
 
 ## References
 
+For connection failures, [export diagnostics](references/environment.md#diagnostics-export).
+
 [Coop](references/cooperation.md), [Debug](references/debugging.md), [Extract](references/extraction.md), [Tabs](references/tabs-and-profiles.md), [Interact](references/interaction-details.md), [Canvas](references/screenshots-and-canvas.md), [Video](references/video.md), [Files](references/files.md), [Recipes](references/recipes.md), [Env](references/environment.md), [Help](references/help-and-recovery.md)

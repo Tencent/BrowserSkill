@@ -137,6 +137,7 @@ jobs:
           cli::plan::
           cli::recipe::
           cli::mcp::tools::tests
+          cli::diagnostics::
           daemon::remote::authorization::tests
           daemon::lockfile::tests
           skill_install
@@ -147,6 +148,7 @@ jobs:
           cargo test -p bsk --test integration --locked --
           cli_usage_errors::
           cli_parse::
+          diagnostics::
           audit_ws::
           interaction_preferences::
           remote_server::
