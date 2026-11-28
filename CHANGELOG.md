@@ -11,6 +11,8 @@ determines which versions can connect.
 
 ### Added
 
+- VOM snapshots now show toggle and current-item state: a button with `aria-pressed` is marked `[pressed]`, `[unpressed]` or `[pressed:mixed]`, and an element with `aria-current` is marked `[current]`, or `[current:page]` and likewise for `step`, `location`, `date` and `time`. Before, a mute or subtitles button read the same whether it was on or off, and the current tab of a navigation bar could not be told from the others.
+
 - `bsk open` (and MCP `bsk_session` `action: "open"`) now accepts `--wait-until` / `wait_until` (`load|domcontentloaded|networkidle|commit`, defaulting to `load`), matching `bsk navigate` so heavy SPAs do not wait for a full `load` timeout before syncing.
 
 - Release benchmarks now report empirical `pass@k`, `pass^k`, and flaky cases across independent runs of the same candidate and test plan.

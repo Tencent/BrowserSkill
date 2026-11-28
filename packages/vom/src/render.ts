@@ -1156,6 +1156,18 @@ function renderNodeLine(
   if (node.checked !== undefined) {
     line += ` [${node.checked === "mixed" ? "mixed" : node.checked ? "checked" : "unchecked"}]`;
   }
+  // A toggle button and the current item of a set state themselves only here.
+  const pressed = role === "button" ? node.attrs?.["aria-pressed"]?.trim().toLowerCase() : "";
+  if (pressed === "true") line += " [pressed]";
+  else if (pressed === "false") line += " [unpressed]";
+  else if (pressed === "mixed") line += " [pressed:mixed]";
+  const current = node.attrs?.["aria-current"]?.trim().toLowerCase();
+  if (current && current !== "false") {
+    // ARIA treats a value outside its token list as "true".
+    line += ["page", "step", "location", "date", "time"].includes(current)
+      ? ` [current:${current}]`
+      : " [current]";
+  }
   if (fillable) {
     line += ` [${node.inputState ?? (rawValue === undefined ? "empty" : "filled")}]`;
   }

@@ -2716,3 +2716,45 @@ describe("selection evidence", () => {
     });
   });
 });
+
+describe("pressed and current state", () => {
+  const line = (role: string, attrs: Record<string, string>) =>
+    renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          role,
+          name: "Mute",
+          attrs,
+          rect: { x: 10, y: 10, w: 50, h: 30 },
+        }),
+      ]),
+    ).text;
+
+  it.each([
+    ["true", '"Mute" [pressed]'],
+    ["false", '"Mute" [unpressed]'],
+    ["mixed", '"Mute" [pressed:mixed]'],
+  ])("reports aria-pressed=%s on a button", (value, expected) => {
+    expect(line("button", { "aria-pressed": value })).toContain(expected);
+  });
+
+  it("does not report a pressed state that is absent, invalid or not on a button", () => {
+    expect(line("button", {})).not.toContain("pressed");
+    expect(line("button", { "aria-pressed": "undefined" })).not.toContain("pressed");
+    expect(line("link", { "aria-pressed": "true" })).not.toContain("pressed");
+  });
+
+  it.each([
+    ["page", '"Mute" [current:page]'],
+    ["true", '"Mute" [current]'],
+    ["yes", '"Mute" [current]'],
+  ])("reports aria-current=%s", (value, expected) => {
+    expect(line("link", { "aria-current": value })).toContain(expected);
+  });
+
+  it.each(["false", ""])("does not report aria-current=%j", (value) => {
+    expect(line("link", { "aria-current": value })).not.toContain("current");
+  });
+});
