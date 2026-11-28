@@ -437,6 +437,115 @@ it("resets auth backoff on setUrl() and disconnect()", async () => {
   vi.useRealTimers();
 });
 
+it("re-arms reconnect instead of stalling if the auth-backoff timer wakes slightly early", async () => {
+  vi.useFakeTimers();
+  FakeSocket.instances = [];
+  let earlyOffsetMs = 0;
+  const realPerformanceNow = performance.now.bind(performance);
+  const perfSpy = vi.spyOn(performance, "now").mockImplementation(() => {
+    const value = realPerformanceNow() - earlyOffsetMs;
+    return value;
+  });
+  try {
+    const authenticate = vi.fn().mockRejectedValueOnce(new Error("server_unverified"));
+    const t = new WSTransport({
+      url: DEFAULT_DAEMON_WS_URL,
+      authenticate,
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+
+    const first = t.connect();
+    lastSocket().open();
+    await expect(first).rejects.toThrow("server_unverified");
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    // Simulate OS/browser timer firing 2ms before the monotonic backoff deadline.
+    earlyOffsetMs = 2;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    // Once the remaining 2ms elapse, the re-armed timer must open the next socket.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeSocket.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeSocket.instances).toHaveLength(2);
+
+    authenticate.mockResolvedValue(undefined);
+    lastSocket().open();
+    await vi.waitFor(() => expect(t.state).toBe("connected"));
+    await t.disconnect();
+  } finally {
+    perfSpy.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it("keeps auth-backoff reconnect on schedule when wall-clock Date.now() jumps backward", async () => {
+  vi.useFakeTimers();
+  FakeSocket.instances = [];
+  try {
+    const authenticate = vi.fn().mockRejectedValueOnce(new Error("server_unverified"));
+    const t = new WSTransport({
+      url: DEFAULT_DAEMON_WS_URL,
+      authenticate,
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+
+    const first = t.connect();
+    lastSocket().open();
+    await expect(first).rejects.toThrow("server_unverified");
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    // NTP / manual clock adjustment moves wall clock backward by 60 seconds.
+    vi.setSystemTime(Date.now() - 60_000);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeSocket.instances).toHaveLength(2);
+
+    authenticate.mockResolvedValue(undefined);
+    lastSocket().open();
+    await vi.waitFor(() => expect(t.state).toBe("connected"));
+    await t.disconnect();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("shortens a pending auth-backoff reconnect timer when resetAuthenticationBackoff() is called", async () => {
+  vi.useFakeTimers();
+  FakeSocket.instances = [];
+  try {
+    const authenticate = vi.fn().mockRejectedValueOnce(new Error("server_unverified"));
+    const t = new WSTransport({
+      url: DEFAULT_DAEMON_WS_URL,
+      authenticate,
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+
+    const first = t.connect();
+    lastSocket().open();
+    await expect(first).rejects.toThrow("server_unverified");
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    // Credentials rotated / remote authorization succeeded while waiting out the 30s backoff.
+    authenticate.mockResolvedValue(undefined);
+    t.resetAuthenticationBackoff();
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(FakeSocket.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeSocket.instances).toHaveLength(2);
+
+    lastSocket().open();
+    await vi.waitFor(() => expect(t.state).toBe("connected"));
+    await t.disconnect();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it("treats socket close during async unpaired authenticate resolution as normal reconnect, not auth failure backoff", async () => {
   vi.useFakeTimers();
   FakeSocket.instances = [];

@@ -59,7 +59,7 @@ export class WSTransport implements Transport {
   private authentication: AbortController | null = null;
   private authenticationTimer: ReturnType<typeof setTimeout> | null = null;
   private authFailures = 0;
-  private authBackoffUntil = 0;
+  private authBackoffUntil: number | null = null;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
   private readonly connectTimeoutMs: number;
@@ -102,14 +102,21 @@ export class WSTransport implements Transport {
   }
 
   resetAuthenticationBackoff(): void {
-    this.authBackoffUntil = 0;
+    const hadAuthBackoff = this.authBackoffUntil !== null;
+    this.authBackoffUntil = null;
     this.authFailures = 0;
+    if (hadAuthBackoff && this.reconnectTimer && !this.explicitlyClosed) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.reconnectAttempt = 0;
+      this.scheduleReconnect();
+    }
   }
 
   connect(): Promise<void> {
     if (this.currentState === "connected") return Promise.resolve();
 
-    if (Date.now() < this.authBackoffUntil) return Promise.reject(new Error("local_auth_backoff"));
+    if (this.remainingAuthBackoffMs() > 0) return Promise.reject(new Error("local_auth_backoff"));
     this.explicitlyClosed = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -240,7 +247,8 @@ export class WSTransport implements Transport {
       const failed = (error: unknown) => {
         if (!this.isCurrentSocket(socket, generation)) return;
         this.onAuthenticationError?.();
-        this.authBackoffUntil = Date.now() + Math.min(30_000 * 2 ** this.authFailures++, 300_000);
+        this.authBackoffUntil =
+          monotonicNow() + Math.min(30_000 * 2 ** this.authFailures++, 300_000);
         this.endAuthentication();
         const reject = this.rejectConnect;
         this.resolveConnect = null;
@@ -300,7 +308,7 @@ export class WSTransport implements Transport {
     ) {
       this.onAuthenticationError?.();
       this.authFailures += 1;
-      this.authBackoffUntil = Date.now() + 30_000;
+      this.authBackoffUntil = monotonicNow() + 30_000;
       this.socket?.close();
       return;
     }
@@ -330,20 +338,44 @@ export class WSTransport implements Transport {
     this.scheduleReconnect();
   }
 
+  private remainingAuthBackoffMs(): number {
+    if (this.authBackoffUntil === null) return 0;
+    const remaining = this.authBackoffUntil - monotonicNow();
+    if (remaining <= 0) {
+      this.authBackoffUntil = null;
+      return 0;
+    }
+    return remaining;
+  }
+
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
     const delay = Math.max(
-      this.authBackoffUntil - Date.now(),
+      this.remainingAuthBackoffMs(),
       Math.min(this.initialDelayMs * 2 ** this.reconnectAttempt, this.maxDelayMs),
     );
     this.reconnectAttempt += 1;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      if (this.explicitlyClosed) return;
-      void this.connect().catch((err) => {
-        console.debug("[WSTransport] reconnect attempt failed", err);
-      });
-    }, delay);
+    this.armReconnectTimer(delay);
+  }
+
+  private armReconnectTimer(delay: number): void {
+    this.reconnectTimer = setTimeout(
+      () => {
+        this.reconnectTimer = null;
+        if (this.explicitlyClosed) return;
+        const remainingAuthBackoff = this.remainingAuthBackoffMs();
+        if (remainingAuthBackoff > 0) {
+          // OS/browser timer coalescing can fire slightly early; wait out the
+          // remaining backoff instead of letting connect() reject and stall.
+          this.armReconnectTimer(Math.ceil(remainingAuthBackoff));
+          return;
+        }
+        void this.connect().catch((err) => {
+          console.debug("[WSTransport] reconnect attempt failed", err);
+        });
+      },
+      Math.max(0, Math.ceil(delay)),
+    );
   }
 
   private startConnectTimer(socket: WebSocket, generation: number): void {
@@ -390,6 +422,12 @@ export class WSTransport implements Transport {
       }
     }
   }
+}
+
+function monotonicNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
 }
 
 function wellFormed(_key: string, value: unknown): unknown {
