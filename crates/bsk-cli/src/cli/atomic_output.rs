@@ -52,12 +52,19 @@ pub(crate) fn preflight_destination(out: &Path) -> Result<(), CliError> {
 }
 
 pub fn commit(temp: &Path, out: &Path, overwrite: bool) -> std::io::Result<()> {
-    if !overwrite {
-        std::fs::hard_link(temp, out)?;
-        std::fs::remove_file(temp)?;
-        return Ok(());
+    if overwrite {
+        replace(temp, out)
+    } else {
+        create_new(temp, out)
     }
-    replace(temp, out)
+}
+
+// ponytail: a link fails on volumes without hard links (FAT, exFAT); switch to
+// renameat2(RENAME_NOREPLACE) / renamex_np(RENAME_EXCL) if that matters here.
+#[cfg(not(windows))]
+fn create_new(temp: &Path, out: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(temp, out)?;
+    std::fs::remove_file(temp)
 }
 
 #[cfg(unix)]
@@ -66,23 +73,37 @@ fn replace(temp: &Path, out: &Path) -> std::io::Result<()> {
     std::fs::rename(temp, out)
 }
 
+/// A rename without `MOVEFILE_REPLACE_EXISTING` fails when the destination
+/// exists and, unlike a hard link, also works on FAT and exFAT volumes.
+#[cfg(windows)]
+fn create_new(temp: &Path, out: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
+
+    move_file(temp, out, MOVEFILE_WRITE_THROUGH)
+}
+
 #[cfg(windows)]
 fn replace(temp: &Path, out: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
+
+    move_file(
+        temp,
+        out,
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+    )
+}
+
+#[cfg(windows)]
+fn move_file(temp: &Path, out: &Path, flags: u32) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
     let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
     let to: Vec<u16> = out.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: both buffers are NUL-terminated and remain alive for the call.
-    let ok = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
+    let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), flags) };
     if ok == 0 {
         Err(std::io::Error::last_os_error())
     } else {
@@ -108,6 +129,18 @@ mod tests {
         std::fs::write(&out, b"old").unwrap();
         assert!(commit(&temp, &out, false).is_err());
         assert_eq!(std::fs::read(&out).unwrap(), b"old");
+    }
+
+    #[test]
+    fn no_replace_commits_a_staged_file_whose_handle_is_still_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.bin");
+        // `bsk extract` and `bsk video` commit while the staging handle is open.
+        let staged = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        std::fs::write(staged.path(), b"new").unwrap();
+        commit(staged.path(), &out, false).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"new");
+        assert!(!staged.path().exists());
     }
 
     #[test]
