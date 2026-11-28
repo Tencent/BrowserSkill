@@ -2572,6 +2572,7 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
                         transfer_id: id.clone(),
                         name: name.clone(),
                         staged_path: None,
+                        data_base64: None,
                     })
                     .collect(),
                 mode,

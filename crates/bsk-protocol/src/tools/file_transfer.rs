@@ -15,6 +15,11 @@ pub struct UploadFile {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_path: Option<String>,
+    /// Daemon-injected, Safari only: the file's bytes (standard base64) for
+    /// extensions that cannot read `staged_path` (a sandboxed Safari app
+    /// extension has no filesystem access). Never agent-facing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -226,6 +231,7 @@ mod tests {
                 transfer_id: "tr_1".into(),
                 name: "image.png".into(),
                 staged_path: None,
+                data_base64: None,
             }],
             mode: UploadMode::Input,
             timeout_ms: None,
@@ -251,6 +257,7 @@ mod tests {
                 transfer_id: "tr_1".into(),
                 name: "image.png".into(),
                 staged_path: None,
+                data_base64: None,
             }],
             mode: UploadMode::Drop,
             timeout_ms: None,

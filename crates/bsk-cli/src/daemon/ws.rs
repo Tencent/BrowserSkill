@@ -45,7 +45,25 @@ pub(super) fn origin_allowed(origin: &str) -> bool {
     {
         return true;
     }
+    // Safari Web Extension pages report `safari-web-extension://<UUID>`
+    // (lowercase, 8-4-4-4-12 hex groups); the UUID is assigned per build.
+    if let Some(rest) = origin.strip_prefix("safari-web-extension://")
+        && is_lowercase_uuid(rest)
+    {
+        return true;
+    }
     false
+}
+
+fn is_lowercase_uuid(s: &str) -> bool {
+    let groups: Vec<&str> = s.split('-').collect();
+    let lens = [8, 4, 4, 4, 12];
+    groups.len() == lens.len()
+        && groups.iter().zip(lens).all(|(g, len)| {
+            g.len() == len
+                && g.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        })
 }
 
 /// Explain a failed bind on the default daemon port, which the OS — not bsk —
@@ -317,7 +335,7 @@ async fn handle_connection(
         if !origin_allowed(&origin) {
             warn!(?origin, "rejecting WS upgrade with disallowed origin");
             let mut err = ErrorResponse::new(Some(
-                "Origin not in chrome-extension allow-list".to_string(),
+                "Origin not in chrome-extension/safari-web-extension allow-list".to_string(),
             ));
             *err.status_mut() = StatusCode::FORBIDDEN;
             return Err(err);
@@ -1303,6 +1321,22 @@ mod tests {
     #[test]
     fn origin_allowlist_rejects_local_web_pages() {
         assert!(!origin_allowed("http://localhost"));
+    }
+
+    #[test]
+    fn origin_allowlist_accepts_safari_web_extension_uuid() {
+        assert!(origin_allowed(
+            "safari-web-extension://3610fd31-0161-4c6b-919a-ee9a3edb2c19"
+        ));
+    }
+
+    #[test]
+    fn origin_allowlist_rejects_safari_uppercase_or_malformed_uuid() {
+        assert!(!origin_allowed(
+            "safari-web-extension://3610FD31-0161-4C6B-919A-EE9A3EDB2C19"
+        ));
+        assert!(!origin_allowed("safari-web-extension://not-a-uuid"));
+        assert!(!origin_allowed("safari-web-extension://"));
     }
 }
 

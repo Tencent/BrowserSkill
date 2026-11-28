@@ -1088,7 +1088,38 @@ async fn handle_tool_dispatch(
                     });
                 }
             };
-        for (file, path) in upload.files.iter_mut().zip(paths) {
+        // A sandboxed Safari extension cannot read `staged_path`, so for Safari
+        // browsers the bytes travel inline too (bounded; see SAFARI_INLINE_UPLOAD_MAX).
+        let inline_bytes = state
+            .sessions
+            .get(&session_id)
+            .and_then(|s| state.browsers.get(&s.browser_id))
+            .is_some_and(|b| b.browser_name.eq_ignore_ascii_case("safari"));
+        let inlined: Vec<Option<String>> = if inline_bytes {
+            let read_paths = paths.clone();
+            match tokio::task::spawn_blocking(move || {
+                super::file_transfer::inline_upload_bytes(
+                    &read_paths,
+                    super::file_transfer::SAFARI_INLINE_UPLOAD_MAX,
+                )
+            })
+            .await
+            {
+                Ok(Ok(v)) => v.into_iter().map(Some).collect(),
+                Ok(Err(err)) => return ResponseBody::Err(err),
+                Err(join_err) => {
+                    return ResponseBody::Err(RpcError {
+                        code: ErrorCode::ProtocolError,
+                        message: format!("upload read worker failed: {join_err}"),
+                        data: None,
+                    });
+                }
+            }
+        } else {
+            vec![None; paths.len()]
+        };
+        for ((file, path), data) in upload.files.iter_mut().zip(paths).zip(inlined) {
+            file.data_base64 = data;
             file.staged_path = Some(path.to_string_lossy().into_owned());
         }
         params = serde_json::to_value(upload).unwrap_or(Value::Null);

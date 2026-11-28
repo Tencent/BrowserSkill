@@ -58,6 +58,13 @@
     },
     "UploadFile": {
       "properties": {
+        "data_base64": {
+          "description": "Daemon-injected, Safari only: the file's bytes (standard base64) for\nextensions that cannot read `staged_path` (a sandboxed Safari app\nextension has no filesystem access). Never agent-facing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
         },
