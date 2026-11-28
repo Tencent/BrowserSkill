@@ -5,6 +5,7 @@ import {
   interactionPolicy,
 } from "@/lib/interaction-preferences";
 import { withTaskPreviewStop } from "@/lib/task-preview";
+import { AGENT_WINDOW_HOME } from "@/session-manager/agent-window";
 import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
 import { detectBrowserMeta } from "@/transport/handshake";
 import type {
@@ -393,9 +394,16 @@ async function stopSession(
         // here; if we counted it as a reason to release (dropOnly), the
         // window would be kept and that agent tab would leak (issue #57
         // regression). Exclude any id still tracked in agentCreatedTabs.
+        // A bare `about:blank` tab is startup residue from window creation
+        // (a seed whose id never reached `initialTabIds` on some Chromium
+        // forks), not something the user opened — it must not keep the
+        // Agent Window alive as a blank "New Tab" after stop (issue #826).
+        // Anything with a real URL, including the new-tab page, stays a
+        // user tab.
         const userTabs = liveWindowTabs.filter((t) => {
           if (t.id === undefined) return false;
-          return !ctx.agentCreatedTabs.has(t.id);
+          if (ctx.agentCreatedTabs.has(t.id)) return false;
+          return t.url !== AGENT_WINDOW_HOME;
         });
         let leakedAgentTabs = liveWindowTabs.filter(
           (t): t is chrome.tabs.Tab & { id: number } =>
