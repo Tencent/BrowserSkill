@@ -42,6 +42,7 @@ pub enum PauseReason {
     LocalChanges,
     InvalidMarker,
     InterruptedUpdate,
+    ExternalSymlink,
 }
 
 impl PauseReason {
@@ -54,6 +55,7 @@ impl PauseReason {
             Self::InterruptedUpdate => {
                 "another skill version has an unfinished update; reinstall with --force"
             }
+            Self::ExternalSymlink => "symlinked skill installation is externally managed",
         }
     }
 }
@@ -105,7 +107,9 @@ fn sync_one(dest: &Path, source: &SkillBundle) -> Result<SyncOne> {
     let marker = dir.join(SOURCE_MARKER_FILE);
     // Include incomplete new installs and missing managed entry points, without
     // creating anything for harnesses that have never installed this skill.
-    if !dest.try_exists()? && !marker.try_exists()? {
+    let dest_is_symlink =
+        std::fs::symlink_metadata(dest).is_ok_and(|meta| meta.file_type().is_symlink());
+    if !dest_is_symlink && !dest.try_exists()? && !marker.try_exists()? {
         return Ok(SyncOne::Missing);
     }
     let Some(_lock) =
@@ -148,10 +152,30 @@ fn sync_one(dest: &Path, source: &SkillBundle) -> Result<SyncOne> {
                 super::transaction::write_bundle(dir, source, &obsolete)?;
                 return Ok(SyncOne::Updated);
             }
+            if dest_is_symlink || super::bundle::is_symlinked_resource(dir, "SKILL.md")? {
+                return Ok(SyncOne::Paused(
+                    PauseReason::ExternalSymlink,
+                    vec![format!(
+                        "{}: {}",
+                        dest.display(),
+                        PauseReason::ExternalSymlink.description()
+                    )],
+                ));
+            }
             baseline = record.files.clone();
             conflicts = conflicts::managed(dir, &baseline)?;
         }
         legacy => {
+            if dest_is_symlink || super::bundle::is_symlinked_resource(dir, "SKILL.md")? {
+                return Ok(SyncOne::Paused(
+                    PauseReason::ExternalSymlink,
+                    vec![format!(
+                        "{}: {}",
+                        dest.display(),
+                        PauseReason::ExternalSymlink.description()
+                    )],
+                ));
+            }
             let Some(hash) = file_hash(dir, "SKILL.md")? else {
                 return Ok(SyncOne::Paused(
                     PauseReason::LocalChanges,
@@ -612,5 +636,49 @@ mod tests {
                 vec![(HarnessId::Cursor, PauseReason::LocalChanges)]
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_skill_entrypoint_is_paused_without_sync_error() {
+        use std::os::unix::fs::symlink;
+
+        let home = TempDir::new().unwrap();
+        let dotfiles = TempDir::new().unwrap();
+        let target_skill = dotfiles.path().join("SKILL.md");
+        std::fs::write(&target_skill, "external symlinked skill").unwrap();
+
+        let dir = HarnessId::ClaudeCode.skill_dest_dir_for_home(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("SKILL.md");
+        symlink(&target_skill, &dest).unwrap();
+
+        let report = sync_with_source(home.path(), "new bundled content");
+
+        assert!(report.errors.is_empty());
+        assert!(report.updated.is_empty());
+        assert_eq!(
+            report.paused,
+            vec![(HarnessId::ClaudeCode, PauseReason::ExternalSymlink)]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target_skill).unwrap(),
+            "external symlinked skill"
+        );
+
+        // Even if an old bundled marker exists alongside a symlinked SKILL.md,
+        // auto-sync must pause cleanly without attempting to read or replace the symlink.
+        mark_bundled(&target_skill);
+        std::fs::copy(
+            dotfiles.path().join(SOURCE_MARKER_FILE),
+            dir.join(SOURCE_MARKER_FILE),
+        )
+        .unwrap();
+        let report_with_marker = sync_with_source(home.path(), "new bundled content");
+        assert!(report_with_marker.errors.is_empty());
+        assert_eq!(
+            report_with_marker.paused,
+            vec![(HarnessId::ClaudeCode, PauseReason::ExternalSymlink)]
+        );
     }
 }
