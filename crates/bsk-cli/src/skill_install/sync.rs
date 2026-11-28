@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 
 use super::{
     SOURCE_MARKER_FILE, SkillBundle,
-    bundle::file_hash,
+    bundle::{file_hash, symlink_rejection},
     conflicts,
     harness::HarnessId,
     provenance::{self, Provenance},
@@ -42,6 +42,7 @@ pub enum PauseReason {
     LocalChanges,
     InvalidMarker,
     InterruptedUpdate,
+    ExternalSymlink,
 }
 
 impl PauseReason {
@@ -53,6 +54,9 @@ impl PauseReason {
             Self::InvalidMarker => "unrecognized or damaged source marker",
             Self::InterruptedUpdate => {
                 "another skill version has an unfinished update; reinstall with --force"
+            }
+            Self::ExternalSymlink => {
+                "skill resources are symlinked to externally managed storage (dotfiles/Stow/Nix)"
             }
         }
     }
@@ -100,7 +104,27 @@ enum SyncOne {
     Busy,
 }
 
+/// Syncs one harness. Symlink rejections from [`bundle::resource_path`] are
+/// reclassified: externally managed installations (dotfiles / GNU Stow / Nix
+/// Home Manager) intentionally link their skill files elsewhere, so they pause
+/// automatic updates instead of surfacing as filesystem failures (issue #795).
 fn sync_one(dest: &Path, source: &SkillBundle) -> Result<SyncOne> {
+    match sync_one_locked(dest, source) {
+        Err(err) => match symlink_rejection(&err) {
+            Some(link) => Ok(SyncOne::Paused(
+                PauseReason::ExternalSymlink,
+                vec![format!(
+                    "{}: managed through an external symlink",
+                    link.path.display()
+                )],
+            )),
+            None => Err(err),
+        },
+        done => done,
+    }
+}
+
+fn sync_one_locked(dest: &Path, source: &SkillBundle) -> Result<SyncOne> {
     let dir = dest.parent().context("skill destination has no parent")?;
     let marker = dir.join(SOURCE_MARKER_FILE);
     // Include incomplete new installs and missing managed entry points, without
@@ -567,6 +591,72 @@ mod tests {
                 vec![HarnessId::Cursor]
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_entry_point_pauses_instead_of_failing_sync() {
+        let home = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let dir = HarnessId::Cursor.skill_dest_dir_for_home(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        // Dotfiles / GNU Stow / Nix-style externally managed installation: the
+        // entry point lives on a symlink into user-owned storage.
+        let external_skill = external.path().join("SKILL.md");
+        std::fs::write(&external_skill, "managed elsewhere").unwrap();
+        let dest = dir.join("SKILL.md");
+        std::os::unix::fs::symlink(&external_skill, &dest).unwrap();
+
+        let report = sync_with_source(home.path(), "bundled content");
+
+        assert_eq!(
+            report.paused,
+            vec![(HarnessId::Cursor, PauseReason::ExternalSymlink)]
+        );
+        assert!(report.errors.is_empty());
+        assert_eq!(report.conflict_details.len(), 1);
+        assert!(report.conflict_details[0].1[0].contains(&dest.to_string_lossy().to_string()));
+        // Write-through protection must stay intact.
+        assert_eq!(
+            std::fs::read_to_string(&external_skill).unwrap(),
+            "managed elsewhere"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_managed_baseline_pauses_without_failing() {
+        let home = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let dir = HarnessId::Cursor.skill_dest_dir_for_home(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("SKILL.md");
+        std::fs::write(&dest, "bundle v1").unwrap();
+        mark_bundled(&dest);
+        let original_marker = std::fs::read(dir.join(SOURCE_MARKER_FILE)).unwrap();
+        // A previously managed entry point is replaced by an external symlink
+        // (dotfiles manager took over after install).
+        let external_skill = external.path().join("SKILL.md");
+        std::fs::write(&external_skill, "managed elsewhere").unwrap();
+        std::fs::remove_file(&dest).unwrap();
+        std::os::unix::fs::symlink(&external_skill, &dest).unwrap();
+
+        let report = sync_with_source(home.path(), "bundle v1");
+
+        assert_eq!(
+            report.paused,
+            vec![(HarnessId::Cursor, PauseReason::ExternalSymlink)]
+        );
+        assert!(report.errors.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&external_skill).unwrap(),
+            "managed elsewhere"
+        );
+        assert_eq!(
+            std::fs::read(dir.join(SOURCE_MARKER_FILE)).unwrap(),
+            original_marker,
+            "external symlink must not rewrite ownership"
+        );
     }
 
     #[test]
