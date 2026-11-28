@@ -7,7 +7,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 新增
 
-- VOM 快照现在会显示开关按钮和“当前项”的状态：带 `aria-pressed` 的按钮标为 `[pressed]`、`[unpressed]` 或 `[pressed:mixed]`，带 `aria-current` 的元素标为 `[current]`，或 `[current:page]`（`step`、`location`、`date`、`time` 同理）。此前静音、字幕这类按钮无论开还是关，在快照里都一样，导航栏里当前所在的页签也无法和其他页签区分。
+- VOM 快照现在会显示开关按钮和“当前项”的状态：带 `aria-pressed` 的按钮标为 `[pressed]`、`[unpressed]` 或 `[pressed:mixed]`，带 `aria-current` 的元素标为 `[current]`，或 `[current:page]`（`step`、`location`、`date`、`time` 同理）。此前静音、字幕这类按钮无论开还是关，在快照里都一样，导航栏里当前所在的页签也无法和其他页签区分（#844）。
 
 - `bsk open`（及 MCP `bsk_session` 的 `action: "open"`）新增 `--wait-until` / `wait_until`（`load|domcontentloaded|networkidle|commit`，默认仍为 `load`）参数，与 `bsk navigate` 对齐，避免重型 SPA 在首次打开同步前反复干等整页 `load` 超时。
 
